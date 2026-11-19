@@ -7,9 +7,10 @@
 //! symbol only some tools define, bytes before or between the lines.
 //!
 //! A [`Mutation`] is applied to a source file a harness already has, which
-//! must still mean what it meant: every mutation here keeps a well-formed
-//! file well-formed to the compiler, except where its reason says the
-//! compiler must reject it.
+//! must still mean what it meant. A mutation that adds a declaration adds a
+//! module at column zero, which is a declaration a namespace takes as well
+//! as a module does (a `let` is not), so the file it is appended to may end
+//! in either.
 
 use std::sync::OnceLock;
 
@@ -22,7 +23,8 @@ pub enum Mutation {
     Prepend(&'static [u8]),
     /// These bytes after the file, which is first ended with a line feed.
     Append(&'static [u8]),
-    /// Every line feed replaced by this.
+    /// Every line end (a line feed, a carriage return, or the two together)
+    /// replaced by this.
     LineEnds(&'static str),
     /// These bytes this many times, after the file.
     AppendRepeated(&'static [u8], usize),
@@ -44,7 +46,11 @@ impl Mutation {
                 }
                 out.extend(*bytes);
             }
-            Mutation::LineEnds(end) => out.extend(source.replace('\n', end).as_bytes()),
+            Mutation::LineEnds(end) => {
+                // Each line end once, however the source spelt it.
+                let unix = source.replace("\r\n", "\n").replace('\r', "\n");
+                out.extend(unix.replace('\n', end).as_bytes());
+            }
             Mutation::AppendRepeated(bytes, n) => {
                 out.extend(source.as_bytes());
                 if !source.ends_with('\n') {
@@ -64,22 +70,22 @@ use Mutation::{Append, AppendRepeated, LineEnds, Prepend};
 const TABLE: &[(Dimension, Mutation, &str)] = &[
     (
         Dimension::LineDirective,
-        Append(b"#line 1 \"Other.fs\"\nlet hostileAfterLine = 1\n"),
+        Append(b"#line 1 \"Other.fs\"\nmodule HostileAfterLine =\n    let x = 1\n"),
         "a line directive naming another file: diagnostics after it are reported there",
     ),
     (
         Dimension::LineDirective,
-        Append(b"# 1 \"Other.fs\"\nlet hostileAfterLine = 1\n"),
+        Append(b"# 1 \"Other.fs\"\nmodule HostileAfterShortLine =\n    let x = 1\n"),
         "the short form of the directive",
     ),
     (
         Dimension::LineDirective,
-        Append(b"#line 100000\nlet hostileAfterLine = 1\n"),
+        Append(b"#line 100000\nmodule HostileAfterFarLine =\n    let x = 1\n"),
         "a directive that moves the line and keeps the file",
     ),
     (
         Dimension::LineDirective,
-        Append(b"(* c *) #line 1 \"Other.fs\"\nlet hostileAfterLine = 1\n"),
+        Append(b"(* c *) #line 1 \"Other.fs\"\nmodule HostileAfterLateLine =\n    let x = 1\n"),
         "a directive after a comment on its line, which a scan of line starts misses",
     ),
     (
@@ -89,17 +95,17 @@ const TABLE: &[(Dimension, Mutation, &str)] = &[
     ),
     (
         Dimension::DirectiveLookalike,
-        Append(b"let hostileText = \"\n#line 1 \\\"Other.fs\\\"\n\"\n"),
+        Append(b"module HostileText =\n    let text = \"\n#line 1 \\\"Other.fs\\\"\n\"\n"),
         "directive-shaped text at the start of a line inside a string",
     ),
     (
         Dimension::DirectiveLookalike,
-        Append(b"let (+//) a b = a + b\n"),
+        Append(b"module HostileOperator =\n    let (+//) a b = a + b\n"),
         "an operator holding the characters that start a line comment",
     ),
     (
         Dimension::DirectiveLookalike,
-        Append(b"let hostileTriple = \"\"\"\n#r \"Lib.dll\"\n#if EDITING\n\"\"\"\n"),
+        Append(b"module HostileTriple =\n    let text = \"\"\"\n#r \"Lib.dll\"\n#if EDITING\n\"\"\"\n"),
         "directives inside a triple-quoted string",
     ),
     (
@@ -119,17 +125,17 @@ const TABLE: &[(Dimension, Mutation, &str)] = &[
     ),
     (
         Dimension::ToolDefine,
-        Append(b"#if EDITING\nlet hostileOnlyWhenEditing = 1\n#endif\n"),
+        Append(b"#if EDITING\nmodule HostileOnlyWhenEditing =\n    let x = 1\n#endif\n"),
         "a symbol FCS's editor services define and fsc does not",
     ),
     (
         Dimension::ToolDefine,
-        Append(b"#if COMPILED\nlet hostileOnlyWhenCompiled = 1\n#else\nlet hostileOnlyWhenNot = 1\n#endif\n"),
+        Append(b"#if COMPILED\nmodule HostileOnlyWhenCompiled =\n    let x = 1\n#else\nmodule HostileOnlyWhenNot =\n    let x = 1\n#endif\n"),
         "a symbol fsc defines and a script host does not",
     ),
     (
         Dimension::ToolDefine,
-        Append(b"#if INTERACTIVE\nlet hostileOnlyWhenInteractive = 1\n#endif\n"),
+        Append(b"#if INTERACTIVE\nmodule HostileOnlyWhenInteractive =\n    let x = 1\n#endif\n"),
         "a symbol only F# Interactive defines",
     ),
     (
@@ -216,10 +222,18 @@ mod tests {
                         entry.why
                     )
                 }
-                Mutation::LineEnds(end) => assert_eq!(
-                    String::from_utf8(mutated).unwrap().replace(end, "\n"),
-                    source
-                ),
+                Mutation::LineEnds(end) => {
+                    assert_eq!(
+                        String::from_utf8(mutated).unwrap().replace(end, "\n"),
+                        source
+                    );
+                    // A source already spelt with other line ends has each
+                    // replaced once, none doubled.
+                    assert_eq!(
+                        entry.value.apply("a\r\nb\rc\nd"),
+                        format!("a{end}b{end}c{end}d").into_bytes()
+                    );
+                }
             }
         }
     }
