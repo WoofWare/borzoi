@@ -95,7 +95,7 @@ const PATH_OPS: &[&str] = &[
 /// [`PATH_OPS`], so a new op is held to one rule or the other.
 #[test]
 fn every_batch_op_is_classified() {
-    let program = std::fs::read_to_string(
+    let program = crate::common::host_fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/fcs-dump/Program.fs"),
     )
     .expect("read fcs-dump's source");
