@@ -227,7 +227,7 @@ crates/nuget/tests/all/range_properties.rs	pending	2
 crates/nuget/tests/all/resolver.rs	pending	2
 crates/nuget/tests/all/resolver_diff.rs	pending	2
 crates/nuget/tests/all/restore_items_diff.rs	pending	2
-crates/nuget/tests/all/settings_diff.rs	pending	2
+crates/nuget/tests/all/settings_diff.rs	draws	settings=name+fs+xml+env
 crates/nuget/tests/all/soak.rs	pending	2
 crates/nuget/tests/all/version_diff.rs	pending	2
 crates/nuget/tests/all/version_properties.rs	pending	2
