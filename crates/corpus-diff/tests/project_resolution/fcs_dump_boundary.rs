@@ -1154,6 +1154,24 @@ fn run_case(resident: &mut BatchChild, case: Case) -> Result<Verdict, String> {
         },
         _ => false,
     };
+    // What must be refused: a reference that is no readable assembly, a file
+    // gone, and a script that names code the check does not read (an active
+    // `#r` or `#load`: one under `#if` is in no branch the build reads).
+    let must_refuse = match case {
+        Case::ReferenceState(s) => !matches!(
+            s,
+            State::Regular | State::Symlink | State::SymlinkOutOfTree | State::ReadOnly
+        ),
+        Case::SourceChange(Change::Disappears) | Case::ReferenceChange(Change::Disappears) => true,
+        Case::ScriptMutation(e) => {
+            e.dimension == Dimension::ScriptDirective
+                && !e.value.apply("").windows(3).any(|w| w == b"#if")
+        }
+        _ => false,
+    };
+    if must_refuse && refusal(&fresh).is_none() {
+        return Err(format!("answered what it must refuse: {fresh}"));
+    }
     if let Some(why) = refusal(&fresh) {
         if names_the_file {
             return Err(format!(

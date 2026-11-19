@@ -110,7 +110,7 @@ gpt62/issue-1031/i1031-codex1.log#2	tools/fcs-dump/Program.fs	source.line-direct
 gpt62/issue-1031/i1031-codex1.log#3	tools/fcs-dump/Program.fs	change.same-stamp-replace	reproduces: fcs_dump_project	Invalidate resident project results when source bytes change
 gpt62/issue-1031/i1031-codex10.log#1	tools/fcs-dump/Program.fs	source.directive-lookalike	pending	Distinguish slashes in F# operators from line comments
 gpt62/issue-1031/i1031-codex10.log#3	tools/fcs-dump/Program.fs	source.long-run	pending	Make the line-directive scan linear on nonmatches
-gpt62/issue-1031/i1031-codex2.log#1	tools/fcs-dump/Program.fs	source.script-directive	declines: fcs_dump_project	Honor active script references in project checks
+gpt62/issue-1031/i1031-codex2.log#1	tools/fcs-dump/Program.fs	source.script-directive	reproduces: fcs_dump_project	Honor active script references in project checks
 gpt62/issue-1031/i1031-codex2.log#2	tools/fcs-dump/Program.fs	source.line-directive	reproduces: fcs_dump_project	Preserve #line semantics when locating project records
 gpt62/issue-1031/i1031-codex3.log#2	tools/fcs-dump/Program.fs	source.line-directive	reproduces: fcs_dump_project	Detect line directives after other tokens on the same line
 gpt62/issue-1031/i1031-codex3.log#3	crates/corpus-diff/src/lib.rs	none: fixture-logic	pending	Require the whole-project diagnostics field from the oracle
