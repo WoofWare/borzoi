@@ -248,6 +248,55 @@ let private isScriptPath (absolute: string) =
         | e -> e.ToLowerInvariant()
     ext = ".fsx" || ext = ".fsscript"
 
+/// Refuse `path` unless it is a regular, non-empty file, links followed,
+/// before anything opens it: opening a FIFO or a device blocks or reads
+/// forever, and an assembly is never empty.
+[<System.Runtime.InteropServices.DllImport("libSystem.Native", EntryPoint = "SystemNative_Stat")>]
+extern int private systemNativeStat(
+    [<System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.LPUTF8Str)>] string path,
+    byte[] output)
+
+/// Whether `path` is a regular file, links followed, on Unix: by the
+/// runtime's own `stat` (`SystemNative_Stat`, whose `FileStatus` starts
+/// `Flags`, `Mode`, with the file type normalised to `S_IFREG = 0x8000`), so
+/// nothing has to open it to find out. Opening a FIFO or a device blocks or
+/// reads forever.
+let private isRegularFileOnUnix (path: string) =
+    let status = Array.zeroCreate<byte> 512
+    systemNativeStat (path, status) = 0 && (BitConverter.ToInt32(status, 4) &&& 0xF000) = 0x8000
+
+/// [`isRegularFile`] on Windows, where `libSystem.Native` does not exist and
+/// there are no FIFOs: a file that exists and is neither a directory nor a
+/// device. Not exercised by any CI lane (none runs Windows).
+let private isRegularFileOnWindows (path: string) =
+    File.Exists path
+    && (let attributes = File.GetAttributes path
+        not (attributes.HasFlag FileAttributes.Directory || attributes.HasFlag FileAttributes.Device))
+
+/// Whether `path` is a regular file, links followed, found out without
+/// opening it ([`isRegularFileOnUnix`], [`isRegularFileOnWindows`]).
+let private isRegularFile (path: string) =
+    if OperatingSystem.IsWindows() then isRegularFileOnWindows path else isRegularFileOnUnix path
+
+/// Refuse `path`, a file a request names as a `what` (a source, a
+/// reference), if something exists there that is not a regular file once
+/// links are followed ([`isRegularFile`]), before anything opens it: an open
+/// of a FIFO for reading waits for a writer for ever, and a character device
+/// may be read without end. The path is asked about as an open reads it,
+/// normalised lexically, so that `missing/../x` is the `x` an open would
+/// read. A path where nothing exists is left to the reader, which reports it
+/// missing.
+let private refuseUnlessRegular (what: string) (path: string) =
+    let full = Path.GetFullPath path
+    if (File.Exists full || Directory.Exists full) && not (isRegularFile full) then
+        failwithf "%s %s is not a regular file" what path
+
+/// The text of the file `path` names, refused unread unless it is a regular
+/// file ([`refuseUnlessRegular`]): every file an op reads itself is read here.
+let private readRegularText (path: string) : string =
+    refuseUnlessRegular "file" path
+    File.ReadAllText path
+
 /// The caller's `<LangVersion>` pin (`BORZOI_FCS_LANGVERSION`, a single
 /// canonical token such as `preview` / `7.0`), or `None` when unset. Applied to
 /// `FSharpParsingOptions.LangVersionText` by [`withLangVersion`] so the *parse*
@@ -293,7 +342,7 @@ let private withLangVersion (opts: FSharpParsingOptions) : FSharpParsingOptions 
     | Some v -> { opts with LangVersionText = v }
 
 let private dumpAst (absolute: string) (defines: string list) =
-    let text = File.ReadAllText(absolute)
+    let text = readRegularText absolute
     let sourceText = SourceText.ofString text
     let checker = FSharpChecker.Create()
     let isScript = isScriptPath absolute
@@ -366,7 +415,7 @@ let private dumpAstBatchCore () =
             let json =
                 try
                     let absolute = Path.GetFullPath path
-                    let text = File.ReadAllText(absolute)
+                    let text = readRegularText absolute
                     let sourceText = SourceText.ofString text
                     let isScript = isScriptPath absolute
                     let parsingOptions0, _ =
@@ -611,7 +660,7 @@ let private parseBench (cache: bool) (iterations: int) =
 /// The tab keeps `cut -f1` yielding the bare kind sequence. Single-file only:
 /// the batch path stays JSONL for the Rust harness.
 let private dumpTokens (absolute: string) (withLexFilter: bool) (compact: bool) =
-    let text = File.ReadAllText(absolute)
+    let text = readRegularText absolute
     let sourceText = SourceText.ofString text
 
     // FSharpLexerFlags.Default = Compiling | SkipTrivia | UseLexFilter.
@@ -676,7 +725,7 @@ let private dumpTokensBatch (withLexFilter: bool) =
             let payload =
                 try
                     let absolute = Path.GetFullPath path
-                    let text = File.ReadAllText(absolute)
+                    let text = readRegularText absolute
                     let sourceText = SourceText.ofString text
                     let tokens = ResizeArray<_>()
                     FSharpLexer.Tokenize(
@@ -822,7 +871,7 @@ let private dumpTokensInternalBatch () =
                     let absolute = Path.GetFullPath path
                     box {| Path = path
                            WithLexFilter = true
-                           Tokens = (lexInternal langVersionText (File.ReadAllText absolute)).ToArray() |}
+                           Tokens = (lexInternal langVersionText (readRegularText absolute)).ToArray() |}
                 with ex ->
                     box {| Path = path
                            WithLexFilter = true
@@ -5611,7 +5660,7 @@ let private projectSymbolUseCensus (u: FSharpSymbolUse) =
 /// referenced-assembly symbol. The `range`s carry their `File`, so the
 /// consumer can tell an in-file declaration from a referenced-assembly one.
 let private dumpUses (absolute: string) =
-    let text = File.ReadAllText(absolute)
+    let text = readRegularText absolute
     let sourceText = SourceText.ofString text
     let checker = FSharpChecker.Create()
 
@@ -5673,7 +5722,7 @@ let private dumpUses (absolute: string) =
 /// at the end of the use's range, with the use's source text as the dotted name
 /// FCS looks up, which is how an editor asks for it.
 let private dumpTooltips (absolute: string) =
-    let text = File.ReadAllText(absolute)
+    let text = readRegularText absolute
     let sourceText = SourceText.ofString text
     let lines = text.Split('\n')
     let checker = FSharpChecker.Create()
@@ -5957,7 +6006,7 @@ let private collectAttrRecords (parsed: ParsedInput) (checkResults: FSharpCheckF
 ///   re-records are collapsed, and two *different* resolutions at one range
 ///   fail loudly — an ambiguous oracle is worse than none.
 let private dumpAttrs (absolute: string) =
-    let text = File.ReadAllText(absolute)
+    let text = readRegularText absolute
     let sourceText = SourceText.ofString text
     let checker = FSharpChecker.Create()
 
@@ -6029,7 +6078,7 @@ let private dumpAttrsBatchCore () =
     let ensureRefs (absolute: string) =
         if baseOpts.IsNone then
             try
-                let t = SourceText.ofString (File.ReadAllText absolute)
+                let t = SourceText.ofString (readRegularText absolute)
 
                 let so, _ =
                     checker.GetProjectOptionsFromScript(
@@ -6067,7 +6116,7 @@ let private dumpAttrsBatchCore () =
                             options
                         )
                     | Some opts0 ->
-                        let sourceText = SourceText.ofString (File.ReadAllText absolute)
+                        let sourceText = SourceText.ofString (readRegularText absolute)
 
                         let dir =
                             Option.ofObj (Path.GetDirectoryName absolute) |> Option.defaultValue "."
@@ -6263,12 +6312,20 @@ let private scriptOptionsBatch () =
         let path = (Option.ofObj line |> Option.defaultValue "").Trim()
         if path <> "" then
             let path = Path.GetFullPath path
-            let text = File.ReadAllText path
+            // One path's failure (a file refused unread) is its own line's,
+            // and the batch goes on.
             let response =
-                {| ResolvedAs = sharedScriptPath path text
-                   Shared = side (projectScriptOptions checker path text [||])
-                   Direct = side (scriptOptionsAs checker path text [||]) |}
-            Console.Out.WriteLine(JsonSerializer.Serialize(response, compact))
+                try
+                    let text = readRegularText path
+                    JsonSerializer.Serialize(
+                        {| ResolvedAs = sharedScriptPath path text
+                           Shared = side (projectScriptOptions checker path text [||])
+                           Direct = side (scriptOptionsAs checker path text [||]) |},
+                        compact
+                    )
+                with ex ->
+                    JsonSerializer.Serialize({| Path = path; Error = ex.Message |}, compact)
+            Console.Out.WriteLine(response)
             Console.Out.Flush()
         line <- Console.In.ReadLine()
 
@@ -6373,36 +6430,6 @@ let private withFullReferencePaths (projOpts: FSharpProjectOptions) : FSharpProj
                 | Some prefix -> "-r:" + Path.GetFullPath(o.Substring prefix.Length)
                 | None -> o) }
 
-/// Refuse `path` unless it is a regular, non-empty file, links followed,
-/// before anything opens it: opening a FIFO or a device blocks or reads
-/// forever, and an assembly is never empty.
-[<System.Runtime.InteropServices.DllImport("libSystem.Native", EntryPoint = "SystemNative_Stat")>]
-extern int private systemNativeStat(
-    [<System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.LPUTF8Str)>] string path,
-    byte[] output)
-
-/// Whether `path` is a regular file, links followed, on Unix: by the
-/// runtime's own `stat` (`SystemNative_Stat`, whose `FileStatus` starts
-/// `Flags`, `Mode`, with the file type normalised to `S_IFREG = 0x8000`), so
-/// nothing has to open it to find out. Opening a FIFO or a device blocks or
-/// reads forever.
-let private isRegularFileOnUnix (path: string) =
-    let status = Array.zeroCreate<byte> 512
-    systemNativeStat (path, status) = 0 && (BitConverter.ToInt32(status, 4) &&& 0xF000) = 0x8000
-
-/// [`isRegularFile`] on Windows, where `libSystem.Native` does not exist and
-/// there are no FIFOs: a file that exists and is neither a directory nor a
-/// device. Not exercised by any CI lane (none runs Windows).
-let private isRegularFileOnWindows (path: string) =
-    File.Exists path
-    && (let attributes = File.GetAttributes path
-        not (attributes.HasFlag FileAttributes.Directory || attributes.HasFlag FileAttributes.Device))
-
-/// Whether `path` is a regular file, links followed, found out without
-/// opening it ([`isRegularFileOnUnix`], [`isRegularFileOnWindows`]).
-let private isRegularFile (path: string) =
-    if OperatingSystem.IsWindows() then isRegularFileOnWindows path else isRegularFileOnUnix path
-
 /// Refuse a reference `path` unless it is a regular, non-empty file
 /// ([`isRegularFile`]); an assembly is never empty.
 let private requireRegularFile (path: string) =
@@ -6416,6 +6443,62 @@ let private requireRegularFile (path: string) =
 let private requireRegularSource (path: string) =
     if not (isRegularFile path) then
         failwithf "source %s is not a regular file" path
+
+/// What [`RegularFilesOnly`] refused FCS while the request in progress was
+/// answered. FCS may turn a failed open into a diagnostic and go on (a
+/// script's `#r`), so the request is refused when this is not empty
+/// ([`answerUnlessFcsWasRefused`]).
+let private fcsRefusals = ResizeArray<string>()
+
+/// `respond`'s answer to `line`, or a refusal if FCS was refused a file
+/// while it was computed.
+let private answerUnlessFcsWasRefused (respond: string -> string) (line: string) : string =
+    fcsRefusals.Clear()
+    let reply = respond line
+    if fcsRefusals.Count > 0 then
+        JsonSerializer.Serialize(
+            {| BatchError = sprintf "FCS was refused a file it would have read: %s" fcsRefusals[0] |},
+            buildOptionsCompact ()
+        )
+    else
+        reply
+
+/// The file system FCS reads through: every file FCS opens itself (a
+/// reference, a script's `#load`, a source it reads from disk) is refused
+/// unopened unless it is a regular file ([`refuseUnlessRegular`]), so no name
+/// a request does not spell out can make FCS wait on a FIFO either.
+type private RegularFilesOnly() =
+    inherit FSharp.Compiler.IO.DefaultFileSystem()
+
+    override _.OpenFileForReadShim(filePath: string, ?useMemoryMappedFile: bool, ?shouldShadowCopy: bool) =
+        try
+            refuseUnlessRegular "file" filePath
+        with ex ->
+            fcsRefusals.Add ex.Message
+            reraise ()
+        base.OpenFileForReadShim(
+            filePath,
+            ?useMemoryMappedFile = useMemoryMappedFile,
+            ?shouldShadowCopy = shouldShadowCopy
+        )
+
+/// The suffixes of the files FCS compiles as sources (`CompilerConfig`'s
+/// `FSharpSigFileSuffixes` and `FSharpImplFileSuffixes`), compared as FCS
+/// compares them, ordinally and ignoring case.
+let private fsharpSourceSuffixes = [ ".fs"; ".fsi"; ".fsx"; ".fsscript" ]
+
+/// The text of the source `path` names, refused unread unless its name ends
+/// in an F# source suffix and it is a regular file ([`refuseUnlessRegular`]).
+/// FCS reports a source of another name in no record, only as a project-wide
+/// FS0226, and fsc reads such an argument otherwise (a `.dll` as a
+/// reference), so no record could describe it.
+let private readSourceText (path: string) : string =
+    if not (fsharpSourceSuffixes |> List.exists (fun s -> path.EndsWith(s, StringComparison.OrdinalIgnoreCase))) then
+        failwithf
+            "source %s is not named as an F# source (%s), so FCS would check nothing of it and fsc would read it otherwise"
+            path
+            (String.concat ", " fsharpSourceSuffixes)
+    readRegularText path
 
 /// The references `projOpts` names (`-r:`), each refused if fsc would reject
 /// it: one that is not a regular file ([`requireRegularFile`]), or not an
@@ -6538,7 +6621,7 @@ let private checkProjectNowWith
         for o in projects do
             for path in o.SourceFiles do
                 requireRegularSource path
-                requestSources[path] <- File.ReadAllText path
+                requestSources[path] <- readSourceText path
         let results = checker.ParseAndCheckProject(opts, userOpName = userOpName) |> Async.RunSynchronously
         let parsed (path: string) =
             (checker.GetBackgroundParseResultsForFileInProject(path, opts, userOpName = userOpName)
@@ -6815,7 +6898,7 @@ let private usesProjectBatchCore () =
     while not (isNull line) do
         let trimmed = (Option.ofObj line |> Option.defaultValue "").Trim()
         if trimmed <> "" then
-            Console.Out.WriteLine(respond trimmed)
+            Console.Out.WriteLine(answerUnlessFcsWasRefused respond trimmed)
             Console.Out.Flush()
         line <- Console.In.ReadLine()
 
@@ -7475,7 +7558,7 @@ let private dumpUsesCensusBatchCore () =
     let ensureRefs (absolute: string) =
         if baseOpts.IsNone then
             try
-                let t = SourceText.ofString (File.ReadAllText absolute)
+                let t = SourceText.ofString (readRegularText absolute)
                 let so, _ =
                     checker.GetProjectOptionsFromScript(
                         absolute, t, assumeDotNetFramework = false, useSdkRefs = true)
@@ -7510,7 +7593,7 @@ let private dumpUsesCensusBatchCore () =
                                References = ([||]: string[])
                                Uses = ([||]: obj[]) |}, options)
                     | Some opts0 ->
-                        let sourceText = SourceText.ofString (File.ReadAllText absolute)
+                        let sourceText = SourceText.ofString (readRegularText absolute)
                         let dir =
                             Option.ofObj (Path.GetDirectoryName absolute)
                             |> Option.defaultValue "."
@@ -7611,7 +7694,7 @@ let private dumpUsesCensusProjectCore () =
     let checker = FSharpChecker.Create()
 
     let scriptOpts, _scriptDiags =
-        projectScriptOptions checker paths.[0] (File.ReadAllText(paths.[0])) [||]
+        projectScriptOptions checker paths.[0] (readRegularText paths.[0]) [||]
 
     let otherOptions =
         scriptOpts.OtherOptions
@@ -7630,7 +7713,7 @@ let private dumpUsesCensusProjectCore () =
     for absolute in paths do
         let json =
             try
-                let sourceText = SourceText.ofString (File.ReadAllText absolute)
+                let sourceText = SourceText.ofString (readRegularText absolute)
                 let _parse, checkAnswer =
                     checker.ParseAndCheckFileInProject(
                         absolute, 0, sourceText, projOpts, userOpName = "fcs-dump-census-project")
@@ -7936,7 +8019,7 @@ let private checkScriptImplFileWithDiags
     (label: string)
     (absolute: string)
     : FSharpImplementationFileContents * FSharp.Compiler.Diagnostics.FSharpDiagnostic[] =
-    let text = File.ReadAllText(absolute)
+    let text = readRegularText absolute
     let sourceText = SourceText.ofString text
     let checker = FSharpChecker.Create(keepAssemblyContents = true)
 
@@ -8323,7 +8406,7 @@ let private dumpOverloads (absolute: string) =
 /// its errors.
 let private typesProjectFiles (checker: FSharpChecker) (paths: string[]) (refArgs: string[]) =
     let scriptOpts, scriptDiags =
-        projectScriptOptions checker paths.[0] (File.ReadAllText(paths.[0])) [||]
+        projectScriptOptions checker paths.[0] (readSourceText paths.[0]) [||]
     let blocking =
         scriptDiags
         |> List.filter (fun d -> d.Severity = FSharp.Compiler.Diagnostics.FSharpDiagnosticSeverity.Error)
@@ -8346,7 +8429,7 @@ let private typesProjectFiles (checker: FSharpChecker) (paths: string[]) (refArg
             UseScriptResolutionRules = false }
     paths
     |> Array.map (fun absolute ->
-        let sourceText = SourceText.ofString (File.ReadAllText(absolute))
+        let sourceText = SourceText.ofString (readSourceText absolute)
         let parseResults, checkAnswer =
             checker.ParseAndCheckFileInProject(
                 absolute, 0, sourceText, projOpts, userOpName = "fcs-dump-types-project")
@@ -9009,6 +9092,10 @@ let private fileBatchCore () =
                     |> Seq.choose (fun e -> Option.ofObj (e.GetString()))
                     |> Seq.toList
                 | _ -> []
+            // As `extraRefArgsOf` names each to FCS, once, for every reader.
+            let refs = refs |> List.map (fun r -> r.Trim()) |> List.filter (fun r -> r <> "")
+            for reference in refs do
+                refuseUnlessRegular "reference" reference
             if kind = "types-project" then
                 let paths =
                     match root.TryGetProperty("paths") with
@@ -9027,7 +9114,7 @@ let private fileBatchCore () =
             let absolute = Path.GetFullPath path
             let refArgs = extraRefArgsOf refs
 
-            let text = File.ReadAllText absolute
+            let text = readSourceText absolute
             let sourceText = SourceText.ofString text
 
             // Mirror the one-shot handlers exactly: script-mode options (SDK
@@ -9140,7 +9227,7 @@ let private fileBatchCore () =
     while not (isNull line) do
         let trimmed = (Option.ofObj line |> Option.defaultValue "").Trim()
         if trimmed <> "" then
-            Console.Out.WriteLine(respond trimmed)
+            Console.Out.WriteLine(answerUnlessFcsWasRefused respond trimmed)
             Console.Out.Flush()
         line <- Console.In.ReadLine()
 
@@ -9184,7 +9271,7 @@ let private dumpTypesCensusBatchCore () =
     let ensureRefs (absolute: string) =
         if baseOpts.IsNone then
             try
-                let t = SourceText.ofString (File.ReadAllText absolute)
+                let t = SourceText.ofString (readRegularText absolute)
                 let so, _ =
                     checker.GetProjectOptionsFromScript(
                         absolute, t, assumeDotNetFramework = false, useSdkRefs = true)
@@ -9213,7 +9300,7 @@ let private dumpTypesCensusBatchCore () =
                                Error = "reference resolution failed"
                                Exprs = ([||]: obj[]) |}, options)
                     | Some opts0 ->
-                        let sourceText = SourceText.ofString (File.ReadAllText absolute)
+                        let sourceText = SourceText.ofString (readRegularText absolute)
                         let dir =
                             Option.ofObj (Path.GetDirectoryName absolute)
                             |> Option.defaultValue "."
@@ -9433,7 +9520,7 @@ let private xmlDocBatchCore () =
     while not (isNull line) do
         let trimmed = (Option.ofObj line |> Option.defaultValue "").Trim()
         if trimmed <> "" then
-            Console.Out.WriteLine(respond trimmed)
+            Console.Out.WriteLine(answerUnlessFcsWasRefused respond trimmed)
             Console.Out.Flush()
         line <- Console.In.ReadLine()
 
@@ -9515,6 +9602,7 @@ let private refuseSelfContained () =
 [<EntryPoint>]
 let main argv =
     refuseSelfContained ()
+    FSharp.Compiler.IO.FileSystemAutoOpens.FileSystem <- RegularFilesOnly()
     match argv with
     | [| "ast"; sourcePath |] ->
         dumpAst (Path.GetFullPath sourcePath) []
