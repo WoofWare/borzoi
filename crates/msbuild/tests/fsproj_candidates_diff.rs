@@ -237,8 +237,18 @@ fn evaluate(
     };
     let (probed, reads) = parse(probe);
     // The probe changes nothing about the walk: tracking candidates leaves
-    // what it publishes, its read set included, as it is without them.
-    let (unprobed, _) = parse(&ReadProbe::default());
+    // what it publishes, its read set included, as the served evaluation
+    // publishes it (which also holds the reuse of imported documents to the
+    // evaluation that asks every time).
+    let unprobed = common::parse_fsproj_with_imports(
+        &borzoi_msbuild::ProjectFile::buffer(path, xml)
+            .expect("a project path spelt as its full path"),
+        &extra,
+        &common::oracle_environment(),
+        None,
+        None,
+    )
+    .expect("well-formed");
     assert_eq!(
         probed, unprobed,
         "the walk publishes something else when the probe reads candidates\n{xml}"
@@ -791,17 +801,6 @@ fn a_doubted_relative_path_assumes_no_working_directory() {
 /// nothing past such a seed.
 #[test]
 fn a_toolset_seed_over_a_refused_write_withdraws_the_channel() {
-    let tmp = TempDir::new().unwrap();
-    let dir = borzoi_msbuild::observed::host_fs::canonicalize(tmp.path()).unwrap();
-    let path = dir.join("Demo.fsproj");
-    let xml = "<Project><PropertyGroup>\
-               <MSBuildExtensionsPath32>$(G.ToUpperInvariant())</MSBuildExtensionsPath32>\
-               </PropertyGroup>\
-               <Import Project=\"Sdk.props\" Sdk=\"Microsoft.NET.Sdk\" />\
-               <PropertyGroup><TargetFramework>net10.0</TargetFramework>\
-               <A>$(MSBuildExtensionsPath32)</A></PropertyGroup>\
-               <Import Project=\"Sdk.targets\" Sdk=\"Microsoft.NET.Sdk\" /></Project>";
-    std::fs::write(&path, xml).unwrap();
     let dotnet_root = common::dotnet_root_from_env();
     let (user_dotnet_root, overrides_present) = common::workload_env_from_process();
     let resolver = |name: &str, observer: &borzoi_msbuild::observed::Observer| {
@@ -820,28 +819,53 @@ fn a_toolset_seed_over_a_refused_write_withdraws_the_channel() {
             observer,
         )
     };
-    let globals = vec![("G".to_owned(), "x".to_owned())];
+    // Each toolset name the walk seeds, and an SDK import that makes it seed
+    // without depending on the name's value.
+    let shapes = [
+        (
+            "MSBuildExtensionsPath32",
+            "<Import Project=\"Sdk.props\" Sdk=\"Microsoft.NET.Sdk\" />",
+            "<Import Project=\"Sdk.targets\" Sdk=\"Microsoft.NET.Sdk\" />",
+        ),
+        (
+            "MSBuildExtensionsPath",
+            "<Import Project=\"UseArtifactsOutputPath.props\" Sdk=\"Microsoft.NET.Sdk\" />",
+            "",
+        ),
+    ];
     let mut oracle = Oracle::spawn();
-    let theirs = oracle
-        .project(xml, &["A".to_owned()], Some(&path), &globals)
-        .expect("MSBuild evaluates it");
-    assert_eq!(theirs.get("A").map(String::as_str), Some("X"));
-    let (_, reads) = parse_fsproj_reads(
-        &borzoi_msbuild::ProjectFile::buffer(&path, xml)
-            .expect("a project path spelt as its full path"),
-        &globals.into_iter().collect(),
-        &common::oracle_environment(),
-        Some(&resolver),
-        None,
-        None,
-        &ReadProbe {
-            properties: vec!["A".to_owned()],
-            ..ReadProbe::default()
-        },
-    )
-    .expect("well-formed");
-    assert!(reads.candidates_withdrawn);
-    assert_eq!(reads.candidates["A"], None);
+    for (name, before, after) in shapes {
+        let tmp = TempDir::new().unwrap();
+        let dir = borzoi_msbuild::observed::host_fs::canonicalize(tmp.path()).unwrap();
+        let path = dir.join("Demo.fsproj");
+        let xml = format!(
+            "<Project><PropertyGroup><{name}>$(G.ToUpperInvariant())</{name}></PropertyGroup>\
+             {before}<PropertyGroup><TargetFramework>net10.0</TargetFramework>\
+             <A>$({name})</A></PropertyGroup>{after}</Project>"
+        );
+        std::fs::write(&path, &xml).unwrap();
+        let globals = vec![("G".to_owned(), "x".to_owned())];
+        let theirs = oracle
+            .project(&xml, &["A".to_owned()], Some(&path), &globals)
+            .expect("MSBuild evaluates it");
+        assert_eq!(theirs.get("A").map(String::as_str), Some("X"), "{name}");
+        let (_, reads) = parse_fsproj_reads(
+            &borzoi_msbuild::ProjectFile::buffer(&path, &xml)
+                .expect("a project path spelt as its full path"),
+            &globals.into_iter().collect(),
+            &common::oracle_environment(),
+            Some(&resolver),
+            None,
+            None,
+            &ReadProbe {
+                properties: vec!["A".to_owned()],
+                ..ReadProbe::default()
+            },
+        )
+        .expect("well-formed");
+        assert!(reads.candidates_withdrawn, "{name}");
+        assert_eq!(reads.candidates["A"], None, "{name}");
+    }
 }
 
 /// Each `<Choose>` the walk cannot decide widens what its branches write

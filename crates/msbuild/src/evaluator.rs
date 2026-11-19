@@ -2070,6 +2070,8 @@ impl<'r> State<'r> {
         // `toolset_honours_env_extensions_path`. Now that an SDK has named the
         // toolset, the value parked in `State::new` can be adjudicated.
         if !self.lookup.is_bound("MSBuildExtensionsPath") {
+            // As for the names above (#1049).
+            self.candidates_withdrawn |= self.trust_of("MSBuildExtensionsPath").refused();
             let toolset_value = format!("{dir}/");
             match (
                 &self.env_extensions_path,
