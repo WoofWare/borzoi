@@ -553,6 +553,7 @@ fn pinned_sdk_resolves_from_the_home_default_without_a_config() {
 
 /// With no user config, which NuGet would write (and throw where it cannot),
 /// the settings model declines, and so does a pinned name NuGet would resolve.
+#[cfg(unix)]
 #[test]
 fn pinned_sdk_declines_without_a_user_config() {
     let layout = PackagesLayout::new();

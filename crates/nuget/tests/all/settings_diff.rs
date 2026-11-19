@@ -214,11 +214,11 @@ struct Case {
     /// folder the test does not own), if it does not: NuGet is then not
     /// asked, and the model must decline.
     unanswerable: Option<&'static str>,
-    /// The name a file or a hostile state is put under at the user config's
-    /// place, where the case puts anything there. As a file, `NuGet.Config`
-    /// is loaded on every platform, and `nuget.config` only where the file
-    /// system ignores case.
-    user_config: Option<&'static str>,
+    /// Where NuGet opens the user config, under the harness's base. The
+    /// case may have written it there, or under a spelling that is this file
+    /// only where the file system ignores case, or put a hostile state
+    /// there, or nothing.
+    user_config: String,
 }
 
 impl Case {
@@ -240,7 +240,7 @@ impl Case {
             placements: Vec::new(),
             hostile: BTreeSet::new(),
             unanswerable: None,
-            user_config: Some("NuGet.Config"),
+            user_config: USER_CONFIG.to_owned(),
         }
     }
 
@@ -307,7 +307,9 @@ fn model_within_deadline(
 }
 
 /// Write `case` into a clean tree, ask both sides, and assert the contract.
-fn grade(harness: &mut Harness, case: &Case) -> Verdict {
+/// Returns the verdict, and whether the case has a user config: a regular
+/// file where NuGet opens one, before NuGet was asked.
+fn grade(harness: &mut Harness, case: &Case) -> (Verdict, bool) {
     for folder in ["tree", "home", "cli-home", "common"] {
         let path = harness.base.join(folder);
         if path.exists() {
@@ -321,7 +323,7 @@ fn grade(harness: &mut Harness, case: &Case) -> Verdict {
             placement.state,
             &placement.content,
         ) {
-            return Verdict::Unmade(refusal);
+            return (Verdict::Unmade(refusal), false);
         }
     }
     std::fs::create_dir_all(harness.base.join(&case.root)).expect("create the root");
@@ -343,13 +345,24 @@ fn grade(harness: &mut Harness, case: &Case) -> Verdict {
     }
     // The model first: NuGet writes a default user config where there is none.
     let ours = model_within_deadline(root.clone(), environment);
+    // NuGet writes a user config where there is none, and answers. The model
+    // does not know that NuGet can write one, so no agreement with NuGet's
+    // answer makes a commit there sound. Asked of the tree as it is laid
+    // out, since which spelling is the file depends on the file system, and
+    // of a case of no hostile value, whose home is where the case put it.
+    let user_config = harness.base.join(&case.user_config).is_file();
+    assert!(
+        user_config || ours.is_err() || !case.hostile.is_empty(),
+        "the model committed where there is no user config: {ours:?}\n{}",
+        case.describe()
+    );
     if let Some(why) = case.unanswerable {
         assert!(
             ours.is_err(),
             "the model committed to {ours:?} where NuGet gives no answer ({why})\n{}",
             case.describe()
         );
-        return Verdict::DeclinedUnanswerable;
+        return (Verdict::DeclinedUnanswerable, user_config);
     }
     let request = json!({
         "op": "globalPackagesFolder",
@@ -359,7 +372,7 @@ fn grade(harness: &mut Harness, case: &Case) -> Verdict {
     let theirs = harness.oracle.request(&request);
     let describe = || format!("{}\nNuGet: {theirs}", case.describe());
     let answered = theirs["ok"].as_bool().expect("ok is a bool");
-    match ours {
+    let verdict = match ours {
         Ok(committed) => {
             if !answered {
                 assert!(
@@ -367,7 +380,10 @@ fn grade(harness: &mut Harness, case: &Case) -> Verdict {
                     "the model committed to {committed:?} where NuGet threw\n{}",
                     describe()
                 );
-                return Verdict::CommittedWhereNuGetThrewOnAnUnreadSection;
+                return (
+                    Verdict::CommittedWhereNuGetThrewOnAnUnreadSection,
+                    user_config,
+                );
             }
             let folder = normalise(theirs["folder"].as_str().expect("folder"));
             assert_eq!(
@@ -401,7 +417,8 @@ fn grade(harness: &mut Harness, case: &Case) -> Verdict {
                 )
             }),
         },
-    }
+    };
+    (verdict, user_config)
 }
 
 /// An absolute path made lexically normal, without a trailing separator: the
@@ -792,7 +809,7 @@ fn gen_case(rng: &mut SplitMix64, base: &Path, cli_home: bool) -> Case {
     let home = if cli_home { "cli-home" } else { "home" };
     // Mostly present: the model declines where there is no user config,
     // which NuGet would write.
-    let user_config = (rng.below(8) != 0).then(|| {
+    if rng.below(8) != 0 {
         // Mostly the spelling NuGet loads on every platform: on Linux the
         // other is no user config.
         let spelling = if rng.below(16) == 0 {
@@ -826,8 +843,7 @@ fn gen_case(rng: &mut SplitMix64, base: &Path, cli_home: bool) -> Case {
                 files.push((format!("{home}/.nuget/NuGet/{spelling}"), bytes));
             }
         }
-        spelling
-    });
+    }
     let mut listed = |folder: &str, rng: &mut SplitMix64, hostile: &mut BTreeSet<Dimension>| {
         let mut names = BTreeSet::new();
         // At most one hostile name per folder: two may be one file to a file
@@ -903,7 +919,7 @@ fn gen_case(rng: &mut SplitMix64, base: &Path, cli_home: bool) -> Case {
         placements,
         hostile,
         unanswerable,
-        user_config,
+        user_config: format!("{home}/.nuget/NuGet/NuGet.Config"),
     };
     if let Some(entry) = hostile::sample(request_environments(), draw(rng)) {
         case.hostile.insert(entry.dimension);
@@ -1092,11 +1108,10 @@ fn cover(census: &Census) {
 #[derive(Default, Debug)]
 struct Tally {
     cases: usize,
-    /// The cases of no hostile value whose user config is spelt as every
-    /// platform loads it, and how many cases of no hostile value committed.
-    /// That is the generator's own space where a commit is possible wherever
-    /// the sweep runs: most hostile values take a case out of the model's
-    /// domain, and without a user config the model declines.
+    /// The cases of no hostile value that have a user config, and how many
+    /// cases of no hostile value committed. That is the generator's own
+    /// space where a commit is possible: most hostile values take a case out
+    /// of the model's domain, and without a user config the model declines.
     plain_cases: usize,
     plain_committed: usize,
     environment: usize,
@@ -1116,7 +1131,7 @@ struct Tally {
 
 /// Grade `case`, and record what became of it in the tally and the census.
 fn run_case(harness: &mut Harness, census: &Census, tally: &mut Tally, case: &Case) {
-    let verdict = grade(harness, case);
+    let (verdict, user_config) = grade(harness, case);
     let outcome = match &verdict {
         Verdict::Unmade(refusal) => {
             tally.unmade += 1;
@@ -1137,16 +1152,8 @@ fn run_case(harness: &mut Harness, census: &Census, tally: &mut Tally, case: &Ca
     census.reached(&case.hostile, outcome);
     tally.cases += 1;
     if case.hostile.is_empty() {
-        tally.plain_cases += usize::from(case.user_config == Some("NuGet.Config"));
+        tally.plain_cases += usize::from(user_config);
         tally.plain_committed += usize::from(matches!(verdict, Verdict::Committed(_)));
-        // NuGet writes a user config where there is none, and answers. The
-        // model does not know that NuGet can write one, so no agreement with
-        // NuGet's answer makes a commit there sound.
-        assert!(
-            case.user_config.is_some() || matches!(verdict, Verdict::Declined { .. }),
-            "the model committed where there is no user config: {verdict:?}\n{}",
-            case.describe()
-        );
     }
     match verdict {
         Verdict::Committed(committed) => {

@@ -1194,15 +1194,17 @@ mod user_config_tests {
     use super::*;
 
     /// Where there is no user config NuGet writes one, and throws where it
-    /// cannot (here, under a home it cannot create): the model, which does
-    /// not write, declines rather than commit to the folder of a default it
-    /// cannot know NuGet wrote.
+    /// cannot: the model, which does not write, declines rather than commit
+    /// to the folder of a default it cannot know NuGet wrote. The home is a
+    /// folder of the test's own that is not there, so that nothing of the
+    /// host's decides what the model finds at it.
     #[test]
     fn a_user_config_nuget_would_have_to_write_declines() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let project = std::fs::canonicalize(tmp.path()).unwrap().join("project");
+        let base = std::fs::canonicalize(tmp.path()).unwrap();
+        let project = base.join("project");
         std::fs::create_dir(&project).unwrap();
-        let home = PathBuf::from("/nonexistent/borzoi-settings-test");
+        let home = base.join("home");
         let environment: BTreeMap<OsString, OsString> = [(
             OsString::from("DOTNET_CLI_HOME"),
             home.clone().into_os_string(),

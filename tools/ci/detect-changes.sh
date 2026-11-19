@@ -39,8 +39,10 @@ filter_prefixes() {
     cst)       echo "crates/cst crates/print" ;;
     # The condition/property oracle and the workload oracle exist solely for
     # crates/msbuild's differential tests, so they live under its filter
-    # (mirrors nuget).
-    msbuild)   echo "crates/msbuild tools/msbuild-condition-oracle tools/workload-oracle" ;;
+    # (mirrors nuget). crates/msbuild's corpus differential and its restore
+    # cone census read NuGet's settings and write its restore graph through
+    # crates/nuget, so that crate is in this filter as well as nuget's.
+    msbuild)   echo "crates/msbuild tools/msbuild-condition-oracle tools/workload-oracle crates/nuget" ;;
     assembly)  echo "crates/assembly" ;;
     # The inheritdoc oracle exists solely for crates/lsp's differential
     # tests, so both live under one filter (mirrors nuget). crates/lsp's
