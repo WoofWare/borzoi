@@ -37,6 +37,7 @@ crates/corpus-diff/src/lib.rs	pending	2
 crates/corpus-diff/src/perturb.rs	pending	2
 crates/corpus-diff/src/utf16.rs	pending	2
 crates/corpus-diff/tests/project_resolution.rs	pending	2
+crates/corpus-diff/tests/project_resolution/fcs_dump_boundary.rs	draws	fcs_dump_project=fs+change+name+spelling+source;fcs_dump_wire=wire
 crates/cst/src/directives/driver.rs	pending	3
 crates/cst/src/directives/expr.rs	pending	3
 crates/cst/src/directives/line.rs	pending	3

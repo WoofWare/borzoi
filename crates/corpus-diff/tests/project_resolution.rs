@@ -33,6 +33,9 @@ use borzoi_sema::{
 use lsp_types::Position;
 use tempfile::TempDir;
 
+#[path = "project_resolution/fcs_dump_boundary.rs"]
+mod fcs_dump_boundary;
+
 fn write(path: &Path, text: &str) {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).expect("create parent dir");

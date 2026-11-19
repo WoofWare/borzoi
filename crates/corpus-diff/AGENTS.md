@@ -17,6 +17,17 @@ substituted into comments and strings, which FCS checks too. Depends on
 its library, not its tests, so it is a regular dependency); driven by
 `docs/project-corpus-diff-runner.md`.
 
+`tests/project_resolution/fcs_dump_boundary.rs` holds `fcs-dump`'s resident
+ops to the hostile-value library (`crates/oracle-harness/AGENTS.md`): every
+wire mutation of a good request to `file-batch`, `uses-project-batch` and
+`xmldoc-batch`, through `BatchChild` and straight to the oracle
+(census `fcs_dump_wire`), and every file-system state, change, name,
+spelling and source mutation of a small project to `uses-project-batch`,
+where a resident child must answer as a fresh one does (census
+`fcs_dump_project`). `BORZOI_HOSTILE_CASES=<text>` narrows the project
+census to the cases whose description holds the text, for iterating; the
+census then fails.
+
 ## Working here
 
 Iterate with `nix develop -c cargo test -p borzoi-corpus-diff`; the repository's root `AGENTS.md` has the pre-push gate.

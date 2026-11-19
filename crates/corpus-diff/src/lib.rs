@@ -905,7 +905,11 @@ impl std::error::Error for FcsInvokeError {}
 /// The `fcs-dump` invocation for `subcommand`. Without `BORZOI_FCS_DUMP` the
 /// first call in the process builds `tools/fcs-dump` and later calls reuse the
 /// output.
-fn fcs_dump_command(subcommand: &str) -> Result<Command, FcsInvokeError> {
+///
+/// Public for the harness that holds the oracle's wire and file-system
+/// boundary (`tests/project_resolution/fcs_dump_boundary.rs`), which drives
+/// every resident op through the same tool the runner checks against.
+pub fn fcs_dump_command(subcommand: &str) -> Result<Command, FcsInvokeError> {
     if let Some(bin) = std::env::var_os("BORZOI_FCS_DUMP") {
         let mut c = Command::new(bin);
         c.arg(subcommand);
