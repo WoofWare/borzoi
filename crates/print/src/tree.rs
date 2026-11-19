@@ -1347,12 +1347,20 @@ pub enum Pat<V: Version> {
 }
 
 impl<V: Version> Pat<V> {
-    /// Whether a single name in `self` is spelled as an active pattern's.
-    fn names_active_pattern(&self) -> bool {
-        let one = |p: &Pat<V>| p.names_active_pattern();
+    /// Whether a single name in `self` is spelled as an active pattern's, or
+    /// starts with a letter whose case Unicode versions disagree on, which
+    /// FCS and our parser may read differently (#1053).
+    fn holds_unsure_name(&self) -> bool {
+        let one = |p: &Pat<V>| p.holds_unsure_name();
         match self {
             Pat::Name(path) => match path.segments() {
-                [only] => crate::names::is_active_pattern_spelling(only.as_str()),
+                [only] => {
+                    let text = only.as_str();
+                    crate::names::is_active_pattern_spelling(text)
+                        || !(text.starts_with(|c: char| c.is_ascii())
+                            || VarName::new(only.clone()).is_ok()
+                            || crate::names::leads_stably_uppercase(text))
+                }
                 _ => false,
             },
             Pat::Wildcard | Pat::Const(_) | Pat::Null | Pat::IsInst(_) => false,
@@ -1402,9 +1410,10 @@ impl<V: Version> AliasPat<V> {
         pat: Pat<V>,
     ) -> Result<Self, Box<Pat<V>>> {
         // A single name is a variable, `AsAlias::Var`'s, unless it starts with
-        // a capital F# and our parser both read as one; and a name spelled as
-        // an active pattern's, anywhere in the alias, would define one, which
-        // FCS refuses of a value that is no function (FS1209).
+        // a capital F# and our parser both read as one; anywhere in the
+        // alias, a name spelled as an active pattern's would define one,
+        // which FCS refuses of a value that is no function (FS1209), and one
+        // on an uncertain initial FCS and our parser may read differently.
         let bare_var = match &pat {
             Pat::Name(path) => match path.segments() {
                 [only] => !crate::names::leads_stably_uppercase(only.as_str()),
@@ -1412,7 +1421,7 @@ impl<V: Version> AliasPat<V> {
             },
             _ => false,
         };
-        let refused = bare_var || pat.names_active_pattern();
+        let refused = bare_var || pat.holds_unsure_name();
         if refused {
             Err(Box::new(pat))
         } else {

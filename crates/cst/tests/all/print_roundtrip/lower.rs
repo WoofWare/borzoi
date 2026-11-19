@@ -125,18 +125,16 @@ fn file<V: Version>(root: &NormalisedRoot, tally: &mut Tally) -> L<ImplFile<V>> 
                     NamedKind::Module => return decline("file shape"),
                 };
                 // A namespace holds no value (FS0201): each `let` or
-                // expression in one is dropped on its own.
-                let decls: Vec<ModuleDecl<V>> = decls_lossy(&m.decls, tally, m.is_rec)
-                    .into_iter()
-                    .filter(|d| {
-                        let value = d.is_namespace_value();
-                        if value {
-                            tally.kept -= 1;
-                            tally.dropped.push(Decline("namespace: a value"));
-                        }
-                        !value
-                    })
-                    .collect();
+                // expression in one, but a bare `()` or `do ()`, is dropped
+                // on its own, judged as written, before lowering strips its
+                // parentheses.
+                let (taken, values): (Vec<&NormalisedDecl>, Vec<&NormalisedDecl>) =
+                    m.decls.iter().partition(|d| namespace_takes(d));
+                tally
+                    .dropped
+                    .extend(values.iter().map(|_| Decline("namespace: a value")));
+                let taken: Vec<NormalisedDecl> = taken.into_iter().cloned().collect();
+                let decls = decls_lossy(&taken, tally, m.is_rec);
                 namespaces
                     .push(Namespace::new(name, module_body(m.is_rec, decls)?).map_err(refused)?);
             }
@@ -189,6 +187,8 @@ fn decls_lossy<V: Version>(
                 Ok(m) => {
                     tally.kept += inner.kept;
                     out.push(ModuleDecl::NestedModule(m));
+                    // A module is of a recursive group's last rank.
+                    rank = 2;
                 }
                 // Each declaration the module would have kept is lost with it;
                 // a module with none to keep or drop is one loss.
@@ -218,6 +218,18 @@ fn decls_lossy<V: Version>(
         }
     }
     out
+}
+
+/// Whether a namespace takes `d` as written: anything but a `let` or an
+/// expression, and of expressions only a bare `()` or `do ()` (FS0201).
+fn namespace_takes(d: &NormalisedDecl) -> bool {
+    use NormalisedExpr as E;
+    let unit = |e: &E| matches!(e, E::Const(NormalisedConst::Unit));
+    match d {
+        NormalisedDecl::Let { .. } => false,
+        NormalisedDecl::Expr(e) => unit(e) || matches!(e, E::Do(inner) if unit(inner)),
+        _ => true,
+    }
 }
 
 /// The rank a recursive group reaches after `d`, or why the group refuses
@@ -1593,6 +1605,30 @@ mod tests {
         assert_eq!(
             (tally.kept, tally.dropped.len()),
             (1, 1),
+            "{:?}",
+            tally.dropped
+        );
+    }
+
+    #[test]
+    fn a_namespace_takes_unit_only_bare() {
+        let tally = lossy("namespace N\ndo (())\n(do ())\n(())\ndo ()\n()\n");
+        assert_eq!(
+            (tally.kept, tally.dropped.len()),
+            (2, 3),
+            "{:?}",
+            tally.dropped
+        );
+    }
+
+    #[test]
+    fn an_open_after_a_module_in_a_recursive_group_drops_alone() {
+        let tally = lossy(
+            "module rec M =\n    module N =\n        let y = 1\n    open System\n    let x = 1\n",
+        );
+        assert_eq!(
+            (tally.kept, tally.dropped.len()),
+            (2, 1),
             "{:?}",
             tally.dropped
         );

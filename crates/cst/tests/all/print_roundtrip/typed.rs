@@ -2867,14 +2867,7 @@ fn every_admitted_alias_checks() {
         vars.iter().any(|v| v.as_str() == "a|b"),
         "`a|b`, which FCS reads as a variable, refused"
     );
-    // Each name alone, and typed, `(n : int)`, a name inside a pattern. The
-    // typed name only on an initial whose case is certain: on another, our
-    // parser can read a pattern's name differently from FCS (#1053).
-    let certain = |n: &Ident| {
-        n.as_str().starts_with(|c: char| c.is_ascii())
-            || VarName::new(n.clone()).is_ok()
-            || borzoi_print::names::leads_stably_uppercase(n.as_str())
-    };
+    // Each name alone, and typed, `(n : int)`, a name inside a pattern.
     let pats: Vec<AliasPat<Preview>> = names
         .iter()
         .flat_map(|n| {
@@ -2883,7 +2876,7 @@ fn every_admitted_alias_checks() {
                 pat: Box::new(bare.clone()),
                 ty: named("int"),
             };
-            std::iter::once(bare).chain(certain(n).then_some(typed))
+            [bare, typed]
         })
         .filter_map(|p| AliasPat::new(Available, p).ok())
         .collect();
