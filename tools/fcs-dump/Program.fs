@@ -6373,23 +6373,39 @@ let private withFullReferencePaths (projOpts: FSharpProjectOptions) : FSharpProj
                 | Some prefix -> "-r:" + Path.GetFullPath(o.Substring prefix.Length)
                 | None -> o) }
 
+/// Refuse `path` unless it is a regular, non-empty file, links followed,
+/// before anything opens it: opening a FIFO or a device blocks or reads
+/// forever, and an assembly is never empty.
+let private requireRegularFile (path: string) =
+    if not (File.Exists path) then
+        failwithf "reference %s is not a file" path
+    let target =
+        match File.ResolveLinkTarget(path, true) with
+        | null -> FileInfo(path)
+        | t -> FileInfo(t.FullName)
+    if not (target.Exists && target.Length > 0L) then
+        failwithf "reference %s is not a regular file" path
+
 /// The references `projOpts` names (`-r:`), each refused if fsc would reject
-/// it: one that is not a file, or not an assembly (FS0084). FCS's project
-/// check resolves its references without reporting these, so a project with
-/// one would otherwise look clean.
+/// it: one that is not a regular file ([`requireRegularFile`]), or not an
+/// assembly (FS0084). FCS's project check resolves its references without
+/// reporting these, so a project with one would otherwise look clean. A
+/// project reference's output (`FSharpReference`) is not read from disk, so
+/// it is not a reference here.
 let private readableReferences (projOpts: FSharpProjectOptions) : string list =
+    let fromSource =
+        projOpts.ReferencedProjects |> Array.map (fun r -> Path.GetFullPath r.OutputFile) |> set
     [ for o in projOpts.OtherOptions do
           match [ "-r:"; "/r:"; "--reference:" ] |> List.tryFind (fun prefix -> o.StartsWith prefix) with
-          | Some prefix ->
+          | Some prefix when not (fromSource.Contains(Path.GetFullPath(o.Substring prefix.Length))) ->
               let path = o.Substring prefix.Length
-              if not (File.Exists path) then
-                  failwithf "reference %s is not a file" path
+              requireRegularFile path
               try
                   System.Reflection.AssemblyName.GetAssemblyName path |> ignore
               with ex ->
                   failwithf "reference %s is not an assembly: %s" path ex.Message
               yield path
-          | None -> () ]
+          | _ -> () ]
 
 /// The content digest of each reference a project-check request has read.
 let private referenceDigests = System.Collections.Generic.Dictionary<string, string>()
@@ -6462,19 +6478,36 @@ let private checkProjectNow (checker: FSharpChecker) (projOpts: FSharpProjectOpt
     let release () =
         checker.ClearCache([ opts ])
         requestSources.Clear()
-    refuseConflatedSources opts.SourceFiles
-    if referencesChanged (readableReferences opts) then
+    // `opts` and every project it hands FCS from source (`FSharpReference`),
+    // whose sources FCS reads through the same document source.
+    let rec reached (o: FSharpProjectOptions) : FSharpProjectOptions list =
+        o
+        :: (o.ReferencedProjects
+            |> Array.toList
+            |> List.collect (function
+                | FSharpReferencedProject.FSharpReference(_, q) -> reached q
+                | _ -> []))
+    let projects = reached opts |> List.distinctBy (fun o -> o.ProjectFileName)
+    for o in projects do
+        refuseConflatedSources o.SourceFiles
+    if referencesChanged (projects |> List.collect readableReferences |> List.distinct) then
         checker.InvalidateAll()
     try
         requestSources.Clear()
-        for path in opts.SourceFiles do
-            requestSources[path] <- File.ReadAllText path
+        for o in projects do
+            for path in o.SourceFiles do
+                requestSources[path] <- File.ReadAllText path
         let results = checker.ParseAndCheckProject(opts, userOpName = userOpName) |> Async.RunSynchronously
         let parsed (path: string) =
             (checker.GetBackgroundParseResultsForFileInProject(path, opts, userOpName = userOpName)
              |> Async.RunSynchronously)
                 .ParseTree
-        refuseUndescribedSources opts.SourceFiles (fun path -> requestSources[path]) parsed
+        for o in projects do
+            let parsedIn (path: string) =
+                (checker.GetBackgroundParseResultsForFileInProject(path, o, userOpName = userOpName)
+                 |> Async.RunSynchronously)
+                    .ParseTree
+            refuseUndescribedSources o.SourceFiles (fun path -> requestSources[path]) (if obj.ReferenceEquals(o, opts) then parsed else parsedIn)
         results, release
     with _ ->
         release ()
@@ -6908,6 +6941,7 @@ let private absolutePath (where: string) (e: JsonElement) =
 let private dllAssembly (where: string) (path: string) : string =
     if not (File.Exists path) then
         failwithf "%s: %s does not exist" where path
+    requireRegularFile path
     let name =
         try
             use stream = File.OpenRead path
@@ -7114,6 +7148,13 @@ let private respondGraphCheck (checker: FSharpChecker) (root: JsonElement) =
     if Directory.Exists unwrittenRoot then
         failwithf "invariant: %s exists, so a project reference could be read from disk" unwrittenRoot
     let built, outputOf = graphOptions graph
+    // Through the guarded project check every project-check oracle uses
+    // ([`checkProjectNow`]): its source text read once, sources FCS would
+    // conflate and line directives refused, unreadable references refused,
+    // for the checked project and every project it reaches from source.
+    let checkedResults, release =
+        checkProjectNow checker built.[graph.Check.Id] "fcs-dump-uses-project-graph"
+    try
     let projectResults (opts: FSharpProjectOptions) =
         checker.ParseAndCheckProject(opts, userOpName = "fcs-dump-uses-project-graph")
         |> Async.RunSynchronously
@@ -7134,7 +7175,6 @@ let private respondGraphCheck (checker: FSharpChecker) (root: JsonElement) =
                AssemblyName = p.AssemblyName
                Diagnostics = (projectResults built.[p.Id]).Diagnostics |> Array.map projectDiagnostic |})
         |> List.toArray
-    let checkedResults = projectResults built.[graph.Check.Id]
     // The records come from the whole-project check ([`projectCheckRecords`]),
     // the check FCS's compile agrees with; `Diagnostics` is every diagnostic
     // of that check, those in no file included.
@@ -7142,6 +7182,8 @@ let private respondGraphCheck (checker: FSharpChecker) (root: JsonElement) =
     {| Files = records.Files
        Diagnostics = checkedResults.Diagnostics |> Array.map projectDiagnostic
        Referenced = referenced |}
+    finally
+        release ()
 
 /// A `compile` request's response: `{ op, project, outDir }`. The project's
 /// references must all be DLLs; FCS's compiler builds it on [`graphArgv`]'s
@@ -7190,7 +7232,7 @@ let private respondGraphCompile (checker: FSharpChecker) (root: JsonElement) =
 /// ([`projectCheckRecords`]). Anything outside the request type is a
 /// `BatchError`.
 let private usesProjectGraphBatchCore () =
-    let checker = FSharpChecker.Create()
+    let checker = projectChecker ()
     let compact = buildOptionsCompact ()
     let respond (line: string) : string =
         try

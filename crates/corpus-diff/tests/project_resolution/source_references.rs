@@ -251,11 +251,13 @@ fn error_lines(answer: &GraphResponse) -> BTreeSet<u64> {
 struct UseCoverage {
     /// Every qualified use's tag.
     made: BTreeSet<String>,
-    /// The tags with a qualified use FCS accepted that binds into A.
+    /// The tags with a qualified use FCS accepted whose intended symbol
+    /// binds into A.
     bound: BTreeSet<String>,
-    /// The tags of a non-colliding kind with a qualified use FCS accepted,
-    /// none of which binds into A. Such a use names A's item by a path no
-    /// other assembly declares, so it can resolve nowhere else.
+    /// Each qualified use of a non-colliding kind FCS accepted with no
+    /// record of its intended symbol binding into A there. Such a use names
+    /// A's item by a path no other assembly declares, so it can resolve
+    /// nowhere else.
     unbound: Vec<String>,
 }
 
@@ -269,42 +271,44 @@ fn use_coverage(case: &Case, source: &GraphResponse) -> UseCoverage {
         u64::try_from(i + 1).expect("a small file")
     };
     let bad = error_lines(source);
-    let into_a: BTreeSet<u64> = uses(source)
-        .filter(|u| u["Assembly"] == case.library.as_str())
-        .filter(|u| {
-            u["Range"]["File"]
-                .as_str()
-                .is_some_and(|f| f.ends_with("/Use.fs"))
+    // Whether a record on `line` of B's Use.fs is A's symbol `name`: the
+    // symbol the generator wrote there, not merely any record of A (a
+    // qualifier such as `N.M` would do).
+    let binds_at = |line: u64, name: &str| {
+        uses(source).any(|u| {
+            u["Assembly"] == case.library.as_str()
+                && u["Range"]["Start"]["Line"].as_u64() == Some(line)
+                && u["Range"]["File"]
+                    .as_str()
+                    .is_some_and(|f| f.ends_with("/Use.fs"))
+                && (u["SymbolName"] == name
+                    || u["LogicalName"] == name
+                    || u["FullName"]
+                        .as_str()
+                        .is_some_and(|f| f.ends_with(&format!(".{name}"))))
         })
-        .filter_map(|u| u["Range"]["Start"]["Line"].as_u64())
-        .collect();
-    let mut made = BTreeSet::new();
-    let mut accepted: BTreeMap<&str, bool> = BTreeMap::new();
-    for (u, tag) in case.uses.iter().zip(&case.use_tags) {
+    };
+    let mut coverage = UseCoverage {
+        made: BTreeSet::new(),
+        bound: BTreeSet::new(),
+        unbound: Vec::new(),
+    };
+    for ((u, tag), symbol) in case.uses.iter().zip(&case.use_tags).zip(&case.use_names) {
         if tag.ends_with("(bare)") {
             continue;
         }
-        made.insert(tag.clone());
+        coverage.made.insert(tag.clone());
         let line = line_of(u);
-        if !bad.contains(&line) {
-            *accepted.entry(tag.as_str()).or_default() |= into_a.contains(&line);
+        if bad.contains(&line) {
+            continue;
+        }
+        if binds_at(line, symbol) {
+            coverage.bound.insert(tag.clone());
+        } else if !tag.ends_with("(colliding)") {
+            coverage.unbound.push(format!("`{u}` ({tag}, {symbol})"));
         }
     }
-    let bound = accepted
-        .iter()
-        .filter(|(_, b)| **b)
-        .map(|(t, _)| (*t).to_owned())
-        .collect();
-    let unbound = accepted
-        .into_iter()
-        .filter(|(t, b)| !b && !t.ends_with("(colliding)"))
-        .map(|(t, _)| t.to_owned())
-        .collect();
-    UseCoverage {
-        made,
-        bound,
-        unbound,
-    }
+    coverage
 }
 
 /// Run D1 over `cases` (each a seed and an index), failing on any
@@ -352,9 +356,9 @@ fn d1_over_generated_cases(cases: &[(u64, usize)]) {
             problems.push(format!("`{middle}.token` does not bind into {middle}"));
         }
         let coverage = use_coverage(&case, &source);
-        for tag in &coverage.unbound {
+        for use_ in &coverage.unbound {
             problems.push(format!(
-                "no accepted qualified use of kind {tag} binds into {}",
+                "the accepted qualified use {use_} does not bind into {}",
                 case.library
             ));
         }
@@ -729,8 +733,11 @@ fn a_rewritten_reference_is_read_afresh_whatever_its_timestamp() {
 /// `fcs-dump` refuses a DLL and a project reference of one assembly name
 /// (which leave FCS to pick one, and which the request type cannot express),
 /// a DLL that does not exist (FCS would check against its own FSharp.Core),
-/// and a DLL whose manifest names another assembly than its file. A raw
-/// request is only ever a check.
+/// a DLL whose manifest names another assembly than its file, and a FIFO
+/// named like a DLL (unopened). The graph check runs through the guarded
+/// project check the other project-check oracles use, so it also refuses two
+/// sources FCS takes for one file and a line directive. A raw request is only
+/// ever a check.
 #[test]
 #[ignore = "drives FCS; use --ignored for oracle smoke"]
 fn the_oracle_refuses_references_it_cannot_identify() {
@@ -755,7 +762,7 @@ fn the_oracle_refuses_references_it_cannot_identify() {
             .to_json_line(),
     )
     .expect("json");
-    assert!(oracle.check_json(&valid.to_string()).is_ok());
+    assert!(oracle.check_value(&valid).is_ok());
     // App references Lib's DLL and Lib from source.
     let mut both = valid.clone();
     let lib_dll = compiled[&name("Lib")].to_str().expect("UTF-8").to_owned();
@@ -763,7 +770,7 @@ fn the_oracle_refuses_references_it_cannot_identify() {
         .as_array_mut()
         .expect("references")
         .insert(0, serde_json::json!({ "dll": lib_dll }));
-    match oracle.check_json(&both.to_string()) {
+    match oracle.check_value(&both) {
         Err(FcsInvokeError::Refused(why)) if why.contains("assembly") => {}
         other => panic!("two references of assembly Lib must be refused: {other:?}"),
     }
@@ -780,7 +787,7 @@ fn the_oracle_refuses_references_it_cannot_identify() {
             r["dll"] = Value::String("/nonexistent/FSharp.Core.dll".to_owned());
         }
     }
-    match oracle.check_json(&missing.to_string()) {
+    match oracle.check_value(&missing) {
         Err(FcsInvokeError::Refused(why)) if why.contains("does not exist") => {}
         other => panic!("a missing DLL must be refused: {other:?}"),
     }
@@ -795,15 +802,53 @@ fn the_oracle_refuses_references_it_cannot_identify() {
             0,
             serde_json::json!({ "dll": renamed.to_str().expect("UTF-8") }),
         );
-    match oracle.check_json(&aliased.to_string()) {
+    match oracle.check_value(&aliased) {
         Err(FcsInvokeError::Refused(why)) if why.contains("is assembly Lib") => {}
         other => panic!("a DLL named apart from its manifest must be refused: {other:?}"),
     }
     let mut compile = valid.clone();
     compile["op"] = Value::String("compile".to_owned());
-    match oracle.check_json(&compile.to_string()) {
+    match oracle.check_value(&compile) {
         Err(FcsInvokeError::Refused(why)) if why.contains("must be a check") => {}
         other => panic!("a raw request is only a check: {other:?}"),
+    }
+    // A FIFO named like a DLL: refused before anything opens it.
+    let fifo = fixture.root().join("Fifo.dll");
+    let mut mkfifo = std::process::Command::new("mkfifo");
+    mkfifo.arg(&fifo);
+    let made = borzoi_spawn::BoundedCommand::new(mkfifo)
+        .run()
+        .expect("run mkfifo");
+    assert!(made.status.success(), "mkfifo: {made:?}");
+    let mut piped = valid.clone();
+    piped["projects"][1]["references"]
+        .as_array_mut()
+        .expect("references")
+        .insert(
+            0,
+            serde_json::json!({ "dll": fifo.to_str().expect("UTF-8") }),
+        );
+    match oracle.check_value(&piped) {
+        Err(FcsInvokeError::Refused(why)) if why.contains("not a regular file") => {}
+        other => panic!("a FIFO must be refused unopened: {other:?}"),
+    }
+    // Two sources FCS takes for one file (they differ by a soft hyphen).
+    let use_fs = fixture.paths(&name("App")).remove(0);
+    let conflated = use_fs.with_file_name("U\u{ad}se.fs");
+    let mut twice = valid.clone();
+    twice["projects"][1]["sources"]
+        .as_array_mut()
+        .expect("sources")
+        .push(Value::String(conflated.to_str().expect("UTF-8").to_owned()));
+    match oracle.check_value(&twice) {
+        Err(FcsInvokeError::Refused(why)) if why.contains("one file to FCS") => {}
+        other => panic!("sources FCS conflates must be refused: {other:?}"),
+    }
+    // A line directive, which moves the ranges the check reports elsewhere.
+    std::fs::write(&use_fs, "module Use\n\n# 1 \"Other.fs\"\nlet y = Lib.x\n").expect("rewrite");
+    match oracle.check_value(&valid) {
+        Err(FcsInvokeError::Refused(why)) if why.contains("line directive") => {}
+        other => panic!("a line directive must be refused: {other:?}"),
     }
 }
 

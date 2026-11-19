@@ -866,29 +866,24 @@ pub struct ProjectGraphOracle {
 impl ProjectGraphOracle {
     /// FCS's answer to `request`.
     pub fn check(&mut self, request: &GraphRequest) -> Result<GraphResponse, FcsInvokeError> {
-        self.check_json(&request.to_json_line())
+        let response = self.round_trip(&request.to_json_line())?;
+        parse_response(&response).map_err(FcsInvokeError::Refused)
     }
 
-    /// FCS's answer to a request given as raw JSON, so a test can put the
-    /// oracle's own parser to a request the typed builder would not make.
-    /// Refused unsent unless it is one non-blank line: the child pairs answers
-    /// with requests by line, so anything else would draw none or several.
-    pub fn check_json(&mut self, line: &str) -> Result<GraphResponse, FcsInvokeError> {
-        if line.trim().is_empty() || line.contains(['\n', '\r']) {
-            return Err(FcsInvokeError::Refused(
-                "a raw request must be one non-blank line".to_owned(),
-            ));
-        }
-        // Only a check: a raw `compile` would write a DLL. Malformed JSON is
-        // still sent, for the oracle's own parser to refuse.
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(line)
-            && value.get("op").and_then(serde_json::Value::as_str) != Some("check")
-        {
+    /// FCS's answer to a check request given as an untyped JSON value, so a
+    /// test can put the oracle's own parser to a request the typed builder
+    /// would not make. Refused unsent unless its `op` is `check` (a raw
+    /// `compile` would write a DLL); serialised, it is one line.
+    pub fn check_value(
+        &mut self,
+        request: &serde_json::Value,
+    ) -> Result<GraphResponse, FcsInvokeError> {
+        if request.get("op").and_then(serde_json::Value::as_str) != Some("check") {
             return Err(FcsInvokeError::Refused(
                 "a raw request must be a check".to_owned(),
             ));
         }
-        let response = self.round_trip(line)?;
+        let response = self.round_trip(&request.to_string())?;
         parse_response(&response).map_err(FcsInvokeError::Refused)
     }
 

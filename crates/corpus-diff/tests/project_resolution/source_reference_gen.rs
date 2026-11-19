@@ -198,6 +198,10 @@ pub struct Case {
     /// Each line of [`Self::uses`]'s coverage tag: the kind of the item it
     /// uses, and whether that item's name collides with FSharp.Core's.
     pub use_tags: Vec<String>,
+    /// Each line of [`Self::uses`]'s intended symbol: the name of A's item
+    /// the line names last (a union's or enum's first case, an optional
+    /// extension's static member).
+    pub use_names: Vec<String>,
 }
 
 const NAMESPACES: &[&str] = &[
@@ -520,6 +524,7 @@ pub fn generate(seed: u64, index: usize) -> Case {
         opens: Vec::new(),
         uses: Vec::new(),
         use_tags: Vec::new(),
+        use_names: Vec::new(),
     };
     let targets = open_targets(&case);
     if rng.chance(30) && !targets.is_empty() {
@@ -531,7 +536,7 @@ pub fn generate(seed: u64, index: usize) -> Case {
         opens.swap(i, rng.below(i + 1));
     }
     case.opens = opens;
-    (case.uses, case.use_tags) = consumer_uses(&case, &mut rng);
+    (case.uses, case.use_tags, case.use_names) = consumer_uses(&case, &mut rng);
     if rng.chance(40) {
         case.middle = Some(format!("Mid{index}"));
     }
@@ -577,7 +582,7 @@ fn open_targets(case: &Case) -> Vec<String> {
 
 /// B's body: for every item of A, its uses, qualified and bare, and each
 /// line's coverage tag.
-fn consumer_uses(case: &Case, rng: &mut Rng) -> (Vec<String>, Vec<String>) {
+fn consumer_uses(case: &Case, rng: &mut Rng) -> (Vec<String>, Vec<String>, Vec<String>) {
     let mut out = Vec::new();
     let mut tags = Vec::new();
     let mut k = 0usize;
@@ -590,7 +595,7 @@ fn consumer_uses(case: &Case, rng: &mut Rng) -> (Vec<String>, Vec<String>) {
         decls: &[Decl],
         rng: &mut Rng,
         out: &mut Vec<String>,
-        tags: &mut Vec<String>,
+        tags: &mut Vec<(String, String)>,
         next: &mut dyn FnMut() -> String,
     ) {
         for d in decls {
@@ -598,11 +603,12 @@ fn consumer_uses(case: &Case, rng: &mut Rng) -> (Vec<String>, Vec<String>) {
             uses_of(prefix, &d.item, rng, out, next);
             tags.extend(out[before..].iter().map(|line| {
                 let tag = use_tag(&d.item);
-                if line.ends_with(BARE_MARK) {
+                let tag = if line.ends_with(BARE_MARK) {
                     format!("{tag} (bare)")
                 } else {
                     tag
-                }
+                };
+                (tag, item_use_name(&d.item))
             }));
             if let Item::Module { name, items, .. } = &d.item {
                 walk(&format!("{prefix}.{name}"), items, rng, out, tags, next);
@@ -618,7 +624,30 @@ fn consumer_uses(case: &Case, rng: &mut Rng) -> (Vec<String>, Vec<String>) {
             }
         }
     }
-    (out, tags)
+    let (tags, names) = tags.into_iter().unzip();
+    (out, tags, names)
+}
+
+/// The name of `item` its qualified uses name last.
+fn item_use_name(item: &Item) -> String {
+    match item {
+        Item::Module { name, .. }
+        | Item::Value { name, .. }
+        | Item::Literal { name }
+        | Item::Function { name, .. }
+        | Item::Record { name, .. }
+        | Item::Class { name, .. }
+        | Item::Delegate { name, .. }
+        | Item::Struct { name, .. }
+        | Item::Interface { name, .. }
+        | Item::Abbrev { name, .. }
+        | Item::Exception { name, .. }
+        | Item::Measure { name } => name.clone(),
+        Item::Union { cases, .. } | Item::Enum { cases, .. } => cases[0].clone(),
+        Item::ActivePattern { case } => case.clone(),
+        Item::OptExtension { member, .. } => format!("{member}S"),
+        Item::CsExtension { member, .. } => member.clone(),
+    }
 }
 
 fn uses_of(

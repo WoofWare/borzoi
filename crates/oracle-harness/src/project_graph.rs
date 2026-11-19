@@ -470,7 +470,7 @@ pub fn framework_references() -> &'static [PathBuf] {
                     PathBuf::from(rest.trim().trim_matches(['[', ']'])),
                 ))
             })
-            .max_by_key(|(v, _)| version_key(v))
+            .max_by_key(|(v, _)| release_precedence(v))
             .unwrap_or_else(|| panic!("no SDK in `dotnet --list-sdks`:\n{listing}"));
         let core = sdk_dir.join(&version).join("FSharp/FSharp.Core.dll");
         assert!(core.is_file(), "{} is missing", core.display());
@@ -478,16 +478,17 @@ pub fn framework_references() -> &'static [PathBuf] {
             .parent()
             .expect("the SDK directory has a parent")
             .join("packs/Microsoft.NETCore.App.Ref");
-        let newest = |dir: &Path| {
+        let newest = |dir: &Path, key: &dyn Fn(&str) -> (Vec<u64>, bool)| {
             std::fs::read_dir(dir)
                 .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
                 .flatten()
                 .map(|e| e.path())
                 .filter(|p| p.is_dir())
-                .max_by_key(|p| version_key(&p.file_name().unwrap_or_default().to_string_lossy()))
+                .max_by_key(|p| key(&p.file_name().unwrap_or_default().to_string_lossy()))
                 .unwrap_or_else(|| panic!("nothing under {}", dir.display()))
         };
-        let tfm_dir = newest(&newest(&packs).join("ref"));
+        let pack = newest(&packs, &release_precedence);
+        let tfm_dir = newest(&pack.join("ref"), &|tfm| (version_key(tfm), true));
         let mut refs: Vec<PathBuf> = std::fs::read_dir(&tfm_dir)
             .unwrap_or_else(|e| panic!("read {}: {e}", tfm_dir.display()))
             .flatten()
@@ -498,6 +499,18 @@ pub fn framework_references() -> &'static [PathBuf] {
         refs.insert(0, core);
         refs
     })
+}
+
+/// A version's precedence: its numeric release segments, then whether it
+/// is a release, so `10.0.100` ranks above `10.0.100-rc.2` (a prerelease
+/// precedes its release) and `10.0.8` above `9.0.10`. Prereleases of one
+/// release tie with each other, which the newest-pick does not need apart.
+fn release_precedence(version: &str) -> (Vec<u64>, bool) {
+    let (release, prerelease) = match version.split_once('-') {
+        Some((r, _)) => (r, true),
+        None => (version, false),
+    };
+    (version_key(release), !prerelease)
 }
 
 /// The numeric value of each dot-separated segment of a version or TFM
@@ -762,6 +775,14 @@ mod tests {
     }
 
     #[test]
+    fn a_release_ranks_above_its_prereleases() {
+        let mut versions = ["10.0.100-rc.2", "10.0.100", "9.0.300", "10.0.100-preview.7"];
+        versions.sort_by_key(|v| release_precedence(v));
+        assert_eq!(versions.last(), Some(&"10.0.100"));
+        assert!(release_precedence("10.0.8") > release_precedence("9.0.10"));
+    }
+
+    #[test]
     fn plain_names() {
         for ok in ["Ay", "My.Lib-2", "_x"] {
             assert!(PlainName::new(ok).is_ok(), "{ok}");
@@ -849,10 +870,15 @@ mod tests {
                 })
                 .collect();
             let self_loop = edges.iter().any(|&(a, b)| a == b);
-            let refused = GraphRequest::new(projects, name("p0")).is_err_and(|e| {
-                e.contains("cycle") || (self_loop && e.contains("reference and the project"))
-            });
-            prop_assert_eq!(refused, has_cycle_by_kahn(n, &edges));
+            let result = GraphRequest::new(projects, name("p0"));
+            if has_cycle_by_kahn(n, &edges) {
+                let refused_for_the_cycle = result.as_ref().is_err_and(|e| {
+                    e.contains("cycle") || (self_loop && e.contains("reference and the project"))
+                });
+                prop_assert!(refused_for_the_cycle, "{result:?}");
+            } else {
+                prop_assert!(result.is_ok(), "an acyclic graph is accepted: {result:?}");
+            }
         }
     }
 
