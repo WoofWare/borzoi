@@ -1,6 +1,10 @@
 //! The walk's own cases, FCS-free: what each input channel declines or
 //! approximates, and what an incomplete certificate does.
 
+// The walk's syntax dispatch is what the parent module's lint holds; a test's
+// match over its own outcomes reports the rest.
+#![allow(clippy::wildcard_enum_match_arm)]
+
 use super::*;
 use crate::qnof::qualified_names;
 use borzoi_cst::parser::{FileKind, ParseOptions, parse_with_options};
