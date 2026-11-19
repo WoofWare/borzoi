@@ -17,10 +17,13 @@ use serde_json::{Value, json};
 
 use crate::common::fcs_dump_command;
 
-/// The answer lines `op` writes for `lines`, sent in one batch.
-fn answers(op: &str, lines: &[String]) -> Vec<String> {
-    let mut input = lines.join("\n").into_bytes();
-    input.push(b'\n');
+/// The answer lines `op` writes for `lines`, each ended by a line feed, sent
+/// in one batch.
+fn answers(op: &str, lines: &[Vec<u8>]) -> Vec<String> {
+    let input: Vec<u8> = lines
+        .iter()
+        .flat_map(|l| [l.as_slice(), b"\n"].concat())
+        .collect();
     let out = BoundedCommand::new(fcs_dump_command(op))
         .stdin_bytes(input)
         .run_ok(format_args!("fcs-dump {op}"));
@@ -53,11 +56,7 @@ fn duplicated(good: &Value, field: &str) -> String {
 
 fn hostile_lines(good: &Value, path_field: &str) -> Vec<(&'static str, String)> {
     let line = good.to_string();
-    let relative = match &good[path_field] {
-        Value::Array(_) => json!(["A.fs"]),
-        _ => json!("A.fs"),
-    };
-    vec![
+    let mut lines = vec![
         ("a blank line", String::new()),
         ("a line of blanks", "  \t".into()),
         ("a trailing no-break space", format!("{line}\u{a0}")),
@@ -82,17 +81,45 @@ fn hostile_lines(good: &Value, path_field: &str) -> Vec<(&'static str, String)> 
             "langversion of the wrong type",
             with_field(good, "langversion", json!(false)),
         ),
-        ("a relative path", with_field(good, path_field, relative)),
         ("an array", json!([good]).to_string()),
         ("a trailing comma", line.replacen('}', ",}", 1)),
-    ]
+    ];
+    if good.get("defines").is_some() {
+        lines.push((
+            "a padded symbol",
+            with_field(good, "defines", json!([" A "])),
+        ));
+        lines.push(("a blank symbol", with_field(good, "defines", json!([""]))));
+    }
+    lines
 }
 
 fn assert_each_line_answered(op: &str, good: Value, path_field: &str) {
-    let hostile = hostile_lines(&good, path_field);
-    let mut lines = vec![good.to_string()];
+    let mut hostile: Vec<(&str, Vec<u8>)> = hostile_lines(&good, path_field)
+        .into_iter()
+        .map(|(what, line)| (what, line.into_bytes()))
+        .collect();
+    // A byte that is not UTF-8 inside the path's string: decoded leniently it
+    // would name another file.
+    let text = good.to_string();
+    let quote = text.find(".fs\"").expect("a source path");
+    hostile.push((
+        "a path holding a byte that is not UTF-8",
+        [
+            &text.as_bytes()[..quote],
+            b"\xff",
+            &text.as_bytes()[quote..],
+        ]
+        .concat(),
+    ));
+    let mut lines = vec![good.to_string().into_bytes()];
     lines.extend(hostile.iter().map(|(_, l)| l.clone()));
-    lines.push(good.to_string());
+    // A carriage return between tokens is JSON whitespace, and a line ended by
+    // a carriage return and a line feed is one line: both are the good
+    // request.
+    lines.push(text.replacen(',', ",\r", 1).into_bytes());
+    lines.push(format!("{text}\r").into_bytes());
+    lines.push(good.to_string().into_bytes());
     let got = answers(op, &lines);
     assert_eq!(
         got.len(),
@@ -109,11 +136,18 @@ fn assert_each_line_answered(op: &str, good: Value, path_field: &str) {
     for (i, (what, line)) in hostile.iter().enumerate() {
         assert!(
             is_refusal(&got[i + 1]),
-            "{op}: {what} ({line:?}) must be refused, and got {}",
+            "{op}: {what} ({:?}) must be refused, and got {}",
+            String::from_utf8_lossy(line),
             got[i + 1]
         );
     }
-    assert_eq!(got.last(), got.first(), "{op}: the oracle stays in step");
+    for answer in &got[hostile.len() + 1..] {
+        assert_eq!(
+            Some(answer),
+            got.first(),
+            "{op}: the good request, and in step"
+        );
+    }
 }
 
 fn fixture() -> (tempfile::TempDir, String) {
@@ -152,4 +186,22 @@ fn xmldoc_batch_refuses_each_line_that_is_not_one_request() {
         json!({"paths": [a], "refs": [], "defines": [], "langversion": null, "exclusiveRefs": false}),
         "paths",
     );
+}
+
+/// A `types-project` request checks at FCS's default language version, so it
+/// refuses a pin it would not honour.
+#[test]
+fn types_project_refuses_a_language_version_pin() {
+    let (_dir, a) = fixture();
+    let lines = vec![
+        json!({"kind": "types-project", "paths": [a], "refs": [], "langversion": "7.0"})
+            .to_string()
+            .into_bytes(),
+        json!({"kind": "types-project", "paths": [a], "refs": [], "langversion": null})
+            .to_string()
+            .into_bytes(),
+    ];
+    let got = answers("file-batch", &lines);
+    assert!(is_refusal(&got[0]), "{}", got[0]);
+    assert!(!is_refusal(&got[1]), "{}", got[1]);
 }
