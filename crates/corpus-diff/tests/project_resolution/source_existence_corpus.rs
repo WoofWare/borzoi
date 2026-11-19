@@ -102,6 +102,23 @@ fn fcs(loaded: &LoadedProject, oracle: &mut ProjectGraphOracle) -> Result<FcsRow
     {
         return Err(format!("language version {v} is not the oracle's"));
     }
+    // A type provider's design-time assembly outlives the oracle's
+    // per-request clearing (#1086): a project referencing one would need the
+    // process isolation of #1085. A reference whose bytes name the attribute
+    // anywhere (FSharp.Core declares it, and is none) may be one.
+    for dll in &loaded.fcs_extra_refs {
+        let is_core = dll
+            .file_name()
+            .is_some_and(|n| n.eq_ignore_ascii_case("FSharp.Core.dll"));
+        let bytes = std::fs::read(dll).map_err(|e| e.to_string())?;
+        if !is_core
+            && bytes
+                .windows(b"TypeProviderAssemblyAttribute".len())
+                .any(|w| w == b"TypeProviderAssemblyAttribute")
+        {
+            return Err("a reference may be a type provider (#1086)".to_owned());
+        }
+    }
     let name = |s: &str| PlainName::new(s).expect("a plain name");
     let defines: Vec<String> = loaded
         .define_constants
