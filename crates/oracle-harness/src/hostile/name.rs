@@ -22,12 +22,12 @@ use super::{Alphabet, Dimension, Entry, Kind};
 pub enum Part {
     /// The stem the harness supplies.
     Stem,
-    /// The stem, in ASCII upper case.
-    StemUpper,
+    /// The stem, each ASCII letter in its other case.
+    StemRecased,
     /// The extension the harness supplies, with its dot.
     Ext,
-    /// The extension, in ASCII upper case.
-    ExtUpper,
+    /// The extension, each ASCII letter in its other case.
+    ExtRecased,
     /// These bytes.
     Lit(&'static [u8]),
     /// As many `x` as bring the whole name to this many bytes.
@@ -48,13 +48,26 @@ pub struct Name {
 /// The plain name: the stem and the extension.
 pub const PLAIN: &[Part] = &[Part::Stem, Part::Ext];
 
+/// `text` with each ASCII letter in its other case.
+fn recased(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_ascii_lowercase() {
+                c.to_ascii_uppercase()
+            } else {
+                c.to_ascii_lowercase()
+            }
+        })
+        .collect()
+}
+
 fn render_parts(parts: &[Part], stem: &str, ext: &str) -> Rendered {
     let fixed = |part: &Part| -> Vec<u8> {
         match part {
             Part::Stem => stem.as_bytes().to_vec(),
-            Part::StemUpper => stem.to_ascii_uppercase().into_bytes(),
+            Part::StemRecased => recased(stem).into_bytes(),
             Part::Ext => ext.as_bytes().to_vec(),
-            Part::ExtUpper => ext.to_ascii_uppercase().into_bytes(),
+            Part::ExtRecased => recased(ext).into_bytes(),
             Part::Lit(bytes) => bytes.to_vec(),
             Part::PadTo(_) => Vec::new(),
         }
@@ -81,6 +94,15 @@ impl Name {
     /// directory).
     pub fn render(&self, stem: &str, ext: &str) -> Rendered {
         render_parts(self.parts, stem, ext)
+    }
+
+    /// Whether the name is hostile for `stem` and `ext`: whether it differs
+    /// from the plain name and from its twin. A template over a part that is
+    /// empty or has no letter to recase renders the plain name, which is no
+    /// draw of its dimension.
+    pub fn varies(&self, stem: &str, ext: &str) -> bool {
+        let rendered = self.render(stem, ext);
+        rendered != render_parts(PLAIN, stem, ext) && self.twin(stem, ext) != Some(rendered)
     }
 
     /// The twin for `stem` and `ext`, if the name has one.
@@ -152,7 +174,7 @@ impl Rendered {
     }
 }
 
-use Part::{Ext, ExtUpper, Lit, PadTo, Stem, StemUpper};
+use Part::{Ext, ExtRecased, Lit, PadTo, Stem, StemRecased};
 
 const fn name(parts: &'static [Part]) -> Name {
     Name { parts, twin: None }
@@ -525,12 +547,12 @@ const TABLE: &[(Dimension, Name, &str)] = &[
     // Case folding.
     (
         Dimension::CaseFold,
-        twinned(&[StemUpper, ExtUpper], PLAIN),
+        twinned(&[StemRecased, ExtRecased], PLAIN),
         "the name in upper case",
     ),
     (
         Dimension::CaseFold,
-        twinned(&[Stem, ExtUpper], PLAIN),
+        twinned(&[Stem, ExtRecased], PLAIN),
         "the extension in upper case, where the extension chooses how a file is read",
     ),
     (
@@ -726,14 +748,15 @@ pub fn alphabet() -> &'static Alphabet<Name> {
     })
 }
 
-/// Every entry rendered for `stem` and `ext` as text, without the names no
-/// string holds: the alphabet for a place that carries text (an item spec, a
+/// Every entry that [varies](Name::varies) rendered for `stem` and `ext` as
+/// text, without the names no string holds: the alphabet for a place that carries text (an item spec, a
 /// property value). [`Dimension::NonUtf8`] has no such name, so a harness
 /// that draws only these excludes it, with that reason.
 pub fn as_text(stem: &str, ext: &str) -> Vec<Entry<String>> {
     alphabet()
         .entries()
         .iter()
+        .filter(|e| e.value.varies(stem, ext))
         .filter_map(|e| {
             Some(Entry {
                 dimension: e.dimension,
@@ -792,6 +815,22 @@ mod tests {
             text.len(),
             alphabet().entries().len() - alphabet().of(Dimension::NonUtf8).count()
         );
+    }
+
+    #[test]
+    fn a_name_that_renders_the_plain_one_does_not_vary() {
+        let recased_ext = alphabet()
+            .of(Dimension::CaseFold)
+            .find(|e| e.value.parts == [Part::Stem, Part::ExtRecased])
+            .unwrap();
+        // A directory has no extension to recase, and the name is the plain one.
+        assert!(recased_ext.value.varies("Lib", ".fs"));
+        assert!(!recased_ext.value.varies("Lib", ""));
+        // An upper-case name still has another case.
+        for e in alphabet().of(Dimension::CaseFold) {
+            assert!(e.value.varies("LIB", ".FS"), "{}", e.why);
+        }
+        assert!(as_text("123", "").iter().all(|e| e.value != "123"));
     }
 
     #[test]

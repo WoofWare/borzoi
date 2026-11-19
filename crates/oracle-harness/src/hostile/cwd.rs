@@ -65,8 +65,14 @@ impl Cwd {
 /// inside the project, or a segment is not one plain path component.
 pub fn directory(cwd: Cwd, project_dir: &Path, segments: &[&str], scratch: &Path) -> PathBuf {
     let fresh = || {
+        // Where the directories are, not how they are spelt: a scratch
+        // directory that is a link into the project is inside it.
+        let real = |dir: &Path| {
+            dir.canonicalize()
+                .unwrap_or_else(|e| panic!("{} is no directory: {e}", dir.display()))
+        };
         assert!(
-            !scratch.starts_with(project_dir),
+            !real(scratch).starts_with(real(project_dir)),
             "{} is inside the project",
             scratch.display()
         );

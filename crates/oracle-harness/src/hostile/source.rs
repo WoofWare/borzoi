@@ -10,7 +10,8 @@
 //! must still mean what it meant. A mutation that adds a declaration adds a
 //! module at column zero, which is a declaration a namespace takes as well
 //! as a module does (a `let` is not), so the file it is appended to may end
-//! in either.
+//! in either. The mutations are for implementation files: a signature file
+//! takes none of these declarations.
 
 use std::sync::OnceLock;
 
