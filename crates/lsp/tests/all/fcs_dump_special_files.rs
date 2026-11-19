@@ -103,3 +103,44 @@ fn a_source_or_reference_that_is_not_a_regular_file_is_refused_unopened() {
         );
     }
 }
+
+/// A source whose name does not end in an F# source suffix is refused: FCS
+/// reports it in no record (only a project-wide FS0226), and fsc reads such
+/// an argument otherwise (a `.dll` as a reference, a name with a trailing
+/// space or dot, or none, as an error), so no record could describe it.
+#[test]
+fn a_source_not_named_as_fsharp_source_is_refused() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let a = dir.path().join("A.fs");
+    std::fs::write(&a, "module A\nlet a = 1\n").expect("write");
+    let text = |p: &Path| p.display().to_string();
+    for name in ["Lib.dll", "Lib.fs ", "Lib.fs.", "Lib", "--"] {
+        let lib = dir.path().join(name);
+        std::fs::write(&lib, "module Lib\nlet b = A.a\n").expect("write");
+        for op in ["uses-project-batch", "xmldoc-batch", "file-batch"] {
+            let request = if op == "file-batch" {
+                json!({"kind": "uses", "path": text(&lib), "refs": []}).to_string()
+            } else {
+                json!({"paths": [text(&a), text(&lib)], "refs": []}).to_string()
+            };
+            let answer = child(op)
+                .try_request(&request)
+                .unwrap_or_else(|e| panic!("{op}, {name:?}: {e}"));
+            let why = refusal(op, &answer);
+            assert!(
+                why.contains("F# source"),
+                "{op}, {name:?}: the refusal says why: {why}"
+            );
+        }
+    }
+    // The suffix is compared as FCS compares it, ignoring case.
+    let upper = dir.path().join("UPPER.FS");
+    std::fs::write(&upper, "module UPPER\nlet c = 1\n").expect("write");
+    let answer = child("uses-project-batch")
+        .try_request(&json!({"paths": [text(&upper)], "refs": []}).to_string())
+        .expect("answered");
+    assert!(
+        serde_json::from_str::<Value>(&answer).expect("JSON")["BatchError"].is_null(),
+        "{answer}"
+    );
+}

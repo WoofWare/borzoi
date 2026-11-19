@@ -6411,9 +6411,22 @@ let private requireRegularFile (what: string) (path: string) =
         | Some kind -> failwithf "%s %s is %s, not a regular file" what path kind
         | None -> ()
 
-/// The text of the source `path` names, refused unread unless it is a regular
-/// file ([`requireRegularFile`]).
+/// The suffixes of the files FCS compiles as sources (`CompilerConfig`'s
+/// `FSharpSigFileSuffixes` and `FSharpImplFileSuffixes`), compared as FCS
+/// compares them, ordinally and ignoring case.
+let private fsharpSourceSuffixes = [ ".fs"; ".fsi"; ".fsx"; ".fsscript" ]
+
+/// The text of the source `path` names, refused unread unless its name ends
+/// in an F# source suffix and it is a regular file ([`requireRegularFile`]).
+/// FCS reports a source of another name in no record, only as a project-wide
+/// FS0226, and fsc reads such an argument otherwise (a `.dll` as a
+/// reference), so no record could describe it.
 let private readSourceText (path: string) : string =
+    if not (fsharpSourceSuffixes |> List.exists (fun s -> path.EndsWith(s, StringComparison.OrdinalIgnoreCase))) then
+        failwithf
+            "source %s is not named as an F# source (%s), so FCS would check nothing of it and fsc would read it otherwise"
+            path
+            (String.concat ", " fsharpSourceSuffixes)
     requireRegularFile "source" path
     File.ReadAllText path
 
