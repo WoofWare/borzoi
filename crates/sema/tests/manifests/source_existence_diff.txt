@@ -24,6 +24,7 @@ defines	certified: exact; unknown: exact
 exceptions	certified: exact; unknown: exact
 extension_active_pattern	certified: exact; unknown: covers [UncertainAttribute]
 extension_compiled_name	certified: exact; unknown: covers [UncertainAttribute]
+extension_compiled_name_property	certified: exact; unknown: covers [UncertainAttribute]
 extension_csharp_style	certified: exact; unknown: covers [UncertainAttribute]
 extension_extern	certified: exact; unknown: covers [UncertainAttribute]
 extension_forms	certified: exact; unknown: exact

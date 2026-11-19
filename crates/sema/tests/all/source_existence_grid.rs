@@ -60,7 +60,10 @@ pub fn cells() -> Vec<Cell> {
             ],
         ),
         // Modules.
-        one("module_header", "module Top.Level.Mod\nlet x = 1\ntype Inner = { A: int }\n"),
+        one(
+            "module_header",
+            "module Top.Level.Mod\nlet x = 1\ntype Inner = { A: int }\n",
+        ),
         one(
             "module_nested_deep",
             "namespace Deep\nmodule L1 =\n    module L2 =\n        module L3 =\n            module L4 =\n                module L5 =\n                    type Bottom = { X: int }\n",
@@ -73,12 +76,18 @@ pub fn cells() -> Vec<Cell> {
             "module_abbreviation",
             "namespace N\nmodule Real =\n    let x = 1\nmodule Alias = Real\n",
         ),
-        exe(one("headerless", "let x = 1\ntype InHeaderless = { A: int }\n")),
+        exe(one(
+            "headerless",
+            "let x = 1\ntype InHeaderless = { A: int }\n",
+        )),
         exe(Cell::new(
             "headerless_last_of_two",
             &[
                 ("First.fs", "module First\nlet a = 1\n"),
-                ("Main_Entry.fs", "type InMain = { A: int }\nprintfn \"%d\" First.a\n"),
+                (
+                    "Main_Entry.fs",
+                    "type InMain = { A: int }\nprintfn \"%d\" First.a\n",
+                ),
             ],
         )),
         // Accessibility.
@@ -214,7 +223,10 @@ pub fn cells() -> Vec<Cell> {
         Cell::new(
             "fsi_pair_access",
             &[
-                ("Lib.fsi", "module PairAccess\ntype internal T =\n    new: unit -> T\n"),
+                (
+                    "Lib.fsi",
+                    "module PairAccess\ntype internal T =\n    new: unit -> T\n",
+                ),
                 ("Lib.fs", "module PairAccess\ntype T() = class end\n"),
             ],
         ),
@@ -225,7 +237,10 @@ pub fn cells() -> Vec<Cell> {
                     "Lib.fsi",
                     "namespace PairAO\n[<AutoOpen>]\nmodule M =\n    val x: int\n",
                 ),
-                ("Lib.fs", "namespace PairAO\n[<AutoOpen>]\nmodule M =\n    let x = 1\n"),
+                (
+                    "Lib.fs",
+                    "namespace PairAO\n[<AutoOpen>]\nmodule M =\n    let x = 1\n",
+                ),
             ],
         ),
         // Conditional compilation under A's defines.
@@ -260,6 +275,10 @@ pub fn cells() -> Vec<Cell> {
         one(
             "extension_compiled_name",
             "namespace ExtCn\nopen System.Runtime.CompilerServices\nmodule M =\n    type System.String with\n        [<CompiledName(\"Renamed\")>]\n        member s.Orig() = 1\n    [<Extension; CompiledName(\"renamedLet\")>]\n    let origLet (s: string) = s\n",
+        ),
+        one(
+            "extension_compiled_name_property",
+            "namespace ExtCnP\nopen System.Runtime.CompilerServices\ntype Holder =\n    [<Extension; CompiledName(\"RenamedProp\")>]\n    static member P(s: string) = 1\nmodule M =\n    type System.String with\n        [<CompiledName(\"RenamedGetter\")>]\n        member s.Prop = 1\n        [<CompiledName(\"RenamedStatic\")>]\n        static member SProp with get () = 1 and set (v: int) = ()\n",
         ),
         one(
             "extension_active_pattern",

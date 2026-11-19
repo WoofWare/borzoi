@@ -146,7 +146,10 @@ fn files_of(files: &[(String, String)]) -> Vec<FixtureFile> {
 }
 
 /// Decode one assembly's signature streams into rows.
-fn decode(primary: &[u8], b: Option<&[u8]>) -> Result<(Vec<PickledEntityRow>, Vec<ExtensionRow>), String> {
+fn decode(
+    primary: &[u8],
+    b: Option<&[u8]>,
+) -> Result<(Vec<PickledEntityRow>, Vec<ExtensionRow>), String> {
     let ccu = borzoi_assembly::unpickle_signature(primary, b).map_err(|e| e.to_string())?;
     borzoi_assembly::existence::pickled_rows(&ccu)
 }
@@ -205,12 +208,15 @@ pub fn fcs(cell: &Cell) -> Fcs {
     let fixture = ProjectGraphFixture::materialise(projects).expect("materialise the cell");
     let mut framework: Vec<PathBuf> = framework_references().to_vec();
     for r in &cell.refs {
-        let line = fixture
-            .compile_request(&plain(r.name), framework_references(), &BTreeMap::new());
+        let line =
+            fixture.compile_request(&plain(r.name), framework_references(), &BTreeMap::new());
         let out: CompileResponse = request(line.as_line()).expect("compile a reference");
-        let dll = out
-            .output
-            .unwrap_or_else(|| panic!("{}: reference {} failed: {:?}", cell.name, r.name, out.diagnostics));
+        let dll = out.output.unwrap_or_else(|| {
+            panic!(
+                "{}: reference {} failed: {:?}",
+                cell.name, r.name, out.diagnostics
+            )
+        });
         framework.push(dll);
     }
     let graph = fixture.request(
@@ -223,7 +229,10 @@ pub fn fcs(cell: &Cell) -> Fcs {
         .expect("the consumer references the producer");
     let response: ReferencedResponse =
         request(&line).unwrap_or_else(|e| panic!("{}: referenced: {e}", cell.name));
-    let errors: Vec<String> = response.errors().map(|d| format!("FS{}", d["ErrorNumber"])).collect();
+    let errors: Vec<String> = response
+        .errors()
+        .map(|d| format!("FS{}", d["ErrorNumber"]))
+        .collect();
     let streams: Vec<_> = response
         .signature
         .streams
@@ -575,8 +584,7 @@ pub fn grade(cell: &Cell, fcs: &Fcs, ours: &SourceExistence) -> Result<String, S
     let lacking_entities = missing(&mine.entities, &theirs.entities);
     let lacking_extensions = missing(&mine.extensions, &theirs.extensions);
     let lacking_opens = missing(&mine.auto_opens, &theirs.auto_opens);
-    if !lacking_entities.is_empty() || !lacking_extensions.is_empty() || !lacking_opens.is_empty()
-    {
+    if !lacking_entities.is_empty() || !lacking_extensions.is_empty() || !lacking_opens.is_empty() {
         return Err(format!(
             "{}: ours does not cover FCS's rows (approximations {:?})\n  FCS has, ours lacks:\n{}{}    auto-opens {lacking_opens:?}\n  ours:\n{}{}",
             cell.name,
@@ -650,7 +658,11 @@ pub fn grade_cells(cells: &[Cell]) -> (Vec<(String, String)>, Vec<String>) {
     for (name, c, u, errors) in results {
         match (&c, &u) {
             (Ok(c), Ok(u)) => {
-                let fcs_errors = if errors.is_empty() { String::new() } else { format!(" [FCS: {}]", errors.join(",")) };
+                let fcs_errors = if errors.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [FCS: {}]", errors.join(","))
+                };
                 entries.push((name, format!("certified: {c}; unknown: {u}{fcs_errors}")));
             }
             _ => {
@@ -746,7 +758,10 @@ fn deep_source_rows_are_fcs_rows_over_generated_projects() {
         .iter()
         .filter(|(_, v)| v.starts_with("certified: exact"))
         .count();
-    eprintln!("{} cases, {exact} exact under the certificate", entries.len());
+    eprintln!(
+        "{} cases, {exact} exact under the certificate",
+        entries.len()
+    );
     assert!(
         failures.is_empty(),
         "{} failures:\n{}",

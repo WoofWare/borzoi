@@ -125,8 +125,11 @@ fn fcs(loaded: &LoadedProject, oracle: &mut ProjectGraphOracle) -> Result<FcsRow
         .canonicalize()
         .map_err(|e| e.to_string())?;
     let consumer_source = consumer_dir.join("Consumer.fs");
-    std::fs::write(&consumer_source, "module SourceExistenceConsumer.Use\nlet x = 1\n")
-        .map_err(|e| e.to_string())?;
+    std::fs::write(
+        &consumer_source,
+        "module SourceExistenceConsumer.Use\nlet x = 1\n",
+    )
+    .map_err(|e| e.to_string())?;
     let mut consumer_refs = dlls;
     consumer_refs.push(Reference::Project(name("Producer")));
     let consumer = GraphProject {
@@ -227,8 +230,7 @@ fn grade(ours: &SourceExistence, fcs: &FcsRows) -> Result<String, String> {
     let missing_entities = lacking(rows, &fcs.entities);
     let missing_extensions = lacking(&surface.index.extensions, &fcs.extensions);
     let missing_opens = lacking(&surface.assembly_auto_opens, &fcs.auto_opens);
-    if !missing_entities.is_empty() || !missing_extensions.is_empty() || !missing_opens.is_empty()
-    {
+    if !missing_entities.is_empty() || !missing_extensions.is_empty() || !missing_opens.is_empty() {
         return Err(format!(
             "ours does not cover FCS's rows: entities {missing_entities:?}, extensions {missing_extensions:?}, auto-opens {missing_opens:?}"
         ));

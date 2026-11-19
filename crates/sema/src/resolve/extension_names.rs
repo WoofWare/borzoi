@@ -457,10 +457,7 @@ enum AugmentationMember {
 
 /// An active pattern's logical name, `|A|B|` or `|A|_|`.
 pub(crate) fn active_pattern_name(ap: &borzoi_cst::syntax::ActivePatName) -> String {
-    let cases: Vec<String> = ap
-        .case_tokens()
-        .map(|t| id_text(&t).into_owned())
-        .collect();
+    let cases: Vec<String> = ap.case_tokens().map(|t| id_text(&t).into_owned()).collect();
     format!("|{}|", cases.join("|"))
 }
 

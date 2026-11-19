@@ -9,40 +9,7 @@ use std::path::PathBuf;
 
 /// The project of `files` (name, text), parsed with no defines.
 fn project(files: &[(&str, &str)]) -> Vec<ProjectFile> {
-    let symbols = Default::default();
-    let mut parsed = Vec::new();
-    let mut recoveries = Vec::new();
-    for (name, text) in files {
-        let kind = if name.ends_with(".fsi") {
-            FileKind::Sig
-        } else {
-            FileKind::Impl
-        };
-        let p = parse_with_options(
-            text,
-            ParseOptions {
-                file_kind: kind,
-                symbols: &symbols,
-                lang: borzoi_cst::language_version::LanguageVersion::DEFAULT,
-            },
-        );
-        recoveries.push(SyntaxRecovery::of(&p));
-        parsed.push(match kind {
-            FileKind::Sig => SourceFile::Sig(SigFile::cast(p.root).expect("sig")),
-            FileKind::Impl => SourceFile::Impl(ImplFile::cast(p.root).expect("impl")),
-        });
-    }
-    let paths: Vec<PathBuf> = files
-        .iter()
-        .map(|(n, _)| PathBuf::from("/p").join(n))
-        .collect();
-    let qnofs = qualified_names(&parsed, &paths);
-    parsed
-        .into_iter()
-        .zip(recoveries)
-        .zip(qnofs)
-        .map(|((f, r), q)| ProjectFile::new(f, q, r))
-        .collect()
+    project_with(files, &[])
 }
 
 /// Our reading of `files` under `routes`, or certified by spelling.
@@ -61,6 +28,9 @@ fn read(files: &[(&str, &str)]) -> SourceExistence {
     read_with(files, None)
 }
 
+/// Every member head shape the generator met is named: a static property
+/// with no receiver (a bare-name pattern), backticked names, an indexer, and
+/// names that are keywords.
 #[test]
 fn bare_member_heads_are_named() {
     for src in [
@@ -131,9 +101,9 @@ fn rows(r: &SourceExistence, what: &str) -> Vec<PickledEntityRow> {
 
 fn has_entity(r: &SourceExistence, logical: &str, compiled: &str, kind: PickledEntityKind) -> bool {
     matches!(r, SourceExistence::Read(_))
-        && rows(r, logical)
-            .iter()
-            .any(|row| row.logical_name == logical && row.compiled_name == compiled && row.kind == kind)
+        && rows(r, logical).iter().any(|row| {
+            row.logical_name == logical && row.compiled_name == compiled && row.kind == kind
+        })
 }
 
 fn extension_names(r: &SourceExistence) -> Vec<Vec<String>> {
@@ -179,7 +149,10 @@ fn witness(channel: Channel) -> Observed {
         Channel::UnreadableItem => {
             let project = project(&[("A.fs", "module A\nlet x = 1\n")]);
             let routes = MarkerRoutes::Certified(BTreeMap::new());
-            let items = [CompileItem::Parsed(&project[0]), CompileItem::Unreadable("B.fs")];
+            let items = [
+                CompileItem::Parsed(&project[0]),
+                CompileItem::Unreadable("B.fs"),
+            ];
             observe(
                 source_existence(Producer::Evaluated {
                     items: &items,
@@ -189,9 +162,14 @@ fn witness(channel: Channel) -> Observed {
             )
         }
         Channel::FoldRefused => observe(source_existence(Producer::FoldRefused("why")), |_| true),
-        Channel::UnservedTfm => observe(source_existence(Producer::UnservedTfm("net8.0")), |_| true),
+        Channel::UnservedTfm => {
+            observe(source_existence(Producer::UnservedTfm("net8.0")), |_| true)
+        }
         Channel::Defines => {
-            let src = [("Lib.fs", "namespace N\n#if A_ONLY\ntype Shown = int\n#endif\n")];
+            let src = [(
+                "Lib.fs",
+                "namespace N\n#if A_ONLY\ntype Shown = int\n#endif\n",
+            )];
             let read_under = |defines: &[&str]| {
                 let project = project_with(&src, defines);
                 let routes = MarkerRoutes::Certified(BTreeMap::new());
@@ -202,7 +180,9 @@ fn witness(channel: Channel) -> Observed {
                 })
             };
             let (a, b) = (read_under(&["A_ONLY"]), read_under(&[]));
-            if has_entity(&a, "Shown", "Shown", K::Abbreviation) && !has_entity(&b, "Shown", "Shown", K::Abbreviation) {
+            if has_entity(&a, "Shown", "Shown", K::Abbreviation)
+                && !has_entity(&b, "Shown", "Shown", K::Abbreviation)
+            {
                 Observed::CallerDecides
             } else {
                 Observed::Wrong(format!("{a:?} / {b:?}"))
@@ -233,7 +213,10 @@ fn witness(channel: Channel) -> Observed {
             let without = read(&[("A.fs", "module A\nlet x = 1\n")]);
             let with = read(&[
                 ("A.fs", "module A\nlet x = 1\n"),
-                ("AssemblyInfo.fs", "namespace FSharp\n[<assembly: AutoOpen(\"A\")>]\ndo ()\n"),
+                (
+                    "AssemblyInfo.fs",
+                    "namespace FSharp\n[<assembly: AutoOpen(\"A\")>]\ndo ()\n",
+                ),
             ]);
             if without != with {
                 Observed::CallerDecides
@@ -250,93 +233,149 @@ fn witness(channel: Channel) -> Observed {
             ]),
             |_| true,
         ),
-        Channel::HeaderlessFile => observe(one("let x = 1\n"), |r| has_entity(r, "Lib", "Lib", K::Module)),
+        Channel::HeaderlessFile => observe(one("let x = 1\n"), |r| {
+            has_entity(r, "Lib", "Lib", K::Module)
+        }),
         Channel::AnonymousModuleName => observe(read(&[("Lïb.fs", "let x = 1\n")]), |_| true),
-        Channel::Namespace => observe(one("namespace A.B\ntype T = int\nnamespace global\ntype U = int\n"), |r| {
-            has_entity(r, "A", "A", K::Namespace) && has_entity(r, "B", "B", K::Namespace)
-        }),
-        Channel::Module => observe(one("module A.M\nmodule rec Inner =\n    let x = 1\n"), |r| {
-            has_entity(r, "M", "M", K::Module) && has_entity(r, "Inner", "Inner", K::Module)
-        }),
-        Channel::ModuleAbbreviation => observe(one("module M\nmodule Real =\n    let x = 1\nmodule Alias = Real\n"), |r| {
-            !rows(r, "alias").iter().any(|row| row.logical_name == "Alias")
-        }),
-        Channel::ModuleSuffix => observe(one("namespace N\ntype T = { X: int }\nmodule T =\n    let x = 1\n"), |r| {
-            has_entity(r, "TModule", "TModule", K::Module)
-        }),
-        Channel::CompilationRepresentationArgument => observe(
-            one("namespace N\n[<CompilationRepresentation(enum<CompilationRepresentationFlags> 4)>]\nmodule T =\n    let x = 1\n"),
-            |_| true,
+        Channel::Namespace => observe(
+            one("namespace A.B\ntype T = int\nnamespace global\ntype U = int\n"),
+            |r| has_entity(r, "A", "A", K::Namespace) && has_entity(r, "B", "B", K::Namespace),
         ),
-        Channel::TypeDefinition => observe(one("namespace N\ntype C() = member _.X = 1\ntype U = A | B\n"), |r| {
-            has_entity(r, "C", "C", K::Type) && has_entity(r, "U", "U", K::Type)
-        }),
-        Channel::GenericArity => observe(one("namespace N\ntype G<'a, [<Measure>] 'u> = { X: 'a }\n"), |r| {
-            has_entity(r, "G`1", "G`1", K::Type)
-        }),
-        Channel::Abbreviation => observe(one("namespace N\ntype I = int\n"), |r| has_entity(r, "I", "I", K::Abbreviation)),
-        Channel::AbbreviationOrUnion => observe(one("namespace N\ntype I = Somewhere\n"), |_| true),
-        Channel::Measure => observe(one("namespace N\n[<Measure>] type m\n"), |r| has_entity(r, "m", "m", K::Measure)),
-        Channel::Exception => observe(one("namespace N\nexception E of string\n"), |r| has_entity(r, "E", "E", K::Exception)),
-        Channel::Accessibility => observe(one("namespace N\nmodule internal M =\n    type T = int\n"), |r| {
-            rows(r, "access").iter().any(|row| row.logical_name == "T" && !row.public)
-        }),
-        Channel::TypeProviderUse => observe(one("namespace N\ntype T = P<\"x\">\n"), |_| true),
-        Channel::AutoOpenAttribute => observe(one("namespace N\n[<AutoOpen>]\nmodule M =\n    let x = 1\n"), |r| {
-            rows(r, "auto").iter().any(|row| row.logical_name == "M" && row.auto_open)
-        }),
-        Channel::ExtensionAttribute => observe(
-            one("namespace N\n[<System.Runtime.CompilerServices.Extension>]\ntype E =\n    static member X = 1\n"),
-            |r| rows(r, "ext").iter().any(|row| row.logical_name == "E" && row.extension),
+        Channel::Module => observe(
+            one("module A.M\nmodule rec Inner =\n    let x = 1\n"),
+            |r| has_entity(r, "M", "M", K::Module) && has_entity(r, "Inner", "Inner", K::Module),
         ),
-        Channel::CompiledNameAttribute => observe(one("namespace N\n[<CompiledName(\"R\")>]\ntype T() = class end\n"), |r| {
-            has_entity(r, "T", "R", K::Type)
-        }),
-        Channel::AttributeTarget => observe(
-            one("module M\ntype System.String with\n    [<return: CompiledName(\"Q\")>]\n    member s.Orig() = 1\n"),
+        Channel::ModuleAbbreviation => observe(
+            one("module M\nmodule Real =\n    let x = 1\nmodule Alias = Real\n"),
             |r| {
-                extension_names(r)
-                    == vec![vec!["Orig".to_owned(), "String.Orig".to_owned()]]
+                !rows(r, "alias")
+                    .iter()
+                    .any(|row| row.logical_name == "Alias")
             },
         ),
-        Channel::UnreadableCompiledName => {
-            observe(one("namespace N\n[<CompiledName(Some.Constant)>]\ntype T() = class end\n"), |_| true)
-        }
-        Channel::AssemblyAutoOpen => observe(one("namespace N\n[<assembly: AutoOpen(\"N\")>]\ndo ()\n"), |r| {
-            matches!(r, SourceExistence::Read(s) if s.assembly_auto_opens == ["N"])
+        Channel::ModuleSuffix => observe(
+            one("namespace N\ntype T = { X: int }\nmodule T =\n    let x = 1\n"),
+            |r| has_entity(r, "TModule", "TModule", K::Module),
+        ),
+        Channel::CompilationRepresentationArgument => observe(
+            one(
+                "namespace N\n[<CompilationRepresentation(enum<CompilationRepresentationFlags> 4)>]\nmodule T =\n    let x = 1\n",
+            ),
+            |_| true,
+        ),
+        Channel::TypeDefinition => observe(
+            one("namespace N\ntype C() = member _.X = 1\ntype U = A | B\n"),
+            |r| has_entity(r, "C", "C", K::Type) && has_entity(r, "U", "U", K::Type),
+        ),
+        Channel::GenericArity => observe(
+            one("namespace N\ntype G<'a, [<Measure>] 'u> = { X: 'a }\n"),
+            |r| has_entity(r, "G`1", "G`1", K::Type),
+        ),
+        Channel::Abbreviation => observe(one("namespace N\ntype I = int\n"), |r| {
+            has_entity(r, "I", "I", K::Abbreviation)
         }),
-        Channel::AssemblyAutoOpenUnreadable => {
-            observe(one("namespace N\n[<assembly: AutoOpen(Some.Constant)>]\ndo ()\n"), |_| true)
-        }
+        Channel::AbbreviationOrUnion => observe(one("namespace N\ntype I = Somewhere\n"), |_| true),
+        Channel::Measure => observe(one("namespace N\n[<Measure>] type m\n"), |r| {
+            has_entity(r, "m", "m", K::Measure)
+        }),
+        Channel::Exception => observe(one("namespace N\nexception E of string\n"), |r| {
+            has_entity(r, "E", "E", K::Exception)
+        }),
+        Channel::Accessibility => observe(
+            one("namespace N\nmodule internal M =\n    type T = int\n"),
+            |r| {
+                rows(r, "access")
+                    .iter()
+                    .any(|row| row.logical_name == "T" && !row.public)
+            },
+        ),
+        Channel::TypeProviderUse => observe(one("namespace N\ntype T = P<\"x\">\n"), |_| true),
+        Channel::AutoOpenAttribute => observe(
+            one("namespace N\n[<AutoOpen>]\nmodule M =\n    let x = 1\n"),
+            |r| {
+                rows(r, "auto")
+                    .iter()
+                    .any(|row| row.logical_name == "M" && row.auto_open)
+            },
+        ),
+        Channel::ExtensionAttribute => observe(
+            one(
+                "namespace N\n[<System.Runtime.CompilerServices.Extension>]\ntype E =\n    static member X = 1\n",
+            ),
+            |r| {
+                rows(r, "ext")
+                    .iter()
+                    .any(|row| row.logical_name == "E" && row.extension)
+            },
+        ),
+        Channel::CompiledNameAttribute => observe(
+            one("namespace N\n[<CompiledName(\"R\")>]\ntype T() = class end\n"),
+            |r| has_entity(r, "T", "R", K::Type),
+        ),
+        Channel::AttributeTarget => observe(
+            one(
+                "module M\ntype System.String with\n    [<return: CompiledName(\"Q\")>]\n    member s.Orig() = 1\n",
+            ),
+            |r| extension_names(r) == vec![vec!["Orig".to_owned(), "String.Orig".to_owned()]],
+        ),
+        Channel::UnreadableCompiledName => observe(
+            one("namespace N\n[<CompiledName(Some.Constant)>]\ntype T() = class end\n"),
+            |_| true,
+        ),
+        Channel::AssemblyAutoOpen => observe(
+            one("namespace N\n[<assembly: AutoOpen(\"N\")>]\ndo ()\n"),
+            |r| matches!(r, SourceExistence::Read(s) if s.assembly_auto_opens == ["N"]),
+        ),
+        Channel::AssemblyAutoOpenUnreadable => observe(
+            one("namespace N\n[<assembly: AutoOpen(Some.Constant)>]\ndo ()\n"),
+            |_| true,
+        ),
         Channel::TypeProviderAssembly => observe(
-            one("namespace N\n[<assembly: Microsoft.FSharp.Core.CompilerServices.TypeProviderAssembly>]\ndo ()\n"),
+            one(
+                "namespace N\n[<assembly: Microsoft.FSharp.Core.CompilerServices.TypeProviderAssembly>]\ndo ()\n",
+            ),
             |_| true,
         ),
         Channel::UncertifiedAttribute => observe(
             read_with(
-                &[("Lib.fs", "namespace N\n[<AutoOpen>]\nmodule M =\n    let x = 1\n")],
+                &[(
+                    "Lib.fs",
+                    "namespace N\n[<AutoOpen>]\nmodule M =\n    let x = 1\n",
+                )],
                 Some(MarkerRoutes::Certified(BTreeMap::new())),
             ),
             |_| true,
         ),
         Channel::OptionalExtensionMember => observe(
             one("module M\ntype System.String with\n    member s.Shout = s\n"),
-            |r| extension_names(r).contains(&vec!["Shout".to_owned(), "String.get_Shout".to_owned(), "get_Shout".to_owned()]),
+            |r| {
+                extension_names(r).contains(&vec![
+                    "Shout".to_owned(),
+                    "String.get_Shout".to_owned(),
+                    "get_Shout".to_owned(),
+                ])
+            },
         ),
         Channel::IntrinsicAugmentation => observe(
             one("module M\ntype R = { X: int }\ntype R with\n    member r.Y = 1\n"),
             |r| extension_names(r).is_empty(),
         ),
         Channel::AugmentationKind => observe(
-            one("module M\ntype T =\n    inherit System.Object\n    abstract M: int\ntype T with\n    member t.N = 1\n"),
+            one(
+                "module M\ntype T =\n    inherit System.Object\n    abstract M: int\ntype T with\n    member t.N = 1\n",
+            ),
             |_| true,
         ),
         Channel::CSharpExtensionMember => observe(
-            one("module M\ntype E =\n    [<System.Runtime.CompilerServices.Extension>]\n    static member Twice(s: string) = s\n"),
+            one(
+                "module M\ntype E =\n    [<System.Runtime.CompilerServices.Extension>]\n    static member Twice(s: string) = s\n",
+            ),
             |r| extension_names(r).contains(&vec!["Twice".to_owned()]),
         ),
         Channel::ExtensionBinding => observe(
-            one("module M\n[<System.Runtime.CompilerServices.Extension>]\nlet shout (s: string) = s\n"),
+            one(
+                "module M\n[<System.Runtime.CompilerServices.Extension>]\nlet shout (s: string) = s\n",
+            ),
             |r| extension_names(r).contains(&vec!["shout".to_owned()]),
         ),
         Channel::BindingPattern => observe(
@@ -344,8 +383,14 @@ fn witness(channel: Channel) -> Observed {
             |_| true,
         ),
         Channel::ImpliedExtensionAttribute => observe(
-            one("namespace N\nmodule M =\n    [<System.Runtime.CompilerServices.Extension>]\n    let shout (s: string) = s\n"),
-            |r| rows(r, "implied").iter().any(|row| row.logical_name == "M" && row.extension),
+            one(
+                "namespace N\nmodule M =\n    [<System.Runtime.CompilerServices.Extension>]\n    let shout (s: string) = s\n",
+            ),
+            |r| {
+                rows(r, "implied")
+                    .iter()
+                    .any(|row| row.logical_name == "M" && row.extension)
+            },
         ),
         Channel::UnnamedDeclaration => observe(
             one("module M\n[<System.Runtime.CompilerServices.Extension>]\nlet _ = 1\n"),
@@ -374,8 +419,12 @@ fn the_inventory_is_what_the_walk_does() {
             _ => false,
         };
         if !agrees {
+            let walk = match &observed {
+                Observed::Wrong(rows) => format!("read wrong rows:\n{rows}"),
+                other => format!("{other:?}"),
+            };
             failures.push(format!(
-                "{channel:?}: inventory {:?}, walk {observed:?}",
+                "{channel:?}: inventory {:?}, walk {walk}",
                 channel.treatment()
             ));
         }
@@ -417,16 +466,37 @@ fn every_decline_and_approximation_is_a_channel() {
         assert!(approximations.contains(&a), "{a:?} is no channel's");
     }
     let declines: Vec<(ExistenceUnread, Channel)> = vec![
-        (ExistenceUnread::UnreadableItem(String::new()), Channel::UnreadableItem),
-        (ExistenceUnread::FoldRefused(String::new()), Channel::FoldRefused),
-        (ExistenceUnread::UnservedTfm(String::new()), Channel::UnservedTfm),
+        (
+            ExistenceUnread::UnreadableItem(String::new()),
+            Channel::UnreadableItem,
+        ),
+        (
+            ExistenceUnread::FoldRefused(String::new()),
+            Channel::FoldRefused,
+        ),
+        (
+            ExistenceUnread::UnservedTfm(String::new()),
+            Channel::UnservedTfm,
+        ),
         (ExistenceUnread::Recovered(0), Channel::Recovered),
         (ExistenceUnread::HashReference(0), Channel::HashReference),
         (ExistenceUnread::TypeProvider(0), Channel::TypeProviderUse),
-        (ExistenceUnread::UnreadableAutoOpen(0), Channel::AssemblyAutoOpenUnreadable),
-        (ExistenceUnread::UnreadableCompiledName(0), Channel::UnreadableCompiledName),
-        (ExistenceUnread::UnnamedDeclaration(0), Channel::UnnamedDeclaration),
-        (ExistenceUnread::AnonymousModuleName(0), Channel::AnonymousModuleName),
+        (
+            ExistenceUnread::UnreadableAutoOpen(0),
+            Channel::AssemblyAutoOpenUnreadable,
+        ),
+        (
+            ExistenceUnread::UnreadableCompiledName(0),
+            Channel::UnreadableCompiledName,
+        ),
+        (
+            ExistenceUnread::UnnamedDeclaration(0),
+            Channel::UnnamedDeclaration,
+        ),
+        (
+            ExistenceUnread::AnonymousModuleName(0),
+            Channel::AnonymousModuleName,
+        ),
     ];
     for (why, channel) in &declines {
         match why {
@@ -457,9 +527,15 @@ fn every_decline_and_approximation_is_a_channel() {
 /// `Unknown`: it may denote any marker, and the walk says it approximated.
 #[test]
 fn an_omitted_name_widens_to_unknown() {
-    let src = [("Lib.fs", "namespace N\n[<AutoOpen>]\nmodule M =\n    let x = 1\n")];
+    let src = [(
+        "Lib.fs",
+        "namespace N\n[<AutoOpen>]\nmodule M =\n    let x = 1\n",
+    )];
     let mut map = BTreeMap::new();
-    map.insert(vec!["AutoOpen".to_owned()], BTreeSet::from([Marker::AutoOpen]));
+    map.insert(
+        vec!["AutoOpen".to_owned()],
+        BTreeSet::from([Marker::AutoOpen]),
+    );
     let certified = read_with(&src, Some(MarkerRoutes::Certified(map)));
     let omitted = read_with(&src, Some(MarkerRoutes::Certified(BTreeMap::new())));
     let unknown = read_with(&src, Some(MarkerRoutes::Unknown));
@@ -471,12 +547,19 @@ fn an_omitted_name_widens_to_unknown() {
             .collect()
     };
     assert_eq!(flags(&certified), BTreeSet::from([(true, false)]));
-    assert_eq!(flags(&omitted), flags(&unknown), "an omitted name reads as Unknown");
+    assert_eq!(
+        flags(&omitted),
+        flags(&unknown),
+        "an omitted name reads as Unknown"
+    );
     assert!(flags(&omitted).contains(&(true, false)) && flags(&omitted).contains(&(false, false)));
     let SourceExistence::Read(s) = &omitted else {
         panic!("{omitted:?}")
     };
-    assert!(s.approximations.contains(&Approximation::UncertainAttribute));
+    assert!(
+        s.approximations
+            .contains(&Approximation::UncertainAttribute)
+    );
     let SourceExistence::Read(s) = &certified else {
         panic!("{certified:?}")
     };
@@ -487,7 +570,10 @@ fn an_omitted_name_widens_to_unknown() {
 /// as one: the shadow a reference may declare.
 #[test]
 fn a_certified_shadow_is_no_marker() {
-    let src = [("Lib.fs", "namespace N\n[<AutoOpen>]\nmodule M =\n    let x = 1\n")];
+    let src = [(
+        "Lib.fs",
+        "namespace N\n[<AutoOpen>]\nmodule M =\n    let x = 1\n",
+    )];
     let mut map = BTreeMap::new();
     map.insert(vec!["AutoOpen".to_owned()], BTreeSet::new());
     let r = read_with(&src, Some(MarkerRoutes::Certified(map)));

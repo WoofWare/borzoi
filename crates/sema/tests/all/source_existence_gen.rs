@@ -84,14 +84,7 @@ const NAMESPACE_NAMES: &[&str] = &[
 ];
 
 /// Member names an augmentation or a type declares.
-const MEMBER_NAMES: &[&str] = &[
-    "M",
-    "Length",
-    "Item",
-    "ToString",
-    "``odd member``",
-    "Ωp",
-];
+const MEMBER_NAMES: &[&str] = &["M", "Length", "Item", "ToString", "``odd member``", "Ωp"];
 
 /// What an augmentation may extend.
 const EXTENDED: &[&str] = &[
@@ -145,21 +138,39 @@ impl Gen {
     }
 
     fn access(&mut self) -> &'static str {
-        *self
-            .rng
+        self.rng
             .pick(&["", "", "", "private ", "internal ", "public "])
     }
 
     /// Attributes FCS accepts on a type of `kind`, or none.
     fn type_attributes(&mut self, indent: &str, kind: Kind) -> String {
         let choices: &[&str] = match kind {
-            Kind::Record => &["[<Struct>]", "[<CompiledName(\"Renamed\")>]", "[<RequireQualifiedAccess>]", "[<AutoOpen>]"],
-            Kind::Union => &["[<Struct>]", "[<CompiledName(\"Renamed\")>]", "[<RequireQualifiedAccess>]"],
-            Kind::Class => &["[<AutoOpen>]", "[<CompiledName(\"Renamed\")>]", "[<AbstractClass>]"],
+            Kind::Record => &[
+                "[<Struct>]",
+                "[<CompiledName(\"Renamed\")>]",
+                "[<RequireQualifiedAccess>]",
+                "[<AutoOpen>]",
+            ],
+            Kind::Union => &[
+                "[<Struct>]",
+                "[<CompiledName(\"Renamed\")>]",
+                "[<RequireQualifiedAccess>]",
+            ],
+            Kind::Class => &[
+                "[<AutoOpen>]",
+                "[<CompiledName(\"Renamed\")>]",
+                "[<AbstractClass>]",
+            ],
             Kind::Enum => &["[<RequireQualifiedAccess>]"],
-            Kind::Abbreviation => &["[<AutoOpen>]", "[<System.Runtime.CompilerServices.Extension>]"],
+            Kind::Abbreviation => &[
+                "[<AutoOpen>]",
+                "[<System.Runtime.CompilerServices.Extension>]",
+            ],
             Kind::StaticHolder => &["[<AutoOpen>]", "[<AbstractClass; Sealed>]"],
-            Kind::CSharpHolder => &["[<System.Runtime.CompilerServices.Extension>]", "[<Sealed>]"],
+            Kind::CSharpHolder => &[
+                "[<System.Runtime.CompilerServices.Extension>]",
+                "[<Sealed>]",
+            ],
             Kind::Interface | Kind::Delegate | Kind::Measure => &[],
         };
         if choices.is_empty() || self.rng.chance(50) {
@@ -211,7 +222,10 @@ impl Gen {
             kind
         };
         let attrs = self.type_attributes(indent, kind);
-        let may_be_generic = matches!(kind, Kind::Record | Kind::Union | Kind::Class | Kind::Interface);
+        let may_be_generic = matches!(
+            kind,
+            Kind::Record | Kind::Union | Kind::Class | Kind::Interface
+        );
         let generic = may_be_generic && self.rng.chance(25);
         let typars = if generic { "<'a>" } else { "" };
         let body = match kind {
@@ -253,7 +267,10 @@ impl Gen {
             .iter()
             // A class-like type: augmenting it in its own list is intrinsic.
             .filter(|(_, g, k)| {
-                !g && matches!(k, Kind::Record | Kind::Union | Kind::Class | Kind::StaticHolder)
+                !g && matches!(
+                    k,
+                    Kind::Record | Kind::Union | Kind::Class | Kind::StaticHolder
+                )
             })
             .map(|(n, _, _)| n.clone())
             .collect();
@@ -279,7 +296,10 @@ impl Gen {
             // `return:` its return value's.
             match self.rng.below(10) {
                 0 => out.push_str(&format!("{indent}    [<return: CompiledName(\"Q\")>]\n")),
-                1 => out.push_str(&format!("{indent}    [<method: CompiledName(\"P{}\")>]\n", self.rng.below(100))),
+                1 => out.push_str(&format!(
+                    "{indent}    [<method: CompiledName(\"P{}\")>]\n",
+                    self.rng.below(100)
+                )),
                 _ => {}
             }
             out.push_str(&format!("{indent}    {line}\n"));
@@ -300,7 +320,9 @@ impl Gen {
                     let rec = if self.rng.chance(15) { "rec " } else { "" };
                     let inner = format!("{indent}    ");
                     let body = self.decls(&inner, depth + 1, true);
-                    out.push_str(&format!("{attrs}{indent}module {access}{rec}{name} =\n{body}"));
+                    out.push_str(&format!(
+                        "{attrs}{indent}module {access}{rec}{name} =\n{body}"
+                    ));
                 }
                 2..=4 => out.push_str(&self.type_defn(indent, in_module)),
                 5 => {
@@ -319,7 +341,9 @@ impl Gen {
                     let name = self.rng.below(1000);
                     out.push_str(&format!("{attr}{indent}let {rec}f{name} (s: string) = s\n"));
                 }
-                8 if in_module => out.push_str(&format!("{indent}let v{} = 1\n", self.rng.below(1000))),
+                8 if in_module => {
+                    out.push_str(&format!("{indent}let v{} = 1\n", self.rng.below(1000)))
+                }
                 _ => out.push_str(&self.type_defn(indent, in_module)),
             }
         }

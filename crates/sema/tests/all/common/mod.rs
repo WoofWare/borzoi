@@ -532,13 +532,7 @@ fn fcs_project_batch_pool() -> &'static BatchPool {
 /// a graph of projects, so it keeps [`PROJECT_TIMEOUT`].
 fn fcs_graph_batch_pool() -> &'static BatchPool {
     static P: OnceLock<BatchPool> = OnceLock::new();
-    P.get_or_init(|| {
-        BatchPool::new(
-            Oracle::Current,
-            "uses-project-graph-batch",
-            PROJECT_TIMEOUT,
-        )
-    })
+    P.get_or_init(|| BatchPool::new(Oracle::Current, "uses-project-graph-batch", PROJECT_TIMEOUT))
 }
 
 /// One request line to the project-graph oracle, and its response line,

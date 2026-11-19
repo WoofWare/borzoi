@@ -44,9 +44,9 @@ use borzoi_assembly::existence::{
     ExistenceIndex, ExtensionRow, IndexLayer, PickleLayer, PickledEntityKind, PickledEntityRow,
 };
 use borzoi_cst::syntax::{
-    AstNode, Attribute, AttributeList, Expr, LongIdent, MemberDefn, ModuleDecl,
-    ModuleOrNamespace, ModuleOrNamespaceKind, Pat, SigDecl, SyntaxKind, SyntaxNode, SyntaxToken,
-    Type, TypeDefn, TypeDefnRepr,
+    AstNode, Attribute, AttributeList, Expr, LongIdent, MemberDefn, ModuleDecl, ModuleOrNamespace,
+    ModuleOrNamespaceKind, Pat, SigDecl, SyntaxKind, SyntaxNode, SyntaxToken, Type, TypeDefn,
+    TypeDefnRepr,
 };
 
 use crate::def::id_text;
@@ -117,7 +117,12 @@ impl Marker {
     pub fn full_name(self) -> &'static [&'static str] {
         match self {
             Marker::AutoOpen => &["Microsoft", "FSharp", "Core", "AutoOpenAttribute"],
-            Marker::Extension => &["System", "Runtime", "CompilerServices", "ExtensionAttribute"],
+            Marker::Extension => &[
+                "System",
+                "Runtime",
+                "CompilerServices",
+                "ExtensionAttribute",
+            ],
             Marker::Measure => &["Microsoft", "FSharp", "Core", "MeasureAttribute"],
             Marker::CompiledName => &["Microsoft", "FSharp", "Core", "CompiledNameAttribute"],
             Marker::CompilationRepresentation => &[
@@ -556,12 +561,7 @@ fn brings_in_references(directive: &SyntaxNode) -> bool {
         .children_with_tokens()
         .filter_map(|el| el.into_token())
         .find(|t| t.kind() == SyntaxKind::IDENT_TOK)
-        .is_some_and(|t| {
-            matches!(
-                t.text(),
-                "r" | "reference" | "load" | "I" | "i" | "include"
-            )
-        })
+        .is_some_and(|t| matches!(t.text(), "r" | "reference" | "load" | "I" | "i" | "include"))
 }
 
 #[derive(Default)]
@@ -739,8 +739,7 @@ impl MarkerRoutes {
                         },
                         Marker::CompilationRepresentation => {
                             let suffix = module_suffix_arg(&attr);
-                            marks.module_suffix = marks.module_suffix.or(match (maybe, suffix)
-                            {
+                            marks.module_suffix = marks.module_suffix.or(match (maybe, suffix) {
                                 (_, Maybe::No) => Maybe::No,
                                 (Maybe::Yes, s) => s,
                                 _ => Maybe::Possibly,
@@ -1059,7 +1058,6 @@ impl FileWalk<'_> {
         outer: &[String],
     ) -> Result<(), ExistenceUnread> {
         let locals = self.local_types(decls);
-        let is_sig = matches!(decls, Decls::Sig(_));
         // Every `open`'s position, which may move what a later augmentation's
         // name resolves to.
         let opens: Vec<usize> = match decls {
@@ -1118,7 +1116,6 @@ impl FileWalk<'_> {
                 }
             }
         }
-        let _ = is_sig;
         Ok(())
     }
 
@@ -1135,8 +1132,8 @@ impl FileWalk<'_> {
                     .and_then(|s| s.last().cloned())
                     .ok_or(ExistenceUnread::UnnamedDeclaration(self.index))?;
                 let attrs: Vec<AttributeList> = m.attributes().collect();
-                let meets = Self::meets_type(ctx.locals, &name, false)
-                    .or(ctx.meets_exception(&name));
+                let meets =
+                    Self::meets_type(ctx.locals, &name, false).or(ctx.meets_exception(&name));
                 let public = !header_access_restricts(m.syntax());
                 self.module(
                     scope,
@@ -1223,8 +1220,8 @@ impl FileWalk<'_> {
                     .and_then(|s| s.last().cloned())
                     .ok_or(ExistenceUnread::UnnamedDeclaration(self.index))?;
                 let attrs: Vec<AttributeList> = m.attributes().collect();
-                let meets = Self::meets_type(ctx.locals, &name, true)
-                    .or(ctx.meets_exception(&name));
+                let meets =
+                    Self::meets_type(ctx.locals, &name, true).or(ctx.meets_exception(&name));
                 let public = !header_access_restricts(m.syntax());
                 self.module(
                     scope,
@@ -1322,7 +1319,7 @@ impl FileWalk<'_> {
             // `[<CompiledName>]` does not rename a module.
             self.entity(
                 scope,
-                &[logical.clone()],
+                std::slice::from_ref(&logical),
                 &[PickledEntityKind::Module],
                 public,
                 &marks,
@@ -1497,8 +1494,7 @@ impl FileWalk<'_> {
                         Maybe::Possibly => both(self),
                     },
                     Some(t)
-                        if FSHARP_CORE_TYPE_NAMES.contains(&t.as_str())
-                            || visible.contains(&t) =>
+                        if FSHARP_CORE_TYPE_NAMES.contains(&t.as_str()) || visible.contains(&t) =>
                     {
                         vec![PickledEntityKind::Abbreviation]
                     }
@@ -1571,7 +1567,9 @@ impl FileWalk<'_> {
                     }
                     continue;
                 }
-                MemberShape::Unnamed => return Err(ExistenceUnread::UnnamedDeclaration(self.index)),
+                MemberShape::Unnamed => {
+                    return Err(ExistenceUnread::UnnamedDeclaration(self.index));
+                }
                 MemberShape::Named { vals, rejected, .. } => {
                     // An abstract slot or a `val` field FCS rejects in an
                     // augmentation: its rows are read as written.
@@ -1584,9 +1582,12 @@ impl FileWalk<'_> {
             for v in vals {
                 match augmented {
                     Some(type_names) => {
-                        // An optional extension: compiled `T.name[.Static]`.
+                        // An optional extension: compiled `T.name[.Static]`. A
+                        // `[<CompiledName>]` renames a method, never a
+                        // property's accessor.
+                        let renames = v.accessor.is_none();
                         let mut compiled: BTreeSet<String> = BTreeSet::new();
-                        if !marks.compiled_name_certain {
+                        if !(renames && marks.compiled_name_certain) {
                             for t in type_names {
                                 let mut c = format!("{t}.{}", v.logical);
                                 if v.is_static {
@@ -1595,7 +1596,9 @@ impl FileWalk<'_> {
                                 compiled.insert(c);
                             }
                         }
-                        compiled.extend(marks.compiled_names.iter().cloned());
+                        if renames {
+                            compiled.extend(marks.compiled_names.iter().cloned());
+                        }
                         if compiled.len() > 1 {
                             self.out
                                 .approximations
@@ -1620,15 +1623,17 @@ impl FileWalk<'_> {
 
     /// A C#-style extension row for a member val `v` of a type.
     fn csharp_val(&mut self, scope: &Scope, v: &MemberVal, marks: &Marks) {
-        let compiled: Vec<Option<&String>> = if marks.compiled_names.is_empty() {
-            vec![None]
-        } else if marks.compiled_name_certain {
-            marks.compiled_names.iter().map(Some).collect()
-        } else {
-            std::iter::once(None)
-                .chain(marks.compiled_names.iter().map(Some))
-                .collect()
-        };
+        // `[<CompiledName>]` renames a method, never a property's accessor.
+        let compiled: Vec<Option<&String>> =
+            if marks.compiled_names.is_empty() || v.accessor.is_some() {
+                vec![None]
+            } else if marks.compiled_name_certain {
+                marks.compiled_names.iter().map(Some).collect()
+            } else {
+                std::iter::once(None)
+                    .chain(marks.compiled_names.iter().map(Some))
+                    .collect()
+            };
         for c in compiled {
             self.out.extensions.push(ExtensionRow {
                 layer: IndexLayer::Pickle,
@@ -1691,7 +1696,9 @@ impl FileWalk<'_> {
                 if names.is_empty() {
                     return Err(ExistenceUnread::UnnamedDeclaration(self.index));
                 }
-                self.out.approximations.insert(Approximation::BindingPattern);
+                self.out
+                    .approximations
+                    .insert(Approximation::BindingPattern);
                 for n in names {
                     self.csharp_row(scope, &n, &marks)?;
                 }
