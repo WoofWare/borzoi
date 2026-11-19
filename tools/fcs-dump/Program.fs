@@ -278,12 +278,177 @@ let private pinnedLangVersionArgs (requested: string option) : string[] =
         [| "--langversion:" + s |]
     | _ -> [||]
 
-/// A request's optional `langversion` string field, `None` when absent or not a
-/// string.
-let private requestLangVersion (root: JsonElement) : string option =
-    match root.TryGetProperty("langversion") with
-    | true, v when v.ValueKind = JsonValueKind.String -> Option.ofObj (v.GetString())
-    | _ -> None
+// ============================================================================
+// Requests of the resident JSON ops (`file-batch`, `uses-project-batch`,
+// `xmldoc-batch`), read strictly.
+//
+// A resident op answers each line it reads with one line, matched by
+// position, so a line must be read as exactly one request or refused on its
+// own line. And a field read leniently (a mistyped one taken as absent, an
+// unknown one ignored, a duplicate resolved by whichever reader's rule) is a
+// request the oracle answers otherwise than its caller asked. So each line is
+// parsed into one typed request record, and anything else is refused: a blank
+// line, text around the JSON other than JSON whitespace, a value that is not
+// an object, a key that occurs twice, a field the op does not take, a field of
+// the wrong type, a path that is not absolute.
+// ============================================================================
+
+/// The fields of the request object on `line`, by name, read by `read` while
+/// the document is alive. Fails, naming the reason, unless `line` is one JSON
+/// object with nothing around it but JSON whitespace, each key once, and each
+/// key one of `known`.
+let private readRequest (known: string list) (line: string) (read: Map<string, JsonElement> -> 'R) : 'R =
+    if String.IsNullOrWhiteSpace line then
+        failwith "the line is blank: a request is one JSON object on one line"
+    use doc = JsonDocument.Parse(line: string)
+    let root = doc.RootElement
+    if root.ValueKind <> JsonValueKind.Object then
+        failwithf "the request is a JSON %O, not an object" root.ValueKind
+    let mutable fields = Map.empty
+    for property in root.EnumerateObject() do
+        if fields.ContainsKey property.Name then
+            failwithf "the request names the field %s twice" property.Name
+        if not (List.contains property.Name known) then
+            failwithf
+                "the request has a field %s, which this op does not take (it takes %s)"
+                property.Name
+                (String.concat ", " known)
+        fields <- Map.add property.Name property.Value fields
+    read fields
+
+/// The string field `name`, failing on another type.
+let private stringField (fields: Map<string, JsonElement>) (name: string) : string option =
+    match Map.tryFind name fields with
+    | None -> None
+    | Some v when v.ValueKind = JsonValueKind.String -> Some(nonNull (v.GetString()))
+    | Some v -> failwithf "the field %s is a JSON %O, not a string" name v.ValueKind
+
+/// The required string field `name`.
+let private requiredString (fields: Map<string, JsonElement>) (name: string) : string =
+    match stringField fields name with
+    | Some s -> s
+    | None -> failwithf "the request has no field %s" name
+
+/// The array-of-strings field `name`, empty when absent, failing on another
+/// type or on an element that is not a string.
+let private stringsField (fields: Map<string, JsonElement>) (name: string) : string[] =
+    match Map.tryFind name fields with
+    | None -> [||]
+    | Some v when v.ValueKind = JsonValueKind.Array ->
+        v.EnumerateArray()
+        |> Seq.map (fun e ->
+            if e.ValueKind = JsonValueKind.String then
+                nonNull (e.GetString())
+            else
+                failwithf "the field %s holds a JSON %O, not a string" name e.ValueKind)
+        |> Seq.toArray
+    | Some v -> failwithf "the field %s is a JSON %O, not an array of strings" name v.ValueKind
+
+/// The boolean field `name`, `false` when absent.
+let private boolField (fields: Map<string, JsonElement>) (name: string) : bool =
+    match Map.tryFind name fields with
+    | None -> false
+    | Some v when v.ValueKind = JsonValueKind.True -> true
+    | Some v when v.ValueKind = JsonValueKind.False -> false
+    | Some v -> failwithf "the field %s is a JSON %O, not a boolean" name v.ValueKind
+
+/// The `langversion` field: a version, or `null` or absent for FCS's
+/// default.
+let private langVersionField (fields: Map<string, JsonElement>) : string option =
+    match Map.tryFind "langversion" fields with
+    | Some v when v.ValueKind = JsonValueKind.Null -> None
+    | _ ->
+        match stringField fields "langversion" with
+        | Some s when String.IsNullOrWhiteSpace s || s.Trim() <> s ->
+            failwithf "the field langversion is %A, which is no language version" s
+        | other -> other
+
+/// `path`, which a request field `name` names, if it means one file whatever
+/// the oracle's working directory.
+let private absolutePath (name: string) (path: string) : string =
+    // `IsPathFullyQualified`, not `IsPathRooted`: see [`refArg`].
+    if not (Path.IsPathFullyQualified path) then
+        failwithf "the field %s names %s, which is not an absolute path" name path
+    path
+
+/// The `refs` field: absolute paths, each passed to FCS exactly as written.
+let private refsField (fields: Map<string, JsonElement>) : string list =
+    stringsField fields "refs" |> Array.map (absolutePath "refs") |> Array.toList
+
+/// The `paths` field: absolute paths, at least one.
+let private pathsField (fields: Map<string, JsonElement>) : string[] =
+    match stringsField fields "paths" |> Array.map (absolutePath "paths") with
+    | [||] -> failwith "the request names no paths"
+    | paths -> paths
+
+/// The `defines` field: symbols, each a non-blank text.
+let private definesField (fields: Map<string, JsonElement>) : string[] =
+    stringsField fields "defines"
+    |> Array.map (fun d ->
+        if String.IsNullOrWhiteSpace d then
+            failwith "the field defines holds a blank symbol"
+        d.Trim())
+
+/// A request of a project-check op (`uses-project-batch`, `xmldoc-batch`):
+/// `{ "paths": [<abs>…], "refs": [<abs dll>…]?, "defines": [<sym>…]?,
+/// "langversion": <text|null>?, "exclusiveRefs": <bool>? }`.
+type private ProjectRequest =
+    { Paths: string[]
+      Refs: string list
+      Defines: string[]
+      LangVersion: string option
+      ExclusiveRefs: bool }
+
+let private projectRequest (line: string) : ProjectRequest =
+    readRequest [ "paths"; "refs"; "defines"; "langversion"; "exclusiveRefs" ] line (fun fields ->
+        { Paths = pathsField fields
+          Refs = refsField fields
+          Defines = definesField fields
+          LangVersion = langVersionField fields
+          ExclusiveRefs = boolField fields "exclusiveRefs" })
+
+/// What a `file-batch` request checks: one file, or (`types-project`) a
+/// project of several.
+type private FileTarget =
+    | OneFile of path: string
+    | Project of paths: string[]
+
+/// A `file-batch` request: `{ "kind": <projection>, "path": <abs>, "refs":
+/// [<abs dll>…]?, "langversion": <text|null>? }`, or for `types-project`
+/// `paths` in place of `path`.
+type private FileRequest =
+    { Kind: string
+      Target: FileTarget
+      Refs: string list
+      LangVersion: string option }
+
+let private fileRequest (line: string) : FileRequest =
+    readRequest [ "kind"; "path"; "paths"; "refs"; "langversion" ] line (fun fields ->
+        let kind = requiredString fields "kind"
+        let target =
+            match kind, Map.containsKey "path" fields, Map.containsKey "paths" fields with
+            | "types-project", false, true -> Project(pathsField fields)
+            | "types-project", _, _ -> failwith "a types-project request names its files in paths, and no path"
+            | _, true, false -> OneFile(absolutePath "path" (requiredString fields "path"))
+            | _, _, _ -> failwithf "a %s request names its file in path, and no paths" kind
+        { Kind = kind
+          Target = target
+          Refs = refsField fields
+          LangVersion = langVersionField fields })
+
+/// The `-r:` switches of a request's `refs`, each path as the request wrote
+/// it ([`refsField`] has checked it is absolute).
+let private requestRefArgs (refs: string list) : string[] =
+    refs |> List.map (fun p -> "-r:" + p) |> List.toArray
+
+/// Answer each line of standard input with `respond`'s one line, a blank line
+/// included, until the input ends.
+let private answerEachLine (respond: string -> string) =
+    let mutable line = Console.In.ReadLine()
+    while not (isNull line) do
+        Console.Out.WriteLine(respond (nonNull line))
+        Console.Out.Flush()
+        line <- Console.In.ReadLine()
 
 /// Apply the [`langVersionEnv`] pin to a parsing-options record's
 /// `LangVersionText`, leaving it untouched when unset.
@@ -5040,18 +5205,6 @@ let private extraRefArgs () : string[] =
         paths.Split([| ';'; '\n' |], StringSplitOptions.RemoveEmptyEntries)
         |> Array.map (refArg "BORZOI_FCS_EXTRA_REFS")
 
-/// `-r:` reference arguments from an explicit list — the resident-batch sibling
-/// of [`extraRefArgs`], which reads them from `BORZOI_FCS_EXTRA_REFS`. A resident
-/// child is spawned once and serves callers whose fixture refs differ, so the
-/// refs must ride in each *request* (the env channel is fixed at spawn); this
-/// turns one request's `refs` list into the same `-r:` switches `extraRefArgs`
-/// would have produced from the env var.
-let private extraRefArgsOf (refs: string list) : string[] =
-    refs
-    |> List.filter (fun p -> p.Trim() <> "")
-    |> List.map (refArg "refs")
-    |> List.toArray
-
 /// Render an expression's inferred type for the oracle. Uses FCS's own
 /// pretty-printer (`FSharpType.Format`), which — unlike the entity-metadata
 /// `renderType` — handles function / tuple / measure types and never throws;
@@ -6706,38 +6859,22 @@ let private usesProjectBatchCore () =
 
     let respond (line: string) : string =
         try
-            use doc = JsonDocument.Parse(line: string)
-            let root = doc.RootElement
-            let strArray (name: string) : string[] =
-                match root.TryGetProperty(name) with
-                | true, arr when arr.ValueKind = JsonValueKind.Array ->
-                    arr.EnumerateArray()
-                    |> Seq.choose (fun e -> Option.ofObj (e.GetString()))
-                    |> Seq.toArray
-                | _ -> [||]
-            let paths = strArray "paths" |> Array.map Path.GetFullPath
-            if Array.isEmpty paths then
-                failwith "no paths in request"
-            let refArgs = strArray "refs" |> Array.toList |> extraRefArgsOf
-            let defineArgs = strArray "defines" |> Array.map (fun d -> "--define:" + d.Trim())
-            let langVersionArgs = pinnedLangVersionArgs (requestLangVersion root)
-            let exclusiveRefs =
-                match root.TryGetProperty("exclusiveRefs") with
-                | true, v when v.ValueKind = JsonValueKind.True -> true
-                | _ -> false
+            let request = projectRequest line
+            let paths = request.Paths |> Array.map Path.GetFullPath
+            let defineArgs = request.Defines |> Array.map (fun d -> "--define:" + d)
             let payload =
-                usesProjectFiles checker paths refArgs exclusiveRefs defineArgs langVersionArgs
+                usesProjectFiles
+                    checker
+                    paths
+                    (requestRefArgs request.Refs)
+                    request.ExclusiveRefs
+                    defineArgs
+                    (pinnedLangVersionArgs request.LangVersion)
             JsonSerializer.Serialize(payload, compact)
         with ex ->
             JsonSerializer.Serialize({| BatchError = ex.Message |}, compact)
 
-    let mutable line = Console.In.ReadLine()
-    while not (isNull line) do
-        let trimmed = (Option.ofObj line |> Option.defaultValue "").Trim()
-        if trimmed <> "" then
-            Console.Out.WriteLine(respond trimmed)
-            Console.Out.Flush()
-        line <- Console.In.ReadLine()
+    answerEachLine respond
 
 /// [`usesProjectBatchCore`] on a large-stack thread, mirroring [`fileBatch`]:
 /// a deeply-nested project's typed tree can recurse past the default 1 MB stack
@@ -8303,160 +8440,129 @@ let private fileBatchCore () =
     let checker = FSharpChecker.Create(keepAssemblyContents = true)
     let compact = buildOptionsCompact ()
 
-    // A required JSON string field, coerced to non-null: a missing or `null`
-    // field is a malformed request, reported (via the enclosing `try`) as a
-    // `BatchError` rather than silently defaulting.
-    let reqString (root: JsonElement) (name: string) : string =
-        match root.GetProperty(name).GetString() with
-        | null -> failwithf "request field %s is null" name
-        | s -> s
-
     let respond (line: string) : string =
         try
-            use doc = JsonDocument.Parse(line: string)
-            let root = doc.RootElement
-            let kind = reqString root "kind"
-            let refs =
-                match root.TryGetProperty("refs") with
-                | true, arr when arr.ValueKind = JsonValueKind.Array ->
-                    arr.EnumerateArray()
-                    |> Seq.choose (fun e -> Option.ofObj (e.GetString()))
-                    |> Seq.toList
-                | _ -> []
-            if kind = "types-project" then
-                let paths =
-                    match root.TryGetProperty("paths") with
-                    | true, arr when arr.ValueKind = JsonValueKind.Array ->
-                        arr.EnumerateArray()
-                        |> Seq.choose (fun e -> Option.ofObj (e.GetString()))
-                        |> Seq.map Path.GetFullPath
-                        |> Seq.toArray
-                    | _ -> [||]
-                if Array.isEmpty paths then
-                    failwith "no paths in types-project request"
-                let files = typesProjectFiles checker paths (extraRefArgsOf refs)
+            let request = fileRequest line
+            let kind = request.Kind
+            let refs = request.Refs
+            match request.Target with
+            | Project paths ->
+                let files = typesProjectFiles checker (paths |> Array.map Path.GetFullPath) (requestRefArgs refs)
                 JsonSerializer.Serialize({| Files = files |}, compact)
-            else
-            let path = reqString root "path"
-            let absolute = Path.GetFullPath path
-            let refArgs = extraRefArgsOf refs
+            | OneFile path ->
+                let absolute = Path.GetFullPath path
+                let refArgs = requestRefArgs refs
 
-            let text = File.ReadAllText absolute
-            let sourceText = SourceText.ofString text
+                let text = File.ReadAllText absolute
+                let sourceText = SourceText.ofString text
 
-            // Mirror the one-shot handlers exactly: script-mode options (SDK
-            // refs, no .fsproj) plus this request's fixture refs, fail hard on a
-            // *reference-resolution* error, then parse-and-check.
-            let opts0, scriptDiags =
-                checker.GetProjectOptionsFromScript(
-                    absolute, sourceText, assumeDotNetFramework = false, useSdkRefs = true)
-                |> Async.RunSynchronously
-            let langVersionArgs = pinnedLangVersionArgs (requestLangVersion root)
-            let scriptSwitches =
-                if Array.isEmpty langVersionArgs then opts0.OtherOptions
-                else
-                    opts0.OtherOptions
-                    |> Array.filter (fun o ->
-                        not (o.StartsWith("--langversion:") || o.StartsWith("/langversion:")))
-            let opts =
-                { opts0 with
-                    OtherOptions =
-                        Array.concat [ dropScriptRefsNamedLike kind refs scriptSwitches; refArgs; langVersionArgs ] }
-            let blocking =
-                scriptDiags
-                |> List.filter (fun d ->
-                    d.Severity = FSharp.Compiler.Diagnostics.FSharpDiagnosticSeverity.Error)
-            if not (List.isEmpty blocking) then
-                let summary =
-                    blocking
-                    |> List.map (fun d -> sprintf "FS%04d: %s" d.ErrorNumber d.Message)
-                    |> String.concat "; "
-                failwithf "script resolution failed: %s" summary
+                // Mirror the one-shot handlers exactly: script-mode options (SDK
+                // refs, no .fsproj) plus this request's fixture refs, fail hard on a
+                // *reference-resolution* error, then parse-and-check.
+                let opts0, scriptDiags =
+                    checker.GetProjectOptionsFromScript(
+                        absolute, sourceText, assumeDotNetFramework = false, useSdkRefs = true)
+                    |> Async.RunSynchronously
+                let langVersionArgs = pinnedLangVersionArgs request.LangVersion
+                let scriptSwitches =
+                    if Array.isEmpty langVersionArgs then opts0.OtherOptions
+                    else
+                        opts0.OtherOptions
+                        |> Array.filter (fun o ->
+                            not (o.StartsWith("--langversion:") || o.StartsWith("/langversion:")))
+                let opts =
+                    { opts0 with
+                        OtherOptions =
+                            Array.concat [ dropScriptRefsNamedLike kind refs scriptSwitches; refArgs; langVersionArgs ] }
+                let blocking =
+                    scriptDiags
+                    |> List.filter (fun d ->
+                        d.Severity = FSharp.Compiler.Diagnostics.FSharpDiagnosticSeverity.Error)
+                if not (List.isEmpty blocking) then
+                    let summary =
+                        blocking
+                        |> List.map (fun d -> sprintf "FS%04d: %s" d.ErrorNumber d.Message)
+                        |> String.concat "; "
+                    failwithf "script resolution failed: %s" summary
 
-            let parseResults, checkAnswer =
-                checker.ParseAndCheckFileInProject(
-                    absolute, 0, sourceText, opts, userOpName = "fcs-dump-file-batch")
-                |> Async.RunSynchronously
-            let checkResults =
-                match checkAnswer with
-                | FSharpCheckFileAnswer.Succeeded r -> r
-                | FSharpCheckFileAnswer.Aborted -> failwith "type-check aborted"
+                let parseResults, checkAnswer =
+                    checker.ParseAndCheckFileInProject(
+                        absolute, 0, sourceText, opts, userOpName = "fcs-dump-file-batch")
+                    |> Async.RunSynchronously
+                let checkResults =
+                    match checkAnswer with
+                    | FSharpCheckFileAnswer.Succeeded r -> r
+                    | FSharpCheckFileAnswer.Aborted -> failwith "type-check aborted"
 
-            let implFile () =
-                match checkResults.ImplementationFile with
-                | Some impl -> impl
-                | None -> failwith "no implementation file (keepAssemblyContents not honoured?)"
+                let implFile () =
+                    match checkResults.ImplementationFile with
+                    | Some impl -> impl
+                    | None -> failwith "no implementation file (keepAssemblyContents not honoured?)"
 
-            let errorLines () =
-                checkResults.Diagnostics
-                |> Array.filter (fun d ->
-                    d.Severity = FSharp.Compiler.Diagnostics.FSharpDiagnosticSeverity.Error)
-                |> Array.map (fun d ->
-                    {| Line = d.StartLine; Code = d.ErrorNumber; Message = d.Message |})
+                let errorLines () =
+                    checkResults.Diagnostics
+                    |> Array.filter (fun d ->
+                        d.Severity = FSharp.Compiler.Diagnostics.FSharpDiagnosticSeverity.Error)
+                    |> Array.map (fun d ->
+                        {| Line = d.StartLine; Code = d.ErrorNumber; Message = d.Message |})
 
-            match kind with
-            | "uses" ->
-                let uses =
-                    checkResults.GetAllUsesOfAllSymbolsInFile()
-                    |> Seq.map projectSymbolUse
-                    |> Seq.toArray
-                JsonSerializer.Serialize({| Uses = uses |}, compact)
-            | "attrs" ->
-                let attrs = collectAttrRecords parseResults.ParseTree checkResults
-                JsonSerializer.Serialize({| Attrs = attrs; Errors = errorLines () |}, compact)
-            | "types" ->
-                let exprs, unconverted = collectExprTypes true (implFile ())
-                JsonSerializer.Serialize(
-                    {| File = absolute
-                       Exprs = exprs
-                       Errors = errorLines ()
-                       Warnings = warningRecords checkResults.Diagnostics
-                       Unconverted = unconverted |}, compact)
-            | "binder-types" ->
-                let binders, unconverted = collectBinderTypes (implFile ())
-                JsonSerializer.Serialize(
-                    {| File = absolute
-                       Binders = binders
-                       Errors = errorLines ()
-                       Unconverted = unconverted |}, compact)
-            | "parse-errors" ->
-                // The parse's own errors, which `checkResults.Diagnostics` (every
-                // other kind's `Errors`) need not carry: a language-version
-                // feature error FCS reports while parsing can be missing there.
-                // Batch-only.
-                JsonSerializer.Serialize({| Errors = errorRecords parseResults.Diagnostics |}, compact)
-            | "check-diagnostics" ->
-                // The check's diagnostics with their ranges, for the language
-                // features FCS checks only in the type checker. Batch-only.
-                JsonSerializer.Serialize({| Diagnostics = rangedRecords checkResults.Diagnostics |}, compact)
-            | "overloads" ->
-                let calls = collectOverloads (implFile ())
-                JsonSerializer.Serialize({| File = absolute; Calls = calls; Errors = errorLines () |}, compact)
-            | "assembly-entities" ->
-                // Every entity each of `refs` declares, at every
-                // accessibility: FCS's view of the loaded assembly and an
-                // independent IL reader's TypeDefinition rows. Batch-only.
-                let assemblies = refs |> List.map (assemblyEntitiesOf checkResults) |> List.toArray
-                JsonSerializer.Serialize({| Assemblies = assemblies |}, compact)
-            | "extension-members" ->
-                // See `extensionMembersOf`. Batch-only.
-                let target =
-                    match refs with
-                    | first :: _ -> Path.GetFullPath first
-                    | [] -> failwith "extension-members: no reference to read"
-                JsonSerializer.Serialize({| Members = extensionMembersOf checkResults target |}, compact)
-            | other ->
-                failwithf "unknown kind %s" other
+                match kind with
+                | "uses" ->
+                    let uses =
+                        checkResults.GetAllUsesOfAllSymbolsInFile()
+                        |> Seq.map projectSymbolUse
+                        |> Seq.toArray
+                    JsonSerializer.Serialize({| Uses = uses |}, compact)
+                | "attrs" ->
+                    let attrs = collectAttrRecords parseResults.ParseTree checkResults
+                    JsonSerializer.Serialize({| Attrs = attrs; Errors = errorLines () |}, compact)
+                | "types" ->
+                    let exprs, unconverted = collectExprTypes true (implFile ())
+                    JsonSerializer.Serialize(
+                        {| File = absolute
+                           Exprs = exprs
+                           Errors = errorLines ()
+                           Warnings = warningRecords checkResults.Diagnostics
+                           Unconverted = unconverted |}, compact)
+                | "binder-types" ->
+                    let binders, unconverted = collectBinderTypes (implFile ())
+                    JsonSerializer.Serialize(
+                        {| File = absolute
+                           Binders = binders
+                           Errors = errorLines ()
+                           Unconverted = unconverted |}, compact)
+                | "parse-errors" ->
+                    // The parse's own errors, which `checkResults.Diagnostics` (every
+                    // other kind's `Errors`) need not carry: a language-version
+                    // feature error FCS reports while parsing can be missing there.
+                    // Batch-only.
+                    JsonSerializer.Serialize({| Errors = errorRecords parseResults.Diagnostics |}, compact)
+                | "check-diagnostics" ->
+                    // The check's diagnostics with their ranges, for the language
+                    // features FCS checks only in the type checker. Batch-only.
+                    JsonSerializer.Serialize({| Diagnostics = rangedRecords checkResults.Diagnostics |}, compact)
+                | "overloads" ->
+                    let calls = collectOverloads (implFile ())
+                    JsonSerializer.Serialize({| File = absolute; Calls = calls; Errors = errorLines () |}, compact)
+                | "assembly-entities" ->
+                    // Every entity each of `refs` declares, at every
+                    // accessibility: FCS's view of the loaded assembly and an
+                    // independent IL reader's TypeDefinition rows. Batch-only.
+                    let assemblies = refs |> List.map (assemblyEntitiesOf checkResults) |> List.toArray
+                    JsonSerializer.Serialize({| Assemblies = assemblies |}, compact)
+                | "extension-members" ->
+                    // See `extensionMembersOf`. Batch-only.
+                    let target =
+                        match refs with
+                        | first :: _ -> Path.GetFullPath first
+                        | [] -> failwith "extension-members: no reference to read"
+                    JsonSerializer.Serialize({| Members = extensionMembersOf checkResults target |}, compact)
+                | other ->
+                    failwithf "unknown kind %s" other
         with ex ->
             JsonSerializer.Serialize({| BatchError = ex.Message |}, compact)
 
-    let mutable line = Console.In.ReadLine()
-    while not (isNull line) do
-        let trimmed = (Option.ofObj line |> Option.defaultValue "").Trim()
-        if trimmed <> "" then
-            Console.Out.WriteLine(respond trimmed)
-            Console.Out.Flush()
-        line <- Console.In.ReadLine()
+    answerEachLine respond
 
 /// [`fileBatchCore`] on a large-stack thread, mirroring [`dumpAstBatch`]: the
 /// `types` / `binder-types` projections serialise a deeply-nested typed tree,
@@ -8719,37 +8825,21 @@ let private xmlDocBatchCore () =
     let compact = buildOptionsCompact ()
     let respond (line: string) : string =
         try
-            use doc = JsonDocument.Parse(line: string)
-            let root = doc.RootElement
-            let strArray (name: string) : string[] =
-                match root.TryGetProperty(name) with
-                | true, arr when arr.ValueKind = JsonValueKind.Array ->
-                    arr.EnumerateArray()
-                    |> Seq.choose (fun e -> Option.ofObj (e.GetString()))
-                    |> Seq.toArray
-                | _ -> [||]
-            let paths = strArray "paths" |> Array.map Path.GetFullPath
-            if Array.isEmpty paths then
-                failwith "no paths in request"
-            let defineArgs = strArray "defines" |> Array.map (fun d -> "--define:" + d.Trim())
-            let langVersionArgs = pinnedLangVersionArgs (requestLangVersion root)
-            let refArgs = strArray "refs" |> Array.toList |> extraRefArgsOf
-            let exclusiveRefs =
-                match root.TryGetProperty("exclusiveRefs") with
-                | true, v when v.ValueKind = JsonValueKind.True -> true
-                | _ -> false
+            let request = projectRequest line
+            let paths = request.Paths |> Array.map Path.GetFullPath
+            let defineArgs = request.Defines |> Array.map (fun d -> "--define:" + d)
             let payload =
-                xmlDocProjectFiles checker paths refArgs exclusiveRefs defineArgs langVersionArgs
+                xmlDocProjectFiles
+                    checker
+                    paths
+                    (requestRefArgs request.Refs)
+                    request.ExclusiveRefs
+                    defineArgs
+                    (pinnedLangVersionArgs request.LangVersion)
             JsonSerializer.Serialize(payload, compact)
         with ex ->
             JsonSerializer.Serialize({| BatchError = ex.Message |}, compact)
-    let mutable line = Console.In.ReadLine()
-    while not (isNull line) do
-        let trimmed = (Option.ofObj line |> Option.defaultValue "").Trim()
-        if trimmed <> "" then
-            Console.Out.WriteLine(respond trimmed)
-            Console.Out.Flush()
-        line <- Console.In.ReadLine()
+    answerEachLine respond
 
 /// [`xmlDocBatchCore`] on a large-stack thread, as the other resident oracles.
 let private xmlDocBatch () =
