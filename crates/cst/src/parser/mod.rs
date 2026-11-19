@@ -424,11 +424,14 @@ impl DiagnosticClass {
 
 type FilteredTok<'src> = (Result<FilteredToken<'src>, LexError>, Range<usize>);
 
-/// Whether F# reads an identifier whose text is `text` as starting with an
-/// upper-case letter: FCS's `String.isLeadingIdentifierCharacterUpperCase`,
-/// which decides whether a pattern's head names a constructor and whether a
-/// union case's or an exception's name is legal (FS0053). `text` may be
-/// quoted in double backticks.
+/// Whether the parser reads an identifier whose text is `text` as starting
+/// with an upper-case letter: its mirror of FCS's
+/// `String.isLeadingIdentifierCharacterUpperCase`, which decides whether a
+/// pattern's head names a constructor and whether a union case's or an
+/// exception's name is legal (FS0053). `text` may be quoted in double
+/// backticks. The mirror's logic is FCS's, but it reads Rust's Unicode
+/// tables, not the .NET runtime's, so for a character whose category the two
+/// versions disagree on (U+0295, U+A7CE) it is an approximation (#1053).
 pub fn ident_leads_uppercase(text: &str) -> bool {
     ident_text_leads_uppercase(text)
 }

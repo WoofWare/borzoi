@@ -317,7 +317,8 @@ fn leads_uppercase(name: &EntityName) -> bool {
 /// resolves. Its rule asks the .NET runtime's Unicode tables, whose version
 /// differs from Rust's, so only a first character every version agrees is
 /// not upper case is admitted: an ASCII character other than a capital, or a
-/// lower-case letter of Latin-1, basic Greek or basic Cyrillic.
+/// lower-case letter of Latin-1, basic Greek or basic Cyrillic. A name with a
+/// `|` is refused too, as FCS reads it as an active pattern's (FS1209).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct VarName(Ident);
 
@@ -329,7 +330,9 @@ impl VarName {
             (c.is_ascii() && !c.is_ascii_uppercase())
                 || (matches!(c, 'ß'..='ÿ' | 'α'..='ω' | 'а'..='џ') && c.is_lowercase())
         });
-        if stable && !borzoi_cst::parser::ident_leads_uppercase(ident.as_str()) {
+        // FCS reads a name with `|` as an active pattern's, quoted or not.
+        let active = ident.as_str().contains('|');
+        if stable && !active && !borzoi_cst::parser::ident_leads_uppercase(ident.as_str()) {
             Ok(VarName(ident))
         } else {
             Err(ident)

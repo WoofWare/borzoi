@@ -170,10 +170,16 @@ fn decls_lossy<V: Version>(decls: &[NormalisedDecl], tally: &mut Tally) -> Vec<M
                     tally.kept += inner.kept;
                     out.push(ModuleDecl::NestedModule(m));
                 }
-                // Each declaration the module would have kept is lost with it.
-                Err(d) => tally
-                    .dropped
-                    .extend(std::iter::repeat_n(d, inner.kept.max(1))),
+                // Each declaration the module would have kept is lost with it;
+                // a module with none to keep or drop is one loss.
+                Err(d) => {
+                    let lost = if inner.kept == 0 && inner.dropped.is_empty() {
+                        1
+                    } else {
+                        inner.kept
+                    };
+                    tally.dropped.extend(std::iter::repeat_n(d, lost));
+                }
             }
             tally.dropped.extend(inner.dropped);
             continue;

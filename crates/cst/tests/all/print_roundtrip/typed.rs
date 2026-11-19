@@ -2805,6 +2805,86 @@ fn every_admitted_case_initial_checks() {
     assert!(refused.is_empty(), "{}", refused.join("\n"));
 }
 
+/// Every name [`VarName::new`] admits must be one FCS reads as a variable
+/// after `as`, where before F# 6 nothing else may stand: each candidate it
+/// admits is checked as `match x with _ as v -> ()` at F# 5 and at preview.
+#[test]
+fn every_admitted_variable_alias_checks() {
+    use borzoi_print::version::{Preview, V5_0};
+
+    const CANDIDATES: &[&str] = &[
+        "|A|B|",
+        "|A|_|",
+        "a|b",
+        "_x",
+        "1a",
+        "a b",
+        "type",
+        "val",
+        "op_Addition",
+        "ß",
+        "α",
+        "а",
+        "ʕ",
+        "\u{A7CF}",
+        "Item",
+        "Ä",
+    ];
+    fn file<V: Version>(v: &VarName) -> ImplFile<V> {
+        let body = Expr::Match {
+            scrutinee: bx(name("x")),
+            clauses: Vec1::new(
+                MatchClause {
+                    pat: Pat::As {
+                        pat: Box::new(Pat::Wildcard),
+                        alias: AsAlias::Var(v.clone()),
+                    },
+                    guard: None,
+                    result: Expr::Const(Const::Unit),
+                },
+                Vec::new(),
+            ),
+        };
+        let binding = Binding {
+            attributes: Vec::new(),
+            is_inline: false,
+            head: BindingHead::Function {
+                access: None,
+                name: ValueName::Ident(ident("f")),
+                params: Vec1::new(
+                    Pat::Typed {
+                        pat: Box::new(Pat::Name(path("x"))),
+                        ty: named("int"),
+                    },
+                    Vec::new(),
+                ),
+            },
+            body,
+        };
+        let group = ModuleBindings::new(LetBindings::NonRec(Box::new(binding))).expect("a group");
+        ImplFile::AnonModule(vec![ModuleDecl::Let(group)])
+    }
+    let admitted: Vec<VarName> = CANDIDATES
+        .iter()
+        .chain(BINDERS)
+        .filter_map(|s| VarName::new(Ident::new(s).ok()?).ok())
+        .collect();
+    assert!(
+        admitted.len() > 10,
+        "too few aliases admitted: {admitted:?}"
+    );
+    let old: Vec<ImplFile<V5_0>> = admitted.iter().map(file).collect();
+    let new: Vec<ImplFile<Preview>> = admitted.iter().map(file).collect();
+    let failures: Vec<String> = super::check::check_errors(&old, V5_0::LANGUAGE)
+        .into_iter()
+        .chain(super::check::check_errors(&new, Preview::LANGUAGE))
+        .zip(admitted.iter().chain(&admitted))
+        .filter(|(errors, _)| !errors.is_empty())
+        .map(|(errors, v)| format!("{v:?}: {errors:?}"))
+        .collect();
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// A file's `module` or `namespace` header names entities, so F#'s checker
 /// refuses there what it refuses in a type's or nested module's name
 /// (FS0883). The typed generator draws anonymous files only, as its trees

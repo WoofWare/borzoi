@@ -421,14 +421,14 @@ impl<V: Version> TypeDefn<V> {
                 // Testers must differ from each other (FS0438: `[]`'s and
                 // `Empty`'s are both `IsEmpty`) and from every case (FS0023).
                 if V::LANGUAGE.supports(LanguageFeature::UnionIsPropertiesVisible) {
-                    let testers: Vec<String> = cases.iter().map(|c| c.name.tester()).collect();
-                    if let Some(t) = first_duplicate(testers.iter()) {
-                        return Err(DeclRefusal::DuplicateTester(t.clone()));
+                    let mut testers: HashSet<String> = HashSet::new();
+                    for c in cases {
+                        let t = c.name.tester();
+                        if !testers.insert(t.clone()) {
+                            return Err(DeclRefusal::DuplicateTester(t));
+                        }
                     }
-                    if let Some(c) = cases
-                        .iter()
-                        .find(|c| testers.iter().any(|t| t == c.name.as_str()))
-                    {
+                    if let Some(c) = cases.iter().find(|c| testers.contains(c.name.as_str())) {
                         return Err(DeclRefusal::CaseNamedAsTester(c.name.ident().clone()));
                     }
                 }
