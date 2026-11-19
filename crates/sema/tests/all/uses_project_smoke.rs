@@ -7,7 +7,10 @@
 //! modules + `open`, which our parser does not fully model yet but FCS resolves
 //! fine; the harness is pure FCS, so that is exactly what it must handle.
 
-use crate::common::{invoke_fcs_dump_project, parse_fcs_uses_project, temp_fs_file};
+use crate::common::{
+    ensure_type_provider_fixture_built, invoke_fcs_dump_project, parse_fcs_uses_project,
+    temp_fs_file, try_invoke_fcs_dump_project_with_refs,
+};
 
 /// A two-file project where `file2` references a `let` declared in `file1`. The
 /// harness must report, in `file2`, a non-definition use of that name whose
@@ -83,4 +86,21 @@ fn cross_file_use_reports_its_declaration_in_the_earlier_file() {
     let def_decl = foo_def.decl.as_ref().expect("definition has a decl site");
     assert_eq!(def_decl.file.file_name(), file1.file_name());
     assert_eq!((def_decl.start, def_decl.end), (foo_binder, foo_binder + 3));
+}
+
+/// A project referencing a type provider's runtime assembly is refused. FCS
+/// loads the provider's design-time assembly into the oracle's process
+/// through the CLR, which never unloads it, so a later request's answer could
+/// depend on this one.
+#[test]
+fn a_type_provider_reference_is_refused() {
+    let src = "module UsesProvider\nlet x = SemaTypeProviderFixture.value\n";
+    let file = temp_fs_file("uses_project_type_provider", src);
+    let provider = ensure_type_provider_fixture_built();
+    let answer = try_invoke_fcs_dump_project_with_refs(&[&file], &[provider]);
+    let _ = std::fs::remove_file(&file);
+    match answer {
+        Err(why) if why.contains("type provider") => {}
+        other => panic!("a type provider reference must be refused: {other:?}"),
+    }
 }

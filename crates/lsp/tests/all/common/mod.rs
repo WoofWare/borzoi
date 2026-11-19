@@ -199,6 +199,25 @@ pub fn seed_user_nuget_config(home: &Path) {
     .unwrap();
 }
 
+/// Assert that the host's NuGet home holds a user config. A test that runs
+/// the server under the host's own environment, as a user's editor does,
+/// calls this first. The NuGet settings model declines where there is no
+/// user config (NuGet writes one on its first run, and the model does not
+/// write), so on a host where no NuGet command has run, such a test would
+/// fail on a restore that never started and not say why.
+pub fn assert_host_has_a_user_nuget_config() {
+    let environment = std::env::vars_os().collect();
+    let home = borzoi_nuget::settings::nuget_home(&environment)
+        .expect("the host has no home NuGet can use");
+    let config = home.join(".nuget").join("NuGet").join("NuGet.Config");
+    assert!(
+        config.host_is_file(),
+        "{} is not there, so the NuGet settings model declines and no restore runs. NuGet \
+         writes the file on its first run: `dotnet nuget list source` makes it.",
+        config.display()
+    );
+}
+
 pub fn project_dir() -> PathBuf {
     workspace_root().join("tools").join("fcs-dump")
 }

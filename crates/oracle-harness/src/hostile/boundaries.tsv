@@ -126,6 +126,7 @@ crates/lsp/tests/all/handlers_workspace_symbol.rs	pending	3
 crates/lsp/tests/all/incremental_state_machine.rs	pending	3
 crates/lsp/tests/all/observed_counts.rs	pending	3
 crates/lsp/tests/all/parser_corpus_sweep.rs	pending	3
+crates/lsp/tests/all/project_check_records.rs	draws	project_check_requests=wire
 crates/lsp/tests/all/restore_hostile_config_matrix.rs	pending	3
 crates/lsp/tests/all/sdk_resolution_exactness_diff.rs	pending	3
 crates/lsp/tests/all/syntactic_diagnostics_diff.rs	pending	3
