@@ -54,16 +54,39 @@ fn ask(
     ask_with_refs(child, oracle, paths, &[])
 }
 
-/// [`ask`], with `refs` referenced beside the SDK's own.
+/// [`ask`], with `refs` referenced beside the SDK's own: a fixture request.
 fn ask_with_refs(
     child: &mut borzoi_oracle_harness::BatchChild,
     oracle: &str,
     paths: &[&Path],
     refs: &[&Path],
 ) -> Result<Value, String> {
+    ask_with(child, oracle, paths, refs, false)
+}
+
+/// [`ask_with_refs`] for a real project's inputs, which may change during a
+/// run (`inputsMayChange`, the oracle's module doc): a request only a fresh
+/// child serves.
+fn ask_real(
+    child: &mut borzoi_oracle_harness::BatchChild,
+    oracle: &str,
+    paths: &[&Path],
+    refs: &[&Path],
+) -> Result<Value, String> {
+    ask_with(child, oracle, paths, refs, true)
+}
+
+fn ask_with(
+    child: &mut borzoi_oracle_harness::BatchChild,
+    oracle: &str,
+    paths: &[&Path],
+    refs: &[&Path],
+    inputs_may_change: bool,
+) -> Result<Value, String> {
     let request = serde_json::json!({
         "paths": paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
         "refs": refs.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+        "inputsMayChange": inputs_may_change,
     })
     .to_string();
     let line = child.request(&request);
@@ -191,11 +214,46 @@ fn an_unreadable_reference_is_refused() {
     }
 }
 
-/// A resident oracle reads a reference as it is now: one rewritten in place
-/// with its modification time put back is read again, as a fresh child would
-/// read it, however the request spells its path.
+/// A child serves a request whose inputs may change only as its first, and
+/// nothing after one: a later request of either kind is refused, and so is
+/// such a request after a fixture request. So an answer to such a request is
+/// the one a fresh process gives, whatever FCS and the CLR keep across
+/// requests (the oracle's module doc); the harnesses put each one to a fresh
+/// child.
 #[test]
-fn a_reference_rewritten_in_place_is_read() {
+fn a_request_whose_inputs_may_change_is_a_fresh_childs_only_one() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let a = dir.path().join("A.fs");
+    write(&a, "module A\nlet y = 1\n");
+    for oracle in ORACLES {
+        let mut child = fcs_dump_batch_child(oracle);
+        ask_real(&mut child, oracle, &[&a], &[])
+            .unwrap_or_else(|err| panic!("{oracle}: a fresh child's first request: {err}"));
+        match ask_real(&mut child, oracle, &[&a], &[]) {
+            Err(why) if why.contains("start a fresh child") => {}
+            other => panic!("{oracle}: a second request must be refused: {other:?}"),
+        }
+        match ask(&mut child, oracle, &[&a]) {
+            Err(why) if why.contains("start a fresh child") => {}
+            other => panic!("{oracle}: a fixture request after one must be refused: {other:?}"),
+        }
+
+        let mut child = fcs_dump_batch_child(oracle);
+        check(&mut child, oracle, &[&a]);
+        match ask_real(&mut child, oracle, &[&a], &[]) {
+            Err(why) if why.contains("start a fresh child") => {}
+            other => panic!("{oracle}: one after a fixture request must be refused: {other:?}"),
+        }
+        check(&mut child, oracle, &[&a]);
+    }
+}
+
+/// A fixture reference rewritten in place breaks the precondition the
+/// fixture requests rest on (the oracle's module doc), so the next request
+/// naming it is refused, naming the path, rather than answered from what FCS
+/// kept of the old bytes. However the request spells the path.
+#[test]
+fn a_fixture_reference_rewritten_in_place_is_refused() {
     let dir = tempfile::tempdir().expect("temp dir");
     let a = dir.path().join("A.fs");
     write(&a, "module A\nlet z = FSharp.Compiler.Text.Range.Zero\n");
@@ -209,9 +267,6 @@ fn a_reference_rewritten_in_place_is_read() {
     for oracle in ORACLES {
         let mut child = resident(oracle);
         std::fs::copy(&fcs, &lib).expect("copy the referenced assembly");
-        let stamp = host_fs::metadata(&lib)
-            .and_then(|m| m.modified())
-            .expect("modification time");
         let first = ask_with_refs(&mut child, oracle, &[&a], &[&lib])
             .unwrap_or_else(|err| panic!("{oracle} refused: {err}"));
         assert_eq!(
@@ -220,13 +275,11 @@ fn a_reference_rewritten_in_place_is_read() {
             "{oracle}: the type resolves in the reference: {first}"
         );
         std::fs::copy(&other, &lib).expect("rewrite the referenced assembly");
-        host_fs::set_modified(&lib, stamp).expect("restore the modification time");
-        let second = ask_with_refs(&mut child, oracle, &[&a], &[&lib_respelled])
-            .unwrap_or_else(|err| panic!("{oracle} refused: {err}"));
-        assert!(
-            error_numbers(record(&second, "A.fs")).contains(&39),
-            "{oracle}: the rewritten reference does not hold the type: {second}"
-        );
+        match ask_with_refs(&mut child, oracle, &[&a], &[&lib_respelled]) {
+            Err(why)
+                if why.contains("reused a path") && why.contains(&lib.display().to_string()) => {}
+            other => panic!("{oracle}: a fixture reused a path, which must be refused: {other:?}"),
+        }
     }
 }
 

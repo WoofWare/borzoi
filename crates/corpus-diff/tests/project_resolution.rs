@@ -2340,6 +2340,22 @@ fn fcs_error(number: i32, message: &str, line: u32, col: u32) -> FcsDiagnostic {
     }
 }
 
+/// The oracle serves a real project's request only as a fresh child's first,
+/// so the runner's oracle puts each to a child of its own: one oracle answers
+/// a run's every project, and a project asked again (a perturbed copy is
+/// asked about the same paths) is answered as a fresh process would, a
+/// reference rewritten in place since read as it is now.
+#[test]
+#[ignore = "builds/runs FCS; use --ignored for oracle smoke"]
+fn one_oracle_answers_every_real_project_of_a_run() {
+    let (_tmp, project) = tiny_project();
+    let loaded = load_lsp_project(&project).expect("project should load");
+    let mut oracle = UsesProjectOracle::default();
+    let first = oracle.uses_project(&loaded).expect("the first project");
+    let second = oracle.uses_project(&loaded).expect("the next project");
+    assert_eq!(first, second, "one project, asked twice, answered alike");
+}
+
 #[test]
 #[ignore = "builds/runs FCS; use --ignored for oracle smoke"]
 fn tiny_project_matches_fcs() {
@@ -2966,7 +2982,9 @@ fn attribute_matrix() -> Vec<AttrCell> {
     cells
 }
 
-/// The corpus runner's own resident oracle, one for the whole matrix: a cell
+/// The corpus runner's own oracle, as a fixture oracle
+/// ([`UsesProjectOracle::for_fixtures`]) with one resident child for the whole
+/// matrix: its cells are fixtures this test writes, and a cell
 /// per process would pay a .NET start and an FCS load per cell, which is most
 /// of the sweep's wall clock and grows with every shape added.
 ///
@@ -2982,7 +3000,7 @@ fn attribute_matrix() -> Vec<AttrCell> {
 fn uses_project_batch(loaded: &LoadedProject) -> String {
     static ORACLE: OnceLock<Mutex<UsesProjectOracle>> = OnceLock::new();
     ORACLE
-        .get_or_init(Mutex::default)
+        .get_or_init(|| Mutex::new(UsesProjectOracle::for_fixtures()))
         .lock()
         .expect("batch oracle mutex")
         .uses_project(loaded)

@@ -742,25 +742,61 @@ const PROJECT_TIMEOUT: Duration = Duration::from_secs(3600);
 /// one.
 const BUILD_TIMEOUT: Duration = Duration::from_secs(1800);
 
-/// The resident `fcs-dump uses-project-batch` oracle a run puts every project,
-/// and every project's perturbed copy, to.
+/// The `fcs-dump uses-project-batch` oracle a run puts every project, and
+/// every project's perturbed copy, to.
 ///
-/// One process for the run rather than one per call, because a cold process
-/// spends most of a check warming up: on `WoofWare.Incremental` (82 files) the
-/// type-check took ~5 s in a fresh process and ~2.4 s on a fresh
-/// `FSharpChecker` in a process that had already run one.
+/// By default ([`UsesProjectOracle::default`]) each request goes to a fresh
+/// child, which answers it and is killed. A real project's files, its restored
+/// packages included, are not ours and may change during a run, and FCS and
+/// the CLR keep what they read from a reference in process-wide state that
+/// nothing clears; so the oracle answers such a request only as a child's
+/// first (the oracle's module doc), which makes each answer the one a fresh
+/// process gives. That costs the warm-up a resident child amortises: on
+/// `WoofWare.Incremental` (82 files) the type-check took ~5 s in a fresh
+/// process and ~2.4 s on a fresh `FSharpChecker` in a process that had
+/// already run one.
 ///
-/// The child is spawned, and the tool built, on the first request, so a run
-/// that compares nothing builds nothing. A request the child cannot answer
-/// (it could not be started, outlived its hour-long budget or crashed) fails
-/// that request alone: the child is killed, and the next request starts a
-/// fresh one.
+/// [`UsesProjectOracle::for_fixtures`] keeps one resident child instead, for
+/// a caller whose inputs are fixtures it wrote under paths of their own, held
+/// to the oracle's fixture precondition.
+///
+/// The tool is built on the first request, so a run that compares nothing
+/// builds nothing. A request the child cannot answer (it could not be started,
+/// outlived its hour-long budget or crashed) fails that request alone: the
+/// child is killed, and the next request starts a fresh one.
 #[derive(Default)]
 pub struct UsesProjectOracle {
+    inputs: OracleInputs,
+    /// The resident child of a fixture oracle; always `None` between the
+    /// requests of a default one.
     child: Option<BatchChild>,
 }
 
+/// What a [`UsesProjectOracle`] reads, which decides whether a child may
+/// serve more than one request.
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+enum OracleInputs {
+    /// Files that may change during a run: one child per request.
+    #[default]
+    MayChange,
+    /// Fixtures the caller wrote, never rewritten under a path the oracle has
+    /// read: one resident child.
+    Fixtures,
+}
+
 impl UsesProjectOracle {
+    /// An oracle with one resident child, for a caller whose every request
+    /// reads fixtures it wrote under paths of their own and references that do
+    /// not change during the run (the oracle's fixture precondition, which it
+    /// asserts: a reference holding other bytes than when the child last read
+    /// it is refused). Never for a real project's files.
+    pub fn for_fixtures() -> Self {
+        UsesProjectOracle {
+            inputs: OracleInputs::Fixtures,
+            child: None,
+        }
+    }
+
     /// FCS's `uses-project` records for an already-loaded project.
     pub fn uses_project(&mut self, loaded: &LoadedProject) -> Result<String, FcsInvokeError> {
         self.uses_paths(loaded, &loaded.parses.paths)
@@ -803,14 +839,24 @@ impl UsesProjectOracle {
             // reference set — FCS aborts — so the mode needs a set to be
             // exclusive about.
             "exclusiveRefs": !loaded.fcs_extra_refs.is_empty(),
+            // The oracle serves a request whose inputs may change only as a
+            // fresh child's first, and nothing after it.
+            "inputsMayChange": self.inputs == OracleInputs::MayChange,
         });
-        if self.child.is_none() {
-            self.child = Some(spawn_uses_project_batch()?);
-        }
-        let child = self.child.as_mut().expect("spawned above");
-        let line = child
-            .try_request(&request.to_string())
-            .map_err(FcsInvokeError::Oracle)?;
+        let answer = match self.inputs {
+            OracleInputs::MayChange => {
+                // Dropping the child kills it.
+                spawn_uses_project_batch()?.try_request(&request.to_string())
+            }
+            OracleInputs::Fixtures => {
+                if self.child.is_none() {
+                    self.child = Some(spawn_uses_project_batch()?);
+                }
+                let child = self.child.as_mut().expect("spawned above");
+                child.try_request(&request.to_string())
+            }
+        };
+        let line = answer.map_err(FcsInvokeError::Oracle)?;
         match batch_error(&line) {
             Some(message) => Err(FcsInvokeError::Refused(message)),
             None => Ok(line),
@@ -818,9 +864,9 @@ impl UsesProjectOracle {
     }
 }
 
-/// The resident child, its command located once by [`fcs_dump_command`]: a
-/// respawn reuses that program and its arguments, so the factory, which cannot
-/// fail, has no build to fail.
+/// A child, its command located by [`fcs_dump_command`] (which builds the
+/// tool at most once per process): a respawn reuses that program and its
+/// arguments, so the factory, which cannot fail, has no build to fail.
 ///
 /// One attempt per request, on a whole-project budget rather than the driver
 /// default (which is sized for a single snippet). A retry would spend another
