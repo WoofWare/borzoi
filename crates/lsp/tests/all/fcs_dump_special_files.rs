@@ -311,13 +311,21 @@ fn binary_reads_pass_over_a_fifo() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("1 io-err"), "{stderr}");
 
-    let target = dir.path().join("Target.dll");
-    std::fs::copy(crate::common::ensure_system_runtime_dll(), &target).expect("copy");
+    // An assembly that is no framework's, so that FCS resolves it under its
+    // own name and `entities` dumps it.
+    let name = "FSharp.DependencyManager.Nuget";
+    let target = dir.path().join(format!("{name}.dll"));
+    std::fs::copy(
+        crate::common::fcs_dump_dir().join(format!("{name}.dll")),
+        &target,
+    )
+    .expect("copy");
     mkfifo(&dir.path().join("Sibling.dll"));
     let mut cmd = fcs_dump_command("entities");
     cmd.arg(&target);
-    BoundedCommand::new(cmd)
+    let out = BoundedCommand::new(cmd)
         .timeout(Duration::from_secs(120))
-        .run()
-        .expect("entities finishes");
+        .run_ok("fcs-dump entities");
+    let dump: serde_json::Value = serde_json::from_slice(&out.stdout).expect("a JSON dump");
+    assert_eq!(dump["Assembly"], name, "the target is dumped");
 }
