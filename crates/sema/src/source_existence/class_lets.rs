@@ -114,11 +114,7 @@ impl LetNames {
             || name.contains('@')
             || (self.members_present && name.contains(['(', ')']))
             || (self.interface_present && name.contains(['.', '-']));
-        if possibly {
-            Taken::Possibly
-        } else {
-            Taken::No
-        }
+        if possibly { Taken::Possibly } else { Taken::No }
     }
 
     /// The fresh names `name` may take at `line`, and the count after.

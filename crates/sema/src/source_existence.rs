@@ -49,6 +49,7 @@ use borzoi_cst::syntax::{
     SyntaxNode, SyntaxToken, TextSize, Type, TypeDefn, TypeDefnRepr,
 };
 
+use crate::FcsRange;
 use crate::def::id_text;
 use crate::recovery::SyntaxRecovery;
 use crate::resolve::extension_names::{
@@ -1694,20 +1695,18 @@ impl FileWalk<'_> {
         }
         self.class_lets(inner, defn, members)?;
         for m in members {
-            match m {
-                MemberDefn::Interface(i) => {
-                    for im in i.members() {
-                        let (lists, _) = member_shape(&im);
-                        if self.routes.marks(&lists).get(Marker::Extension) != Maybe::No {
-                            return Err(ExistenceUnread::UnnamedDeclaration(self.index));
-                        }
+            if let MemberDefn::Interface(i) = m {
+                for im in i.members() {
+                    let (lists, _) = member_shape(&im);
+                    if self.routes.marks(&lists).get(Marker::Extension) != Maybe::No {
+                        return Err(ExistenceUnread::UnnamedDeclaration(self.index));
                     }
                 }
-                _ => {}
             }
         }
         Ok(())
     }
+
     /// The C#-style rows of a type's `let`s under `[<Extension>]`: one per
     /// compiled name each may take ([`class_lets`]), for a `let` FCS
     /// represents as a method (one that takes arguments; a value is a field
@@ -1785,13 +1784,13 @@ impl FileWalk<'_> {
             for arg in args {
                 match arg {
                     Some(t) => {
-                        names.bind(&id_text(&t), line(t.text_range().start()));
+                        names.bind(&id_text(&t), line(t.fcs_range().start()));
                     }
                     None => names.bind_unknown(),
                 }
             }
             if let Some(t) = ctor.self_id() {
-                names.bind(&id_text(&t), line(t.text_range().start()));
+                names.bind(&id_text(&t), line(t.fcs_range().start()));
             }
         }
         // Each binding in order: every name it may take, and a row per name
@@ -1800,16 +1799,15 @@ impl FileWalk<'_> {
             let marks = self.routes.marks(lists);
             // FCS's `InferValReprInfoOfBinding`: arguments in the head, or a
             // lambda for the body; a `mutable` is always a field.
-            let method = |args: bool| {
-                !b.is_mutable() && (args || b.expr().is_some_and(|e| is_lambda(&e)))
-            };
+            let method =
+                |args: bool| !b.is_mutable() && (args || b.expr().is_some_and(|e| is_lambda(&e)));
             let Some(pat) = b.pat() else {
                 return Err(ExistenceUnread::UnnamedDeclaration(self.index));
             };
             let (row_names, certain) = match class_binder(&pat, true) {
                 ClassBinder::Single { name, at, args } => {
                     let taken = names.bind(&name, line(at));
-                    (Some(taken).filter(|_| method(args)), true)
+                    (method(args).then_some(taken), true)
                 }
                 ClassBinder::Possible { name, at, args } => {
                     // A union case's pattern instead, if `name` is one:
@@ -1822,7 +1820,7 @@ impl FileWalk<'_> {
                     }
                     let start = pat.syntax().text_range().start();
                     names.possibly_bind("patternInput", line(start));
-                    (Some(taken).filter(|_| method(args)), false)
+                    (method(args).then_some(taken), false)
                 }
                 ClassBinder::Pattern => {
                     // A pattern's values are fields or locals, never methods:
@@ -1871,7 +1869,9 @@ impl FileWalk<'_> {
         match shape {
             MemberShape::NoVal | MemberShape::Inherit => {}
             MemberShape::Unnamed => names.take_unknown(),
-            MemberShape::Named { name, vals, role, .. } => match role {
+            MemberShape::Named {
+                name, vals, role, ..
+            } => match role {
                 MemberRole::Field => names.take(&name),
                 MemberRole::Constructor => {
                     names.members_present();
@@ -2507,7 +2507,7 @@ impl Lines {
             if t.kind() == SyntaxKind::HASH_LINE {
                 return None;
             }
-            let start = t.text_range().start();
+            let start = t.fcs_range().start();
             for (i, _) in t.text().match_indices('\n') {
                 // In range: a file is under 4 GiB.
                 newlines.push(start + TextSize::new(i as u32));
@@ -2561,7 +2561,7 @@ fn class_binder(pat: &Pat, top: bool) -> ClassBinder {
             },
             (None, Some(t)) => ClassBinder::Single {
                 name: id_text(&t).into_owned(),
-                at: t.text_range().start(),
+                at: t.fcs_range().start(),
                 args: false,
             },
             (None, None) => ClassBinder::Pattern,
@@ -2578,12 +2578,11 @@ fn class_binder(pat: &Pat, top: bool) -> ClassBinder {
                     args,
                 };
             }
-            let idents: Vec<SyntaxToken> =
-                l.head().map_or_else(Vec::new, |h| h.idents().collect());
+            let idents: Vec<SyntaxToken> = l.head().map_or_else(Vec::new, |h| h.idents().collect());
             match idents.as_slice() {
                 [t] => {
                     let name = id_text(t).into_owned();
-                    let at = t.text_range().start();
+                    let at = t.fcs_range().start();
                     // A lower-case head is no union case.
                     if name.chars().next().is_some_and(char::is_lowercase) {
                         ClassBinder::Single { name, at, args }
@@ -2604,7 +2603,7 @@ fn pattern_idents(pat: &Pat) -> Vec<(String, TextSize)> {
         .descendants_with_tokens()
         .filter_map(|el| el.into_token())
         .filter(|t| t.kind() == SyntaxKind::IDENT_TOK)
-        .map(|t| (id_text(&t).into_owned(), t.text_range().start()))
+        .map(|t| (id_text(&t).into_owned(), t.fcs_range().start()))
         .collect()
 }
 

@@ -6,53 +6,53 @@ gen_1	certified: exact; unknown: covers [UncertainAttribute]
 gen_10	certified: exact; unknown: unread TypeProvider(0)
 gen_11	certified: exact; unknown: covers [UncertainAttribute]
 gen_12	certified: covers recovered facts, FCS rejects ({}); unknown: covers recovered facts, FCS rejects ({UncertainAttribute}) [FCS: FS37]
-gen_13	certified: covers recovered facts, FCS rejects ({}); unknown: covers recovered facts, FCS rejects ({UncertainAttribute}) [FCS: FS37,FS434]
+gen_13	certified: exact; unknown: covers [UncertainAttribute]
 gen_14	certified: covers recovered facts, FCS rejects ({UncertainAttribute}); unknown: covers recovered facts, FCS rejects ({UncertainAttribute}) [FCS: FS1133]
-gen_15	certified: exact; unknown: unread TypeProvider(2)
-gen_16	certified: covers [UncertainAttribute]; unknown: covers [UncertainAttribute]
-gen_17	certified: covers recovered facts, FCS rejects ({UncertainAttribute}); unknown: covers recovered facts, FCS rejects ({UncertainAttribute}) [FCS: FS438,FS438]
+gen_15	certified: exact; unknown: covers [UncertainAttribute]
+gen_16	certified: unread TypeProvider(2); unknown: unread TypeProvider(2)
+gen_17	certified: exact; unknown: unread TypeProvider(0)
 gen_18	certified: exact; unknown: exact
-gen_19	certified: covers recovered facts, FCS rejects ({}); unknown: covers recovered facts, FCS rejects ({UncertainAttribute}) [FCS: FS37]
+gen_19	certified: covers recovered facts, FCS rejects ({}); unknown: covers recovered facts, FCS rejects ({UncertainAttribute}) [FCS: FS438,FS439,FS438,FS439]
 gen_2	certified: covers recovered facts, FCS rejects ({AbbreviationOrUnion}); unknown: covers recovered facts, FCS rejects ({UncertainAttribute, AbbreviationOrUnion}) [FCS: FS37]
-gen_20	certified: unread TypeProvider(0); unknown: unread TypeProvider(0) [FCS: FS37,FS3891]
+gen_20	certified: covers [ClassLetName]; unknown: covers [UncertainAttribute,ClassLetName]
 gen_21	certified: exact; unknown: exact
 gen_22	certified: exact; unknown: covers [UncertainAttribute]
 gen_23	certified: exact; unknown: covers [UncertainAttribute]
 gen_24	certified: exact; unknown: covers [UncertainAttribute]
-gen_25	certified: exact; unknown: covers [UncertainAttribute]
+gen_25	certified: covers [BindingPattern]; unknown: covers [UncertainAttribute,BindingPattern]
 gen_26	certified: exact; unknown: covers [UncertainAttribute]
 gen_27	certified: exact; unknown: exact
 gen_28	certified: exact; unknown: unread TypeProvider(1)
-gen_29	certified: covers recovered facts, FCS rejects, its signature undecodable ({}); unknown: unread TypeProvider(0) [FCS: FS957,FS37,FS37,FS37,FS37]
+gen_29	certified: covers FCS's entities, the signature undecodable (#1081) ({}); unknown: unread TypeProvider(0) [FCS: compile FS438,compile FS438,compile FS438,compile FS438,compile FS438,compile FS438]
 gen_3	certified: exact; unknown: unread TypeProvider(0)
 gen_30	certified: covers [UncertainAttribute]; unknown: covers [UncertainAttribute]
 gen_31	certified: exact; unknown: covers [UncertainAttribute]
 gen_32	certified: exact; unknown: covers [UncertainAttribute]
-gen_33	certified: covers recovered facts, FCS rejects ({}); unknown: covers recovered facts, FCS rejects ({UncertainAttribute}) [FCS: FS960]
+gen_33	certified: exact; unknown: covers [UncertainAttribute]
 gen_34	certified: covers recovered facts, FCS rejects ({}); unknown: unread TypeProvider(2) [FCS: FS37,FS37]
-gen_35	certified: covers recovered facts, FCS rejects ({}); unknown: covers recovered facts, FCS rejects ({UncertainAttribute}) [FCS: FS37]
+gen_35	certified: covers recovered facts, FCS rejects ({ClassLetName}); unknown: unread TypeProvider(1) [FCS: FS38]
 gen_36	certified: exact; unknown: covers [UncertainAttribute]
 gen_37	certified: exact; unknown: exact
 gen_38	certified: exact; unknown: unread TypeProvider(0)
 gen_39	certified: exact; unknown: covers [UncertainAttribute]
 gen_4	certified: covers recovered facts, FCS rejects ({}); unknown: covers recovered facts, FCS rejects ({UncertainAttribute}) [FCS: FS37,FS37,FS37,FS37]
-gen_40	certified: covers recovered facts, FCS rejects, its signature undecodable ({}); unknown: covers recovered facts, FCS rejects, its signature undecodable ({UncertainAttribute}) [FCS: FS434,FS250]
+gen_40	certified: covers recovered facts, FCS rejects, its signature undecodable ({BindingPattern}); unknown: covers recovered facts, FCS rejects, its signature undecodable ({UncertainAttribute, BindingPattern}) [FCS: FS250]
 gen_41	certified: exact; unknown: covers [UncertainAttribute]
 gen_42	certified: exact; unknown: covers [UncertainAttribute]
 gen_43	certified: covers [UncertainAttribute]; unknown: covers [UncertainAttribute]
 gen_44	certified: exact; unknown: unread TypeProvider(0)
 gen_45	certified: exact; unknown: unread TypeProvider(1)
 gen_46	certified: exact; unknown: unread TypeProvider(0)
-gen_47	certified: unread Recovered(1); unknown: unread Recovered(1) [FCS: FS584]
+gen_47	certified: covers recovered facts, FCS rejects ({}); unknown: covers recovered facts, FCS rejects ({UncertainAttribute}) [FCS: FS37]
 gen_48	certified: unread TypeProvider(0); unknown: unread TypeProvider(0) [FCS: FS53,FS501]
 gen_49	certified: exact; unknown: unread TypeProvider(0)
 gen_5	certified: exact; unknown: unread TypeProvider(0)
 gen_50	certified: exact; unknown: unread TypeProvider(0)
 gen_51	certified: exact; unknown: unread TypeProvider(0)
 gen_52	certified: covers recovered facts, FCS rejects ({}); unknown: covers recovered facts, FCS rejects ({UncertainAttribute}) [FCS: FS37]
-gen_53	certified: covers recovered facts, FCS rejects ({}); unknown: covers recovered facts, FCS rejects ({UncertainAttribute}) [FCS: FS438,FS438]
+gen_53	certified: exact; unknown: covers [UncertainAttribute]
 gen_54	certified: exact; unknown: unread TypeProvider(0)
-gen_55	certified: unread TypeProvider(1); unknown: unread TypeProvider(1) [FCS: FS438,FS438]
+gen_55	certified: covers [UncertainAttribute]; unknown: covers [UncertainAttribute]
 gen_56	certified: covers recovered facts, FCS rejects ({}); unknown: covers recovered facts, FCS rejects ({UncertainAttribute}) [FCS: FS37]
 gen_57	certified: covers [AbbreviationOrUnion]; unknown: covers [UncertainAttribute,AbbreviationOrUnion]
 gen_58	certified: exact; unknown: unread TypeProvider(0)
