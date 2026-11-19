@@ -82,32 +82,37 @@ fn a_source_or_reference_that_is_not_a_regular_file_is_refused_unopened() {
                 project(vec![text(&a), text(source)], refs)
             }
         };
+        // Each case, and what its refusal must name.
+        const SPECIAL: &str = "not a regular file";
         let mut cases = vec![
-            ("a FIFO source", ask(&fifo, None)),
-            ("a device source", ask(&device, None)),
-            ("a FIFO reference", ask(&a, Some(&fifo_dll))),
-            ("a device reference", ask(&a, Some(&device_dll))),
+            ("a FIFO source", ask(&fifo, None), SPECIAL),
+            ("a device source", ask(&device, None), SPECIAL),
+            ("a FIFO reference", ask(&a, Some(&fifo_dll)), SPECIAL),
+            ("a device reference", ask(&a, Some(&device_dll)), SPECIAL),
         ];
         if op == "file-batch" {
-            // FCS resolves a script's directives itself, and `refs` are
-            // read as written, blanks and all.
+            // FCS resolves a script's directives itself. A reference with
+            // blanks around it may be refused for those, or as the FIFO it
+            // names once trimmed, but never opened.
             cases.push((
                 "a script that loads a FIFO",
                 file(text(&loads_fifo), vec![]),
+                SPECIAL,
             ));
             cases.push((
                 "a FIFO reference with blanks around it",
                 file(text(&a), vec![format!(" {} ", text(&fifo_dll))]),
+                "Fifo.dll",
             ));
         }
-        for (what, request) in cases {
+        for (what, request, reason) in cases {
             let answer = oracle
                 .try_request(&request)
                 .unwrap_or_else(|e| panic!("{op}, {what}: {e}"));
             let why = refusal(op, &answer);
             assert!(
-                why.contains("not a regular file"),
-                "{op}, {what}: the refusal says why: {why}"
+                why.contains(reason),
+                "{op}, {what}: the refusal names {reason:?}: {why}"
             );
         }
         let good = if op == "file-batch" {
