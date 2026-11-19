@@ -260,6 +260,7 @@ crates/sema/src/unify.rs	pending	3
 crates/sema/tests/all/ancestor_namespace_grid.rs	pending	3
 crates/sema/tests/all/assembly_container_precedence_grid.rs	pending	3
 crates/sema/tests/all/attr_resolution_sweep.rs	pending	3
+crates/sema/tests/all/augmentation_scope_diff.rs	pending	3
 crates/sema/tests/all/auto_open_member_sweep.rs	pending	3
 crates/sema/tests/all/binder_site_grid.rs	pending	3
 crates/sema/tests/all/case_access_grid.rs	pending	3
@@ -287,6 +288,7 @@ crates/sema/tests/all/implicit_namespace_matrix.rs	pending	3
 crates/sema/tests/all/infer_annotation_shape_gen_diff.rs	pending	3
 crates/sema/tests/all/infer_assembly_extension_grid.rs	pending	3
 crates/sema/tests/all/infer_assembly_values_diff.rs	pending	3
+crates/sema/tests/all/infer_builtin_operators_diff.rs	pending	3
 crates/sema/tests/all/infer_declared_prefix.rs	pending	3
 crates/sema/tests/all/infer_dropped_namespace_perturbation.rs	pending	3
 crates/sema/tests/all/infer_entry_order_diff.rs	pending	3

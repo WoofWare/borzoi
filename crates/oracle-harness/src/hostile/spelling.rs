@@ -49,6 +49,9 @@ pub enum Means {
     Nothing,
     /// Something that exists and is not the file: a directory, or the root.
     SomethingElse,
+    /// A path outside the fixture. It is not the file; whether anything is
+    /// there is the machine's to say, not the fixture's.
+    Outside,
 }
 
 /// A hostile spelling.
@@ -77,13 +80,14 @@ pub const FAR_LINK: &str = "far";
 /// `fs`'s tree: [`INNER_DIR`], [`LINK`] and [`FAR_LINK`]. `dir` is one path
 /// component.
 pub fn prepare(fs: &HostileFs, dir: &str) {
-    let base = fs.tree();
-    let inner = base.join(dir).join(INNER_DIR);
-    std::fs::create_dir_all(&inner).unwrap_or_else(|e| panic!("create {}: {e}", inner.display()));
-    symlink(dir, base.join(LINK)).expect("link to the file's directory");
-    let far = fs.aside().join("far-target").join("a").join("b");
+    // Through the fixture's own checked traversal: nothing here is made
+    // through a link the tree already holds.
+    fs.directory(&Path::new(dir).join(INNER_DIR));
+    let parent = fs.directory(Path::new(dir));
+    symlink(dir, fs.tree().join(LINK)).expect("link to the file's directory");
+    let far = fs.target_dir(fs.aside()).join("a").join("b");
     std::fs::create_dir_all(&far).unwrap_or_else(|e| panic!("create {}: {e}", far.display()));
-    symlink(&far, base.join(dir).join(FAR_LINK)).expect("link out of the tree");
+    symlink(&far, parent.join(FAR_LINK)).expect("link out of the tree");
 }
 
 /// `text` with each ASCII letter in its other case.
@@ -252,22 +256,22 @@ const TABLE: &[(Dimension, Spelling, &str)] = &[
     ),
     (
         Dimension::ParentEscape,
-        relative(&[Lit(b"../"), Name], Means::Nothing),
+        relative(&[Lit(b"../"), Name], Means::Outside),
         "a file of the same name beside the base: a write there leaves the directory the caller owns",
     ),
     (
         Dimension::ParentEscape,
-        relative(&[Dir, Lit(b"/../../"), Name], Means::Nothing),
+        relative(&[Dir, Lit(b"/../../"), Name], Means::Outside),
         "an escape from inside the directory",
     ),
     (
         Dimension::Rooted,
-        rooted(&[Lit(b"/"), Name], Means::Nothing),
+        rooted(&[Lit(b"/"), Name], Means::Outside),
         "the name with a leading slash: a file in the root directory",
     ),
     (
         Dimension::Rooted,
-        rooted(&[Lit(b"/"), Dir, Lit(b"/"), Name], Means::Nothing),
+        rooted(&[Lit(b"/"), Dir, Lit(b"/"), Name], Means::Outside),
         "the relative path with a leading slash",
     ),
     (
@@ -277,22 +281,22 @@ const TABLE: &[(Dimension, Spelling, &str)] = &[
     ),
     (
         Dimension::WindowsRoot,
-        rooted(&[Lit(b"C:\\"), Dir, Lit(b"\\"), Name], Means::Nothing),
+        rooted(&[Lit(b"C:\\"), Dir, Lit(b"\\"), Name], Means::Outside),
         "a drive-rooted Windows path: a relative name on Unix",
     ),
     (
         Dimension::WindowsRoot,
-        rooted(&[Lit(b"C:/"), Dir, Lit(b"/"), Name], Means::Nothing),
+        rooted(&[Lit(b"C:/"), Dir, Lit(b"/"), Name], Means::Outside),
         "a drive letter before forward slashes: a directory named `C:` on Unix",
     ),
     (
         Dimension::WindowsRoot,
-        rooted(&[Lit(b"\\\\server\\share\\"), Name], Means::Nothing),
+        rooted(&[Lit(b"\\\\server\\share\\"), Name], Means::Outside),
         "a UNC path",
     ),
     (
         Dimension::WindowsRoot,
-        rooted(&[Lit(b"\\\\?\\C:\\"), Name], Means::Nothing),
+        rooted(&[Lit(b"\\\\?\\C:\\"), Name], Means::Outside),
         "a verbatim path, which Windows does not normalise",
     ),
     (
@@ -416,10 +420,11 @@ mod tests {
             let expected_file = match spelling.means {
                 Means::TheFile => true,
                 Means::TheFileIfCaseIsIgnored => folds,
-                Means::Nothing | Means::SomethingElse => false,
+                Means::Nothing | Means::SomethingElse | Means::Outside => false,
             };
             match spelling.means {
                 _ if expected_file => assert_eq!(got, Resolved::TheFile, "{}", entry.why),
+                Means::Outside => assert_ne!(got, Resolved::TheFile, "{}", entry.why),
                 Means::SomethingElse => {
                     assert!(matches!(got, Resolved::SomethingElse(_)), "{}", entry.why)
                 }

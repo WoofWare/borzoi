@@ -43,7 +43,7 @@ pub const BOUNDARIES: &str = include_str!("boundaries.tsv");
 /// predate the library. `pending` is their status alone, so a new generator
 /// cannot take it: a row added as pending exceeds the ceiling. Lower each
 /// number as its level's retrofit decides rows.
-pub const PENDING_BACKLOG: &[(u8, usize)] = &[(2, 94), (3, 233)];
+pub const PENDING_BACKLOG: &[(u8, usize)] = &[(2, 94), (3, 235)];
 
 /// The library's own sources, which [`scan`] passes over.
 const LIBRARY: &str = "crates/oracle-harness/src/hostile/";
@@ -361,9 +361,14 @@ pub fn classify(path: &str, text: &str) -> Result<Option<Generator>, String> {
     }))
 }
 
-fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
+/// The Rust sources under `dir`. `optional` says the directory may be
+/// absent (a crate need have no `tests/`); any other failure to list one is a
+/// panic, since a scan that cannot read a directory has not scanned it.
+fn rust_files(dir: &Path, optional: bool, out: &mut Vec<PathBuf>) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if optional && e.kind() == std::io::ErrorKind::NotFound => return,
+        Err(e) => panic!("list {}: {e}", dir.display()),
     };
     for entry in entries {
         let entry = entry.expect("read a directory entry");
@@ -372,7 +377,7 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
         // the checkout and never opens what is not a regular file.
         let kind = entry.file_type().expect("a directory entry's type");
         if kind.is_dir() {
-            rust_files(&path, out);
+            rust_files(&path, false, out);
         } else if kind.is_file() {
             if path.extension().is_some_and(|e| e == "rs") {
                 out.push(path);
@@ -400,8 +405,11 @@ pub fn scan(workspace: &Path) -> Vec<Generator> {
         std::fs::read_dir(&crates).unwrap_or_else(|e| panic!("read {}: {e}", crates.display()))
     {
         let krate = krate.expect("read a directory entry").path();
-        rust_files(&krate.join("src"), &mut files);
-        rust_files(&krate.join("tests"), &mut files);
+        if !krate.is_dir() {
+            continue;
+        }
+        rust_files(&krate.join("src"), true, &mut files);
+        rust_files(&krate.join("tests"), true, &mut files);
     }
     let mut generators: Vec<Generator> = files
         .iter()

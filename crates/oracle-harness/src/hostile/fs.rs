@@ -397,7 +397,7 @@ impl HostileFs {
     /// of the tree (a link, which may point out of it). A fixture must not
     /// write outside its own directory, whatever its caller generated, so
     /// each component is checked before anything is made below it.
-    fn directory(&self, dir: &Path) -> PathBuf {
+    pub(super) fn directory(&self, dir: &Path) -> PathBuf {
         assert!(
             dir.components().all(|c| matches!(c, Component::Normal(_))),
             "{dir:?} is not a plain relative path, so it may name a directory outside the tree"
@@ -412,8 +412,15 @@ impl HostileFs {
                      file), so it may name a directory outside the tree",
                     path.display()
                 ),
-                Err(e) if e.kind() == io::ErrorKind::NotFound => fs::create_dir(&path)
-                    .unwrap_or_else(|e| panic!("create {}: {e}", path.display())),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => match fs::create_dir(&path) {
+                    Ok(()) => {}
+                    // Another thread of the harness made it first: fine, if
+                    // what it made is a directory of the tree.
+                    Err(e)
+                        if e.kind() == io::ErrorKind::AlreadyExists
+                            && fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir()) => {}
+                    Err(e) => panic!("create {}: {e}", path.display()),
+                },
                 Err(e) => panic!("stat {}: {e}", path.display()),
             }
         }
@@ -422,7 +429,7 @@ impl HostileFs {
 
     /// A directory nothing else holds, for one link's target, under `base`
     /// (which exists).
-    fn target_dir(&self, base: &Path) -> PathBuf {
+    pub(super) fn target_dir(&self, base: &Path) -> PathBuf {
         loop {
             let n = self.next.fetch_add(1, Ordering::Relaxed);
             let dir = base.join(n.to_string());
@@ -470,11 +477,44 @@ impl HostileFs {
             "{} exists already",
             path.display()
         );
+        // A refusal is the platform's only if it is shown to be: an error
+        // that could as well be a broken fixture is a panic.
         let made = |result: io::Result<()>| -> Result<(), Unmakeable> {
             result.map_err(|e| match name_refusal(&e) {
                 Some(why) => Unmakeable::Name { why },
+                // Some sandboxes refuse a name that is not text with a plain
+                // permission error. It is the name's if another name can be
+                // made in the same directory.
+                None if e.kind() == io::ErrorKind::PermissionDenied
+                    && name.to_str().is_none()
+                    && tempfile::tempfile_in(&parent).is_ok() =>
+                {
+                    Unmakeable::Name {
+                        why: NameRefusal::NotUtf8,
+                    }
+                }
                 None => panic!("make {state:?} at {}: {e}", path.display()),
             })
+        };
+        // The operations that make something other than a file or a
+        // directory. One the platform does not permit or support is the
+        // state's refusal if a regular file of the same name can be made.
+        let special = |result: io::Result<()>| -> Result<(), Unmakeable> {
+            let Err(e) = result else { return Ok(()) };
+            let unpermitted = matches!(
+                e.kind(),
+                io::ErrorKind::PermissionDenied | io::ErrorKind::Unsupported
+            );
+            if unpermitted && name_refusal(&e).is_none() {
+                made(fs::write(&path, b""))?;
+                fs::remove_file(&path).expect("remove the probe file");
+                return Err(Unmakeable::State {
+                    state,
+                    reason: format!("the platform does not make one here: {e}"),
+                    whole: true,
+                });
+            }
+            made(Err(e))
         };
         let mut target = None;
         match state {
@@ -487,7 +527,7 @@ impl HostileFs {
                 fs::remove_file(&path).expect("remove the probe file");
             }
             State::Directory => made(fs::create_dir(&path))?,
-            State::Fifo => made(mkfifo(&path))?,
+            State::Fifo => special(mkfifo(&path))?,
             State::Socket => match bind_socket(&parent, component) {
                 Ok(()) => {}
                 Err(SocketFailure::Path(reason)) => {
@@ -498,7 +538,7 @@ impl HostileFs {
                         whole: false,
                     });
                 }
-                Err(SocketFailure::Io(e)) => made(Err(e))?,
+                Err(SocketFailure::Io(e)) => special(Err(e))?,
             },
             State::CharDevice => {
                 let null = Path::new("/dev/null");
@@ -509,7 +549,7 @@ impl HostileFs {
                         whole: true,
                     });
                 }
-                made(symlink(null, &path))?;
+                special(symlink(null, &path))?;
             }
             State::Symlink | State::SymlinkOutOfTree => {
                 let base = if state == State::Symlink {
@@ -519,14 +559,14 @@ impl HostileFs {
                 };
                 let to = self.target_dir(&base).join(component);
                 made(fs::write(&to, content))?;
-                made(symlink(&to, &path))?;
+                special(symlink(&to, &path))?;
                 target = Some(to);
             }
             State::DanglingSymlink => {
                 let nowhere = self.target_dir(&self.aside).join("nowhere");
-                made(symlink(&nowhere, &path))?;
+                special(symlink(&nowhere, &path))?;
             }
-            State::SymlinkLoop => made(symlink(component, &path))?,
+            State::SymlinkLoop => special(symlink(component, &path))?,
             State::Unreadable => {
                 made(fs::write(&path, content))?;
                 fs::set_permissions(&path, Permissions::from_mode(0o000))
@@ -756,10 +796,19 @@ mod tests {
             let placed = match fs_.place("d", &plain(&format!("f{i}")), *state, b"content") {
                 Ok(placed) => placed,
                 Err(unmakeable) => {
-                    // Only the two permission states may be unmakeable on a
-                    // platform this suite runs on, and only for root.
+                    // A platform may be unable to make a state at all (a
+                    // user whom modes do not bind, a sandbox with no
+                    // sockets), and must say so. It makes files and
+                    // directories, or nothing here means anything.
                     assert!(
-                        matches!(state, State::Unreadable | State::ReadOnly),
+                        unmakeable.excuses() == Some(state.dimension()),
+                        "{unmakeable}"
+                    );
+                    assert!(
+                        !matches!(
+                            state,
+                            State::Regular | State::Empty | State::Missing | State::Directory
+                        ),
                         "{unmakeable}"
                     );
                     eprintln!("hostile fs: {unmakeable}");

@@ -93,7 +93,7 @@ impl Census {
     ///
     /// If an excluded dimension is of a kind the census does not draw, is
     /// excluded twice, or has an empty reason.
-    pub fn new(declared: Declared, excluded: &[(Dimension, &'static str)]) -> Self {
+    pub(super) fn new(declared: Declared, excluded: &[(Dimension, &'static str)]) -> Self {
         let mut map = BTreeMap::new();
         for (dimension, reason) in excluded {
             assert!(
@@ -285,9 +285,11 @@ impl Census {
             } else if counts.reached.contains_key(&dimension) {
                 "reached".to_owned()
             } else if let Some(reasons) = counts.unmakeable.get(&dimension) {
-                // Another platform's verdict stands where this one has none.
+                // Another platform's observation stands where this one has
+                // none. Only an observation: a pinned exclusion was the
+                // harness's decision, which it has since withdrawn.
                 match pinned.get(key.as_str()) {
-                    Some(line) if !line.starts_with("unmade") => (*line).to_owned(),
+                    Some(line) if *line == "reached" => (*line).to_owned(),
                     _ => format!(
                         "unmade: {}",
                         reasons.iter().cloned().collect::<Vec<_>>().join("; ")
@@ -433,6 +435,16 @@ mod tests {
                 .manifest(Some(&elsewhere))
                 .entries()
                 .contains(&"change.appears\treached".to_owned())
+        );
+        // A pinned exclusion is not an observation, and does not stand.
+        let excluded =
+            Manifest::from_entries(["change.appears\texcluded: once".to_owned()]).unwrap();
+        assert!(
+            census
+                .manifest(Some(&excluded))
+                .entries()
+                .iter()
+                .any(|e| e.starts_with("change.appears\tunmade: "))
         );
         // A pinned `unmade` line is replaced by this platform's own reason.
         let unmade = Manifest::from_entries(["change.appears\tunmade: other".to_owned()]).unwrap();
