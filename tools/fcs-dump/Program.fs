@@ -1,3 +1,30 @@
+/// The F# Compiler Service oracles the differential tests grade borzoi
+/// against.
+///
+/// **Freshness of the resident project oracles** (`uses-project-batch`,
+/// `xmldoc-batch`). One child answers many requests, and FCS and the CLR keep
+/// what they read from a referenced assembly in process-wide state (caches
+/// keyed by path and modification time or by path alone, files read beside
+/// the assembly, a type provider's design-time assembly), not all of which
+/// anything can clear. So a request is one of two kinds:
+///
+/// - A request whose inputs may change (`inputsMayChange`, sent by the paths
+///   that read real projects: the corpus differential and the pinned
+///   projects' source-doc differential) is served only as a child's first
+///   request, and the child refuses every request after it
+///   ([`admitProjectCheck`]); those callers start a fresh child per project.
+///   Its answer is therefore the one a fresh process gives, and a file changed
+///   *during* the request affects that request alone: the same exposure a
+///   fresh fsc process has. The one-shot `uses-project` is such a request.
+/// - Every other request reads fixtures the test suites generate, under the
+///   precondition that a run never puts other bytes under a path an oracle
+///   child has already read. A reference that holds other bytes than when the
+///   child last read it refuses the request, naming the path
+///   ([`assertFixtureReferencesUnchanged`]), rather than letting a cached
+///   import of the old bytes answer. A type provider is refused
+///   ([`refuseTypeProvider`]): the CLR never unloads its design-time assembly.
+///   A file read beside a reference (a companion of a BCL or NuGet assembly)
+///   changing during a run is outside the precondition, and not checked.
 module FcsDump.Program
 
 // The FCS public tokenizer API (`FSharpLexer`, `FSharpLexerFlags`,
@@ -308,10 +335,10 @@ let private readRequest (known: string list) (line: string) (read: Map<string, J
     let mutable fields = Map.empty
     for property in root.EnumerateObject() do
         if fields.ContainsKey property.Name then
-            failwithf "the request names the field %s twice" property.Name
+            failwithf "request: field %s given twice" property.Name
         if not (List.contains property.Name known) then
             failwithf
-                "the request has a field %s, which this op does not take (it takes %s)"
+                "request: unknown field %s, which this op does not take (it takes %s)"
                 property.Name
                 (String.concat ", " known)
         fields <- Map.add property.Name property.Value fields
@@ -322,7 +349,7 @@ let private stringField (fields: Map<string, JsonElement>) (name: string) : stri
     match Map.tryFind name fields with
     | None -> None
     | Some v when v.ValueKind = JsonValueKind.String -> Some(nonNull (v.GetString()))
-    | Some v -> failwithf "the field %s is a JSON %O, not a string" name v.ValueKind
+    | Some v -> failwithf "%s: expected a string, not a JSON %O" name v.ValueKind
 
 /// The required string field `name`.
 let private requiredString (fields: Map<string, JsonElement>) (name: string) : string =
@@ -341,9 +368,9 @@ let private stringsField (fields: Map<string, JsonElement>) (name: string) : str
             if e.ValueKind = JsonValueKind.String then
                 nonNull (e.GetString())
             else
-                failwithf "the field %s holds a JSON %O, not a string" name e.ValueKind)
+                failwithf "%s: expected a string, not a JSON %O" name e.ValueKind)
         |> Seq.toArray
-    | Some v -> failwithf "the field %s is a JSON %O, not an array of strings" name v.ValueKind
+    | Some v -> failwithf "%s: expected an array of strings, not a JSON %O" name v.ValueKind
 
 /// The boolean field `name`, `false` when absent.
 let private boolField (fields: Map<string, JsonElement>) (name: string) : bool =
@@ -351,7 +378,7 @@ let private boolField (fields: Map<string, JsonElement>) (name: string) : bool =
     | None -> false
     | Some v when v.ValueKind = JsonValueKind.True -> true
     | Some v when v.ValueKind = JsonValueKind.False -> false
-    | Some v -> failwithf "the field %s is a JSON %O, not a boolean" name v.ValueKind
+    | Some v -> failwithf "request: field %s must be true or false, not %s" name (v.GetRawText())
 
 /// Whether the FCS this tool runs recognises `version` as a language version,
 /// as its option parser (`setLanguageVersion`) does: `preview` in any case,
@@ -420,21 +447,26 @@ let private definesField (fields: Map<string, JsonElement>) : string[] =
 
 /// A request of a project-check op (`uses-project-batch`, `xmldoc-batch`):
 /// `{ "paths": [<abs>…], "refs": [<abs dll>…]?, "defines": [<sym>…]?,
-/// "langversion": <text|null>?, "exclusiveRefs": <bool>? }`.
+/// "langversion": <text|null>?, "exclusiveRefs": <bool>?,
+/// "inputsMayChange": <bool>? }`.
 type private ProjectRequest =
     { Paths: string[]
       Refs: string list
       Defines: string[]
       LangVersion: string option
-      ExclusiveRefs: bool }
+      /// `refs` is the whole reference set (`--noframework`).
+      ExclusiveRefs: bool
+      /// The inputs may change during a run (see the module doc).
+      InputsMayChange: bool }
 
 let private projectRequest (line: string) : ProjectRequest =
-    readRequest [ "paths"; "refs"; "defines"; "langversion"; "exclusiveRefs" ] line (fun fields ->
+    readRequest [ "paths"; "refs"; "defines"; "langversion"; "exclusiveRefs"; "inputsMayChange" ] line (fun fields ->
         { Paths = pathsField fields
           Refs = refsField fields
           Defines = definesField fields
           LangVersion = langVersionField fields
-          ExclusiveRefs = boolField fields "exclusiveRefs" })
+          ExclusiveRefs = boolField fields "exclusiveRefs"
+          InputsMayChange = boolField fields "inputsMayChange" })
 
 /// What a `file-batch` request checks: one file, or (`types-project`) a
 /// project of several.
@@ -505,6 +537,30 @@ let private answerEachLine (respond: string -> string) =
         if next = 10 then answer () else line.Add(byte next)
         next <- input.ReadByte()
     if line.Count > 0 then answer ()
+
+/// The properties of JSON object `e`, refusing a value that is not an object,
+/// a property not in `allowed` and a property given twice: an unknown or
+/// repeated field is a request for something the parser does not do.
+let private strictObject (where: string) (allowed: string list) (e: JsonElement) =
+    if e.ValueKind <> JsonValueKind.Object then
+        failwithf "%s: expected an object" where
+    let seen = System.Collections.Generic.Dictionary<string, JsonElement>()
+    for p in e.EnumerateObject() do
+        if not (List.contains p.Name allowed) then
+            failwithf "%s: unknown field %s" where p.Name
+        if not (seen.TryAdd(p.Name, p.Value)) then
+            failwithf "%s: field %s given twice" where p.Name
+    seen
+
+let private strictString (where: string) (e: JsonElement) : string =
+    match e.ValueKind with
+    | JsonValueKind.String -> Option.ofObj (e.GetString()) |> Option.defaultValue ""
+    | _ -> failwithf "%s: expected a string" where
+
+let private strictArray (where: string) (e: JsonElement) : JsonElement list =
+    match e.ValueKind with
+    | JsonValueKind.Array -> e.EnumerateArray() |> Seq.toList
+    | _ -> failwithf "%s: expected an array" where
 
 /// Apply the [`langVersionEnv`] pin to a parsing-options record's
 /// `LangVersionText`, leaving it untouched when unset.
@@ -6571,8 +6627,9 @@ let private refuseUndescribedSources (paths: string[]) (textOf: string -> string
             failwithf "%s holds #%s, which names code the project check does not read" path ident
         | None -> ()
 
-/// `projOpts` with each reference (`-r:`) named by its full path, so that the
-/// path FCS keeps an assembly by is the path [`referencesChanged`] digests.
+/// `projOpts` with each reference (`-r:`) named by its full path, so that a
+/// path is one key however a request spells it
+/// ([`assertFixtureReferencesUnchanged`]).
 let private withFullReferencePaths (projOpts: FSharpProjectOptions) : FSharpProjectOptions =
     { projOpts with
         OtherOptions =
@@ -6646,6 +6703,70 @@ let private requestReferences (refs: string list) : string list =
         requireAssemblyReference reference
     refs
 
+/// The type a custom attribute's constructor belongs to, as (namespace,
+/// name), or `None` when the metadata does not say in a form FCS reads. FCS
+/// resolves a constructor's parent as a type reference, a type definition, a
+/// generic instantiation of either, or a method definition, and so does this.
+/// A generic instantiation of anything else (a malformed cycle included) says
+/// nothing.
+let private attributeTypeName
+    (md: System.Reflection.Metadata.MetadataReader)
+    (ctor: System.Reflection.Metadata.EntityHandle)
+    : (string * string) option =
+    let named (handle: System.Reflection.Metadata.EntityHandle) =
+        match handle.Kind with
+        | System.Reflection.Metadata.HandleKind.TypeReference ->
+            let t = md.GetTypeReference(System.Reflection.Metadata.TypeReferenceHandle.op_Explicit handle)
+            Some(md.GetString t.Namespace, md.GetString t.Name)
+        | System.Reflection.Metadata.HandleKind.TypeDefinition ->
+            let t = md.GetTypeDefinition(System.Reflection.Metadata.TypeDefinitionHandle.op_Explicit handle)
+            Some(md.GetString t.Namespace, md.GetString t.Name)
+        | _ -> None
+    let ofType (handle: System.Reflection.Metadata.EntityHandle) =
+        match handle.Kind with
+        | System.Reflection.Metadata.HandleKind.TypeSpecification ->
+            let spec = md.GetTypeSpecification(System.Reflection.Metadata.TypeSpecificationHandle.op_Explicit handle)
+            let mutable blob = md.GetBlobReader spec.Signature
+            if blob.ReadSignatureTypeCode() = System.Reflection.Metadata.SignatureTypeCode.GenericTypeInstance then
+                blob.ReadSignatureTypeCode() |> ignore
+                named (blob.ReadTypeHandle())
+            else
+                None
+        | _ -> named handle
+    let ofMethod (handle: System.Reflection.Metadata.EntityHandle) =
+        let declaring =
+            md.GetMethodDefinition(System.Reflection.Metadata.MethodDefinitionHandle.op_Explicit handle).GetDeclaringType()
+        named (System.Reflection.Metadata.TypeDefinitionHandle.op_Implicit declaring)
+    match ctor.Kind with
+    | System.Reflection.Metadata.HandleKind.MemberReference ->
+        let parent = md.GetMemberReference(System.Reflection.Metadata.MemberReferenceHandle.op_Explicit ctor).Parent
+        if parent.Kind = System.Reflection.Metadata.HandleKind.MethodDefinition then
+            ofMethod parent
+        else
+            ofType parent
+    | System.Reflection.Metadata.HandleKind.MethodDefinition -> ofMethod ctor
+    | _ -> None
+
+/// Refuse, for a fixture request, a type provider's runtime assembly (one
+/// carrying `TypeProviderAssemblyAttribute`, matched by the qualified name FCS
+/// compares, namespace and name joined), and an assembly whose attributes do
+/// not say, in a form FCS reads, whether it is one ([`attributeTypeName`]).
+/// FCS loads a provider's design-time assembly into the process through the
+/// CLR, which never unloads it, so a later request in the same child could be
+/// answered from it.
+let private refuseTypeProvider (path: string) =
+    use stream = File.OpenRead path
+    use pe = new System.Reflection.PortableExecutable.PEReader(stream)
+    let md = System.Reflection.Metadata.PEReaderExtensions.GetMetadataReader pe
+    for h in md.GetAssemblyDefinition().GetCustomAttributes() do
+        match attributeTypeName md (md.GetCustomAttribute h).Constructor with
+        | Some(ns, name) when
+            (if ns = "" then name else ns + "." + name) = "Microsoft.FSharp.Core.CompilerServices.TypeProviderAssemblyAttribute"
+            ->
+            failwithf "reference %s is a type provider, whose design-time assembly the oracle cannot unload" path
+        | Some _ -> ()
+        | None -> failwithf "reference %s has an attribute whose type the oracle cannot tell, so it may be a type provider" path
+
 /// The references `projOpts` names (`-r:`), each refused if fsc would reject
 /// it: one that is not a regular file ([`requireRegularFile`]), or not an
 /// assembly (FS0084). FCS's project check resolves its references without
@@ -6663,27 +6784,34 @@ let private readableReferences (projOpts: FSharpProjectOptions) : string list =
               yield path
           | _ -> () ]
 
-/// The content digest of each reference a project-check request has read.
+/// The content digest each reference held when a fixture request of this
+/// oracle first read it, by full path as spelled: FCS keys its caches the same
+/// way (its readers by path and timestamp, its framework imports by path), so
+/// a path spelled otherwise, even one naming the same file on a
+/// case-insensitive volume, is a separate entry for FCS too, read fresh.
 let private referenceDigests = System.Collections.Generic.Dictionary<string, string>()
 
-/// Whether any of `references` holds other bytes than when a request last
-/// read it, recording what each holds now. FCS keeps an assembly it read by
-/// its path and modification time, process-wide, so a rewrite that keeps the
-/// time would be answered from the old assembly; the caller clears FCS's
-/// caches when this says so.
-let private referencesChanged (references: string list) : bool =
-    let mutable changed = false
+/// The fixture precondition (see the module doc): refuse the request if any
+/// of `references` holds other bytes than when a request of this oracle last
+/// read it, naming the path. FCS could otherwise answer from what it kept of
+/// the old bytes. The new bytes are not recorded, so every later request
+/// naming the path is refused too. A reference seen for the first time is
+/// refused if it is a type provider ([`refuseTypeProvider`]), and recorded
+/// only once it passes, so bytes already recorded need no second scan.
+let private assertFixtureReferencesUnchanged (references: string list) =
     for path in references do
         let digest =
             use stream = File.OpenRead path
             Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(stream))
         match referenceDigests.TryGetValue path with
-        | true, seen when seen = digest -> ()
-        | true, _ ->
-            changed <- true
+        | true, seen when seen <> digest ->
+            failwithf
+                "reference %s holds other bytes than when this oracle last read it: a fixture reused a path, which the oracle's precondition forbids (send inputsMayChange for inputs that may change)"
+                path
+        | true, _ -> ()
+        | false, _ ->
+            refuseTypeProvider path
             referenceDigests[path] <- digest
-        | false, _ -> referenceDigests[path] <- digest
-    changed
 
 /// The text of each source of the project-check request in progress, read
 /// once when it starts ([`checkProjectNow`]). The project-check oracles'
@@ -6717,18 +6845,37 @@ let private refuseConflatedSources (paths: string[]) =
         | true, first -> failwithf "%s and %s are one file to FCS" first path
         | false, _ -> seen[path] <- path
 
+/// How many project-check requests this child has admitted, and whether one
+/// of them was a request whose inputs may change ([`admitProjectCheck`]).
+let mutable private admittedChecks = 0
+let mutable private servedChangingInputs = false
+
+/// Admit a project-check request, or refuse it (see the module doc): a
+/// request whose inputs may change only as this child's first, and nothing
+/// after one. Called before the request touches FCS at all, so a child that
+/// served such a request answers nothing else from what it read.
+let private admitProjectCheck (inputsMayChange: bool) =
+    if servedChangingInputs then
+        failwith "this child served a request whose inputs may change, so it serves nothing more: start a fresh child"
+    if inputsMayChange && admittedChecks > 0 then
+        failwith "a request whose inputs may change must be a fresh child's first: start a fresh child"
+    admittedChecks <- admittedChecks + 1
+    servedChangingInputs <- inputsMayChange
+
 /// The whole-project check of `projOpts` by a [`projectChecker`], of its
 /// sources as they are when the request starts, refused where it cannot
 /// describe them ([`refuseConflatedSources`], [`readableReferences`],
 /// [`refuseUndescribedSources`]).
 ///
-/// No request's answer depends on another's. The sources are read afresh
-/// into [`requestSources`]; a reference whose bytes changed clears FCS's
-/// caches ([`referencesChanged`]); and a stamp of its own gives each request
-/// a project FCS has not checked, dropped from FCS's caches once read (the
-/// returned release).
+/// The sources are read afresh into [`requestSources`], and a stamp of its
+/// own gives each request a project FCS has not checked, dropped from FCS's
+/// caches once read (the returned release). When `fixture`, the references
+/// are held to the fixture precondition ([`assertFixtureReferencesUnchanged`])
+/// and type providers refused ([`refuseTypeProvider`]); otherwise the caller
+/// answers for their freshness: a fresh child ([`admitProjectCheck`]), or the
+/// project-graph oracle's clearing of FCS's caches before every request.
 let private checkProjectNowWith
-    (trackDigests: bool)
+    (fixture: bool)
     (checker: FSharpChecker)
     (projOpts: FSharpProjectOptions)
     (userOpName: string)
@@ -6756,8 +6903,8 @@ let private checkProjectNowWith
     for o in projects do
         refuseConflatedSources o.SourceFiles
     let references = projects |> List.collect readableReferences |> List.distinct
-    if trackDigests && referencesChanged references then
-        checker.InvalidateAll()
+    if fixture then
+        assertFixtureReferencesUnchanged references
     try
         requestSources.Clear()
         for o in projects do
@@ -6780,10 +6927,15 @@ let private checkProjectNowWith
         release ()
         reraise ()
 
-/// [`checkProjectNowWith`], clearing FCS's caches when a reference's bytes
-/// changed ([`referencesChanged`]).
-let private checkProjectNow (checker: FSharpChecker) (projOpts: FSharpProjectOptions) (userOpName: string) =
-    checkProjectNowWith true checker projOpts userOpName
+/// [`checkProjectNowWith`] for a request of the uses-project or xml-doc
+/// oracle: a fixture request unless its inputs may change (the module doc).
+let private checkProjectNow
+    (checker: FSharpChecker)
+    (projOpts: FSharpProjectOptions)
+    (userOpName: string)
+    (inputsMayChange: bool)
+    =
+    checkProjectNowWith (not inputsMayChange) checker projOpts userOpName
 
 /// A project-check oracle's payload, `{ Files, Diagnostics }`, taken from
 /// `results`, the whole-project check of `paths`: each file's record
@@ -6844,8 +6996,9 @@ let private checkedProjectRecords
     (userOpName: string)
     (projectUse: FSharpSymbolUse -> 'U)
     (paths: string[])
+    (inputsMayChange: bool)
     =
-    let results, release = checkProjectNow checker projOpts userOpName
+    let results, release = checkProjectNow checker projOpts userOpName inputsMayChange
     try
         projectCheckRecords projectUse results paths
     finally
@@ -6898,11 +7051,13 @@ let private usesProjectFiles
     (exclusiveRefs: bool)
     (defineArgs: string[])
     (langVersionArgs: string[])
+    (inputsMayChange: bool)
     =
     // Script resolution supplies the SDK's references and nothing else, so it
     // reads no source: a script's directives (`#r`, `#load`, `#I`) are read
     // with `EDITING` defined, and the project check reads each source's own
     // directives as fsc does.
+    admitProjectCheck inputsMayChange
     let scriptOpts, scriptDiags =
         projectScriptOptions checker paths.[0] "" (Array.append defineArgs langVersionArgs)
 
@@ -6947,7 +7102,7 @@ let private usesProjectFiles
             OtherOptions = otherOptions
             UseScriptResolutionRules = false }
 
-    checkedProjectRecords checker projOpts "fcs-dump-uses-project" projectSymbolUse paths
+    checkedProjectRecords checker projOpts "fcs-dump-uses-project" projectSymbolUse paths inputsMayChange
 
 let private dumpUsesProject () =
     let paths =
@@ -6986,7 +7141,8 @@ let private dumpUsesProject () =
         | None -> false
 
     let checker = projectChecker ()
-    let payload = usesProjectFiles checker paths (extraRefArgs ()) exclusiveRefs defineArgs langVersionArgs
+    // One request in a fresh process: a request whose inputs may change.
+    let payload = usesProjectFiles checker paths (extraRefArgs ()) exclusiveRefs defineArgs langVersionArgs true
     let json = JsonSerializer.Serialize(payload, buildOptions ())
     Console.Out.Write(json)
     Console.Out.WriteLine()
@@ -7022,6 +7178,7 @@ let private usesProjectBatchCore () =
                     request.ExclusiveRefs
                     defineArgs
                     (pinnedLangVersionArgs request.LangVersion)
+                    request.InputsMayChange
             JsonSerializer.Serialize(payload, compact)
         with ex ->
             JsonSerializer.Serialize({| BatchError = ex.Message |}, compact)
@@ -7044,30 +7201,6 @@ let private usesProjectBatch () =
     match captured with
     | Some ex -> raise ex
     | None -> ()
-
-/// The properties of JSON object `e`, refusing a value that is not an object,
-/// a property not in `allowed` and a property given twice: an unknown or
-/// repeated field is a request for something the parser does not do.
-let private strictObject (where: string) (allowed: string list) (e: JsonElement) =
-    if e.ValueKind <> JsonValueKind.Object then
-        failwithf "%s: expected an object" where
-    let seen = System.Collections.Generic.Dictionary<string, JsonElement>()
-    for p in e.EnumerateObject() do
-        if not (List.contains p.Name allowed) then
-            failwithf "%s: unknown field %s" where p.Name
-        if not (seen.TryAdd(p.Name, p.Value)) then
-            failwithf "%s: field %s given twice" where p.Name
-    seen
-
-let private strictString (where: string) (e: JsonElement) : string =
-    match e.ValueKind with
-    | JsonValueKind.String -> Option.ofObj (e.GetString()) |> Option.defaultValue ""
-    | _ -> failwithf "%s: expected a string" where
-
-let private strictArray (where: string) (e: JsonElement) : JsonElement list =
-    match e.ValueKind with
-    | JsonValueKind.Array -> e.EnumerateArray() |> Seq.toList
-    | _ -> failwithf "%s: expected an array" where
 
 let private required (where: string) (name: string) (fields: System.Collections.Generic.Dictionary<string, JsonElement>) =
     match fields.TryGetValue name with
@@ -9528,8 +9661,10 @@ let private xmlDocProjectFiles
     (exclusiveRefs: bool)
     (defineArgs: string[])
     (langVersionArgs: string[])
+    (inputsMayChange: bool)
     =
     // The SDK's references alone, as in `usesProjectFiles`: no source's text.
+    admitProjectCheck inputsMayChange
     let baseOpts, _ = projectScriptOptions checker paths.[0] "" [||]
     let switches =
         baseOpts.OtherOptions
@@ -9559,7 +9694,7 @@ let private xmlDocProjectFiles
                         switches
                 Array.concat [ switches; refArgs; defineArgs; langVersionArgs ]
             UseScriptResolutionRules = false }
-    checkedProjectRecords checker projOpts "fcs-dump-xmldoc" projectXmlDocUse paths
+    checkedProjectRecords checker projOpts "fcs-dump-xmldoc" projectXmlDocUse paths inputsMayChange
 
 /// Resident source-XML-doc oracle. One JSON request per stdin line —
 /// `{ "paths": [<abs .fs/.fsi>…], "defines": [<sym>…], "langversion": <token|null>,
@@ -9588,6 +9723,7 @@ let private xmlDocBatchCore () =
                     request.ExclusiveRefs
                     defineArgs
                     (pinnedLangVersionArgs request.LangVersion)
+                    request.InputsMayChange
             JsonSerializer.Serialize(payload, compact)
         with ex ->
             JsonSerializer.Serialize({| BatchError = ex.Message |}, compact)
@@ -9634,10 +9770,10 @@ let private usage () =
     eprintfn "  binder-types <source-path>  dump per-binder inferred types (Phase-3 binder-type oracle)"
     eprintfn "  overloads <source-path>  dump the chosen overload at each call node (overload-resolution oracle)"
     eprintfn "  file-batch               resident single-file oracle: one JSON request/line {kind,path,refs,langversion?}, one compact JSON response/line"
-    eprintfn "  uses-project-batch       resident project oracle: one JSON request/line {paths,refs,defines,langversion}, one compact {Files,Diagnostics} response/line, from the whole-project check"
+    eprintfn "  uses-project-batch       resident project oracle: one JSON request/line {paths,refs,defines,langversion,inputsMayChange}, one compact {Files,Diagnostics} response/line, from the whole-project check"
     eprintfn "  uses-project-graph-batch resident project-graph oracle: one JSON request/line, {op:check,projects,check} (project refs as FSharpReference) or {op:compile,project,outDir}"
     eprintfn "  script-options-batch     test oracle: per path on stdin, the shared and the own-directory script resolution {ResolvedAs,Shared,Direct}"
-    eprintfn "  xmldoc-batch             resident source-XML-doc oracle: one JSON request/line {paths,defines,langversion}, one compact {Files,Diagnostics} response/line, from the whole-project check"
+    eprintfn "  xmldoc-batch             resident source-XML-doc oracle: one JSON request/line {paths,defines,langversion,inputsMayChange}, one compact {Files,Diagnostics} response/line, from the whole-project check"
     2
 
 /// Refuse to run as a self-contained publish. Every script-mode check

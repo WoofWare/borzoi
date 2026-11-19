@@ -1,0 +1,13 @@
+# Generated; do not edit by hand. One line per graded item, sorted.
+# Regenerate with:
+#   BORZOI_UPDATE_MANIFESTS=1 cargo test -p borzoi --test all project_check_records::every_hostile_spelling_of_a_request_is_refused_or_means_it
+plain	owed
+wire.blank-line	owed
+wire.duplicate-key	owed
+wire.missing-field	owed
+wire.multi-line	owed
+wire.not-an-object	owed
+wire.not-json	owed
+wire.trailing-unicode-whitespace	owed
+wire.unknown-field	owed
+wire.wrong-type	owed
