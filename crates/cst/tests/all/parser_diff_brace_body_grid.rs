@@ -48,8 +48,8 @@ enum Outcome {
 
 /// Grade one cell against FCS, panicking on a divergence no cell may show.
 ///
-/// We must not reject what FCS accepts. When both parsers reject, the
-/// recovered trees must agree outside the damage ([`grade`]). And whatever
+/// We must not reject what FCS accepts. When FCS rejects, the trees must
+/// agree outside the damage ([`grade`]), whichever our verdict. And whatever
 /// the verdicts, every declaration FCS keeps from [`AFTER`] on must be one of
 /// ours: the recovery grade compares only declarations outside both sides'
 /// damage, so a recovery that swallowed `after` under a wider error span would
@@ -90,20 +90,29 @@ fn grade_cell(source: &str) -> Outcome {
             );
             Outcome::Accepted
         }
-        (false, true) => Outcome::OnlyFcsRejects,
+        (false, true) => {
+            assert_agree_outside_damage(source, &parse, &json);
+            Outcome::OnlyFcsRejects
+        }
         (true, true) => {
-            let verdict = grade(&parse, &HashSet::new(), &json, source);
-            assert!(
-                verdict.relation != Relation::Divergent,
-                "recovered trees diverge for {source:?}: {}\n{}\n  our errors: {:?}",
-                verdict.token(),
-                verdict.first_divergence.as_deref().unwrap_or(""),
-                parse.errors,
-            );
+            assert_agree_outside_damage(source, &parse, &json);
             Outcome::Rejected
         }
         (true, false) => unreachable!("asserted above"),
     }
+}
+
+/// Assert that every declaration outside FCS's and our damage agrees, key for
+/// key and shape for shape ([`grade`]).
+fn assert_agree_outside_damage(source: &str, parse: &borzoi_cst::parser::Parse, json: &str) {
+    let verdict = grade(parse, &HashSet::new(), json, source);
+    assert!(
+        verdict.relation != Relation::Divergent,
+        "recovered trees diverge for {source:?}: {}\n{}\n  our errors: {:?}",
+        verdict.token(),
+        verdict.first_divergence.as_deref().unwrap_or(""),
+        parse.errors,
+    );
 }
 
 /// Grade every cell, collecting (rather than stopping at) divergences, and
