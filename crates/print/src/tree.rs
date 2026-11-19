@@ -1309,6 +1309,34 @@ pub enum Pat<V: Version> {
     IsInst(Type),
 }
 
+impl<V: Version> Pat<V> {
+    /// Whether a single name in `self` is spelled as an active pattern's.
+    fn names_active_pattern(&self) -> bool {
+        let one = |p: &Pat<V>| p.names_active_pattern();
+        match self {
+            Pat::Name(path) => match path.segments() {
+                [only] => crate::names::is_active_pattern_spelling(only.as_str()),
+                _ => false,
+            },
+            Pat::Wildcard | Pat::Const(_) | Pat::Null | Pat::IsInst(_) => false,
+            Pat::Ctor { args, .. } => args.as_slice().iter().any(one),
+            Pat::Tuple(ps) | Pat::Ands(ps) => ps.as_slice().iter().any(one),
+            Pat::List(ps) | Pat::Array(ps) => ps.iter().any(one),
+            Pat::Cons { head, tail } => one(head) || one(tail),
+            Pat::Typed { pat, .. } => one(pat),
+            Pat::As { pat, alias } => {
+                one(pat)
+                    || match alias {
+                        AsAlias::Var(_) => false,
+                        AsAlias::Pat(a) => one(a.pat()),
+                    }
+            }
+            Pat::Or(l, r) => one(l) || one(r),
+            Pat::Record(fs) => fs.as_slice().iter().any(|(_, p)| one(p)),
+        }
+    }
+}
+
 /// What follows `as` in a pattern.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AsAlias<V: Version> {
@@ -1337,18 +1365,17 @@ impl<V: Version> AliasPat<V> {
         pat: Pat<V>,
     ) -> Result<Self, Box<Pat<V>>> {
         // A single name is a variable, `AsAlias::Var`'s, unless it starts with
-        // a capital F# and our parser both read as one; one spelled as an
-        // active pattern's FCS refuses there (FS1209).
-        let refused = match &pat {
+        // a capital F# and our parser both read as one; and a name spelled as
+        // an active pattern's, anywhere in the alias, would define one, which
+        // FCS refuses of a value that is no function (FS1209).
+        let bare_var = match &pat {
             Pat::Name(path) => match path.segments() {
-                [only] => {
-                    !crate::names::leads_stably_uppercase(only.as_str())
-                        || crate::names::is_active_pattern_spelling(only.as_str())
-                }
+                [only] => !crate::names::leads_stably_uppercase(only.as_str()),
                 _ => false,
             },
             _ => false,
         };
+        let refused = bare_var || pat.names_active_pattern();
         if refused {
             Err(Box::new(pat))
         } else {

@@ -15,7 +15,7 @@
 //! The generator does not draw what F#'s checker refuses for reasons the tree
 //! cannot see, which are name resolution's and inference's, not syntax's: it
 //! keeps names in scope and of the right type, a name bound once per pattern
-//! and per module, a local `mutable` out of closures, a recursive group's
+//! and per module, a recursive group's
 //! names clear of what its bodies see, an inline body clear of less
 //! accessible values (FS1113), and every type fixed before the checker reads
 //! it: a parameter annotated whole, a lookup's receiver and a runtime test's
@@ -142,13 +142,11 @@ pub fn type_of(ty: &Ty) -> Type {
     }
 }
 
-/// A value in scope: its path, its type, and whether it is a `mutable` that
-/// a closure must not capture.
+/// A value in scope: its path, its type, and what may be done with it.
 #[derive(Debug, Clone)]
 pub struct Var {
     path: LongIdent,
     ty: Ty,
-    local_mutable: bool,
     /// Whether it is a mutable an assignment may target.
     mutable: bool,
     /// Whether it is not visible outside its module: `private`, or brought
@@ -194,13 +192,6 @@ impl Scope {
         self.vars.iter().any(|v| &v.path.segments()[0] == n) || self.modules.contains(n)
     }
 
-    /// The scope inside a closure: a local `mutable` cannot be captured.
-    fn closure(&self) -> Scope {
-        let mut out = self.clone();
-        out.vars.retain(|v| !v.local_mutable);
-        out
-    }
-
     fn of_type(&self, ty: &Ty) -> Vec<LongIdent> {
         self.vars
             .iter()
@@ -214,7 +205,6 @@ fn local(name: &Ident, ty: Ty) -> Var {
     Var {
         path: LongIdent::single(name.clone()),
         ty,
-        local_mutable: false,
         mutable: false,
         private: false,
         restricted: false,
@@ -772,7 +762,7 @@ fn simplest<V: Version>(ty: &Ty, sc: &Sc) -> BoxedStrategy<Expr<V>> {
             .prop_map(|es| Expr::Tuple(Vec2::from_vec(es).expect("two")))
             .boxed(),
         Ty::Fun(a, b) => {
-            let inner = Rc::new(sc.closure());
+            let inner = sc.clone();
             let b = (**b).clone();
             param::<V>(a, 1)
                 .prop_flat_map(move |(p, bound)| {
@@ -1277,7 +1267,7 @@ fn expr_now<V: Version>(ty: &Ty, sc: &Sc, depth: u32) -> BoxedStrategy<Expr<V>> 
         }
         Ty::Lazy(t) => {
             let t = (**t).clone();
-            let s = Rc::new(sc.closure());
+            let s = sc.clone();
             alts.push((
                 2,
                 defer(move || expr::<V>(&t, &s, d))
@@ -1297,7 +1287,7 @@ fn expr_now<V: Version>(ty: &Ty, sc: &Sc, depth: u32) -> BoxedStrategy<Expr<V>> 
         Ty::Fun(a, b) => {
             alts.push(rule(4, ty, sc, d, |ty, sc, d| lambda::<V>(ty, sc, d)));
             let (a, b) = ((**a).clone(), (**b).clone());
-            let inner = Rc::new(sc.closure());
+            let inner = sc.clone();
             alts.push((
                 2,
                 defer(move || clauses::<V>(&a, &b, &inner, d))
@@ -1357,7 +1347,7 @@ fn lambda<V: Version>(ty: &Ty, sc: &Sc, d: u32) -> BoxedStrategy<Expr<V>> {
     let Ty::Fun(a, b) = ty else {
         unreachable!("a lambda of a function type")
     };
-    let inner = sc.closure();
+    let inner = (**sc).clone();
     let (a, b) = ((**a).clone(), (**b).clone());
     let two = match &b {
         Ty::Fun(b1, b2) => Some(((**b1).clone(), (**b2).clone())),
@@ -1524,7 +1514,7 @@ fn list_body<V: Version>(elem: &Ty, sc: &Sc, d: u32) -> BoxedStrategy<ListBody<V
     if *elem == Ty::Int {
         alts.push((1, range::<V>(sc, d).prop_map(ListBody::Range).boxed()));
     }
-    let inner = Rc::new(sc.closure());
+    let inner = sc.clone();
     alts.push((
         3,
         comp::<V, InCollection>(Some(elem.clone()), &inner, d)
@@ -1539,7 +1529,7 @@ fn list_body<V: Version>(elem: &Ty, sc: &Sc, d: u32) -> BoxedStrategy<ListBody<V
 
 /// `builder { … }`.
 fn computation<V: Version>(sc: &Sc, d: u32) -> BoxedStrategy<Expr<V>> {
-    let inner = Rc::new(sc.closure());
+    let inner = sc.clone();
     (
         prop_oneof![
             3 => expr::<V>(&Ty::Builder, sc, 0),
@@ -1654,11 +1644,7 @@ fn item<V: Version, K: Context>(
                     .prop_filter_map("F# refuses the group locally", |(b, bound)| {
                         LocalBindings::new(b).ok().map(|b| (b, bound))
                     })
-                    .prop_map(move |(b, bound)| {
-                        // A body's later statements are closures, which a
-                        // local `mutable` cannot be captured by.
-                        (CompItem::Let(b), s2.with(bound).closure())
-                    })
+                    .prop_map(move |(b, bound)| (CompItem::Let(b), s2.with(bound)))
                     .boxed()
             }),
         ));
@@ -2138,7 +2124,6 @@ fn binding<V: Version>(
                 let var = Var {
                     path: LongIdent::single(name.clone()),
                     ty: t.clone(),
-                    local_mutable: is_mutable && !module_level,
                     mutable: is_mutable,
                     private: access == Some(Access::Private),
                     restricted: restricted(access),
@@ -2173,7 +2158,7 @@ fn binding<V: Version>(
                     let ret = ret.clone();
                     parts.prop_flat_map(move |ps| {
                         let bound: Bound = ps.iter().flat_map(|(_, b)| b.clone()).collect();
-                        let inner = Rc::new(s.closure().with(vars(&bound)));
+                        let inner = Rc::new(s.with(vars(&bound)));
                         let pats: Vec<Pat<V>> = ps.iter().map(|(p, _)| p.clone()).collect();
                         let var = Var {
                             private: access == Some(Access::Private),
@@ -2882,9 +2867,25 @@ fn every_admitted_alias_checks() {
         vars.iter().any(|v| v.as_str() == "a|b"),
         "`a|b`, which FCS reads as a variable, refused"
     );
+    // Each name alone, and typed, `(n : int)`, a name inside a pattern. The
+    // typed name only on an initial whose case is certain: on another, our
+    // parser can read a pattern's name differently from FCS (#1053).
+    let certain = |n: &Ident| {
+        n.as_str().starts_with(|c: char| c.is_ascii())
+            || VarName::new(n.clone()).is_ok()
+            || borzoi_print::names::leads_stably_uppercase(n.as_str())
+    };
     let pats: Vec<AliasPat<Preview>> = names
         .iter()
-        .filter_map(|n| AliasPat::new(Available, Pat::Name(LongIdent::single(n.clone()))).ok())
+        .flat_map(|n| {
+            let bare = Pat::Name(LongIdent::single(n.clone()));
+            let typed = Pat::Typed {
+                pat: Box::new(bare.clone()),
+                ty: named("int"),
+            };
+            std::iter::once(bare).chain(certain(n).then_some(typed))
+        })
+        .filter_map(|p| AliasPat::new(Available, p).ok())
         .collect();
     assert!(!pats.is_empty(), "no name admitted as a pattern");
     let old: Vec<ImplFile<V5_0>> = vars.iter().map(|v| file(AsAlias::Var(v.clone()))).collect();
