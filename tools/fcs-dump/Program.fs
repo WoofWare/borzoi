@@ -354,13 +354,15 @@ let private boolField (fields: Map<string, JsonElement>) (name: string) : bool =
     | Some v -> failwithf "the field %s is a JSON %O, not a boolean" name v.ValueKind
 
 /// The `langversion` field: a version, or `null` or absent for FCS's
-/// default.
+/// default. A version is letters, digits and dots (`8.0`, `latest`,
+/// `preview`): anything else is refused before it reaches FCS's switch, where
+/// `?` would print the known versions to the answer stream and exit.
 let private langVersionField (fields: Map<string, JsonElement>) : string option =
     match Map.tryFind "langversion" fields with
     | Some v when v.ValueKind = JsonValueKind.Null -> None
     | _ ->
         match stringField fields "langversion" with
-        | Some s when String.IsNullOrWhiteSpace s || s.Trim() <> s ->
+        | Some s when s = "" || not (s |> Seq.forall (fun c -> Char.IsAsciiLetterOrDigit c || c = '.')) ->
             failwithf "the field langversion is %A, which is no language version" s
         | other -> other
 

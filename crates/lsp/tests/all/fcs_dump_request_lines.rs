@@ -34,11 +34,26 @@ fn answers(op: &str, lines: &[Vec<u8>]) -> Vec<String> {
         .collect()
 }
 
+/// Whether `answer` is a refusal (`{"BatchError": <text>}`) rather than an
+/// answer (an object holding `Uses` or `Files`).
+///
+/// # Panics
+///
+/// If it is neither: the oracle wrote something that is no answer at all.
 fn is_refusal(answer: &str) -> bool {
-    serde_json::from_str::<Value>(answer)
-        .ok()
-        .and_then(|v| v.get("BatchError").cloned())
-        .is_some()
+    let value: Value = serde_json::from_str(answer)
+        .unwrap_or_else(|e| panic!("an answer is JSON ({e}): {answer}"));
+    match value.get("BatchError") {
+        Some(Value::String(_)) => true,
+        Some(other) => panic!("a refusal's message is text: {other}"),
+        None => {
+            assert!(
+                value.get("Uses").is_some() || value.get("Files").is_some(),
+                "an answer holds Uses or Files: {answer}"
+            );
+            false
+        }
+    }
 }
 
 /// `good` as written, with `field` set to `value`, given twice, or added.
@@ -84,6 +99,10 @@ fn hostile_lines(good: &Value, path_field: &str) -> Vec<(&'static str, String)> 
         ("an array", json!([good]).to_string()),
         ("a trailing comma", line.replacen('}', ",}", 1)),
     ];
+    lines.push((
+        "a language version FCS would read as a switch",
+        with_field(good, "langversion", json!("?")),
+    ));
     if good.get("defines").is_some() {
         lines.push((
             "a padded symbol",
@@ -154,6 +173,9 @@ fn fixture() -> (tempfile::TempDir, String) {
     let dir = tempfile::tempdir().expect("temp dir");
     let a = dir.path().join("A.fs");
     std::fs::write(&a, "module A\nlet a = 1\n").expect("write");
+    // What a request holding a byte that is not UTF-8 in this path names once
+    // decoded leniently: so that only a strict decoder refuses it.
+    std::fs::write(dir.path().join("A\u{fffd}.fs"), "module A\nlet a = 1\n").expect("write");
     let a = Path::new(&a).display().to_string();
     (dir, a)
 }
