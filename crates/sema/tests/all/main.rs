@@ -157,6 +157,7 @@ mod resolve_union_cases;
 mod sig_namespace_fold_diff;
 mod silent_region_sweep;
 mod source_existence_diff;
+mod source_existence_domain;
 mod source_existence_gen;
 mod source_existence_grid;
 mod source_existence_placement;

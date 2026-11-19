@@ -105,7 +105,7 @@ fn canonical(name: &str) -> String {
     }
 }
 
-fn canonical_path(path: &[String]) -> Vec<String> {
+pub(crate) fn canonical_path(path: &[String]) -> Vec<String> {
     path.iter().map(|s| canonical(s)).collect()
 }
 

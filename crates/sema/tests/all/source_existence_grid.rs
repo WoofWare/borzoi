@@ -513,6 +513,26 @@ pub fn cells() -> Vec<Cell> {
             "self_named_generic_abbreviation",
             "namespace SelfGeneric\ntype Foo = { X: int }\n[<System.Runtime.CompilerServices.Extension>]\ntype Foo<'a> = Foo\n",
         ),
+        // Codex round 5's shapes (the leaves certified in `LEAF_FORMS` are
+        // graded in `source_existence_domain`).
+        one(
+            "nullary_active_pattern_let",
+            "module NullaryAp\n[<System.Runtime.CompilerServices.Extension>]\nlet (|Zero|_|) = function 0 -> Some () | _ -> None\n",
+        ),
+        one(
+            "attribute_made_interface_augmentation",
+            "module AttrInterface\n[<Interface>]\ntype I() =\n    abstract M: string -> string\ntype I with\n    static member Foo() = 1\n",
+        ),
+        Cell::new(
+            "static_abstract_signature_augmentation",
+            &[
+                (
+                    "Lib.fsi",
+                    "module StaticAbstractSig\ntype System.String with\n    static abstract member Foo: int -> int\n",
+                ),
+                ("Lib.fs", "module StaticAbstractSig\nlet x = 1\n"),
+            ],
+        ),
         // Codex round 4's shapes.
         one(
             "intrinsic_augmentation_class_let",

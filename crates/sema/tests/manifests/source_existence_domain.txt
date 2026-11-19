@@ -1,0 +1,16 @@
+# Generated; do not edit by hand. One line per graded item, sorted.
+# Regenerate with:
+#   BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-sema --test all source_existence_domain::every_leaf_form_is_read_or_declined_as_the_table_says
+domain_AugmentationHead_generic	certified: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 1) []; unknown: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 1) []
+domain_AugmentationHead_global	certified: unread OutsideDomain(0, AugmentationHead); unknown: unread OutsideDomain(0, AugmentationHead)
+domain_AugmentationHead_local	certified: exact []; unknown: exact []
+domain_AugmentationHead_qualified	certified: exact []; unknown: exact []
+domain_AugmentationHead_tuple	certified: covers, FCS rejects surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 5) [RejectedShape]; unknown: covers, FCS rejects surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 5) [RejectedShape] [FCS: FS3350]
+domain_ProvidedTarget_array	certified: exact []; unknown: exact []
+domain_ProvidedTarget_function	certified: exact []; unknown: exact []
+domain_ProvidedTarget_named	certified: unread TypeProvider(0); unknown: unread TypeProvider(0)
+domain_ProvidedTarget_postfix	certified: unread TypeProvider(0); unknown: unread TypeProvider(0)
+domain_ProvidedTarget_prefix	certified: unread TypeProvider(0); unknown: unread TypeProvider(0)
+domain_ProvidedTarget_tuple	certified: exact []; unknown: exact []
+domain_TypeHead_dotted	certified: unread OutsideDomain(0, TypeHead); unknown: unread OutsideDomain(0, TypeHead) [FCS: FS925]
+domain_TypeHead_single	certified: exact []; unknown: exact []

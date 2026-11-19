@@ -42,6 +42,20 @@ pub fn existence_facts(
     set.facts()
 }
 
+/// The module and placed-type paths the Compile-order fold of `files`
+/// (against an empty environment) exports, each spelt canonically as the
+/// existence set spells a path: what the existence surface of the same files
+/// must hold as entities.
+pub fn fold_entity_paths(files: &[crate::ProjectFile]) -> std::collections::BTreeSet<Vec<String>> {
+    let env = AssemblyEnv::default();
+    let project = crate::resolve::resolve_project_files(files, &env);
+    project
+        .module_and_placed_type_paths(env.names())
+        .iter()
+        .map(|p| crate::assembly_env::existence::canonical_path(p))
+        .collect()
+}
+
 /// Which input of the extension-scope gate declines a call of a method named
 /// `name` in the file `resolved` (`is_static`: a type-qualified call), or
 /// `None` when the gate lets the

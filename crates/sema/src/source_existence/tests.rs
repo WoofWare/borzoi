@@ -422,6 +422,7 @@ fn witness(channel: Channel) -> Observed {
             ),
             |_| true,
         ),
+        Channel::OutsideDomain => observe(one("module M\ntype X.Y = { N: int }\n"), |_| true),
         Channel::LineDirective => observe(
             one(
                 "module M\n# 10 \"Other.fs\"\ntype T() =\n    [<System.Runtime.CompilerServices.Extension>]\n    static let f (s: string) = s\n    member _.G = f \"x\"\n",
@@ -530,6 +531,10 @@ fn every_decline_and_approximation_is_a_channel() {
         ),
         (ExistenceUnread::TooManyReadings, Channel::ReadingsBudget),
         (ExistenceUnread::LineDirective(0), Channel::LineDirective),
+        (
+            ExistenceUnread::OutsideDomain(0, Leaf::TypeHead),
+            Channel::OutsideDomain,
+        ),
     ];
     for (why, channel) in &declines {
         match why {
@@ -544,7 +549,8 @@ fn every_decline_and_approximation_is_a_channel() {
             | ExistenceUnread::UnnamedDeclaration(_)
             | ExistenceUnread::AnonymousModuleName(_)
             | ExistenceUnread::TooManyReadings
-            | ExistenceUnread::LineDirective(_) => {}
+            | ExistenceUnread::LineDirective(_)
+            | ExistenceUnread::OutsideDomain(..) => {}
         }
         assert_eq!(channel.treatment(), Treatment::Declined, "{why:?}");
         match witness(*channel) {

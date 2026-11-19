@@ -84,6 +84,8 @@ pub struct Cell {
     pub target: Target,
     /// The hostile dimensions mixed into the cell's source.
     pub hostile: crate::source_existence_gen::Hostile,
+    /// Whether the walk is told a reference may be a type provider.
+    pub providers_possible: bool,
 }
 
 impl Cell {
@@ -99,6 +101,7 @@ impl Cell {
             certificate: Certificate::BySpelling,
             target: Target::Library,
             hostile: Default::default(),
+            providers_possible: false,
         }
     }
 }
@@ -489,7 +492,8 @@ pub fn fcs(cell: &Cell) -> Fcs {
 }
 
 /// Our reading of `cell` under `routes`, or how it declines.
-pub fn ours(cell: &Cell, routes: Option<&MarkerRoutes>) -> (SourceExistence, MarkerRoutes) {
+/// `cell`'s files, parsed as the walk reads them.
+fn project_files(cell: &Cell) -> Vec<ProjectFile> {
     // FCS defines `COMPILED` in every compiled project (the LSP does too).
     let symbols: HashSet<String> = cell
         .defines
@@ -528,6 +532,12 @@ pub fn ours(cell: &Cell, routes: Option<&MarkerRoutes>) -> (SourceExistence, Mar
         .zip(qualified_names(&files, &paths))
         .map(|((f, r), q)| ProjectFile::new(f, q, r))
         .collect();
+    project
+}
+
+/// Our reading of `cell` under `routes`, or certified by spelling.
+pub fn ours(cell: &Cell, routes: Option<&MarkerRoutes>) -> (SourceExistence, MarkerRoutes) {
+    let project = project_files(cell);
     let refs: Vec<&ProjectFile> = project.iter().collect();
     let routes = match routes {
         Some(r) => r.clone(),
@@ -540,11 +550,12 @@ pub fn ours(cell: &Cell, routes: Option<&MarkerRoutes>) -> (SourceExistence, Mar
             routes: &routes,
             // A reference that may be a type provider is one whose source
             // names the attribute that makes it one.
-            providers: if cell.refs.iter().any(|r| {
-                r.files
-                    .iter()
-                    .any(|(_, t)| t.contains("TypeProviderAssembly"))
-            }) {
+            providers: if cell.providers_possible
+                || cell.refs.iter().any(|r| {
+                    r.files
+                        .iter()
+                        .any(|(_, t)| t.contains("TypeProviderAssembly"))
+                }) {
                 ProviderReferences::Possible
             } else {
                 ProviderReferences::None
@@ -618,6 +629,21 @@ pub fn grade(cell: &Cell, fcs: &Fcs, ours: &SourceExistence) -> Result<String, S
             surface.approximations,
             lines(&lacking)
         ));
+    }
+    // The fold's own reading of the same files: every module it declares and
+    // every type it places is one of ours, on a producer FCS accepts.
+    if fcs.clean {
+        let fold = borzoi_sema::test_support::fold_entity_paths(&project_files(cell));
+        let missing: Vec<String> = fold
+            .difference(&mine.entities)
+            .map(|p| p.join("."))
+            .collect();
+        if !missing.is_empty() {
+            return Err(format!(
+                "{}: the resolver's fold declares entities ours lacks: {missing:?}",
+                cell.name
+            ));
+        }
     }
     let surplus = Surplus::of(&mine, &theirs);
     // A surplus abbreviation lender makes every name a possible extension:

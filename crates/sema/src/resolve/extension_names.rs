@@ -772,10 +772,18 @@ pub(crate) fn member_shape(m: &MemberDefn) -> (Vec<AttributeList>, MemberShape) 
                 );
                 return (lists, shape);
             }
-            let is_static = matches!(
-                leading,
-                MemberSigLeading::Static | MemberSigLeading::StaticMember
-            );
+            let is_static = match leading {
+                MemberSigLeading::Static
+                | MemberSigLeading::StaticMember
+                | MemberSigLeading::StaticAbstract
+                | MemberSigLeading::StaticAbstractMember => true,
+                MemberSigLeading::Member
+                | MemberSigLeading::Abstract
+                | MemberSigLeading::AbstractMember
+                | MemberSigLeading::Override
+                | MemberSigLeading::Default
+                | MemberSigLeading::New => false,
+            };
             let Some(sig) = ms.val_sig() else {
                 return (lists, MemberShape::Unnamed);
             };

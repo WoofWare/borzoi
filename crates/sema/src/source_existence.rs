@@ -249,7 +249,142 @@ pub enum ExistenceUnread {
     /// line (`f@7`), in a file whose `#line` directives may move the lines
     /// FCS reports.
     LineDirective(usize),
+    /// A leaf form outside the certified domain ([`LEAF_FORMS`]).
+    OutsideDomain(usize, Leaf),
 }
+
+/// A syntax leaf the walk interprets, whose forms it certifies one by one
+/// ([`LEAF_FORMS`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Leaf {
+    /// A type definition's name.
+    TypeHead,
+    /// An augmentation's head: the type it extends.
+    AugmentationHead,
+    /// An abbreviation's target, where a reference may be a type provider.
+    ProvidedTarget,
+}
+
+/// What the walk does with one form of a [`Leaf`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    /// Read, and graded by `source_existence_diff`.
+    Read,
+    /// Declined.
+    Declined,
+}
+
+/// One form of a leaf: a file that writes it, and the walk's verdict. The
+/// table is the certified domain: `source_existence_domain` grades every
+/// `Read` row against FCS and holds the walk to every row's verdict, so the
+/// predicate and the forms it admits cannot drift apart. A form not in the
+/// table is outside the domain only if the walk declines it; a leaf the walk
+/// reads gains a row for each form it reads.
+#[derive(Debug, Clone, Copy)]
+pub struct LeafForm {
+    pub leaf: Leaf,
+    pub form: &'static str,
+    /// A producer file writing the form.
+    pub source: &'static str,
+    /// Whether the producer's references may hold a type provider.
+    pub providers: ProviderReferences,
+    pub verdict: Verdict,
+}
+
+/// The certified domain of each leaf ([`LeafForm`]).
+pub const LEAF_FORMS: &[LeafForm] = &[
+    LeafForm {
+        leaf: Leaf::TypeHead,
+        form: "single",
+        source: "namespace D\ntype T = { X: int }\n",
+        providers: ProviderReferences::None,
+        verdict: Verdict::Read,
+    },
+    LeafForm {
+        leaf: Leaf::TypeHead,
+        form: "dotted",
+        source: "module D\ntype X.Y = { N: int }\n",
+        providers: ProviderReferences::None,
+        verdict: Verdict::Declined,
+    },
+    LeafForm {
+        leaf: Leaf::AugmentationHead,
+        form: "local",
+        source: "module D\ntype R = { X: int }\ntype R with\n    member r.M() = 1\n",
+        providers: ProviderReferences::None,
+        verdict: Verdict::Read,
+    },
+    LeafForm {
+        leaf: Leaf::AugmentationHead,
+        form: "qualified",
+        source: "module D\ntype System.String with\n    member s.M() = 1\n",
+        providers: ProviderReferences::None,
+        verdict: Verdict::Read,
+    },
+    LeafForm {
+        leaf: Leaf::AugmentationHead,
+        form: "generic",
+        source: "module D\ntype List<'T> with\n    member l.M() = 1\n",
+        providers: ProviderReferences::None,
+        verdict: Verdict::Read,
+    },
+    LeafForm {
+        leaf: Leaf::AugmentationHead,
+        form: "tuple",
+        source: "module D\ntype (int * int) with\n    member x.M() = 1\n",
+        providers: ProviderReferences::None,
+        verdict: Verdict::Read,
+    },
+    LeafForm {
+        leaf: Leaf::AugmentationHead,
+        form: "global",
+        source: "namespace rec D\ntype C() = class end\ntype global.D.C with\n    static member E(s: string) = s\n",
+        providers: ProviderReferences::None,
+        verdict: Verdict::Declined,
+    },
+    LeafForm {
+        leaf: Leaf::ProvidedTarget,
+        form: "tuple",
+        source: "namespace D\ntype T = int * int\n",
+        providers: ProviderReferences::Possible,
+        verdict: Verdict::Read,
+    },
+    LeafForm {
+        leaf: Leaf::ProvidedTarget,
+        form: "function",
+        source: "namespace D\ntype T = int -> int\n",
+        providers: ProviderReferences::Possible,
+        verdict: Verdict::Read,
+    },
+    LeafForm {
+        leaf: Leaf::ProvidedTarget,
+        form: "array",
+        source: "namespace D\ntype T = int[]\n",
+        providers: ProviderReferences::Possible,
+        verdict: Verdict::Read,
+    },
+    LeafForm {
+        leaf: Leaf::ProvidedTarget,
+        form: "named",
+        source: "namespace D\ntype T = int\n",
+        providers: ProviderReferences::Possible,
+        verdict: Verdict::Declined,
+    },
+    LeafForm {
+        leaf: Leaf::ProvidedTarget,
+        form: "postfix",
+        source: "namespace D\ntype T = int list\n",
+        providers: ProviderReferences::Possible,
+        verdict: Verdict::Declined,
+    },
+    LeafForm {
+        leaf: Leaf::ProvidedTarget,
+        form: "prefix",
+        source: "namespace D\ntype T = Map<int, int>\n",
+        providers: ProviderReferences::Possible,
+        verdict: Verdict::Declined,
+    },
+];
 
 /// A place the walk emitted facts FCS's CCU may not hold: where the surplus
 /// comes from.
@@ -413,6 +548,8 @@ channels! {
     ClassLet,
     /// A `#line` directive in a file with a type's `[<Extension>]` `let`.
     LineDirective,
+    /// A leaf form outside the certified domain ([`LEAF_FORMS`]).
+    OutsideDomain,
     /// A member or declaration the walk cannot name.
     UnnamedDeclaration,
     /// A member FCS rejects in an augmentation.
@@ -446,7 +583,8 @@ impl Channel {
             | Channel::TypeProviderAssembly
             | Channel::UnnamedDeclaration
             | Channel::ReadingsBudget
-            | Channel::LineDirective => Treatment::Declined,
+            | Channel::LineDirective
+            | Channel::OutsideDomain => Treatment::Declined,
             Channel::Defines | Channel::LanguageVersion | Channel::GeneratedItems => {
                 Treatment::Caller
             }
@@ -1292,6 +1430,10 @@ impl FileWalk<'_> {
         if is_augmentation(defn) {
             return self.augmentation(scope, defn, position, ctx);
         }
+        // `type X.Y = …` (FS0925, recovered as `X`) is outside the domain.
+        if defn.long_id().is_some_and(|li| li.idents().count() > 1) {
+            return Err(ExistenceUnread::OutsideDomain(self.index, Leaf::TypeHead));
+        }
         let name = defn
             .long_id()
             .and_then(|li| li.idents().last())
@@ -1851,6 +1993,12 @@ impl FileWalk<'_> {
             self.type_bodies(scope, None, &members)?;
             return self.members(scope, &members, Some(&names));
         };
+        if head.first().is_some_and(|h| h == "global") {
+            return Err(ExistenceUnread::OutsideDomain(
+                self.index,
+                Leaf::AugmentationHead,
+            ));
+        }
         let last = head.last().expect("not empty").clone();
         // A qualified head names a type of this list only through a path to
         // the list's own container.
@@ -1931,8 +2079,14 @@ fn intrinsic_in(ctx: &ListCtx, name: &str, arity: usize, position: usize) -> May
     }
 }
 
-/// Whether `defn` is certainly a class, struct, record or union.
+/// Whether `defn` is certainly a class, struct, record or union. An
+/// attribute may change the kind FCS infers (`[<Interface>]`,
+/// `[<AbstractClass>]`, `[<Struct>]`, `[<Class>]`, `[<Measure>]`), so an
+/// attributed type is not certainly one.
 fn certainly_class_like(defn: &TypeDefn) -> bool {
+    if defn.attributes().next().is_some() {
+        return false;
+    }
     match defn.repr() {
         Some(TypeDefnRepr::Record(_)) | Some(TypeDefnRepr::Union(_)) => true,
         Some(TypeDefnRepr::ObjectModel(om)) => {
@@ -2043,34 +2197,34 @@ fn tuple_arity(head: &borzoi_cst::syntax::TupleTypeExtensionHead) -> usize {
 }
 
 /// Whether an abbreviation's target may be a generative provider's type,
-/// where a reference may be a provider: a prefix application (`Gen<N>`,
-/// whose arguments may be static ones), or a bare name, which FCS hands a
-/// provider with an empty argument list (`Provider.Generated`). Only a
-/// structural type (a tuple, a function, an array, a variable) or a type
-/// FSharp.Core declares in every file's scope is no provider's.
+/// where a reference may be a provider ([`Leaf::ProvidedTarget`]): any
+/// named type, applied or not, prefix or postfix (FCS hands a provider any
+/// `SynType.App` or bare name, and an opened provider namespace may shadow
+/// even FSharp.Core's names). Only a structural type (a tuple, a function,
+/// an array, a variable, an anonymous record) is no provider's.
 fn may_be_provided(ty: &Type) -> bool {
-    if let Type::Paren(p) = ty {
-        return p.inner().as_ref().is_some_and(may_be_provided);
+    match ty {
+        Type::Paren(p) => p.inner().as_ref().is_none_or(may_be_provided),
+        Type::Tuple(_)
+        | Type::Fun(_)
+        | Type::Array(_)
+        | Type::Var(_)
+        | Type::Anon(_)
+        | Type::AnonRecd(_) => false,
+        Type::LongIdent(_)
+        | Type::App(_)
+        | Type::LongIdentApp(_)
+        | Type::Hash(_)
+        | Type::WithNull(_)
+        | Type::Constrained(_)
+        | Type::Intersection(_)
+        | Type::MeasurePower(_)
+        | Type::StaticConst(_)
+        | Type::StaticConstExpr(_)
+        | Type::StaticConstNamed(_)
+        | Type::StaticConstNull(_)
+        | Type::SignatureParameter(_) => true,
     }
-    if let Type::LongIdent(t) = ty {
-        return match abbrev_single_ident(ty) {
-            Some(name) => !FSHARP_CORE_TYPE_NAMES.contains(&name.as_str()),
-            None => t.long_ident().is_some(),
-        };
-    }
-    has_prefix_application(ty)
-}
-
-/// Whether a type applies a head to arguments in angle brackets (`Foo<N>`):
-/// a provider's static arguments may be among them.
-fn has_prefix_application(ty: &Type) -> bool {
-    std::iter::once(ty.syntax().clone())
-        .chain(ty.syntax().descendants())
-        .any(|n| {
-            n.kind() == SyntaxKind::LONG_IDENT_APP_TYPE
-                || (n.kind() == SyntaxKind::APP_TYPE
-                    && borzoi_cst::syntax::AppType::cast(n).is_some_and(|a| !a.is_postfix()))
-        })
 }
 
 /// The 1-based line of each offset of one file, in FCS's sense: a line
@@ -2128,7 +2282,12 @@ fn binding_name(pat: &Pat) -> Option<String> {
 /// function: `let Some x = …`, `let None = …` and `let (f x) = …` do not.
 fn binding_name_at(pat: &Pat, top: bool) -> Option<String> {
     match pat {
-        Pat::Named(n) => n.ident().map(|t| id_text(&t).into_owned()),
+        // `let (|Zero|_|) = …`: a nullary active pattern, named by its
+        // recognizer.
+        Pat::Named(n) => match n.active_pat_name() {
+            Some(ap) => Some(active_pattern_name(&ap)),
+            None => n.ident().map(|t| id_text(&t).into_owned()),
+        },
         Pat::LongIdent(l) => {
             if let Some(ap) = l.active_pat_name() {
                 return Some(active_pattern_name(&ap));

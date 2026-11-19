@@ -5192,6 +5192,27 @@ impl ResolvedProject {
         &self.files[idx]
     }
 
+    /// The full path of every module (by its declaration) and every type the
+    /// walk placed, outside an anonymous root: what `source_existence`'s
+    /// entity paths must hold of the same files. `names` must be the table
+    /// the project was resolved against.
+    #[cfg(feature = "test-support")]
+    pub(crate) fn module_and_placed_type_paths(&self, names: &NameTable) -> Vec<Vec<String>> {
+        let mut out = Vec::new();
+        for file in &self.files {
+            let surface = file.surface();
+            for t in &surface.placed_types {
+                out.push(t.path.clone());
+            }
+            for d in &surface.export_decls {
+                if !d.anonymous_root && matches!(d.kind, ExportDeclKind::Module { .. }) {
+                    out.push(d.path.spell(names));
+                }
+            }
+        }
+        out
+    }
+
     pub fn len(&self) -> usize {
         self.files.len()
     }
