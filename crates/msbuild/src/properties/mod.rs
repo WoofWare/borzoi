@@ -400,13 +400,13 @@ impl PropertyMap {
     pub(crate) fn record_candidates(&mut self, key: &str, candidates: Candidates) {
         let lower = key.to_ascii_lowercase();
         self.remove_record(&lower);
-        let candidates = if self.candidate_bytes.saturating_add(candidates.bytes())
-            > candidates::MAX_RECORDED_CANDIDATE_BYTES
+        // No record reads as anything, so anything is recorded as none.
+        if matches!(candidates, Candidates::Anything)
+            || self.candidate_bytes.saturating_add(candidates.bytes())
+                > candidates::MAX_RECORDED_CANDIDATE_BYTES
         {
-            Candidates::Anything
-        } else {
-            candidates
-        };
+            return;
+        }
         self.candidate_bytes += candidates.bytes();
         self.fresh.push(lower.clone());
         self.candidates.insert(lower, candidates);
@@ -747,6 +747,17 @@ pub(crate) fn substitute_in_target(
     input: &str,
     props: &PropertyMap,
 ) -> (Provenanced<Escaped>, Vec<Issue>) {
+    substitute_undecided(input, props)
+}
+
+/// [`substitute`] with no file system and no assumption about MSBuild's
+/// working directory: every probe the Unix path adjustment needs, relative or
+/// absolute, is an [`Issue::PathAdjustmentUndecided`]. For text expanded
+/// speculatively, whose result must not rest on what a probe would find.
+pub(crate) fn substitute_undecided(
+    input: &str,
+    props: &PropertyMap,
+) -> (Provenanced<Escaped>, Vec<Issue>) {
     substitute_adjusting(input, props, None, Relative::Undecided)
 }
 
@@ -784,9 +795,9 @@ pub(crate) enum Relative {
     /// `obj\`, and with it every import `MSBuildProjectExtensionsPath`
     /// chooses. A seed's backslash is not project text, and declines.
     MissForProjectText,
-    /// Every relative probe declines: a target's expansion
-    /// ([`substitute_in_target`]).
-    #[cfg(any(test, feature = "test-support"))]
+    /// Every relative probe declines: a speculative expansion
+    /// ([`substitute_undecided`]), as a target's does (`substitute_in_target`,
+    /// with the test support).
     Undecided,
 }
 

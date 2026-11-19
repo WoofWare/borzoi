@@ -192,10 +192,11 @@ impl State<'_> {
         raw: &str,
         table: &PropertyMap,
     ) -> (properties::Provenanced<Escaped>, Vec<properties::Issue>) {
-        // Without the file system: a speculative value is no reason for the
-        // evaluation to depend on what a probe would find, so one the Unix
-        // path adjustment would probe for is an issue, and anything.
-        properties::substitute(raw, table)
+        // Without the file system, and assuming nothing of MSBuild's working
+        // directory: a speculative value is no reason for the evaluation to
+        // depend on what a probe would find, so one the Unix path adjustment
+        // would probe for, relative or absolute, is an issue, and anything.
+        properties::substitute_undecided(raw, table)
     }
 
     /// The candidates of a property element whose write the real build may
@@ -206,6 +207,11 @@ impl State<'_> {
             return Candidates::Anything;
         }
         let name = element.tag_name().name();
+        // A body whose source alone is far past the budget is not collected
+        // only to be dropped; comments in it may make that a decline.
+        if element.range().len() > 4 * MAX_CANDIDATE_BYTES {
+            return Candidates::Anything;
+        }
         let value = collect_element_text(element)
             .map_or(Candidates::Anything, |raw| self.value_candidates(&raw));
         self.candidates_of(name).union(value)

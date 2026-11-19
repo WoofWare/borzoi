@@ -719,6 +719,34 @@ fn an_unresolved_sdk_withdraws_the_channel() {
     assert_eq!(reads.candidates["OutputPath"], None);
 }
 
+/// A relative path with a backslash is adjusted by what MSBuild's working
+/// directory holds: a value expanded only to name candidates assumes nothing
+/// about it, so the one MSBuild started beside `obj` ends with is among them.
+#[test]
+fn a_speculative_relative_path_assumes_no_working_directory() {
+    let tmp = TempDir::new().unwrap();
+    let dir = borzoi_msbuild::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    let path = dir.join("Demo.fsproj");
+    let cwd = TempDir::new().unwrap();
+    std::fs::create_dir(cwd.path().join("obj")).unwrap();
+    let xml = "<Project><PropertyGroup>\
+               <P Condition=\"'$(G.ToUpperInvariant())' == 'X'\">obj\\foo</P>\
+               </PropertyGroup></Project>";
+    std::fs::write(&path, xml).unwrap();
+    let probe = ReadProbe {
+        properties: vec!["P".to_owned()],
+        ..ReadProbe::default()
+    };
+    let mut oracle = Oracle::spawn_in_dir(cwd.path());
+    let (theirs, reads) =
+        evaluate(&mut oracle, xml, &path, &probe, "x").expect("MSBuild evaluates it");
+    let real = theirs.get("P").cloned().unwrap_or_default();
+    assert_eq!(real, "obj/foo", "MSBuild adjusts the path beside `obj`");
+    if let Some(candidates) = &reads.candidates["P"] {
+        assert!(candidates.contains(&real), "{candidates:?}");
+    }
+}
+
 /// Each `<Choose>` the walk cannot decide widens what its branches write
 /// once: four optional appends name the five strings they can make.
 #[test]
