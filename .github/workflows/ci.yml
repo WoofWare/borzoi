@@ -175,6 +175,9 @@ jobs:
       - name: Test the whole-project gate script
         run: bash tools/ci/project-corpus-gate.test.sh
 
+      - name: Test the ignored-sweep list
+        run: bash tools/ci/corpus-sweeps.test.sh
+
       - name: Test the facade freeze check
         run: bash tools/ci/facade-lock-check.test.sh
 
@@ -416,17 +419,7 @@ jobs:
         # assertion.
         env:
           BORZOI_FCS_DUMP: ${{ runner.temp }}/fcs-dump-bundle/fcs-dump
-        run: |
-          nix develop --command cargo test --profile gate -p borzoi-cst --test all \
-            parser_corpus:: -- --ignored --nocapture
-          nix develop --command cargo test -p borzoi-cst --test all \
-            parser_corpus_diff:: -- --ignored --nocapture
-          nix develop --command cargo test -p borzoi-cst --test all \
-            parser_diff_feature_gates:: -- --ignored --nocapture
-          nix develop --command cargo test --profile gate -p borzoi-cst --test all \
-            version_dependence_census:: -- --ignored --nocapture
-          nix develop --command cargo test -p borzoi-cst --test all \
-            print_roundtrip::corpus:: -- --ignored --nocapture
+        run: bash tools/ci/corpus-sweeps.sh parser-corpus parser-corpus-diff feature-gates version-dependence print-roundtrip
 
       - name: Gate on parser recovery under deliberate damage
         if: steps.gate.outputs.run == 'true'
@@ -442,9 +435,7 @@ jobs:
         # and is most of the step's time, so it runs under the gate profile.
         env:
           BORZOI_FCS_DUMP: ${{ runner.temp }}/fcs-dump-bundle/fcs-dump
-        run: |
-          nix develop --command cargo test --profile gate -p borzoi-cst --test all \
-            recovery_sweep:: -- --ignored --nocapture
+        run: bash tools/ci/corpus-sweeps.sh recovery
 
       - name: Grade the lex filter over declaration sequences
         if: steps.gate.outputs.run == 'true'
@@ -455,9 +446,7 @@ jobs:
         # `crates/cst/tests/manifests/decl_sequence_grid_streams.txt`.
         env:
           BORZOI_FCS_DUMP: ${{ runner.temp }}/fcs-dump-bundle/fcs-dump
-        run: |
-          nix develop --command cargo test -p borzoi-cst --test all \
-            parser_diff_decl_sequence_grid::every_declaration_pair_streams -- --ignored --nocapture
+        run: bash tools/ci/corpus-sweeps.sh decl-sequence-streams
 
       - name: Hold the syntax table to rowan over the corpus
         if: steps.gate.outputs.run == 'true'
@@ -466,9 +455,7 @@ jobs:
         # method to rowan's exhaustively over short generated sources; this
         # holds every corpus file's elements to rowan's on the same green
         # tree, so a navigation bug that needs real code's shapes cannot land.
-        run: |
-          nix develop --command cargo test --profile gate -p borzoi-cst --test all \
-            flat_tree_reference::corpus -- --ignored --nocapture
+        run: bash tools/ci/corpus-sweeps.sh flat-tree
 
       - name: Hold every per-version facade to the union over the corpus
         if: steps.gate.outputs.run == 'true'
@@ -476,9 +463,7 @@ jobs:
         # every facade; this reads every corpus file, parsed at a version each
         # facade serves, and requires every facade accessor to run on some
         # fixture or corpus file.
-        run: |
-          nix develop --command cargo test --profile gate -p borzoi-cst --test all \
-            facade_properties::corpus -- --ignored --nocapture
+        run: bash tools/ci/corpus-sweeps.sh facade-properties
 
       - name: Sweep the parser for panics on adversarial input
         if: steps.gate.outputs.run == 'true'
@@ -489,9 +474,7 @@ jobs:
         # half — token soup that is not F#, at every language version. The
         # exhaustive halves run in the ordinary suite; this is the fresh-seed
         # one, which takes a new seed each run and prints it.
-        run: |
-          nix develop --command cargo test --profile gate -p borzoi-cst --test all \
-            parser_panic_sweep::fresh_seed -- --ignored --nocapture
+        run: bash tools/ci/corpus-sweeps.sh panic-fresh-seed
 
       - name: Sweep the parser for panics on layout damage
         if: steps.gate.outputs.run == 'true'
@@ -502,9 +485,7 @@ jobs:
         # only by chance; this puts every production in the corpus in front of
         # it. It is a quarter of a million whole-file parses, and the debug
         # assertions it exists to trip are ones the `gate` profile keeps.
-        run: |
-          nix develop --command cargo test --profile gate -p borzoi-cst --test all \
-            layout_perturbation_sweep:: -- --ignored --nocapture
+        run: bash tools/ci/corpus-sweeps.sh layout-perturbation
 
       - name: Hold the lex filter's columns to UTF-16 units over the corpus
         if: steps.gate.outputs.run == 'true'
@@ -514,9 +495,7 @@ jobs:
         # one measured in bytes would move after nearly every identifier. The
         # normal suite runs a sample; this runs every file at the oldest and
         # newest language versions.
-        run: |
-          nix develop --command cargo test --profile gate -p borzoi-cst --test all \
-            utf16_width_invariance::corpus -- --ignored --nocapture
+        run: bash tools/ci/corpus-sweeps.sh utf16-width
 
       - name: Report the slowest tests
         if: ${{ !cancelled() && steps.gate.outputs.run == 'true' }}
@@ -583,9 +562,7 @@ jobs:
         # `crates/msbuild/tests/manifests/fsproj_msbuild_corpus_diff.txt`.
         # A newly declined project fails as loudly as a newly wrong one.
         # Evaluation is pre-execution, so this needs no restore (~40 s).
-        run: |
-          nix develop --command cargo test -p borzoi-msbuild \
-            --test fsproj_msbuild_corpus_diff -- --ignored --nocapture
+        run: bash tools/ci/corpus-sweeps.sh msbuild-corpus
 
       - name: Pin the SDK-chain decline attribution
         if: steps.gate.outputs.run == 'true'
@@ -594,9 +571,7 @@ jobs:
         # fail this and force the figures to be restated. It exists because the
         # prose version of these numbers was wrong for a year and sent a plan
         # stage to wait on a lever worth 1.5% of what the comment claimed.
-        run: |
-          nix develop --command cargo test -p borzoi-msbuild \
-            --test sdk_chain_decline_attribution -- --ignored --nocapture
+        run: bash tools/ci/corpus-sweeps.sh sdk-chain-attribution
 
       - name: Report the slowest tests
         if: ${{ !cancelled() && steps.gate.outputs.run == 'true' }}
@@ -666,11 +641,7 @@ jobs:
         # caused by the diff in front of you: it can be a latent bug this run
         # happened to reach first. Reproduce with the printed seed before
         # concluding anything about the change.
-        run: |
-          nix develop --command cargo test -p borzoi-nuget --test all soak:: \
-            -- --ignored --nocapture
-          nix develop --command cargo test -p borzoi-nuget --test all \
-            resolver_diff::randomised_soundness_soak -- --ignored --nocapture
+        run: bash tools/ci/corpus-sweeps.sh nuget-soak resolver-soak
 
       - name: Report the slowest tests
         if: ${{ !cancelled() && steps.gate.outputs.run == 'true' }}
@@ -994,9 +965,7 @@ jobs:
         # Same stride as the series, so the two see the same sample.
         env:
           BORZOI_FCS_DUMP: ${{ runner.temp }}/fcs-dump-bundle/fcs-dump
-        run: |
-          nix develop --command cargo test -p borzoi-sema --test all \
-            resolve_corpus_diff:: -- --ignored --nocapture
+        run: bash tools/ci/corpus-sweeps.sh resolve-corpus
 
       - name: Gate on attribute resolution over the corpus
         if: steps.gate.outputs.run == 'true'
@@ -1007,9 +976,7 @@ jobs:
         # decay into deferral and report that as a pass.
         env:
           BORZOI_FCS_DUMP: ${{ runner.temp }}/fcs-dump-bundle/fcs-dump
-        run: |
-          nix develop --command cargo test -p borzoi-sema --test all \
-            attr_resolution_sweep:: -- --ignored --nocapture
+        run: bash tools/ci/corpus-sweeps.sh attr-resolution
 
       - name: Gate on resolver walk coverage over the corpus
         if: steps.gate.outputs.run == 'true'
@@ -1017,9 +984,7 @@ jobs:
         # the container that explains it, pinned per file by a checked-in
         # manifest. A construct whose bodies the walk skips reads as ordinary
         # deferrals to the FCS differentials; here it is a named block.
-        run: |
-          nix develop --command cargo test -p borzoi-sema --test all \
-            silent_region_sweep:: -- --ignored --nocapture
+        run: bash tools/ci/corpus-sweeps.sh silent-region
 
       - name: Gate on the auto-open member sweep
         if: steps.gate.outputs.run == 'true'
@@ -1031,9 +996,7 @@ jobs:
         # the ordinary suite for its length.
         env:
           BORZOI_FCS_DUMP: ${{ runner.temp }}/fcs-dump-bundle/fcs-dump
-        run: |
-          nix develop --command cargo test -p borzoi-sema --test all \
-            auto_open_member_sweep:: -- --ignored --nocapture
+        run: bash tools/ci/corpus-sweeps.sh auto-open-member
 
       - name: Gate on inferred types over the corpus
         if: steps.gate.outputs.run == 'true'
@@ -1044,9 +1007,7 @@ jobs:
         # coverage by FCS node kind — the worklist for the next inference slice.
         env:
           BORZOI_FCS_DUMP: ${{ runner.temp }}/fcs-dump-bundle/fcs-dump
-        run: |
-          nix develop --command cargo test -p borzoi-sema --test all \
-            infer_corpus_diff:: -- --ignored --nocapture
+        run: bash tools/ci/corpus-sweeps.sh infer-corpus-diff
 
       - name: Gate on everything inference publishes over the corpus
         if: steps.gate.outputs.run == 'true'
@@ -1058,9 +1019,7 @@ jobs:
         # The bundle is for the FSharp.Core it ships, which the env reads.
         env:
           BORZOI_FCS_DUMP: ${{ runner.temp }}/fcs-dump-bundle/fcs-dump
-        run: |
-          nix develop --command cargo test -p borzoi-sema --test all \
-            infer_corpus_dump:: -- --ignored --nocapture
+        run: bash tools/ci/corpus-sweeps.sh infer-corpus-dump
 
       - name: Gate on incremental inference over a corpus sample
         if: steps.gate.outputs.run == 'true'
@@ -1071,10 +1030,7 @@ jobs:
         # same equation over real code.
         env:
           BORZOI_FCS_DUMP: ${{ runner.temp }}/fcs-dump-bundle/fcs-dump
-        run: |
-          nix develop --command cargo test -p borzoi-sema --test all \
-            infer_incremental_diff::incremental_equals_batch_over_a_corpus_sample \
-            -- --ignored --nocapture
+        run: bash tools/ci/corpus-sweeps.sh infer-incremental
 
       - name: Gate on the extension gate over damaged files
         if: steps.gate.outputs.run == 'true'
@@ -1085,9 +1041,7 @@ jobs:
         # name the file may declare. The ordinary suite runs a sample.
         env:
           BORZOI_FCS_DUMP: ${{ runner.temp }}/fcs-dump-bundle/fcs-dump
-        run: |
-          nix develop --command cargo test -p borzoi-sema --test all \
-            infer_extension_damage_sweep::full_sweep -- --ignored --nocapture
+        run: bash tools/ci/corpus-sweeps.sh infer-extension-damage
 
       - name: Report the slowest tests
         if: ${{ !cancelled() && steps.gate.outputs.run == 'true' }}
@@ -1244,9 +1198,7 @@ jobs:
         # sweeps here rather than skipping for want of a sibling checkout.
         env:
           BORZOI_FCS_DUMP: ${{ runner.temp }}/fcs-dump-bundle/fcs-dump
-        run: |
-          nix develop --command cargo test -p borzoi --test all \
-            parser_corpus_sweep:: -- --ignored --nocapture
+        run: bash tools/ci/corpus-sweeps.sh lsp-parser-corpus
 
       - name: Gate on the shipped XML-doc sweep
         if: steps.gate.outputs.run == 'true'
@@ -1254,9 +1206,7 @@ jobs:
         # (the reference pack and FSharp.Core): each indexes, each entry renders
         # with no Markdown structure leaking from its text, and no tag in them
         # falls back to plain text. The SDK comes from `nix develop`.
-        run: |
-          nix develop --command cargo test -p borzoi --test all \
-            xml_doc_shipped_sweep:: -- --ignored --nocapture
+        run: bash tools/ci/corpus-sweeps.sh xml-doc-shipped
 
       - name: Gate on the source XML-doc corpus differential
         if: steps.gate.outputs.run == 'true'
@@ -1265,9 +1215,7 @@ jobs:
         # those lines; every decline is pinned in the checked-in manifest.
         env:
           BORZOI_FCS_DUMP: ${{ runner.temp }}/fcs-dump-bundle/fcs-dump
-        run: |
-          nix develop --command cargo test -p borzoi --test all \
-            xml_doc_source_diff::corpus:: -- --ignored --nocapture
+        run: bash tools/ci/corpus-sweeps.sh xml-doc-source
 
       - name: Gate on the <inheritdoc> sweep against Roslyn
         if: steps.gate.outputs.run == 'true'
@@ -1280,11 +1228,7 @@ jobs:
         # generated-program module's `deep_*` twins, in the module and its
         # families, are its only ignored tests. The type-ID differential's
         # generated metadata runs deep here too.
-        run: |
-          nix develop --command cargo test -p borzoi --test all -- --ignored --nocapture \
-            xml_doc_inheritdoc_sweep:: xml_doc_inheritdoc_cref_diff::deep_ \
-            xml_doc_inheritdoc_generated_diff:: xml_doc_inheritdoc_metadata_diff::deep_ \
-            xml_doc_type_id_diff::deep_
+        run: bash tools/ci/corpus-sweeps.sh inheritdoc
 
       - name: Report the slowest tests
         if: ${{ !cancelled() && steps.gate.outputs.run == 'true' }}

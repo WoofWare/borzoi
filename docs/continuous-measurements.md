@@ -109,7 +109,7 @@ the same property table. Neither of these was reachable that way:
   `'$(TargetFrameworkIdentifier)' == '.NETFramework'`, a property the common
   targets *derive*. We read it as empty and trusted, so the `Otherwise` arm won
   and a wrong value was **committed**. This is the one that mattered, and not
-  because `net472` is a target worth serving (it is not — see AGENTS.md):
+  because `net472` is a target worth serving (it is not — see `crates/assembly/AGENTS.md`):
   `define_constants` is *consumed*, deciding which `#if` branch the whole
   semantic layer sees.
 - `Link = NullHelpers.fs` on `FSharp.Build.fsproj` ([PR #263]) — a `Compile`

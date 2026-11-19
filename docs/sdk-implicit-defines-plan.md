@@ -260,4 +260,4 @@ here, but the perturbation census should keep reporting it.
 - Platform TFMs (`net8.0-windows`, `-android`, …). Stage 4 declines them;
   widening the envelope is a later, census-driven decision.
 - `.NETFramework` quality. The vocabulary is modelled because the SDK logic is
-  shared, but net4x is an unsupported target (AGENTS.md).
+  shared, but net4x is an unsupported target (`crates/assembly/AGENTS.md`).
