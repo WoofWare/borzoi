@@ -227,3 +227,20 @@ fn types_project_refuses_a_language_version_pin() {
     assert!(is_refusal(&got[0]), "{}", got[0]);
     assert!(!is_refusal(&got[1]), "{}", got[1]);
 }
+
+/// A `file-batch` reference is read exactly as written, so one that names no
+/// file (a trailing blank, say) is refused: FCS drops a reference it cannot
+/// find and checks without it.
+#[test]
+fn file_batch_refuses_a_reference_that_is_not_a_file() {
+    let (dir, a) = fixture();
+    let reference = dir.path().join("Ref.dll");
+    std::fs::write(&reference, "").expect("write");
+    let lines = vec![
+        json!({"kind": "uses", "path": a, "refs": [format!("{} ", reference.display())]})
+            .to_string()
+            .into_bytes(),
+    ];
+    let got = answers("file-batch", &lines);
+    assert!(is_refusal(&got[0]), "{}", got[0]);
+}
