@@ -16,7 +16,8 @@ use std::hash::Hash;
 use std::marker::PhantomData;
 
 use crate::names::{
-    CaseName, EntityName, Ident, InfixOperator, LongIdent, Operator, TyparName, ValueName, VarName,
+    EntityName, EntityPath, ExceptionName, Ident, InfixOperator, LongIdent, Operator, TyparName,
+    UnionCaseName, ValueName, VarName,
 };
 use crate::vec::{Vec1, Vec2};
 use crate::version::{Available, Gate, Unavailable, Version};
@@ -37,7 +38,7 @@ pub enum ImplFile<V: Version> {
 pub struct NamedModule<V: Version> {
     pub attributes: Vec<Attribute<V>>,
     pub access: Option<Access>,
-    pub name: LongIdent,
+    pub name: EntityPath,
     pub body: ModuleBody<V>,
 }
 
@@ -54,7 +55,7 @@ pub enum NamespaceName {
     /// `namespace global`
     Global,
     /// `namespace A.B`
-    Named(LongIdent),
+    Named(EntityPath),
 }
 
 /// An accessibility modifier.
@@ -459,13 +460,13 @@ pub struct RecordField {
 /// (FS3176), so [`UnionCase::new`] refuses them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnionCase {
-    name: CaseName,
+    name: UnionCaseName,
     fields: Vec<UnionField>,
 }
 
 impl UnionCase {
     /// The case, or why F#'s checker refuses it.
-    pub fn new(name: CaseName, fields: Vec<UnionField>) -> Result<Self, DeclRefusal> {
+    pub fn new(name: UnionCaseName, fields: Vec<UnionField>) -> Result<Self, DeclRefusal> {
         if name.as_str() == "Tags" {
             return Err(DeclRefusal::CaseNamedTags);
         }
@@ -481,7 +482,7 @@ impl UnionCase {
         Ok(UnionCase { name, fields })
     }
 
-    pub fn name(&self) -> &CaseName {
+    pub fn name(&self) -> &UnionCaseName {
         &self.name
     }
 
@@ -495,19 +496,19 @@ impl UnionCase {
 /// (FS3176), so [`ExceptionDefn::new`] refuses them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExceptionDefn {
-    name: CaseName,
+    name: ExceptionName,
     fields: Vec<UnionField>,
 }
 
 impl ExceptionDefn {
     /// The exception, or why F#'s checker refuses it.
-    pub fn new(name: CaseName, fields: Vec<UnionField>) -> Result<Self, DeclRefusal> {
+    pub fn new(name: ExceptionName, fields: Vec<UnionField>) -> Result<Self, DeclRefusal> {
         // An unnamed field is `Data0`, `Data1`, ….
         check_fields(&fields, |i| format!("Data{i}"))?;
         Ok(ExceptionDefn { name, fields })
     }
 
-    pub fn name(&self) -> &CaseName {
+    pub fn name(&self) -> &ExceptionName {
         &self.name
     }
 

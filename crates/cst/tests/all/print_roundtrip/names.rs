@@ -3,7 +3,8 @@
 //! short operator spelling in every position an operator can take.
 
 use borzoi_print::names::{
-    CaseName, EntityName, Ident, InfixOperator, LongIdent, Operator, TyparName, ValueName,
+    EntityName, EntityPath, ExceptionName, Ident, InfixOperator, LongIdent, Operator, TyparName,
+    UnionCaseName, ValueName,
 };
 use borzoi_print::tree::{
     Const, ExceptionDefn, ForDirection, ModuleBody, RecordField, Type, TypeRepr, UnionCase,
@@ -121,9 +122,11 @@ fn let_decl(head: BindingHead, body: Expr) -> ModuleDecl {
 /// elsewhere, with `id` its field's name.
 fn name_positions(id: &Ident) -> ImplFile {
     let entity = EntityName::new(id.clone()).expect("an entity's name");
-    let case = CaseName::new(id.clone()).unwrap_or_else(|_| {
-        CaseName::new(Ident::new("C").expect("an identifier")).expect("a case")
-    });
+    let c = || Ident::new("C").expect("an identifier");
+    let case =
+        UnionCaseName::new(id.clone()).unwrap_or_else(|_| UnionCaseName::new(c()).expect("a case"));
+    let exn = ExceptionName::new(id.clone())
+        .unwrap_or_else(|_| ExceptionName::new(c()).expect("an exception"));
     let path = LongIdent(Vec1::new(id.clone(), vec![id.clone()]));
     let ty = Type::App {
         head: single(id),
@@ -237,7 +240,7 @@ fn name_positions(id: &Ident) -> ImplFile {
         )),
         ModuleDecl::Exception(
             ExceptionDefn::new(
-                case,
+                exn,
                 vec![UnionField {
                     name: Some(id.clone()),
                     ty,
@@ -249,7 +252,7 @@ fn name_positions(id: &Ident) -> ImplFile {
     ImplFile::NamedModule(NamedModule {
         attributes: Vec::new(),
         access: None,
-        name: path,
+        name: EntityPath(Vec1::new(entity.clone(), vec![entity.clone()])),
         body: ModuleBody::NonRec(vec![ModuleDecl::NestedModule(NestedModule {
             attributes: Vec::new(),
             access: None,

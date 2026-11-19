@@ -63,6 +63,8 @@ let rv = { A = 1; C = 2 }
 type Meth =
     static member F (a: int, b: int, ?c: int) : int = a
     static member G (x: int) : int = x
+    static member H () : int = 0
+    static member H (x: obj) : string = \"\"
 [<System.AttributeUsage(System.AttributeTargets.All, AllowMultiple = true)>]
 type AAttribute () =
     inherit System.Attribute ()
@@ -175,4 +177,28 @@ pub fn check_report(failures: &[CheckFailure]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n\n")
+}
+
+/// The errors FCS's checker reports at `lang` in `source`, a whole file
+/// checked on its own: a file with a `module` or `namespace` header cannot
+/// sit in another module after [`PRELUDE`].
+pub fn check_standalone_errors(source: &str, lang: LanguageVersion) -> Vec<(i64, String)> {
+    let mut tmp = tempfile::Builder::new()
+        .prefix("Checked")
+        .suffix(".fs")
+        .tempfile()
+        .expect("create tempfile");
+    tmp.write_all(source.as_bytes()).expect("write source");
+    let json = fcs_check_diagnostics_at(tmp.path(), &lang.to_string());
+    let record: serde_json::Value = serde_json::from_str(&json).expect("check JSON");
+    record["Diagnostics"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no check diagnostics: {json}"))
+        .iter()
+        .filter(|d| d["Severity"] == "Error")
+        .map(|d| {
+            let code = d["Code"].as_i64().expect("a code");
+            (code, d["Message"].as_str().expect("a message").to_owned())
+        })
+        .collect()
 }

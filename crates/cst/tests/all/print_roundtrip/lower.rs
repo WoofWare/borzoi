@@ -18,7 +18,8 @@
 //! `f ((a, b))` to one tuple ([`application`]).
 
 use borzoi_print::names::{
-    CaseName, EntityName, Ident, InfixOperator, LongIdent, Operator, TyparName, ValueName, VarName,
+    EntityName, EntityPath, ExceptionName, Ident, InfixOperator, LongIdent, Operator, TyparName,
+    UnionCaseName, ValueName, VarName,
 };
 use borzoi_print::tree::{
     Access, AliasPat, AndBang, Args, ArrayRank, AsAlias, Attribute, AttributeArgs, Binding,
@@ -106,7 +107,7 @@ fn file<V: Version>(root: &NormalisedRoot, tally: &mut Tally) -> L<ImplFile<V>> 
         ] => Ok(ImplFile::NamedModule(NamedModule {
             attributes: attributes_of(attributes)?,
             access: access.map(lower_access),
-            name: long_ident(long_id)?,
+            name: entity_path(long_id)?,
             body: module_body(*is_rec, decls_lossy(decls, tally))?,
         })),
         modules => {
@@ -119,7 +120,7 @@ fn file<V: Version>(root: &NormalisedRoot, tally: &mut Tally) -> L<ImplFile<V>> 
                     return decline("namespace attributes or access");
                 }
                 let name = match kind {
-                    NamedKind::Namespace => NamespaceName::Named(long_ident(long_id)?),
+                    NamedKind::Namespace => NamespaceName::Named(entity_path(long_id)?),
                     NamedKind::GlobalNamespace => NamespaceName::Global,
                     NamedKind::Module => return decline("file shape"),
                 };
@@ -152,18 +153,24 @@ fn decls_lossy<V: Version>(decls: &[NormalisedDecl], tally: &mut Tally) -> Vec<M
                 };
                 Ok((entity_name(name)?, attributes_of(attributes)?))
             })();
+            // The module's declarations count as kept only if it is.
+            let mut inner = Tally::default();
             let module = header.and_then(|(name, attributes)| {
                 Ok(NestedModule {
                     attributes,
                     access: access.map(lower_access),
                     name,
-                    body: module_body(*is_rec, decls_lossy(decls, tally))?,
+                    body: module_body(*is_rec, decls_lossy(decls, &mut inner))?,
                 })
             });
             match module {
-                Ok(m) => out.push(ModuleDecl::NestedModule(m)),
+                Ok(m) => {
+                    tally.kept += inner.kept;
+                    out.push(ModuleDecl::NestedModule(m));
+                }
                 Err(d) => tally.dropped.push(d),
             }
+            tally.dropped.extend(inner.dropped);
             continue;
         }
         match decl(d) {
@@ -210,6 +217,8 @@ fn decl<V: Version>(d: &NormalisedDecl) -> L<ModuleDecl<V>> {
                 return decline("exception attributes, access, abbreviation or members");
             }
             let (name, fields) = case_parts(&exn.case)?;
+            let name =
+                ExceptionName::new(name).map_err(|_| Decline("name: refused for an exception"))?;
             ExceptionDefn::new(name, fields)
                 .map(ModuleDecl::Exception)
                 .map_err(refused)
@@ -302,11 +311,12 @@ fn typar_decl(t: &NormalisedTypar) -> L<TyparName> {
 
 fn union_case(c: &NormalisedUnionCase) -> L<UnionCase> {
     let (name, fields) = case_parts(c)?;
+    let name = UnionCaseName::new(name).map_err(|_| Decline("name: refused for a union case"))?;
     UnionCase::new(name, fields).map_err(refused)
 }
 
 /// A union case's or an exception's name and fields.
-fn case_parts(c: &NormalisedUnionCase) -> L<(CaseName, Vec<UnionField>)> {
+fn case_parts(c: &NormalisedUnionCase) -> L<(Ident, Vec<UnionField>)> {
     if !c.attributes.is_empty() {
         return decline("union case attributes");
     }
@@ -314,7 +324,7 @@ fn case_parts(c: &NormalisedUnionCase) -> L<(CaseName, Vec<UnionField>)> {
         return decline("union case with a full type");
     };
     Ok((
-        case_name(&c.ident)?,
+        ident(&c.ident)?,
         fields
             .iter()
             .map(|f| {
@@ -704,6 +714,11 @@ fn application<V: Version>(func: &NormalisedExpr, arg: &NormalisedExpr) -> L<Exp
     {
         return decline("expr: application of a parenthesised name");
     }
+    if is_parenthesised_unit(arg) {
+        // `f ()` and `f (())` call a method with no argument and with `()`;
+        // the tree's unit argument is the first.
+        return decline("expr: a parenthesised unit argument");
+    }
     let func = Box::new(expr(func)?);
     Ok(match argument_list(arg) {
         Some(elements) => Expr::MethodApp {
@@ -715,6 +730,18 @@ fn application<V: Version>(func: &NormalisedExpr, arg: &NormalisedExpr) -> L<Exp
             arg: Box::new(expr(arg)?),
         },
     })
+}
+
+/// Whether `arg` is `(())`, `((()))`, ….
+fn is_parenthesised_unit(arg: &NormalisedExpr) -> bool {
+    let NormalisedExpr::Paren(first) = arg else {
+        return false;
+    };
+    let mut inner: &NormalisedExpr = first;
+    while let NormalisedExpr::Paren(next) = inner {
+        inner = next;
+    }
+    matches!(inner, NormalisedExpr::Const(NormalisedConst::Unit))
 }
 
 /// The elements of `arg` if F#'s checker reads it as an argument list.
@@ -1350,8 +1377,11 @@ fn entity_name(s: &str) -> L<EntityName> {
     EntityName::new(ident(s)?).map_err(|_| Decline("name: refused for a type, module or case"))
 }
 
-fn case_name(s: &str) -> L<CaseName> {
-    CaseName::new(ident(s)?).map_err(|_| Decline("name: refused for a union case or exception"))
+fn entity_path(path: &[String]) -> L<EntityPath> {
+    let names = path.iter().map(|s| entity_name(s)).collect::<L<Vec<_>>>()?;
+    Vec1::from_vec(names)
+        .map(EntityPath)
+        .ok_or(Decline("name: empty path"))
 }
 
 fn long_ident(path: &[String]) -> L<LongIdent> {

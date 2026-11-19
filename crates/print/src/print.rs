@@ -30,7 +30,7 @@
 //! Elsewhere layout matters only between declarations: each starts its own
 //! line, and a nested module's declarations are indented two columns past it.
 
-use crate::names::{Ident, LongIdent, Operator, TyparName, ValueName};
+use crate::names::{EntityPath, Ident, LongIdent, Operator, TyparName, ValueName};
 use crate::tree::{
     Access, Args, AsAlias, Attribute, AttributeArgs, Binding, BindingHead, Comp, CompClause,
     CompItem, Const, Context, Expr, ForDirection, ForSource, ImplFile, LetBindings, ListBody,
@@ -67,7 +67,7 @@ fn print_file<V: Version>(file: &ImplFile<V>) -> Printer {
                 p.out.push_str(" rec");
             }
             p.out.push(' ');
-            p.long_ident(&m.name);
+            p.entity_path(&m.name);
             p.out.push('\n');
             p.decls(m.body.decls(), 0);
         }
@@ -80,7 +80,7 @@ fn print_file<V: Version>(file: &ImplFile<V>) -> Printer {
                 p.out.push(' ');
                 match &ns.name {
                     NamespaceName::Global => p.out.push_str("global"),
-                    NamespaceName::Named(name) => p.long_ident(name),
+                    NamespaceName::Named(name) => p.entity_path(name),
                 }
                 p.out.push('\n');
                 p.decls(ns.body.decls(), 0);
@@ -1008,6 +1008,15 @@ impl Printer {
                 self.out.push('.');
             }
             self.ident(id);
+        }
+    }
+
+    fn entity_path(&mut self, path: &EntityPath) {
+        for (i, name) in path.segments().iter().enumerate() {
+            if i > 0 {
+                self.out.push('.');
+            }
+            self.ident(name.ident());
         }
     }
 

@@ -221,21 +221,34 @@ impl EntityName {
     }
 }
 
-/// The name of a union case or an exception: an [`EntityName`] that F# reads
-/// as starting with an upper-case letter (FS0053), by `borzoi-cst`'s mirror of
-/// FCS's rule ([`borzoi_cst::parser::ident_leads_uppercase`]). F# 7 also
-/// admits a lower-case union case in a type with the
-/// `RequireQualifiedAccess` attribute, which takes resolving the attribute's
-/// name to see, so the name refuses it.
+/// A dotted path of entity names, `A.B`: what a file's `module` or
+/// `namespace` declares.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct CaseName(EntityName);
+pub struct EntityPath(pub Vec1<EntityName>);
 
-impl CaseName {
-    /// `ident` as a case's name, or `ident` back if F# refuses it as one.
+impl EntityPath {
+    /// The segments, in order.
+    pub fn segments(&self) -> &[EntityName] {
+        self.0.as_slice()
+    }
+}
+
+/// The name of a union case: an [`EntityName`] that F# reads as starting with
+/// an upper-case letter, by `borzoi-cst`'s mirror of FCS's rule
+/// ([`borzoi_cst::parser::ident_leads_uppercase`]), or one of the names FCS
+/// gives `[]` and `::` (FS0053). F# 7 also admits a lower-case case in a type
+/// with the `RequireQualifiedAccess` attribute, which takes resolving the
+/// attribute's name to see, so the name refuses it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct UnionCaseName(EntityName);
+
+impl UnionCaseName {
+    /// `ident` as a union case's name, or `ident` back if F# refuses it as
+    /// one.
     pub fn new(ident: Ident) -> Result<Self, Ident> {
         let name = EntityName::new(ident)?;
-        if borzoi_cst::parser::ident_leads_uppercase(name.as_str()) {
-            Ok(CaseName(name))
+        if leads_uppercase(&name) || matches!(name.as_str(), "op_Nil" | "op_ColonColon") {
+            Ok(UnionCaseName(name))
         } else {
             Err(name.0)
         }
@@ -248,6 +261,36 @@ impl CaseName {
     pub fn as_str(&self) -> &str {
         self.0.as_str()
     }
+}
+
+/// The name of an exception: an [`EntityName`] that F# reads as starting with
+/// an upper-case letter (FS0053), with no exception for `[]` and `::`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ExceptionName(EntityName);
+
+impl ExceptionName {
+    /// `ident` as an exception's name, or `ident` back if F# refuses it as
+    /// one.
+    pub fn new(ident: Ident) -> Result<Self, Ident> {
+        let name = EntityName::new(ident)?;
+        if leads_uppercase(&name) {
+            Ok(ExceptionName(name))
+        } else {
+            Err(name.0)
+        }
+    }
+
+    pub fn ident(&self) -> &Ident {
+        self.0.ident()
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+fn leads_uppercase(name: &EntityName) -> bool {
+    borzoi_cst::parser::ident_leads_uppercase(name.as_str())
 }
 
 /// A name F# reads as a variable where a pattern may also name a constructor:

@@ -1019,8 +1019,8 @@ tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/ImportDecl
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/ImportDeclarations/W_OpenUnqualifiedNamespace01.fs	kept=2 dropped=1
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/ImportDeclarations/openDU.fs	kept=10 dropped=0
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/ImportDeclarations/openSystem01.fs	kept=2 dropped=1
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/InterfaceSpecificationsAndImplementations/ConcreteUnitOnInterface01.fs	kept=5 dropped=3
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/InterfaceSpecificationsAndImplementations/GenericMethodsOnInterface01.fs	kept=7 dropped=3
+tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/InterfaceSpecificationsAndImplementations/ConcreteUnitOnInterface01.fs	kept=4 dropped=4
+tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/InterfaceSpecificationsAndImplementations/GenericMethodsOnInterface01.fs	kept=6 dropped=4
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/InterfaceSpecificationsAndImplementations/GenericMethodsOnInterface02.fs	kept=0 dropped=7
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/InterfaceSpecificationsAndImplementations/InterfaceSpecificationsAndImplementations.fs	kept=5 dropped=3
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/LetBindings/ActivePatternBindings/ActivePatternBindings.fs	kept=5 dropped=3
@@ -1628,7 +1628,7 @@ tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/ExpressionQuotation
 tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/ExpressionQuotations/Baselines/UInt32.fs	kept=7 dropped=1
 tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/ExpressionQuotations/Baselines/UInt64.fs	kept=7 dropped=1
 tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/ExpressionQuotations/Baselines/UnionCaseTest.fs	kept=7 dropped=3
-tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/ExpressionQuotations/Baselines/Unit.fs	kept=7 dropped=1
+tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/ExpressionQuotations/Baselines/Unit.fs	kept=6 dropped=2
 tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/ExpressionQuotations/Baselines/Value.fs	kept=8 dropped=1
 tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/ExpressionQuotations/Baselines/Var.fs	kept=6 dropped=2
 tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/ExpressionQuotations/Baselines/VarSet.fs	kept=6 dropped=2
@@ -1939,8 +1939,8 @@ tests/FSharp.Compiler.ComponentTests/Conformance/InferenceProcedures/MethodAppli
 tests/FSharp.Compiler.ComponentTests/Conformance/InferenceProcedures/MethodApplicationResolution/MethodApplicationResolution.fs	kept=8 dropped=0
 tests/FSharp.Compiler.ComponentTests/Conformance/InferenceProcedures/MethodApplicationResolution/MultiExtensionMethods01.fs	kept=7 dropped=2
 tests/FSharp.Compiler.ComponentTests/Conformance/InferenceProcedures/MethodApplicationResolution/ParamArrayToDelegate01.fs	kept=10 dropped=2
-tests/FSharp.Compiler.ComponentTests/Conformance/InferenceProcedures/MethodApplicationResolution/UnitVsNoArgs.fs	kept=5 dropped=2
-tests/FSharp.Compiler.ComponentTests/Conformance/InferenceProcedures/MethodApplicationResolution/UnitVsNoArgs02.fs	kept=6 dropped=3
+tests/FSharp.Compiler.ComponentTests/Conformance/InferenceProcedures/MethodApplicationResolution/UnitVsNoArgs.fs	kept=4 dropped=3
+tests/FSharp.Compiler.ComponentTests/Conformance/InferenceProcedures/MethodApplicationResolution/UnitVsNoArgs02.fs	kept=4 dropped=5
 tests/FSharp.Compiler.ComponentTests/Conformance/InferenceProcedures/NameResolution/AutoOpen/AutoOpen.fs	kept=4 dropped=5
 tests/FSharp.Compiler.ComponentTests/Conformance/InferenceProcedures/NameResolution/AutoOpen/E_library_with_namespaces01.fs	kept=3 dropped=7
 tests/FSharp.Compiler.ComponentTests/Conformance/InferenceProcedures/NameResolution/AutoOpen/E_module02.fs	kept=1 dropped=0
@@ -3551,7 +3551,7 @@ tests/FSharp.Compiler.ComponentTests/Language/RuntimeAsync/RuntimeAsyncReraiseOw
 tests/FSharp.Compiler.ComponentTests/Language/RuntimeAsync/RuntimeAsyncSequence.fs	kept=11 dropped=4
 tests/FSharp.Compiler.ComponentTests/Language/RuntimeAsync/RuntimeAsyncSequenceBuilder.fs	kept=8 dropped=3
 tests/FSharp.Compiler.ComponentTests/Language/RuntimeAsync/RuntimeTaskBuilder.fs	kept=18 dropped=5
-tests/FSharp.Compiler.ComponentTests/Language/RuntimeAsync/RuntimeTasks.fs	kept=73 dropped=24
+tests/FSharp.Compiler.ComponentTests/Language/RuntimeAsync/RuntimeTasks.fs	kept=72 dropped=25
 tests/FSharp.Compiler.ComponentTests/Language/RuntimeAsync/RuntimeTasksAsyncDisposalException.fs	kept=7 dropped=0
 tests/FSharp.Compiler.ComponentTests/Language/RuntimeAsyncEdgeCaseTests.fs	kept=10 dropped=1
 tests/FSharp.Compiler.ComponentTests/Language/RuntimeAsyncSequenceTests.fs	kept=5 dropped=0
@@ -3816,7 +3816,7 @@ tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/LexicalAnalysis
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/LexicalAnalysis/IdentifiersAndKeywords/E_NameCollision01.fs	kept=3 dropped=0
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/LexicalAnalysis/IdentifiersAndKeywords/E_QuotedTypeModuleNames01.fs	kept=1 dropped=20
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/LexicalAnalysis/IdentifiersAndKeywords/E_ReservedIdentKeywords.fs	kept=17 dropped=0
-tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/LexicalAnalysis/IdentifiersAndKeywords/E_ValidIdentifier03.fs	kept=0 dropped=2
+tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/LexicalAnalysis/IdentifiersAndKeywords/E_ValidIdentifier03.fs	name: refused for a type, module or case
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/LexicalAnalysis/IdentifiersAndKeywords/E_ValidIdentifier04.fs	parse errors
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/LexicalAnalysis/IdentifiersAndKeywords/StructNotAllowDoKeyword.fs	kept=1 dropped=2
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/LexicalAnalysis/IdentifiersAndKeywords/ValidIdentifier01.fs	kept=13 dropped=4
@@ -5089,7 +5089,7 @@ tests/fsharp/typeProviders/helloWorld/providedJ.fs	kept=1 dropped=1
 tests/fsharp/typeProviders/helloWorld/providedK.fs	kept=0 dropped=1
 tests/fsharp/typeProviders/helloWorld/providedNullAssemblyName.fsx	kept=1 dropped=1
 tests/fsharp/typeProviders/helloWorld/provider.fsx	kept=10 dropped=19
-tests/fsharp/typeProviders/helloWorld/test.fsx	kept=222 dropped=127
+tests/fsharp/typeProviders/helloWorld/test.fsx	kept=221 dropped=128
 tests/fsharp/typeProviders/helloWorld/testlib_client.fsx	kept=1 dropped=2
 tests/fsharp/typeProviders/helloWorldCSharp/magic.fs	kept=10 dropped=6
 tests/fsharp/typeProviders/helloWorldCSharp/test.fsx	kept=8 dropped=1
@@ -5308,7 +5308,7 @@ tests/fsharp/typecheck/sigs/neg92.fs	kept=1 dropped=4
 tests/fsharp/typecheck/sigs/neg93.fs	kept=1 dropped=2
 tests/fsharp/typecheck/sigs/neg94-pre.fs	kept=1 dropped=4
 tests/fsharp/typecheck/sigs/neg94.fs	kept=2 dropped=0
-tests/fsharp/typecheck/sigs/neg95.fs	kept=13 dropped=5
+tests/fsharp/typecheck/sigs/neg95.fs	kept=4 dropped=5
 tests/fsharp/typecheck/sigs/neg96.fs	kept=3 dropped=2
 tests/fsharp/typecheck/sigs/neg97.fs	kept=5 dropped=4
 tests/fsharp/typecheck/sigs/neg98.fs	kept=0 dropped=2
@@ -6028,7 +6028,7 @@ tests/service/data/SyntaxTree/Nullness/MatchWithTypeCastParensAndSeparateNullCas
 tests/service/data/SyntaxTree/Nullness/NullAnnotatedExpression.fs	kept=0 dropped=1
 tests/service/data/SyntaxTree/Nullness/RegressionAnnotatedInlinePatternMatch.fs	kept=0 dropped=1
 tests/service/data/SyntaxTree/Nullness/RegressionChoiceType.fs	kept=0 dropped=1
-tests/service/data/SyntaxTree/Nullness/RegressionListType.fs	kept=0 dropped=1
+tests/service/data/SyntaxTree/Nullness/RegressionListType.fs	kept=1 dropped=0
 tests/service/data/SyntaxTree/Nullness/RegressionOneLinerOptionType.fs	kept=1 dropped=0
 tests/service/data/SyntaxTree/Nullness/RegressionOptionType.fs	kept=0 dropped=1
 tests/service/data/SyntaxTree/Nullness/RegressionOrPattern.fs	kept=1 dropped=0

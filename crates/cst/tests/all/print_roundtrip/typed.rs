@@ -30,7 +30,8 @@ use std::fmt::Debug;
 use std::rc::Rc;
 
 use borzoi_print::names::{
-    CaseName, EntityName, Ident, InfixOperator, LongIdent, Operator, ValueName, VarName,
+    EntityName, ExceptionName, Ident, InfixOperator, LongIdent, Operator, UnionCaseName, ValueName,
+    VarName,
 };
 use borzoi_print::tree::{
     Access, AliasPat, AndBang, Args, ArrayRank, AsAlias, Attribute, AttributeArgs, Binding,
@@ -84,29 +85,6 @@ impl Ty {
             Ty::List(t) | Ty::Array(t) | Ty::Option(t) => t.has_equality(),
             Ty::Tuple(ts) => ts.iter().all(Ty::has_equality),
             _ => true,
-        }
-    }
-
-    /// Whether a binder of the type must be annotated for a use of it to
-    /// resolve: a member lookup or a type test on a value of a type inference
-    /// has not fixed yet is an error.
-    /// Whether a parameter of this type needs annotating: its patterns may
-    /// test a value's runtime type or look a member up (`:? T`, `Failure m`,
-    /// a record's fields), which needs the type fixed first (FS0008, FS0072),
-    /// at any depth in the type.
-    fn needs_annotation(&self) -> bool {
-        match self {
-            Ty::Str
-            | Ty::Obj
-            | Ty::Exn
-            | Ty::Lazy(_)
-            | Ty::Seq(_)
-            | Ty::Disposable
-            | Ty::Builder => true,
-            Ty::Int | Ty::Bool | Ty::Unit | Ty::Record => false,
-            Ty::List(t) | Ty::Array(t) | Ty::Option(t) => t.needs_annotation(),
-            Ty::Tuple(ts) => ts.iter().any(Ty::needs_annotation),
-            Ty::Fun(a, b) => a.needs_annotation() || b.needs_annotation(),
         }
     }
 }
@@ -211,6 +189,11 @@ impl Scope {
         out
     }
 
+    /// Whether `n` heads a value's path or names a module in scope.
+    fn names(&self, n: &Ident) -> bool {
+        self.vars.iter().any(|v| &v.path.segments()[0] == n) || self.modules.contains(n)
+    }
+
     /// The scope inside a closure: a local `mutable` cannot be captured.
     fn closure(&self) -> Scope {
         let mut out = self.clone();
@@ -267,7 +250,9 @@ const BINDERS: &[&str] = &[
 ];
 
 /// Names in the type namespace: types, exceptions, union cases, modules. Some
-/// start lower case, which F# refuses of a union case or an exception.
+/// start lower case, which F# refuses of a union case or an exception. Not
+/// `op_Nil` or `op_ColonColon`, which a union case may be named but which
+/// then shadow `[]` and `::`.
 const TYPE_NAMES: &[&str] = &["T", "U", "E", "N", "Q", "t1", "type", "Ä", "Tags", "A.B"];
 
 fn binder() -> BoxedStrategy<Ident> {
@@ -1362,12 +1347,13 @@ fn clauses<V: Version>(
                 result,
             })
     });
-    let first_annotated = scrutinee.needs_annotation();
+    // The first clause annotated, as a parameter is: its pattern fixes the
+    // scrutinee's type before the clauses' bodies are read.
     let t = scrutinee.clone();
     prop::collection::vec(clause, 1..=2)
         .prop_map(move |cs| {
             let mut cs = Vec1::from_vec(cs).expect("non-empty").into_vec();
-            if first_annotated && !matches!(cs[0].pat, Pat::Typed { .. }) {
+            if !matches!(cs[0].pat, Pat::Typed { .. }) {
                 let p = std::mem::replace(&mut cs[0].pat, Pat::Wildcard);
                 cs[0].pat = Pat::Typed {
                     pat: Box::new(p),
@@ -1418,6 +1404,12 @@ fn method_call<V: Version>(sc: &Sc, d: u32) -> BoxedStrategy<Expr<V>> {
         int().prop_map(|x| Expr::App {
             func: bx(name("Meth.G")),
             arg: bx(x),
+        }),
+        // `Meth.H ()`, the overload taking nothing; `Meth.H (())` would pass
+        // `()` to the one taking `obj`, which returns a `string`.
+        Just(Expr::App {
+            func: bx(name("Meth.H")),
+            arg: bx(Expr::Const(Const::Unit)),
         }),
     ]
     .boxed()
@@ -1972,7 +1964,6 @@ fn comp_clauses<V: Version, K: Context>(
     sub: impl Fn(&Scope) -> BoxedStrategy<Comp<V, K>> + Clone + 'static,
 ) -> BoxedStrategy<Vec1<CompClause<V, K>>> {
     let s = sc.clone();
-    let annotate = scrutinee.needs_annotation();
     let t = scrutinee.clone();
     let clause = pat::<V>(scrutinee, 2, true).prop_flat_map(move |(p, bound)| {
         let inner = s.with(vars(&bound));
@@ -1989,7 +1980,8 @@ fn comp_clauses<V: Version, K: Context>(
     });
     prop::collection::vec(clause, 1..=2)
         .prop_map(move |mut cs| {
-            if annotate && !matches!(cs[0].pat, Pat::Typed { .. }) {
+            // The first clause annotated, as in `clauses`.
+            if !matches!(cs[0].pat, Pat::Typed { .. }) {
                 let p = std::mem::replace(&mut cs[0].pat, Pat::Wildcard);
                 cs[0].pat = Pat::Typed {
                     pat: Box::new(p),
@@ -2325,7 +2317,11 @@ fn decl<V: Version>(
             1,
             defer(move || {
                 let s = s.clone();
-                (fresh(), prop::sample::select(s.modules.clone()))
+                // Not a name in scope: an abbreviation would shadow its
+                // paths, which the scope does not follow.
+                let taken = s.clone();
+                let name = fresh().prop_filter("a name in scope", move |n| !taken.names(n));
+                (name, prop::sample::select(s.modules.clone()))
                     .prop_map(move |(name, target)| {
                         (
                             ModuleDecl::ModuleAbbrev {
@@ -2385,6 +2381,14 @@ fn decl<V: Version>(
                                         ..v.clone()
                                     })
                                     .collect();
+                                // Behind a value of the module's name, F# reads
+                                // `N.x` as a member of the value.
+                                let exported =
+                                    if s.vars.iter().any(|v| v.path.segments() == [name.clone()]) {
+                                        Vec::new()
+                                    } else {
+                                        exported
+                                    };
                                 let mut scope = s.with(exported);
                                 scope.modules.push(name.clone());
                                 let body = if is_rec {
@@ -2455,7 +2459,8 @@ fn decl<V: Version>(
                 )
                     .prop_filter_map("F# refuses the exception", move |(name, fields)| {
                         let names = vec![name.as_str().to_owned()];
-                        let exn = ExceptionDefn::new(CaseName::new(name).ok()?, fields).ok()?;
+                        let exn =
+                            ExceptionDefn::new(ExceptionName::new(name).ok()?, fields).ok()?;
                         Some((ModuleDecl::Exception(exn), (*s).clone(), names))
                     })
                     .boxed()
@@ -2606,7 +2611,7 @@ fn type_defn<V: Version>() -> BoxedStrategy<DefnParts<V>> {
                         .prop_filter_map(
                             "F# refuses the case",
                             |(name, fields)| {
-                                UnionCase::new(CaseName::new(name).ok()?, fields).ok()
+                                UnionCase::new(UnionCaseName::new(name).ok()?, fields).ok()
                             }
                         ),
                     1..=3,
@@ -2627,6 +2632,55 @@ pub fn impl_file<V: Version>() -> BoxedStrategy<ImplFile<V>> {
         .boxed()
 }
 
+/// A file's `module` or `namespace` header names entities, so F#'s checker
+/// refuses there what it refuses in a type's or nested module's name
+/// (FS0883). The typed generator draws anonymous files only, as its trees
+/// are checked inside modules of their own, so each header is checked here,
+/// on its own, with every candidate name the tree admits.
+#[test]
+fn every_header_name_checks() {
+    use borzoi_print::names::EntityPath;
+    use borzoi_print::print_impl_file;
+    use borzoi_print::tree::{NamedModule, Namespace, NamespaceName};
+    use borzoi_print::version::DefaultVersion;
+
+    let candidates = TYPE_NAMES
+        .iter()
+        .chain(BINDERS)
+        .chain(&["A+B", "A$B", "A&B", "A[B]", "A/B", "A\\B", "A*B", "A\"B"]);
+    let admitted: Vec<EntityName> = candidates
+        .filter_map(|s| EntityName::new(Ident::new(s).ok()?).ok())
+        .collect();
+    assert!(admitted.len() > 10, "too few header names: {admitted:?}");
+    let failures: Vec<String> = admitted
+        .iter()
+        .flat_map(|n| {
+            let path = EntityPath(Vec1::new(n.clone(), vec![n.clone()]));
+            [
+                ImplFile::<DefaultVersion>::NamedModule(NamedModule {
+                    attributes: Vec::new(),
+                    access: None,
+                    name: path.clone(),
+                    body: ModuleBody::NonRec(Vec::new()),
+                }),
+                ImplFile::Namespaces(Vec1::new(
+                    Namespace {
+                        name: NamespaceName::Named(path),
+                        body: ModuleBody::NonRec(Vec::new()),
+                    },
+                    Vec::new(),
+                )),
+            ]
+        })
+        .filter_map(|file| {
+            let printed = print_impl_file(&file);
+            let errors = super::check::check_standalone_errors(&printed, DefaultVersion::LANGUAGE);
+            (!errors.is_empty()).then(|| format!("{printed}{errors:?}"))
+        })
+        .collect();
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
 /// The typed checks: each version's trees, drawn from a fixed seed, and a deep
 /// twin from a fresh one.
 mod run {
@@ -2635,13 +2689,13 @@ mod run {
     use borzoi_print::print_impl_file;
     use borzoi_print::tree::ImplFile;
     use borzoi_print::version::{
-        Preview, V4_6, V4_7, V5_0, V6_0, V7_0, V8_0, V9_0, V10_0, V11_0, Version,
+        LanguageVersion, Preview, V4_6, V4_7, V5_0, V6_0, V7_0, V8_0, V9_0, V10_0, V11_0, Version,
     };
     use proptest::strategy::{Strategy, ValueTree};
     use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
 
     use super::super::check::check_errors;
-    use super::super::round_trips;
+    use super::super::round_trips_at;
     use super::impl_file;
     use crate::common::par_map;
 
@@ -2664,6 +2718,12 @@ mod run {
             return Some(Failure::Check(errors));
         }
         round_trips(file).err().map(Failure::RoundTrip)
+    }
+
+    /// Whether `file` round-trips at its version and at the newest: each gate
+    /// is a threshold, so the two ends stand for every version that reads it.
+    fn round_trips<V: Version>(file: &ImplFile<V>) -> Result<(), String> {
+        round_trips_at(file, &[V::LANGUAGE, LanguageVersion::MAX])
     }
 
     #[derive(Debug, Clone)]

@@ -10,7 +10,8 @@
 //! gated construct exactly where the version's gate has a witness.
 
 use borzoi_print::names::{
-    CaseName, EntityName, Ident, InfixOperator, LongIdent, Operator, TyparName, ValueName, VarName,
+    EntityName, EntityPath, ExceptionName, Ident, InfixOperator, LongIdent, Operator, TyparName,
+    UnionCaseName, ValueName, VarName,
 };
 use borzoi_print::tree::{
     Access, AliasPat, AndBang, Args, ArrayRank, AsAlias, Attribute, AttributeArgs, Binding,
@@ -116,15 +117,23 @@ fn entity_name() -> BoxedStrategy<EntityName> {
         .boxed()
 }
 
-/// A union case's or an exception's name; most identifiers are lower-case,
-/// so upper-case ones are drawn too.
-fn case_name() -> BoxedStrategy<CaseName> {
+/// A candidate for a union case's or an exception's name; most identifiers
+/// are lower-case, so upper-case ones are drawn too, and the names FCS gives
+/// `[]` and `::`.
+fn case_ident() -> BoxedStrategy<Ident> {
     prop_oneof![
-        1 => ident(),
-        1 => "[A-Z][a-zA-Z0-9_']{0,5}".prop_filter_map("not an identifier", |s| Ident::new(&s).ok()),
+        2 => ident(),
+        2 => "[A-Z][a-zA-Z0-9_']{0,5}".prop_filter_map("not an identifier", |s| Ident::new(&s).ok()),
+        1 => prop::sample::select(vec!["op_Nil", "op_ColonColon"])
+            .prop_map(|s| Ident::new(s).expect("an identifier")),
     ]
-    .prop_filter_map("not a case's name", |i| CaseName::new(i).ok())
     .boxed()
+}
+
+fn entity_path() -> BoxedStrategy<EntityPath> {
+    prop::collection::vec(entity_name(), 1..=3)
+        .prop_map(|names| EntityPath(Vec1::from_vec(names).expect("non-empty")))
+        .boxed()
 }
 
 fn long_ident() -> BoxedStrategy<LongIdent> {
@@ -797,17 +806,17 @@ fn union_fields() -> BoxedStrategy<Vec<UnionField>> {
 }
 
 fn union_case() -> BoxedStrategy<UnionCase> {
-    (case_name(), union_fields())
+    (case_ident(), union_fields())
         .prop_filter_map("F# refuses the case", |(name, fields)| {
-            UnionCase::new(name, fields).ok()
+            UnionCase::new(UnionCaseName::new(name).ok()?, fields).ok()
         })
         .boxed()
 }
 
 fn exception() -> BoxedStrategy<ExceptionDefn> {
-    (case_name(), union_fields())
+    (case_ident(), union_fields())
         .prop_filter_map("F# refuses the exception", |(name, fields)| {
-            ExceptionDefn::new(name, fields).ok()
+            ExceptionDefn::new(ExceptionName::new(name).ok()?, fields).ok()
         })
         .boxed()
 }
@@ -895,7 +904,7 @@ pub fn impl_file<V: Version>() -> BoxedStrategy<ImplFile<V>> {
         (
             attributes(expr()),
             access(),
-            long_ident(),
+            entity_path(),
             (any::<bool>(), decls())
                 .prop_filter_map("F# refuses the recursive group", module_body()),
         )
@@ -911,7 +920,7 @@ pub fn impl_file<V: Version>() -> BoxedStrategy<ImplFile<V>> {
             (
                 prop_oneof![
                     1 => Just(NamespaceName::Global),
-                    3 => long_ident().prop_map(NamespaceName::Named),
+                    3 => entity_path().prop_map(NamespaceName::Named),
                 ],
                 (any::<bool>(), decls())
                     .prop_filter_map("F# refuses the recursive group", module_body()),
