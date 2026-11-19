@@ -444,18 +444,31 @@ fn errors_of(diagnostics: &[Value]) -> impl Iterator<Item = &Value> {
     diagnostics.iter().filter(|d| d["Severity"] == "Error")
 }
 
-/// Parse one response line; a `BatchError` (the oracle refused the request)
-/// is an `Err` holding its message.
-pub fn parse_response<T: serde::de::DeserializeOwned>(line: &str) -> Result<T, String> {
-    let value: Value =
-        serde_json::from_str(line).map_err(|e| format!("unreadable response ({e}): {line}"))?;
+/// Why a response line is not an answer: the oracle refused the request (a
+/// `BatchError`), or the line is no response of the protocol at all.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ResponseError {
+    /// The oracle's own refusal, with its message.
+    Refused(String),
+    /// Not JSON, or not the expected shape: a broken protocol, not a
+    /// rejected input.
+    Malformed(String),
+}
+
+/// Parse one response line.
+pub fn parse_response<T: serde::de::DeserializeOwned>(line: &str) -> Result<T, ResponseError> {
+    let value: Value = serde_json::from_str(line)
+        .map_err(|e| ResponseError::Malformed(format!("unreadable response ({e}): {line}")))?;
     if let Some(message) = value.get("BatchError") {
-        return Err(message
-            .as_str()
-            .unwrap_or("<non-string BatchError>")
-            .to_owned());
+        return match message.as_str() {
+            Some(m) => Err(ResponseError::Refused(m.to_owned())),
+            None => Err(ResponseError::Malformed(format!(
+                "a non-string BatchError: {line}"
+            ))),
+        };
     }
-    serde_json::from_value(value).map_err(|e| format!("unexpected response shape ({e}): {line}"))
+    serde_json::from_value(value)
+        .map_err(|e| ResponseError::Malformed(format!("unexpected response shape ({e}): {line}")))
 }
 
 /// The references every fixture project is checked and compiled against:

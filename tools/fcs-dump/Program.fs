@@ -7295,7 +7295,9 @@ let private respondGraphCompile (checker: FSharpChecker) (root: JsonElement) =
         failwithf "project %s: a compiled project references DLLs only" p.Id
     // The bytes of each source as the check reads them: a source saved
     // between the check and the compile would give a DLL of text the check
-    // never saw, so the compile's result is refused then.
+    // never saw, so the compile's result is refused then. A source edited and
+    // restored while the compiler runs is not seen: the oracle requires its
+    // inputs to hold still during a request.
     let digestOf (path: string) =
         Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes path))
     let checkedText = p.Sources |> Array.map digestOf

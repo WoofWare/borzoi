@@ -794,7 +794,10 @@ fn the_oracle_refuses_references_it_cannot_identify() {
             0,
             serde_json::json!({ "dll": fifo.to_str().expect("UTF-8") }),
         );
-    match oracle.check_value(&piped) {
+    // A regressed oracle would open the FIFO and wait for a writer, so the
+    // probe runs on its own oracle with a short budget.
+    let mut probe = ProjectGraphOracle::with_timeout(std::time::Duration::from_secs(120));
+    match probe.check_value(&piped) {
         Err(FcsInvokeError::Refused(why)) if why.contains("not a regular file") => {}
         other => panic!("a FIFO must be refused unopened: {other:?}"),
     }
@@ -852,7 +855,7 @@ fn the_oracle_refuses_references_it_cannot_identify() {
             0,
             Value::String(fifo_fs.to_str().expect("UTF-8").to_owned()),
         );
-    match oracle.check_value(&piped_source) {
+    match probe.check_value(&piped_source) {
         Err(FcsInvokeError::Refused(why)) if why.contains("not a regular file") => {}
         other => panic!("a FIFO source must be refused unopened: {other:?}"),
     }
