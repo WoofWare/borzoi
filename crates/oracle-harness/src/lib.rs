@@ -333,6 +333,32 @@ impl BatchChild {
         }
         Err(last.expect("a failed attempt records why"))
     }
+
+    /// End the child: close its stdin, which ends an oracle's batch loop, and
+    /// wait up to `grace` for it to exit on its own, killing it if it has not.
+    /// Its exit status when it exited on its own; `None` when it was killed,
+    /// or was never spawned.
+    ///
+    /// Dropping the driver kills the child outright, which for a .NET oracle
+    /// leaves its runtime's debugger pipes behind in `TMPDIR`; a caller that
+    /// spawns a child per request ends each with this instead.
+    pub fn finish(mut self, grace: Duration) -> Option<std::process::ExitStatus> {
+        let mut io = self.io.take()?;
+        // `None` only while a write is in flight, which a finished round-trip
+        // never leaves: then the child is killed below.
+        drop(io.stdin.take());
+        let deadline = Instant::now() + grace;
+        loop {
+            match io.child.try_wait() {
+                Ok(Some(status)) => return Some(status),
+                Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+                Ok(None) | Err(_) => {
+                    io.kill();
+                    return None;
+                }
+            }
+        }
+    }
 }
 
 impl ChildIo {

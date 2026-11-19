@@ -18,6 +18,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::time::Duration;
 
 use serde_json::Value;
 
@@ -238,6 +239,8 @@ fn a_request_whose_inputs_may_change_is_a_fresh_childs_only_one() {
             other => panic!("{oracle}: a fixture request after one must be refused: {other:?}"),
         }
 
+        child.finish(Duration::from_secs(30));
+
         let mut child = fcs_dump_batch_child(oracle);
         check(&mut child, oracle, &[&a]);
         match ask_real(&mut child, oracle, &[&a], &[]) {
@@ -245,6 +248,41 @@ fn a_request_whose_inputs_may_change_is_a_fresh_childs_only_one() {
             other => panic!("{oracle}: one after a fixture request must be refused: {other:?}"),
         }
         check(&mut child, oracle, &[&a]);
+        child.finish(Duration::from_secs(30));
+    }
+}
+
+/// A request's mode flags are JSON booleans or absent: any other value is
+/// refused, so a caller's misspelt `inputsMayChange` (or `exclusiveRefs`)
+/// never selects a mode it did not ask for, and a refused request leaves the
+/// child fresh.
+#[test]
+fn a_mode_flag_that_is_not_a_boolean_is_refused() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let a = dir.path().join("A.fs");
+    write(&a, "module A\nlet y = 1\n");
+    for oracle in ORACLES {
+        let mut child = fcs_dump_batch_child(oracle);
+        for (flag, value) in [
+            ("inputsMayChange", serde_json::json!("true")),
+            ("inputsMayChange", serde_json::json!(1)),
+            ("inputsMayChange", Value::Null),
+            ("exclusiveRefs", serde_json::json!("true")),
+        ] {
+            let request = serde_json::json!({
+                "paths": [a.display().to_string()],
+                (flag): value,
+            });
+            let line = child.request(&request.to_string());
+            let v: Value = serde_json::from_str(&line).expect("a JSON response");
+            match v.get("BatchError").and_then(Value::as_str) {
+                Some(why) if why.contains(flag) && why.contains("true or false") => {}
+                _ => panic!("{oracle}: {flag} = {value} must be refused: {line}"),
+            }
+        }
+        ask_real(&mut child, oracle, &[&a], &[])
+            .unwrap_or_else(|err| panic!("{oracle}: the child is still fresh: {err}"));
+        child.finish(Duration::from_secs(30));
     }
 }
 

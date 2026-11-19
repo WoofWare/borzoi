@@ -2356,6 +2356,93 @@ fn one_oracle_answers_every_real_project_of_a_run() {
     assert_eq!(first, second, "one project, asked twice, answered alike");
 }
 
+/// A real project's reference rewritten in place, its modification time put
+/// back, between two of one oracle's requests is read as it is now, as a
+/// fresh process reads it: the type the first DLL declares resolves, and is
+/// unbound once the DLL holds another assembly's bytes. A resident child
+/// would answer the second request from the assembly it read for the first.
+///
+/// The reference set is the whole one (`exclusiveRefs`, as for any project
+/// with references): the running SDK's .NET 10 reference pack, the oracle's
+/// own FSharp.Core, and `Lib.dll`, which first holds the oracle's
+/// FSharp.Compiler.Service.
+#[test]
+#[ignore = "builds/runs FCS; use --ignored for oracle smoke"]
+fn a_real_projects_reference_rewritten_in_place_is_read() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project = tmp.path().join("Real.fsproj");
+    write(
+        &project,
+        "<Project>\n  <ItemGroup>\n    <Compile Include=\"A.fs\" />\n  </ItemGroup>\n</Project>\n",
+    );
+    write(
+        &tmp.path().join("A.fs"),
+        "module A\nlet z = FSharp.Compiler.Text.Range.Zero\n",
+    );
+    let mut loaded = load_lsp_project(&project).expect("project should load");
+    let mut oracle = UsesProjectOracle::default();
+    // The first request builds the oracle, whose output holds the assemblies
+    // the reference set takes.
+    oracle
+        .uses_project(&loaded)
+        .expect("the oracle is built and answers");
+    let out =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/fcs-dump/bin/Release/net10.0");
+    let lib = tmp.path().join("lib").join("Lib.dll");
+    fs::create_dir_all(lib.parent().expect("a parent")).expect("mkdir");
+    fs::copy(out.join("FSharp.Compiler.Service.dll"), &lib).expect("copy the referenced assembly");
+    let stamp = fs::metadata(&lib)
+        .and_then(|m| m.modified())
+        .expect("modification time");
+    // The oracle's FSharp.Compiler.Service is built for .NET 10.
+    let packs = PathBuf::from(
+        std::env::var_os("DOTNET_ROOT").expect("DOTNET_ROOT (run under `nix develop`)"),
+    )
+    .join("packs")
+    .join("Microsoft.NETCore.App.Ref");
+    let pack = fs::read_dir(&packs)
+        .expect("read the reference packs")
+        .map(|e| e.expect("an entry").path().join("ref").join("net10.0"))
+        .filter(|p| p.is_dir())
+        .max()
+        .expect("a .NET 10 reference pack");
+    loaded.fcs_extra_refs = fs::read_dir(&pack)
+        .expect("read the reference pack")
+        .map(|e| e.expect("an entry").path())
+        .filter(|p| p.extension().is_some_and(|x| x == "dll"))
+        .chain([out.join("FSharp.Core.dll"), lib.clone()])
+        .collect();
+    let errors = |json: &str| -> Vec<i64> {
+        let v: serde_json::Value = serde_json::from_str(json).expect("JSON");
+        v["Files"]
+            .as_array()
+            .expect("Files")
+            .iter()
+            .chain(std::iter::once(&v))
+            .flat_map(|f| f["Diagnostics"].as_array().cloned().unwrap_or_default())
+            .filter(|d| d["Severity"] == "Error")
+            .map(|d| d["ErrorNumber"].as_i64().expect("ErrorNumber"))
+            .collect()
+    };
+    let before = oracle.uses_project(&loaded).expect("the first check");
+    assert_eq!(
+        errors(&before),
+        Vec::<i64>::new(),
+        "the type resolves in the reference: {before}"
+    );
+    fs::copy(out.join("FSharp.Core.dll"), &lib).expect("rewrite the referenced assembly");
+    fs::File::options()
+        .write(true)
+        .open(&lib)
+        .and_then(|f| f.set_modified(stamp))
+        .expect("restore the modification time");
+    let after = oracle.uses_project(&loaded).expect("the second check");
+    assert!(
+        errors(&after).contains(&39),
+        "the rewritten reference does not hold the type: {after}"
+    );
+}
+
 #[test]
 #[ignore = "builds/runs FCS; use --ignored for oracle smoke"]
 fn tiny_project_matches_fcs() {

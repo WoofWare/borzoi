@@ -305,13 +305,20 @@ let private pinnedLangVersionArgs (requested: string option) : string[] =
         [| "--langversion:" + s |]
     | _ -> [||]
 
+/// A request's optional boolean field `name`: `false` when absent, and the
+/// request refused when present as anything but `true` or `false`, so a
+/// caller's misspelt value never selects a mode it did not ask for.
+let private requestFlag (root: JsonElement) (name: string) : bool =
+    match root.TryGetProperty(name) with
+    | true, v when v.ValueKind = JsonValueKind.True -> true
+    | true, v when v.ValueKind = JsonValueKind.False -> false
+    | true, v -> failwithf "request: field %s must be true or false, not %s" name (v.GetRawText())
+    | false, _ -> false
+
 /// A project-check request's optional `inputsMayChange` field: `true` from the
 /// paths that read real projects, whose files may change during a run (see
 /// the module doc).
-let private requestInputsMayChange (root: JsonElement) : bool =
-    match root.TryGetProperty("inputsMayChange") with
-    | true, v -> v.ValueKind = JsonValueKind.True
-    | false, _ -> false
+let private requestInputsMayChange (root: JsonElement) : bool = requestFlag root "inputsMayChange"
 
 /// A request's optional `langversion` string field, `None` when absent or not a
 /// string.
@@ -6549,7 +6556,9 @@ let private referenceDigests = System.Collections.Generic.Dictionary<string, str
 /// of `references` holds other bytes than when a request of this oracle last
 /// read it, naming the path. FCS could otherwise answer from what it kept of
 /// the old bytes. The new bytes are not recorded, so every later request
-/// naming the path is refused too.
+/// naming the path is refused too. A reference seen for the first time is
+/// refused if it is a type provider ([`refuseTypeProvider`]), and recorded
+/// only once it passes, so bytes already recorded need no second scan.
 let private assertFixtureReferencesUnchanged (references: string list) =
     for path in references do
         let digest =
@@ -6561,7 +6570,9 @@ let private assertFixtureReferencesUnchanged (references: string list) =
                 "reference %s holds other bytes than when this oracle last read it: a fixture reused a path, which the oracle's precondition forbids (send inputsMayChange for inputs that may change)"
                 path
         | true, _ -> ()
-        | false, _ -> referenceDigests[path] <- digest
+        | false, _ ->
+            refuseTypeProvider path
+            referenceDigests[path] <- digest
 
 /// The text of each source of the project-check request in progress, read
 /// once when it starts ([`checkProjectNow`]). The project-check oracles'
@@ -6655,7 +6666,6 @@ let private checkProjectNowWith
     let references = projects |> List.collect readableReferences |> List.distinct
     if fixture then
         assertFixtureReferencesUnchanged references
-        List.iter refuseTypeProvider references
     try
         requestSources.Clear()
         for o in projects do
@@ -6934,9 +6944,7 @@ let private usesProjectBatchCore () =
             let defineArgs = strArray "defines" |> Array.map (fun d -> "--define:" + d.Trim())
             let langVersionArgs = pinnedLangVersionArgs (requestLangVersion root)
             let exclusiveRefs =
-                match root.TryGetProperty("exclusiveRefs") with
-                | true, v when v.ValueKind = JsonValueKind.True -> true
-                | _ -> false
+                requestFlag root "exclusiveRefs"
             let payload =
                 usesProjectFiles checker paths refArgs exclusiveRefs defineArgs langVersionArgs (requestInputsMayChange root)
             JsonSerializer.Serialize(payload, compact)
@@ -9555,9 +9563,7 @@ let private xmlDocBatchCore () =
             let langVersionArgs = pinnedLangVersionArgs (requestLangVersion root)
             let refArgs = strArray "refs" |> Array.toList |> extraRefArgsOf
             let exclusiveRefs =
-                match root.TryGetProperty("exclusiveRefs") with
-                | true, v when v.ValueKind = JsonValueKind.True -> true
-                | _ -> false
+                requestFlag root "exclusiveRefs"
             let payload =
                 xmlDocProjectFiles checker paths refArgs exclusiveRefs defineArgs langVersionArgs (requestInputsMayChange root)
             JsonSerializer.Serialize(payload, compact)

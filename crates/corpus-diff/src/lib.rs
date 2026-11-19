@@ -735,6 +735,10 @@ fn import_fail_message(reason: &ImportFailReason) -> String {
 /// see [`spawn_uses_project_batch`].
 const PROJECT_TIMEOUT: Duration = Duration::from_secs(3600);
 
+/// How long a child that answered its one request may take to exit once its
+/// input is closed ([`BatchChild::finish`]) before it is killed.
+const CHILD_EXIT_GRACE: Duration = Duration::from_secs(30);
+
 /// Budget for the `dotnet build` of `tools/fcs-dump`. A cold build restores
 /// packages and compiles FCS, which is legitimately minutes: the bound is there
 /// to stop a *stalled* build (blocked on a NuGet lock held by a concurrent run in
@@ -746,7 +750,8 @@ const BUILD_TIMEOUT: Duration = Duration::from_secs(1800);
 /// every project's perturbed copy, to.
 ///
 /// By default ([`UsesProjectOracle::default`]) each request goes to a fresh
-/// child, which answers it and is killed. A real project's files, its restored
+/// child, which answers it and is then ended ([`BatchChild::finish`]). A real
+/// project's files, its restored
 /// packages included, are not ours and may change during a run, and FCS and
 /// the CLR keep what they read from a reference in process-wide state that
 /// nothing clears; so the oracle answers such a request only as a child's
@@ -845,8 +850,10 @@ impl UsesProjectOracle {
         });
         let answer = match self.inputs {
             OracleInputs::MayChange => {
-                // Dropping the child kills it.
-                spawn_uses_project_batch()?.try_request(&request.to_string())
+                let mut child = spawn_uses_project_batch()?;
+                let answer = child.try_request(&request.to_string());
+                child.finish(CHILD_EXIT_GRACE);
+                answer
             }
             OracleInputs::Fixtures => {
                 if self.child.is_none() {

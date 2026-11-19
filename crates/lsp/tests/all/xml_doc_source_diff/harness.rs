@@ -16,6 +16,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 use borzoi::workspace::implicit_symbols;
 use borzoi::xml_doc::source::{
@@ -179,9 +180,12 @@ pub fn fcs_check_or_refusal(
     })
     .to_string();
     let line = if inputs_may_change {
-        // A fresh child, killed when dropped: the oracle serves a request whose
-        // inputs may change only as a child's first, and nothing after it.
-        fcs_dump_batch_child("xmldoc-batch").request(&request)
+        // A fresh child, ended once it answers: the oracle serves a request
+        // whose inputs may change only as a child's first, and nothing after it.
+        let mut child = fcs_dump_batch_child("xmldoc-batch");
+        let line = child.request(&request);
+        child.finish(Duration::from_secs(30));
+        line
     } else {
         oracle()
             .lock()
