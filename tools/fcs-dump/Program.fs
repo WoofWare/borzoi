@@ -353,6 +353,23 @@ let private boolField (fields: Map<string, JsonElement>) (name: string) : bool =
     | Some v when v.ValueKind = JsonValueKind.False -> false
     | Some v -> failwithf "the field %s is a JSON %O, not a boolean" name v.ValueKind
 
+/// Whether the FCS this tool runs recognises `version` as a language version:
+/// FCS's own `LanguageVersion.ContainsVersion`, which is internal and so read
+/// by reflection. A version FCS does not recognise is not one it checks at:
+/// it reports an option error that no projection carries, and checks at its
+/// default.
+let private fcsRecognisesLanguageVersion : string -> bool =
+    let languageVersion =
+        nonNull (typeof<FSharpChecker>.Assembly.GetType("FSharp.Compiler.Features+LanguageVersion", true))
+    let containsVersion =
+        nonNull (
+            languageVersion.GetMethod(
+                "ContainsVersion",
+                BindingFlags.Static ||| BindingFlags.Public ||| BindingFlags.NonPublic
+            )
+        )
+    fun version -> containsVersion.Invoke(null, [| box version |]) |> unbox<bool>
+
 /// The `langversion` field: a version, or `null` or absent for FCS's
 /// default. A version is letters, digits and dots (`8.0`, `latest`,
 /// `preview`): anything else is refused before it reaches FCS's switch, where
@@ -364,6 +381,8 @@ let private langVersionField (fields: Map<string, JsonElement>) : string option 
         match stringField fields "langversion" with
         | Some s when s = "" || not (s |> Seq.forall (fun c -> Char.IsAsciiLetterOrDigit c || c = '.')) ->
             failwithf "the field langversion is %A, which is no language version" s
+        | Some s when not (fcsRecognisesLanguageVersion s) ->
+            failwithf "the field langversion is %A, which this FCS does not recognise" s
         | other -> other
 
 /// `path`, which a request field `name` names, if it means one file whatever
@@ -6603,6 +6622,26 @@ let private requireRegularSource (path: string) =
     if not (isRegularFile path) then
         failwithf "source %s is not a regular file" path
 
+/// Refuse a reference `path` unless it is a regular file holding an
+/// assembly ([`requireRegularFile`], then its manifest): FCS drops a reference
+/// it cannot read (FS0084 to fsc) and checks without it, saying nothing. Every
+/// op that takes references holds each to this.
+let private requireAssemblyReference (path: string) =
+    requireRegularFile path
+    try
+        System.Reflection.AssemblyName.GetAssemblyName path |> ignore
+    with ex ->
+        failwithf "reference %s is not an assembly: %s" path ex.Message
+
+/// A request's references, each held to [`requireAssemblyReference`]. A
+/// function of its own because every `let` and statement in a batch loop nests
+/// the rest of it one level deeper in the AST (see
+/// [`dropScriptRefsNamedLike`]).
+let private requestReferences (refs: string list) : string list =
+    for reference in refs do
+        requireAssemblyReference reference
+    refs
+
 /// The references `projOpts` names (`-r:`), each refused if fsc would reject
 /// it: one that is not a regular file ([`requireRegularFile`]), or not an
 /// assembly (FS0084). FCS's project check resolves its references without
@@ -6616,11 +6655,7 @@ let private readableReferences (projOpts: FSharpProjectOptions) : string list =
           match [ "-r:"; "/r:"; "--reference:" ] |> List.tryFind (fun prefix -> o.StartsWith prefix) with
           | Some prefix when not (fromSource.Contains(Path.GetFullPath(o.Substring prefix.Length))) ->
               let path = o.Substring prefix.Length
-              requireRegularFile path
-              try
-                  System.Reflection.AssemblyName.GetAssemblyName path |> ignore
-              with ex ->
-                  failwithf "reference %s is not an assembly: %s" path ex.Message
+              requireAssemblyReference path
               yield path
           | _ -> () ]
 
@@ -9163,12 +9198,7 @@ let private fileBatchCore () =
         try
             let request = fileRequest line
             let kind = request.Kind
-            let refs = request.Refs
-            // Read exactly as written: FCS drops a reference it cannot find
-            // and checks without it.
-            for reference in refs do
-                if not (File.Exists reference) then
-                    failwithf "reference %s is not a file" reference
+            let refs = requestReferences request.Refs
             match request.Target with
             | Project paths ->
                 let files = typesProjectFiles checker (paths |> Array.map Path.GetFullPath) (requestRefArgs refs)
