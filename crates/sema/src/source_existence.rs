@@ -1757,6 +1757,8 @@ impl FileWalk<'_> {
             // too.
             let event = member_marks.get(Marker::CliEvent);
             let mut vals = vals;
+            // An event's accessors, which `[<CompiledName>]` does not rename.
+            let mut event_vals: BTreeSet<String> = BTreeSet::new();
             if event != Maybe::No && role == MemberRole::Member {
                 if event == Maybe::Possibly && member_marks.uncertain {
                     self.out
@@ -1771,6 +1773,7 @@ impl FileWalk<'_> {
                 for g in getters {
                     let bare = g.logical.trim_start_matches("get_").to_owned();
                     for prefix in ["add_", "remove_"] {
+                        event_vals.insert(format!("{prefix}{bare}"));
                         vals.push(MemberVal {
                             logical: format!("{prefix}{bare}"),
                             accessor: None,
@@ -1808,7 +1811,7 @@ impl FileWalk<'_> {
                         // An optional extension: compiled `T.name[.Static]`. A
                         // `[<CompiledName>]` renames a method, never a
                         // property's accessor.
-                        let renames = v.accessor.is_none();
+                        let renames = v.accessor.is_none() && !event_vals.contains(&v.logical);
                         let mut compiled: BTreeSet<String> = BTreeSet::new();
                         if !(renames && marks.compiled_name_certain) {
                             for t in type_names {
@@ -1837,7 +1840,10 @@ impl FileWalk<'_> {
                             });
                         }
                     }
-                    None => self.csharp_val(scope, &v, &marks),
+                    None => {
+                        let renames = v.accessor.is_none() && !event_vals.contains(&v.logical);
+                        self.csharp_val(scope, &v, &marks, renames)
+                    }
                 }
             }
         }
@@ -1845,18 +1851,18 @@ impl FileWalk<'_> {
     }
 
     /// A C#-style extension row for a member val `v` of a type.
-    fn csharp_val(&mut self, scope: &Scope, v: &MemberVal, marks: &Marks) {
-        // `[<CompiledName>]` renames a method, never a property's accessor.
-        let compiled: Vec<Option<&String>> =
-            if marks.compiled_names.is_empty() || v.accessor.is_some() {
-                vec![None]
-            } else if marks.compiled_name_certain {
-                marks.compiled_names.iter().map(Some).collect()
-            } else {
-                std::iter::once(None)
-                    .chain(marks.compiled_names.iter().map(Some))
-                    .collect()
-            };
+    /// `renames`: whether a `[<CompiledName>]` renames it (a method; never a
+    /// property's or an event's accessor).
+    fn csharp_val(&mut self, scope: &Scope, v: &MemberVal, marks: &Marks, renames: bool) {
+        let compiled: Vec<Option<&String>> = if marks.compiled_names.is_empty() || !renames {
+            vec![None]
+        } else if marks.compiled_name_certain {
+            marks.compiled_names.iter().map(Some).collect()
+        } else {
+            std::iter::once(None)
+                .chain(marks.compiled_names.iter().map(Some))
+                .collect()
+        };
         if compiled.len() > 1 {
             self.out
                 .approximations
@@ -1894,7 +1900,7 @@ impl FileWalk<'_> {
             is_static: true,
             own_lists: Vec::new(),
         };
-        self.csharp_val(scope, &v, marks);
+        self.csharp_val(scope, &v, marks, true);
         Ok(())
     }
 

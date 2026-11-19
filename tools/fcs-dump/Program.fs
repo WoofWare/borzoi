@@ -9106,12 +9106,16 @@ let private extensionMembersOfAssembly (assembly: FSharpAssembly) =
                CompiledName = (try m.CompiledName with _ -> "")
                Style = style
                IsInstance = isInstance |})
+    // An accessor FCS cannot produce (an F# `[<CLIEvent>]` property read
+    // as an event has no add or remove method of its own) is left out.
+    let tryAccessor (f: unit -> FSharpMemberOrFunctionOrValue) =
+        try Some(f ()) with _ -> None
     let accessorsOf (m: FSharpMemberOrFunctionOrValue) =
         [ if safe (fun () -> m.HasGetterMethod) then yield m.GetterMethod
           if safe (fun () -> m.HasSetterMethod) then yield m.SetterMethod
           if safe (fun () -> m.IsEvent) then
-              yield m.EventAddMethod
-              yield m.EventRemoveMethod ]
+              yield! Option.toList (tryAccessor (fun () -> m.EventAddMethod))
+              yield! Option.toList (tryAccessor (fun () -> m.EventRemoveMethod)) ]
     let memberRows (ns: string) (e: FSharpEntity) container (m: FSharpMemberOrFunctionOrValue) =
         if safe (fun () -> m.IsExtensionMember) then
             emit ns e m "fsharp" (safe (fun () -> m.IsInstanceMember))

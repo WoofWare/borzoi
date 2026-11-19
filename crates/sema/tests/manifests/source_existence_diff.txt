@@ -38,6 +38,7 @@ extension_destructuring_let	certified: covers [BindingPattern]; unknown: covers 
 extension_extern	certified: exact; unknown: covers [UncertainAttribute]
 extension_forms	certified: exact; unknown: exact
 extension_generic	certified: exact; unknown: covers [UncertainAttribute]
+extension_interface_implementation	certified: unread UnnamedDeclaration(0); unknown: unread UnnamedDeclaration(0)
 extension_intrinsic	certified: exact; unknown: exact
 extension_measure_arity	certified: exact; unknown: covers [UncertainAttribute]
 extension_namespace_level	certified: covers recovered facts, FCS rejects ({}); unknown: covers recovered facts, FCS rejects ({}) [FCS: FS644,FS73]
