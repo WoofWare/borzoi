@@ -1,0 +1,174 @@
+//! Differential test (`parser::parse` vs FCS): a brace body followed, past its
+//! own closer, by a token that would classify it.
+//!
+//! FCS's `braceExprBody` is a record when its leading long identifier is
+//! followed by `=` (a field binding) or `with` (a copy-and-update), and a
+//! computation expression otherwise. LexFilter swallows the `}` of the brace
+//! and the closers around it (`)`, `]`, `|]`, `end`), so in the filtered stream
+//! the token after `{ a` may be an `=` or `with` that belongs to an enclosing
+//! expression: `((builder { a }) = b)` is an equality whose left operand is a
+//! computation expression, not a record with a field `a`. The grid puts brace
+//! bodies of each shape into contexts where such a token follows each kind of
+//! closer, and FCS decides every cell.
+//!
+//! Each cell goes to [`assert_parse_verdicts_match`]: a cell we wrongly reject,
+//! wrongly accept or accept with a divergent tree fails. A cell both reject is
+//! followed by a declaration that FCS keeps, and the recovered trees are
+//! graded on it ([`assert_recovered_trees_agree`]).
+
+use crate::common::assert_parse_verdicts_match;
+use crate::common::recovery::assert_recovered_trees_agree;
+use borzoi_oracle_harness::panic_silence::{catch_unwind_silent, take_silenced_panic};
+
+/// The hole each template's shape fills.
+const HOLE: &str = "@";
+
+/// A declaration after every cell, outside any damage a cell's shape causes.
+const AFTER: &str = "let after = 1\n";
+
+/// Run every cell through the verdict oracle, and every cell both reject
+/// through the recovery oracle, collecting (rather than stopping at)
+/// divergences, and assert both verdicts were exercised.
+///
+/// `known` lists cells (the declaration, without the module header and the
+/// trailing [`AFTER`]) that diverge for reasons outside this grid's subject.
+/// Each must still diverge, so the list cannot outlive the defect it records.
+fn sweep(what: &str, cells: impl IntoIterator<Item = String>, known: &[String]) {
+    let mut total = 0;
+    let mut accepted = 0;
+    let mut failures = Vec::new();
+    let mut known_now_agreeing = Vec::new();
+    let mut known_seen = 0;
+    for body in cells {
+        total += 1;
+        let is_known = known.contains(&body);
+        if is_known {
+            known_seen += 1;
+        }
+        let source = format!("module M\n{body}{AFTER}");
+        let graded = catch_unwind_silent(|| {
+            let fcs_accepts = assert_parse_verdicts_match(&source);
+            if !fcs_accepts {
+                assert_recovered_trees_agree(&source, 0);
+            }
+            fcs_accepts
+        });
+        match graded {
+            Ok(fcs_accepts) => {
+                if fcs_accepts {
+                    accepted += 1;
+                }
+                if is_known {
+                    known_now_agreeing.push(body);
+                }
+            }
+            Err(_) => {
+                let message = take_silenced_panic().map_or_else(String::new, |p| p.message);
+                if !is_known {
+                    let first_line = message.lines().next().unwrap_or_default().to_owned();
+                    failures.push(first_line);
+                }
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} of {total} {what} cells diverge from FCS:\n{}",
+        failures.len(),
+        failures.join("\n"),
+    );
+    assert_eq!(
+        known_seen,
+        known.len(),
+        "every known {what} divergence must be a cell of the grid",
+    );
+    assert!(
+        known_now_agreeing.is_empty(),
+        "these {what} cells are listed as known divergences but now agree with FCS; \
+         remove them from the list:\n{known_now_agreeing:#?}",
+    );
+    assert!(
+        accepted > 0 && accepted < total,
+        "the {what} sweep should both accept and reject, but accepted {accepted} of {total}",
+    );
+}
+
+/// Every template with every shape in its hole.
+fn cross<'a>(templates: &'a [&str], shapes: &'a [&str]) -> impl Iterator<Item = String> + 'a {
+    templates
+        .iter()
+        .flat_map(move |t| shapes.iter().map(move |s| t.replace(HOLE, s)))
+}
+
+/// Brace bodies, with and without a builder in front: a bare long identifier
+/// (the shape whose classification looks past the `}`), dotted and
+/// `global`-rooted, a sequence, an application, a record and a copy-and-update
+/// (whose own `=`/`with` sit inside the brace), each with a trailing separator,
+/// and the empty record and copy-and-update, whose field list is empty because
+/// the `}` comes first.
+const BRACE_SHAPES: &[&str] = &[
+    "builder { a }",
+    "builder { a.b }",
+    "builder { global.a }",
+    "builder { a; b }",
+    "builder { f x }",
+    "builder { A = 1 }",
+    "builder { a.B = 1 }",
+    "builder { r with A = 1 }",
+    "builder { A = 1; }",
+    "builder { r with A = 1; }",
+    "builder { a; }",
+    "builder { }",
+    "builder { r with }",
+    "seq { a }",
+    "{ a }",
+    "{ a.b }",
+    "{ A = 1 }",
+    "{ r with A = 1 }",
+    "{ }",
+];
+
+/// Where a brace shape sits: followed by an `=` past each closer LexFilter
+/// swallows (`}`, `)`, `]`, `|]`, `end`, and two of them), by a `with` that
+/// belongs to an enclosing copy-and-update, and by an `=` of the next
+/// declaration, with a few controls whose operator is not `=`.
+const CONTEXTS: &[&str] = &[
+    "let x = @\n",
+    "let x = @ = b\n",
+    "let x = (@) = b\n",
+    "let x = ((@) = b)\n",
+    "let x = ((@) = (b))\n",
+    "let x = f (@) = b\n",
+    "let x = (@, c) = b\n",
+    "let x = [@] = b\n",
+    "let x = [|@|] = b\n",
+    "let x = begin @ end = b\n",
+    "let x = ((@)) = b\n",
+    "let x = seq { @ = b }\n",
+    "let x = seq { yield (@) = b }\n",
+    "let x = { R = (@) = b }\n",
+    "let x = { r with R = (@) = b }\n",
+    "let x = { f (@) with R = 1 }\n",
+    "let x = { (@) with R = 1 }\n",
+    "let x = (@) <> b\n",
+    "let x = (@) b\n",
+    "let x = (@).M\n",
+    "let x = (@) :: b\n",
+    "let x = [@; c] = b\n",
+    "let x = (@) == b\n",
+    "let x = (@)\nlet y = b\n",
+    "let x =\n    (@)\n    = b\n",
+];
+
+/// The context whose every cell is a known divergence: each shape is an
+/// `appExpr` other than a long identifier, directly followed by the `=`, so
+/// FCS shifts the `=` into a record field binding and reports FS0609, while we
+/// parse an equality (WoofWare/borzoi#1054).
+const KNOWN_CONTEXT: &str = "let x = seq { @ = b }\n";
+
+/// Every brace shape in every context.
+#[test]
+fn diff_brace_body_followed_by_a_classifying_token() {
+    let known: Vec<String> = cross(&[KNOWN_CONTEXT], BRACE_SHAPES).collect();
+    sweep("brace-body", cross(CONTEXTS, BRACE_SHAPES), &known);
+}
