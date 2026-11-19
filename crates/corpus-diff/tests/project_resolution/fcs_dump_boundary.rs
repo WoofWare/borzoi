@@ -665,18 +665,17 @@ impl Case {
             cases.push(Case::SourceSpelling(entry));
             cases.push(Case::ReferenceSpelling(entry));
         }
-        cases.extend(
+        // A mutation that leaves the source as it was is no draw of its
+        // dimension.
+        let lib = std::str::from_utf8(LIB_FS).expect("text");
+        let varying = || {
             source::alphabet()
                 .entries()
                 .iter()
-                .map(Case::SourceMutation),
-        );
-        cases.extend(
-            source::alphabet()
-                .entries()
-                .iter()
-                .map(Case::ScriptMutation),
-        );
+                .filter(move |e| e.value.varies(lib))
+        };
+        cases.extend(varying().map(Case::SourceMutation));
+        cases.extend(varying().map(Case::ScriptMutation));
         // `BORZOI_HOSTILE_CASES=<text>` keeps the cases whose description
         // holds the text, for iterating on one; the census then fails.
         if let Some(filter) = std::env::var_os("BORZOI_HOSTILE_CASES") {
