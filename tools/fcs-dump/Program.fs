@@ -8585,9 +8585,13 @@ let private fileBatchCore () =
             let request = fileRequest line
             let kind = request.Kind
             let refs = request.Refs
-            // Each as `requestRefArgs` names it to FCS.
+            // Read exactly as `requestRefArgs` names each to FCS: refused
+            // unopened unless a regular file, and refused if missing, since
+            // FCS drops a reference it cannot find and checks without it.
             for reference in refs do
                 requireRegularFile "reference" reference
+                if not (File.Exists reference) then
+                    failwithf "reference %s is not a file" reference
             match request.Target with
             | Project paths ->
                 let files = typesProjectFiles checker (paths |> Array.map Path.GetFullPath) (requestRefArgs refs)
