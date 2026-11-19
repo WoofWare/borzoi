@@ -6444,6 +6444,17 @@ let private requireRegularSource (path: string) =
     if not (isRegularFile path) then
         failwithf "source %s is not a regular file" path
 
+/// A `file-batch` request's `refs` as `extraRefArgsOf` names them to FCS
+/// (trimmed, blanks dropped), for every reader of the request, each refused
+/// unopened unless a regular file ([`refuseUnlessRegular`]). A function of
+/// its own because every `let` in the batch loop nests the rest of it one
+/// level deeper in the AST (see [`dropScriptRefsNamedLike`]).
+let private regularRequestReferences (refs: string list) : string list =
+    let refs = refs |> List.map (fun r -> r.Trim()) |> List.filter (fun r -> r <> "")
+    for reference in refs do
+        refuseUnlessRegular "reference" reference
+    refs
+
 /// What [`RegularFilesOnly`] refused FCS while the request in progress was
 /// answered. FCS may turn a failed open into a diagnostic and go on (a
 /// script's `#r`), so the request is refused when this is not empty
@@ -9086,16 +9097,14 @@ let private fileBatchCore () =
             let root = doc.RootElement
             let kind = reqString root "kind"
             let refs =
-                match root.TryGetProperty("refs") with
-                | true, arr when arr.ValueKind = JsonValueKind.Array ->
-                    arr.EnumerateArray()
-                    |> Seq.choose (fun e -> Option.ofObj (e.GetString()))
-                    |> Seq.toList
-                | _ -> []
-            // As `extraRefArgsOf` names each to FCS, once, for every reader.
-            let refs = refs |> List.map (fun r -> r.Trim()) |> List.filter (fun r -> r <> "")
-            for reference in refs do
-                refuseUnlessRegular "reference" reference
+                regularRequestReferences (
+                    match root.TryGetProperty("refs") with
+                    | true, arr when arr.ValueKind = JsonValueKind.Array ->
+                        arr.EnumerateArray()
+                        |> Seq.choose (fun e -> Option.ofObj (e.GetString()))
+                        |> Seq.toList
+                    | _ -> []
+                )
             if kind = "types-project" then
                 let paths =
                     match root.TryGetProperty("paths") with
