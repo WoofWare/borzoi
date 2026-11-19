@@ -1172,7 +1172,13 @@ mod fifo_tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let base = std::fs::canonicalize(tmp.path()).unwrap();
         let home = base.join("home");
-        std::fs::create_dir(&home).unwrap();
+        // A user config, so that nothing but the walk can decline.
+        std::fs::create_dir_all(home.join(".nuget").join("NuGet")).unwrap();
+        std::fs::write(
+            home.join(".nuget").join("NuGet").join(DEFAULT_FILE_NAME),
+            "<configuration />\n",
+        )
+        .unwrap();
         let environment: BTreeMap<OsString, OsString> = [
             ("HOME", home.as_os_str()),
             (
