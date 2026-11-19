@@ -41,7 +41,6 @@
 //! is its only one.
 
 use std::collections::{BTreeSet, HashMap};
-use std::path::Path;
 
 use roxmltree::Node;
 
@@ -49,7 +48,7 @@ use crate::properties::candidates::{Candidate, Candidates, MAX_CANDIDATE_BYTES, 
 use crate::properties::escaping::Escaped;
 use crate::properties::{self, Origin, PropertyMap};
 
-use super::{State, collect_element_text, directory_build};
+use super::{State, attribute, collect_element_text, directory_build};
 
 impl State<'_> {
     /// What `name` may hold in the real build now: the value the walk holds,
@@ -221,7 +220,7 @@ impl State<'_> {
         for element in group.children().filter(Node::is_element) {
             let name = element.tag_name().name();
             if self.protected.contains(&name.to_ascii_lowercase())
-                || !super::property_child_could_write(element, self)
+                || self.ruled_out_without_files(element)
             {
                 continue;
             }
@@ -233,30 +232,34 @@ impl State<'_> {
     /// [`Self::widen_group_candidates`] for every property group in `branch`
     /// (a `<When>` or `<Otherwise>`), nested `<Choose>`s' branches included: a
     /// branch the walk did not take, which the real build may.
-    /// `current_file_dir` resolves a group's `Exists`. A group or a nested
-    /// branch a gate rules out on every input is skipped, its children
-    /// unread.
-    pub(super) fn widen_branch_candidates(
-        &mut self,
-        branch: Node<'_, '_>,
-        current_file_dir: &Path,
-    ) {
+    /// A group or a nested branch a gate rules out on every input, decided
+    /// without the file system, is skipped, its children unread.
+    pub(super) fn widen_branch_candidates(&mut self, branch: Node<'_, '_>) {
         if !self.track_candidates {
             return;
         }
         for child in branch.children().filter(Node::is_element) {
             match child.tag_name().name() {
-                "PropertyGroup" if !self.ruled_out(child, current_file_dir) => {
+                "PropertyGroup" if !self.ruled_out_without_files(child) => {
                     self.widen_group_candidates(child);
                 }
                 "Choose" => {
-                    for nested in self.choose_branches_from(child, 0, None) {
-                        self.widen_branch_candidates(nested, current_file_dir);
+                    for nested in self.choose_branches_from(child, 0, None, false) {
+                        self.widen_branch_candidates(nested);
                     }
                 }
                 _ => {}
             }
         }
+    }
+
+    /// Whether `node`'s gate is false whatever the names the walk is not
+    /// certain of hold, decided without the file system
+    /// ([`directory_build::decision_without_files`]).
+    pub(super) fn ruled_out_without_files(&self, node: Node<'_, '_>) -> bool {
+        attribute(node, "Condition").is_some_and(|condition| {
+            directory_build::decision_without_files(self, &condition) == Some(false)
+        })
     }
 
     /// Record `name`'s candidates, where the walk tracks them.

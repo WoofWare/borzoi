@@ -440,7 +440,7 @@ fn sweep(
                 None,
             )
             .expect("well-formed");
-            let (_, reads) = parse_fsproj_reads(
+            let (probed, reads) = parse_fsproj_reads(
                 &project,
                 &extra,
                 &common::oracle_environment(),
@@ -450,6 +450,23 @@ fn sweep(
                 &probe,
             )
             .expect("well-formed");
+            // The probe changes nothing about the walk: tracking candidates
+            // leaves what it publishes as it is without them.
+            let (unprobed, _) = parse_fsproj_reads(
+                &project,
+                &extra,
+                &common::oracle_environment(),
+                None,
+                None,
+                None,
+                &ReadProbe::default(),
+            )
+            .expect("well-formed");
+            assert_eq!(
+                probed, unprobed,
+                "the walk publishes something else when the probe reads candidates\n{}",
+                case.project
+            );
             // The hidden import stays unseen, so the gate names, bound only
             // before it, are never committed: a walk that sees the hidden
             // file would grade no stale gate at all.

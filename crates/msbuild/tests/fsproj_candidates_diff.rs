@@ -97,6 +97,9 @@ fn gate(rng: &mut SplitMix64) -> String {
         " Condition=\"'$(G.ToUpperInvariant())' == 'Y'\"",
         " Condition=\"'$(R)' == 'w'\"",
         " Condition=\"'$(R)' != 'w'\"",
+        // An `Exists` the walk's own evaluation short-circuits past.
+        " Condition=\"'$(R)' == 'w' And Exists('marker')\"",
+        " Condition=\"'$(Alpha)' == 'zz' And Exists('marker')\"",
     ])
     .to_string()
 }
@@ -219,17 +222,27 @@ fn evaluate(
     let globals = vec![("G".to_owned(), g.to_owned())];
     let theirs = oracle.project(xml, &probe.properties, Some(path), &globals)?;
     let extra: HashMap<String, String> = globals.into_iter().collect();
-    let (_, reads) = parse_fsproj_reads(
-        xml,
-        path,
-        &extra,
-        &common::oracle_environment(),
-        None,
-        None,
-        None,
-        probe,
-    )
-    .expect("well-formed");
+    let parse = |probe: &ReadProbe| {
+        parse_fsproj_reads(
+            xml,
+            path,
+            &extra,
+            &common::oracle_environment(),
+            None,
+            None,
+            None,
+            probe,
+        )
+        .expect("well-formed")
+    };
+    let (probed, reads) = parse(probe);
+    // The probe changes nothing about the walk: tracking candidates leaves
+    // what it publishes, its read set included, as it is without them.
+    let (unprobed, _) = parse(&ReadProbe::default());
+    assert_eq!(
+        probed, unprobed,
+        "the walk publishes something else when the probe reads candidates\n{xml}"
+    );
     Some((theirs, reads))
 }
 
@@ -586,6 +599,38 @@ fn a_speculative_expansion_probes_nothing() {
     .expect("well-formed");
     let reads = format!("{:?}", parsed.read_set);
     assert!(!reads.contains("probe-only-path"), "{reads}");
+}
+
+/// [`a_speculative_expansion_probes_nothing`] with the channel tracking:
+/// the walk that reads `P`'s candidates publishes what the unprobed one does.
+#[test]
+fn a_tracked_speculative_expansion_probes_nothing() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("Demo.fsproj");
+    let xml = "<Project><PropertyGroup><R>$(G.ToUpperInvariant())</R><R>v</R>\
+               <P Condition=\"'$(G.ToUpperInvariant())' == 'X'\">/probe-only-path\\foo</P>\
+               </PropertyGroup><PropertyGroup Condition=\"'$(R)' == 'w'\">\
+               <P Condition=\"'$(Q)' == 'w' And Exists('marker')\">/probe-only-path\\bar</P>\
+               </PropertyGroup></Project>";
+    std::fs::write(&path, xml).unwrap();
+    let parse = |properties: Vec<String>| {
+        parse_fsproj_reads(
+            xml,
+            &path,
+            &HashMap::from([("G".to_owned(), "y".to_owned())]),
+            &common::oracle_environment(),
+            None,
+            None,
+            None,
+            &ReadProbe {
+                properties,
+                ..ReadProbe::default()
+            },
+        )
+        .expect("well-formed")
+        .0
+    };
+    assert_eq!(parse(vec!["P".to_owned()]), parse(Vec::new()));
 }
 
 /// A child of a widened group whose own gate fails on every input cannot

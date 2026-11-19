@@ -2991,7 +2991,7 @@ impl<'r> State<'r> {
                     }
                 }
                 "Choose" => {
-                    let nested = self.choose_branches_from(child, 0, None);
+                    let nested = self.choose_branches_from(child, 0, None, true);
                     for name in self.skipped_branch_writes(&nested, current_file_dir, cause) {
                         mark(self, name);
                     }
@@ -3005,12 +3005,15 @@ impl<'r> State<'r> {
     /// on, but `walked` (the walk's, by index; the `<Otherwise>` is index
     /// `whens.len()`): each whose gate does not fail whatever the uncertain
     /// names hold, up to the first whose gate holds whatever they hold, and
-    /// the `<Otherwise>` only if none does.
+    /// the `<Otherwise>` only if none does. Gates are decided without the
+    /// file system where `probe_files` is false
+    /// ([`directory_build::decision_without_files`]).
     fn choose_branches_from<'a, 'input>(
         &self,
         choose: Node<'a, 'input>,
         first: usize,
         walked: Option<usize>,
+        probe_files: bool,
     ) -> Vec<Node<'a, 'input>> {
         let entry_dir = self.entry_project_dir.clone();
         let mut branches = Vec::new();
@@ -3024,7 +3027,11 @@ impl<'r> State<'r> {
                 continue;
             }
             let decision = attribute(when, "Condition").and_then(|condition| {
-                directory_build::decision_from_certain_inputs(self, &condition, &entry_dir)
+                if probe_files {
+                    directory_build::decision_from_certain_inputs(self, &condition, &entry_dir)
+                } else {
+                    directory_build::decision_without_files(self, &condition)
+                }
             });
             if decision == Some(false) {
                 continue;
@@ -4175,8 +4182,8 @@ fn handle_choose(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State<
             // mark, may be the one MSBuild takes ([`candidates`]); the later
             // ones' marks widened theirs.
             for branch in &whens[first..from] {
-                if !state.ruled_out(*branch, &exists_dir) {
-                    state.widen_branch_candidates(*branch, current_file_dir);
+                if !state.ruled_out_without_files(*branch) {
+                    state.widen_branch_candidates(*branch);
                 }
             }
         }
@@ -4212,7 +4219,7 @@ fn handle_choose(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State<
     // and marked once the walk's is walked.
     let alternatives = match (first_unsure, choice_stale.clone()) {
         (Some(first), Some(cause)) => {
-            let untaken = state.choose_branches_from(node, first, Some(walked));
+            let untaken = state.choose_branches_from(node, first, Some(walked), true);
             let written = state.skipped_branch_writes(&untaken, current_file_dir, &cause);
             Some((written, cause))
         }
@@ -4229,8 +4236,8 @@ fn handle_choose(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State<
     // reason that leaves no mark, MSBuild may take another branch than the
     // walk's: what each writes, the real build may hold ([`candidates`]).
     if let (Some(first), None) = (first_unsure, &choice_stale) {
-        for branch in state.choose_branches_from(node, first, Some(walked)) {
-            state.widen_branch_candidates(branch, current_file_dir);
+        for branch in state.choose_branches_from(node, first, Some(walked), false) {
+            state.widen_branch_candidates(branch);
         }
     }
     let Some(branch) = chosen.map(|(_, when)| when).or(otherwise) else {
@@ -4469,12 +4476,19 @@ fn walk_property_child_inner(
                     .is_some()
             });
     // Whether the gate is decided from certain inputs, asked of the values it
-    // reads before its evaluation, and only of a gate that reads a value the
-    // walk is not sure of: nothing else needs it.
+    // reads before its evaluation, and only of a gate that reads a stale one:
+    // nothing else in the walk needs it.
     let own_gate_decided = attribute(node, "Condition").is_none_or(|condition| {
-        state.trust_for_raw(&condition).is_certain()
+        state.trust_for_raw(&condition).stale().is_none()
             || directory_build::decided_from_certain_inputs(state, &condition, &entry_dir)
     });
+    // The candidate channel asks it of any gate reading a value the walk is not
+    // sure of, without the file system ([`candidates`]).
+    let own_gate_decided_for_candidates = !state.track_candidates
+        || attribute(node, "Condition").is_none_or(|condition| {
+            state.trust_for_raw(&condition).is_certain()
+                || directory_build::decision_without_files(state, &condition).is_some()
+        });
     let diagnostics_before_condition = state.diagnostics.len();
     let gate = evaluate_property_condition(node, state);
     let own_condition_maybe_wrong = state.diagnostics.len() != diagnostics_before_condition
@@ -4522,7 +4536,7 @@ fn walk_property_child_inner(
             // is undecided for a reason that leaves no stale mark, may let it
             // run: the name may hold either ([`candidates`]).
             let widened = (own_condition_maybe_wrong
-                || (!own_gate_decided && stale_gate.is_none()))
+                || (!own_gate_decided_for_candidates && stale_gate.is_none()))
             .then(|| state.widened_candidates(node));
             // What it may hold now, recorded or held: the verdict below may
             // change its trust, though not what it holds.
@@ -4774,7 +4788,10 @@ fn walk_property_child_inner(
     // build, which keeps what the name held; a value read from names the walk
     // is not certain of may be another there ([`candidates`]). Both are
     // computed before the write, which may read the name itself.
-    let doubted = write_condition_maybe_wrong || !own_gate_decided || state.inside_doubted_gate();
+    let doubted = write_condition_maybe_wrong
+        || !own_gate_decided
+        || !own_gate_decided_for_candidates
+        || state.inside_doubted_gate();
     let before = doubted.then(|| state.candidates_of(&name));
     let value_candidates = (state.track_candidates && !state.reads_only_certain(&raw))
         .then(|| state.value_candidates(&raw));
