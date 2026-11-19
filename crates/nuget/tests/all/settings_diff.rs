@@ -449,8 +449,9 @@ fn gen_case(rng: &mut SplitMix64, base: &Path, cli_home: bool) -> Case {
     // which NuGet would write.
     if rng.below(8) != 0 {
         // Mostly the spelling NuGet loads on every platform: on Linux the
-        // other is no user config, which the model declines.
-        let spelling = if rng.below(8) == 0 {
+        // other is no user config, which the model declines, and the
+        // generator's commits must stay above its floor there too.
+        let spelling = if rng.below(16) == 0 {
             "nuget.config"
         } else {
             "NuGet.Config"
