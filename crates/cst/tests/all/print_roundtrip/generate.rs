@@ -925,7 +925,9 @@ pub fn impl_file<V: Version>() -> BoxedStrategy<ImplFile<V>> {
                 (any::<bool>(), decls())
                     .prop_filter_map("F# refuses the recursive group", module_body()),
             )
-                .prop_map(|(name, body)| Namespace { name, body }),
+                .prop_filter_map("a namespace holding a value", |(name, body)| {
+                    Namespace::new(name, body).ok()
+                }),
             1..=2,
         )
         .prop_map(|ns| ImplFile::Namespaces(Vec1::from_vec(ns).expect("non-empty"))),

@@ -124,10 +124,21 @@ fn file<V: Version>(root: &NormalisedRoot, tally: &mut Tally) -> L<ImplFile<V>> 
                     NamedKind::GlobalNamespace => NamespaceName::Global,
                     NamedKind::Module => return decline("file shape"),
                 };
-                namespaces.push(Namespace {
-                    name,
-                    body: module_body(m.is_rec, decls_lossy(&m.decls, tally, m.is_rec))?,
-                });
+                // A namespace holds no value (FS0201): each `let` or
+                // expression in one is dropped on its own.
+                let decls: Vec<ModuleDecl<V>> = decls_lossy(&m.decls, tally, m.is_rec)
+                    .into_iter()
+                    .filter(|d| {
+                        let value = d.is_namespace_value();
+                        if value {
+                            tally.kept -= 1;
+                            tally.dropped.push(Decline("namespace: a value"));
+                        }
+                        !value
+                    })
+                    .collect();
+                namespaces
+                    .push(Namespace::new(name, module_body(m.is_rec, decls)?).map_err(refused)?);
             }
             Vec1::from_vec(namespaces)
                 .map(ImplFile::Namespaces)
@@ -144,6 +155,9 @@ fn decls_lossy<V: Version>(
     in_rec: bool,
 ) -> Vec<ModuleDecl<V>> {
     let mut out = Vec::new();
+    // In a recursive group, the rank of the last declaration kept: opens
+    // first, then module abbreviations, then the rest.
+    let mut rank = 0;
     for d in decls {
         if let NormalisedDecl::NestedModule {
             long_id,
@@ -190,7 +204,12 @@ fn decls_lossy<V: Version>(
             tally.dropped.extend(inner.dropped);
             continue;
         }
-        match decl(d, in_rec) {
+        match decl(d, in_rec).and_then(|d| {
+            if in_rec {
+                rank = rec_rank_after(&d, rank)?;
+            }
+            Ok(d)
+        }) {
             Ok(d) => {
                 tally.kept += 1;
                 out.push(d);
@@ -199,6 +218,32 @@ fn decls_lossy<V: Version>(
         }
     }
     out
+}
+
+/// The rank a recursive group reaches after `d`, or why the group refuses
+/// it: an open or module abbreviation after a declaration of a later rank
+/// (FS3200, FS3201), or a mutable or pattern `let` (FS0874, FS3521). Each
+/// such declaration is dropped alone, so its module's others are kept.
+fn rec_rank_after<V: Version>(d: &ModuleDecl<V>, rank: u8) -> L<u8> {
+    let this = match d {
+        ModuleDecl::Open(_) => 0,
+        ModuleDecl::ModuleAbbrev { .. } => 1,
+        _ => 2,
+    };
+    if this < rank {
+        return decline("module rec: an open or abbreviation after a declaration");
+    }
+    if let ModuleDecl::Let(group) = d {
+        let refused = group.bindings().as_slice().iter().any(|b| match &b.head {
+            BindingHead::Name { is_mutable, .. } => *is_mutable,
+            BindingHead::Function { .. } => false,
+            BindingHead::Pattern(p) => !matches!(p, Pat::Wildcard),
+        });
+        if refused {
+            return decline("module rec: a mutable or pattern let");
+        }
+    }
+    Ok(this)
 }
 
 /// A declaration, `in_rec` if it sits in a recursive module.
@@ -318,6 +363,7 @@ fn refused(r: DeclRefusal) -> Decline {
         DeclRefusal::CaseNamedTags => "type: a union case named Tags",
         DeclRefusal::FieldNamedAsGenerated(_) => "type: a field named as an unnamed one",
         DeclRefusal::AnonymousType => "type: `_` in a declaration",
+        DeclRefusal::ValueInNamespace => "namespace: a value",
         DeclRefusal::CaseNamedAsTester(_) => "type: a union case named as a tester",
         DeclRefusal::UndeclaredTypar(_) => "type: an undeclared type parameter",
         DeclRefusal::DuplicateTester(_) => "type: two union cases with one tester",
@@ -1518,5 +1564,37 @@ mod tests {
         assert!(lowered::<V11_0>("module rec M =\n    let (_) = 1\n").is_err());
         assert!(lowered::<V11_0>("module rec M =\n    module N =\n        let (_) = 1\n").is_err());
         assert_eq!(lowered::<V11_0>("module rec M =\n    let _ = 1\n"), Ok(()));
+    }
+
+    fn lossy(src: &str) -> super::Tally {
+        let parse = borzoi_cst::parser::parse(src);
+        assert!(parse.errors.is_empty(), "{src:?}: {:?}", parse.errors);
+        super::lower_file_lossy::<V11_0>(&normalise_parse(&parse))
+            .expect("a file")
+            .1
+    }
+
+    #[test]
+    fn a_recursive_group_drops_only_what_it_refuses() {
+        let tally = lossy(
+            "namespace rec A\nmodule M =\n    let mutable x = 1\n    let y = 2\n    open System\nnamespace B\ntype T = int\n",
+        );
+        assert_eq!(
+            (tally.kept, tally.dropped.len()),
+            (2, 2),
+            "{:?}",
+            tally.dropped
+        );
+    }
+
+    #[test]
+    fn a_namespace_drops_only_its_values() {
+        let tally = lossy("namespace N\nlet x = 1\ntype T = int\n");
+        assert_eq!(
+            (tally.kept, tally.dropped.len()),
+            (1, 1),
+            "{:?}",
+            tally.dropped
+        );
     }
 }

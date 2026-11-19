@@ -2177,7 +2177,7 @@ tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/E
 tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/EnumTypes/E_BoolUnderlyingType.fs	kept=0 dropped=1
 tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/EnumTypes/E_DiscriminantOfDifferentTypes.fs	kept=0 dropped=1
 tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/EnumTypes/E_InvalidCase01.fs	kept=1 dropped=1
-tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/EnumTypes/E_NamedTypeInScope.fs	kept=1 dropped=2
+tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/EnumTypes/E_NamedTypeInScope.fs	kept=0 dropped=3
 tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/EnumTypes/E_NeedToQualify01.fs	kept=3 dropped=1
 tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/EnumTypes/E_NoMethodsOnEnums01.fs	kept=0 dropped=1
 tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/EnumTypes/E_NoValueFieldOnEnum.fs	kept=2 dropped=1
@@ -4087,7 +4087,7 @@ tests/FSharp.Compiler.ComponentTests/resources/tests/Diagnostics/General/E_Objec
 tests/FSharp.Compiler.ComponentTests/resources/tests/Diagnostics/General/E_ObjectConstructorAndTry02.fs	kept=0 dropped=1
 tests/FSharp.Compiler.ComponentTests/resources/tests/Diagnostics/General/E_PropertyIsNotReadable01.fs	kept=0 dropped=2
 tests/FSharp.Compiler.ComponentTests/resources/tests/Diagnostics/General/E_Quotation_UnresolvedGenericConstruct01.fs	kept=0 dropped=4
-tests/FSharp.Compiler.ComponentTests/resources/tests/Diagnostics/General/E_SpanExtendsToNextToken01.fs	kept=1 dropped=0
+tests/FSharp.Compiler.ComponentTests/resources/tests/Diagnostics/General/E_SpanExtendsToNextToken01.fs	kept=0 dropped=1
 tests/FSharp.Compiler.ComponentTests/resources/tests/Diagnostics/General/E_StructMustHaveAtLeastOneField.fs	kept=0 dropped=1
 tests/FSharp.Compiler.ComponentTests/resources/tests/Diagnostics/General/E_TryFinallyIncompleteStructuredConstruct.fs	parse errors
 tests/FSharp.Compiler.ComponentTests/resources/tests/Diagnostics/General/E_UnexpectedKeywordAs01.fs	parse errors
@@ -5170,7 +5170,7 @@ tests/fsharp/typecheck/sigs/neg06_b.fs	kept=0 dropped=3
 tests/fsharp/typecheck/sigs/neg07.fs	kept=15 dropped=5
 tests/fsharp/typecheck/sigs/neg08.fs	kept=7 dropped=14
 tests/fsharp/typecheck/sigs/neg08.fsi	signature file
-tests/fsharp/typecheck/sigs/neg09.fs	kept=8 dropped=5
+tests/fsharp/typecheck/sigs/neg09.fs	kept=6 dropped=7
 tests/fsharp/typecheck/sigs/neg09.fsi	signature file
 tests/fsharp/typecheck/sigs/neg10.fs	kept=105 dropped=63
 tests/fsharp/typecheck/sigs/neg10.fsi	signature file
@@ -5308,7 +5308,7 @@ tests/fsharp/typecheck/sigs/neg92.fs	kept=1 dropped=4
 tests/fsharp/typecheck/sigs/neg93.fs	kept=1 dropped=2
 tests/fsharp/typecheck/sigs/neg94-pre.fs	kept=1 dropped=4
 tests/fsharp/typecheck/sigs/neg94.fs	kept=2 dropped=0
-tests/fsharp/typecheck/sigs/neg95.fs	kept=4 dropped=10
+tests/fsharp/typecheck/sigs/neg95.fs	kept=9 dropped=5
 tests/fsharp/typecheck/sigs/neg96.fs	kept=3 dropped=2
 tests/fsharp/typecheck/sigs/neg97.fs	kept=5 dropped=4
 tests/fsharp/typecheck/sigs/neg98.fs	kept=0 dropped=2
@@ -5962,7 +5962,7 @@ tests/service/data/SyntaxTree/ModuleOrNamespace/Module 05.fs	parse errors
 tests/service/data/SyntaxTree/ModuleOrNamespace/Module 06.fs	parse errors
 tests/service/data/SyntaxTree/ModuleOrNamespace/Module 07.fs	parse errors
 tests/service/data/SyntaxTree/ModuleOrNamespace/ModuleShouldContainModuleKeyword.fs	kept=5 dropped=0
-tests/service/data/SyntaxTree/ModuleOrNamespace/MultipleDeclaredNamespacesShouldHaveARangeThatStartsAtTheNamespaceKeyword.fs	kept=1 dropped=1
+tests/service/data/SyntaxTree/ModuleOrNamespace/MultipleDeclaredNamespacesShouldHaveARangeThatStartsAtTheNamespaceKeyword.fs	kept=0 dropped=2
 tests/service/data/SyntaxTree/ModuleOrNamespace/Namespace 01.fs	kept=2 dropped=0
 tests/service/data/SyntaxTree/ModuleOrNamespace/Namespace 02.fs	parse errors
 tests/service/data/SyntaxTree/ModuleOrNamespace/Namespace 03.fs	parse errors

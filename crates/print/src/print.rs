@@ -74,16 +74,16 @@ fn print_file<V: Version>(file: &ImplFile<V>) -> Printer {
         ImplFile::Namespaces(namespaces) => {
             for ns in namespaces.as_slice() {
                 p.out.push_str("namespace");
-                if ns.body.is_rec() {
+                if ns.body().is_rec() {
                     p.out.push_str(" rec");
                 }
                 p.out.push(' ');
-                match &ns.name {
+                match ns.name() {
                     NamespaceName::Global => p.out.push_str("global"),
                     NamespaceName::Named(name) => p.entity_path(name),
                 }
                 p.out.push('\n');
-                p.decls(ns.body.decls(), 0);
+                p.decls(ns.body().decls(), 0);
             }
         }
     }
@@ -124,6 +124,12 @@ impl Printer {
         self.indent(depth);
         match decl {
             ModuleDecl::Let(bindings) => self.let_bindings(bindings.bindings()),
+            // `()` and `do ()` bare: a namespace takes them, and refuses them
+            // parenthesised (FS0201).
+            ModuleDecl::Expr(Expr::Const(Const::Unit)) => self.out.push_str("()"),
+            ModuleDecl::Expr(Expr::Do(e)) if matches!(**e, Expr::Const(Const::Unit)) => {
+                self.out.push_str("do ()")
+            }
             ModuleDecl::Expr(e) => self.expr(e),
             ModuleDecl::Open(target) => {
                 self.out.push_str("open ");
@@ -1663,7 +1669,7 @@ mod tests {
         };
         assert_eq!(
             file(vec![ModuleDecl::NestedModule(outer)]),
-            "module M =\n  module N = begin end\n  (())\n"
+            "module M =\n  module N = begin end\n  ()\n"
         );
     }
 }

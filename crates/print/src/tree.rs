@@ -43,11 +43,31 @@ pub struct NamedModule<V: Version> {
     pub body: ModuleBody<V>,
 }
 
-/// A `namespace` section.
+/// A `namespace` section. A namespace holds no value: F#'s checker refuses a
+/// `let` or an expression directly in one (FS0201), but `()` and `do ()`, so
+/// [`Namespace::new`] refuses them ([`ModuleDecl::is_namespace_value`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Namespace<V: Version> {
-    pub name: NamespaceName,
-    pub body: ModuleBody<V>,
+    name: NamespaceName,
+    body: ModuleBody<V>,
+}
+
+impl<V: Version> Namespace<V> {
+    /// The section, or why F#'s checker refuses it.
+    pub fn new(name: NamespaceName, body: ModuleBody<V>) -> Result<Self, DeclRefusal> {
+        if body.decls().iter().any(ModuleDecl::is_namespace_value) {
+            return Err(DeclRefusal::ValueInNamespace);
+        }
+        Ok(Namespace { name, body })
+    }
+
+    pub fn name(&self) -> &NamespaceName {
+        &self.name
+    }
+
+    pub fn body(&self) -> &ModuleBody<V> {
+        &self.body
+    }
 }
 
 /// What a `namespace` section names.
@@ -119,6 +139,21 @@ pub enum ModuleDecl<V: Version> {
     Types(Vec1<TypeDefn<V>>),
     /// `exception E of …`
     Exception(ExceptionDefn),
+}
+
+impl<V: Version> ModuleDecl<V> {
+    /// Whether F#'s checker refuses the declaration directly in a namespace
+    /// (FS0201): a `let`, or an expression other than `()` and `do ()`,
+    /// which the printer writes bare for a namespace to take.
+    pub fn is_namespace_value(&self) -> bool {
+        match self {
+            ModuleDecl::Let(_) => true,
+            ModuleDecl::Expr(Expr::Const(Const::Unit)) => false,
+            ModuleDecl::Expr(Expr::Do(e)) => !matches!(**e, Expr::Const(Const::Unit)),
+            ModuleDecl::Expr(_) => true,
+            _ => false,
+        }
+    }
 }
 
 /// A nested `module M =` and its declarations.
@@ -363,6 +398,8 @@ pub enum DeclRefusal {
     CaseNamedTags,
     /// A declaration's type holds `_` (FS0715).
     AnonymousType,
+    /// A namespace holds a `let` or an expression (FS0201).
+    ValueInNamespace,
     /// A type uses a type parameter its definition does not declare (FS0039);
     /// an exception declares none.
     UndeclaredTypar(TyparName),

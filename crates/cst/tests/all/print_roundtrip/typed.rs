@@ -2922,6 +2922,122 @@ fn every_admitted_alias_checks() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// A namespace holds no value (FS0201): over one declaration of each kind,
+/// in a namespace, a recursive one and the global one, [`Namespace::new`]
+/// must admit exactly the sections FCS accepts.
+#[test]
+fn namespace_values_are_refused_exactly() {
+    use borzoi_print::names::EntityPath;
+    use borzoi_print::print_impl_file;
+    use borzoi_print::tree::{Namespace, NamespaceName};
+    use borzoi_print::version::DefaultVersion;
+    type D = ModuleDecl<DefaultVersion>;
+
+    let entity = |s: &str| EntityName::new(ident(s)).expect("an entity's name");
+    let value = || {
+        let binding = Binding {
+            attributes: Vec::new(),
+            is_inline: false,
+            head: BindingHead::Name {
+                is_mutable: false,
+                access: None,
+                name: ValueName::Ident(ident("x")),
+            },
+            body: Expr::Const(Const::Int32(1)),
+        };
+        D::Let(ModuleBindings::new(LetBindings::NonRec(Box::new(binding))).expect("a group"))
+    };
+    let kinds: Vec<(&str, D)> = vec![
+        ("let", value()),
+        ("expression", D::Expr(Expr::Const(Const::Int32(1)))),
+        ("unit", D::Expr(Expr::Const(Const::Unit))),
+        ("do ()", D::Expr(Expr::Do(bx(Expr::Const(Const::Unit))))),
+        ("do (u)", D::Expr(Expr::Do(bx(name("u"))))),
+        ("open", D::Open(path("System"))),
+        (
+            "abbreviation",
+            D::ModuleAbbrev {
+                name: ident("A"),
+                target: path("List"),
+            },
+        ),
+        (
+            "type",
+            D::Types(Vec1::new(
+                TypeDefn::new(
+                    Vec::new(),
+                    None,
+                    entity("T"),
+                    Vec::new(),
+                    TypeRepr::Abbrev(named("int")),
+                )
+                .expect("a definition"),
+                Vec::new(),
+            )),
+        ),
+        (
+            "exception",
+            D::Exception(
+                ExceptionDefn::new(
+                    borzoi_print::names::ExceptionName::new(ident("E"))
+                        .expect("an exception's name"),
+                    Vec::new(),
+                )
+                .expect("an exception"),
+            ),
+        ),
+        (
+            "module",
+            D::NestedModule(NestedModule {
+                attributes: Vec::new(),
+                access: None,
+                name: entity("M"),
+                body: ModuleBody::NonRec(vec![value()]),
+            }),
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (kind, decl) in kinds {
+        for (name, is_rec) in [
+            (
+                NamespaceName::Named(EntityPath(Vec1::new(entity("N"), Vec::new()))),
+                false,
+            ),
+            (
+                NamespaceName::Named(EntityPath(Vec1::new(entity("N"), Vec::new()))),
+                true,
+            ),
+            (NamespaceName::Global, false),
+        ] {
+            let body = if is_rec {
+                ModuleBody::Rec(RecDecls::new(vec![decl.clone()]).expect("a recursive group"))
+            } else {
+                ModuleBody::NonRec(vec![decl.clone()])
+            };
+            let admitted = Namespace::new(name.clone(), body.clone());
+            // What FCS makes of the section, printed as the tree would if
+            // it admitted it.
+            let shown = Namespace::<DefaultVersion>::new(name, ModuleBody::NonRec(Vec::new()))
+                .expect("an empty one");
+            let mut printed = print_impl_file(&ImplFile::Namespaces(Vec1::new(shown, Vec::new())));
+            if is_rec {
+                printed = printed.replacen("namespace", "namespace rec", 1);
+            }
+            printed.push_str(&print_impl_file(&ImplFile::AnonModule(
+                body.decls().to_vec(),
+            )));
+            let errors = super::check::check_standalone_errors(&printed, DefaultVersion::LANGUAGE);
+            if admitted.is_ok() != errors.is_empty() {
+                failures.push(format!(
+                    "{kind}: tree admits {}, FCS {errors:?}\n{printed}",
+                    admitted.is_ok()
+                ));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// A file's `module` or `namespace` header names entities, so F#'s checker
 /// refuses there what it refuses in a type's or nested module's name
 /// (FS0883). The typed generator draws anonymous files only, as its trees
@@ -2954,10 +3070,8 @@ fn every_header_name_checks() {
                     body: ModuleBody::NonRec(Vec::new()),
                 }),
                 ImplFile::Namespaces(Vec1::new(
-                    Namespace {
-                        name: NamespaceName::Named(path),
-                        body: ModuleBody::NonRec(Vec::new()),
-                    },
+                    Namespace::new(NamespaceName::Named(path), ModuleBody::NonRec(Vec::new()))
+                        .expect("a namespace"),
                     Vec::new(),
                 )),
             ]
