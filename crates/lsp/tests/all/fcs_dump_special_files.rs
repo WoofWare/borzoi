@@ -111,6 +111,16 @@ fn a_source_or_reference_that_is_not_a_regular_file_is_refused_unopened() {
                 SPECIAL,
             ));
             cases.push((
+                "a FIFO reference spelt through a missing directory, read for its metadata",
+                json!({
+                    "kind": "assembly-entities",
+                    "path": text(&a),
+                    "refs": [format!("{}/missing/../Fifo.dll", dir.path().display())],
+                })
+                .to_string(),
+                SPECIAL,
+            ));
+            cases.push((
                 "a FIFO reference with blanks around it",
                 file(text(&a), vec![format!(" {} ", text(&fifo_dll))]),
                 "Fifo.dll",

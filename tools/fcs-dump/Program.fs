@@ -272,8 +272,13 @@ extern int systemNativeStat(string path, NativeFileStatus& output)
 /// exists, of length zero), so this asks the runtime's own `stat` shim.
 let private requireRegularFile (what: string) (path: string) =
     let mutable status = NativeFileStatus()
-    // Windows has no such files at a path, and no `libSystem.Native`.
-    if not (OperatingSystem.IsWindows()) && systemNativeStat (path, &status) = 0 then
+    // The path as `System.IO` opens it: normalised lexically, so that
+    // `missing/../x` is asked about the `x` an open would read. Windows has
+    // no such files at a path, and no `libSystem.Native`.
+    if
+        not (OperatingSystem.IsWindows())
+        && systemNativeStat (Path.GetFullPath path, &status) = 0
+    then
         let kind =
             match status.Mode &&& 0xF000 with
             | 0x8000 -> None
