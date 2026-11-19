@@ -299,15 +299,25 @@ impl ExceptionName {
     }
 }
 
+/// Whether F# reads `name` as starting with an upper-case letter, by FCS's
+/// rule, which asks the .NET runtime's Unicode tables. Rust's are a different
+/// version, and Unicode moves letters between categories (U+0295 is a
+/// letter of another case to FCS, U+A7CE no letter at all), so only a
+/// capital whose case every version agrees on is admitted: ASCII's,
+/// Latin-1's, and basic Greek's and Cyrillic's.
 fn leads_uppercase(name: &EntityName) -> bool {
-    borzoi_cst::parser::ident_leads_uppercase(name.as_str())
+    name.as_str().chars().next().is_some_and(|c| {
+        matches!(c, 'A'..='Z' | 'À'..='Þ' | 'Α'..='Ω' | 'Ѐ'..='Я') && c.is_uppercase()
+    }) && borzoi_cst::parser::ident_leads_uppercase(name.as_str())
 }
 
 /// A name F# reads as a variable where a pattern may also name a constructor:
-/// an [`Ident`] that does not start with an upper-case letter, by
-/// `borzoi-cst`'s mirror of FCS's rule
-/// ([`borzoi_cst::parser::ident_leads_uppercase`]). FCS reads an upper-case
-/// name there as a constructor's, or as a variable only if none resolves.
+/// an [`Ident`] that does not start with an upper-case letter. FCS reads an
+/// upper-case name there as a constructor's, or as a variable only if none
+/// resolves. Its rule asks the .NET runtime's Unicode tables, whose version
+/// differs from Rust's, so only a first character every version agrees is
+/// not upper case is admitted: an ASCII character other than a capital, or a
+/// lower-case letter of Latin-1, basic Greek or basic Cyrillic.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct VarName(Ident);
 
@@ -315,10 +325,14 @@ impl VarName {
     /// `ident` as a variable's name, or `ident` back if F# could read it as a
     /// constructor's.
     pub fn new(ident: Ident) -> Result<Self, Ident> {
-        if borzoi_cst::parser::ident_leads_uppercase(ident.as_str()) {
-            Err(ident)
-        } else {
+        let stable = ident.as_str().chars().next().is_some_and(|c| {
+            (c.is_ascii() && !c.is_ascii_uppercase())
+                || (matches!(c, 'ß'..='ÿ' | 'α'..='ω' | 'а'..='џ') && c.is_lowercase())
+        });
+        if stable && !borzoi_cst::parser::ident_leads_uppercase(ident.as_str()) {
             Ok(VarName(ident))
+        } else {
+            Err(ident)
         }
     }
 

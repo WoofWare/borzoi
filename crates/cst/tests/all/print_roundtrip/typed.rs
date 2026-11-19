@@ -582,20 +582,7 @@ fn pat_raw<V: Version>(ty: &Ty, depth: u32, binds: bool) -> BoxedStrategy<(Pat<V
                 // A name F# could read as a constructor's is a variable
                 // alias only from F# 6, as a pattern.
                 .prop_filter_map("an alias F# refuses", move |((p, b), n)| {
-                    // `:? T as x` binds `x` at `T`, not at the matched type;
-                    // `System.ArgumentException` is no type the scope has.
-                    let at = match &p {
-                        Pat::IsInst(Type::Name(path)) => match path.segments() {
-                            [only] => match only.as_str() {
-                                "int" => Ty::Int,
-                                "string" => Ty::Str,
-                                "R" => Ty::Record,
-                                _ => return None,
-                            },
-                            _ => return None,
-                        },
-                        _ => t.clone(),
-                    };
+                    let at = narrowed(&p, &t)?;
                     let alias = match VarName::new(n.clone()) {
                         Ok(v) => AsAlias::Var(v),
                         Err(n) => AsAlias::Pat(
@@ -618,8 +605,60 @@ fn pat_raw<V: Version>(ty: &Ty, depth: u32, binds: bool) -> BoxedStrategy<(Pat<V
                 })
                 .boxed(),
         ));
+        // `p as q` with `q` any pattern but a variable, at the type `p`
+        // narrows to (F# 6).
+        if let Some(gate) = V::NonVariablePatternsToRightOfAsPatterns::WITNESS {
+            let t = ty.clone();
+            let lhs = pat::<V>(ty, d, binds).prop_filter("a type test at no type of the scope", {
+                let t = t.clone();
+                move |(p, _)| narrowed(p, &t).is_some()
+            });
+            alts.push((
+                1,
+                lhs.prop_flat_map(move |(p, b)| {
+                    let at = narrowed(&p, &t).expect("filtered above");
+                    pat::<V>(&at, d, binds).prop_filter_map(
+                        "a variable, or a name bound twice",
+                        move |(q, qb)| {
+                            let bound: Bound = b.iter().chain(&qb).cloned().collect();
+                            distinct(&bound).then_some(())?;
+                            let alias = AliasPat::new(gate, q).ok()?;
+                            Some((
+                                Pat::As {
+                                    pat: Box::new(p.clone()),
+                                    alias: AsAlias::Pat(alias),
+                                },
+                                bound,
+                            ))
+                        },
+                    )
+                })
+                .boxed(),
+            ));
+        }
     }
     weighted(alts)
+}
+
+/// The type `p as q` matches `q` at: `T` after `:? T`, else `ty`, the type
+/// `p` matches. `None` for a type test at a type the scope has no values of
+/// (`System.ArgumentException`).
+fn narrowed<V: Version>(p: &Pat<V>, ty: &Ty) -> Option<Ty> {
+    let Pat::IsInst(tested) = p else {
+        return Some(ty.clone());
+    };
+    let Type::Name(path) = tested else {
+        return None;
+    };
+    match path.segments() {
+        [only] => match only.as_str() {
+            "int" => Some(Ty::Int),
+            "string" => Some(Ty::Str),
+            "R" => Some(Ty::Record),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 /// A pattern for a binder, annotated whole: its type must be fixed before its
@@ -2589,15 +2628,21 @@ fn pat_names<V: Version>(p: &Pat<V>, out: &mut Vec<String>) {
 /// A field type: a drawn type, or one of `typars`.
 fn field_type(typars: Vec<borzoi_print::names::TyparName>) -> BoxedStrategy<Type> {
     let drawn = arb_ty(1).prop_map(|t| type_of(&t));
-    // `_`, alone or in a type, which a declaration refuses (FS0715).
-    let hole = prop_oneof![Just(Type::Anon), Just(app("list", Type::Anon)),];
+    // What a declaration refuses: `_`, alone or in a type (FS0715), and a
+    // type parameter it does not declare, `'c` (FS0039).
+    let undeclared = borzoi_print::names::TyparName::new("c").expect("a type variable");
+    let refused = prop_oneof![
+        Just(Type::Anon),
+        Just(app("list", Type::Anon)),
+        Just(Type::Var(undeclared)),
+    ];
     if typars.is_empty() {
-        prop_oneof![8 => drawn, 1 => hole].boxed()
+        prop_oneof![8 => drawn, 1 => refused].boxed()
     } else {
         prop_oneof![
             8 => drawn,
             4 => prop::sample::select(typars).prop_map(Type::Var),
-            1 => hole,
+            1 => refused,
         ]
         .boxed()
     }
@@ -2669,6 +2714,95 @@ pub fn impl_file<V: Version>() -> BoxedStrategy<ImplFile<V>> {
         .prop_flat_map(move |n| decls::<V>(n, &sc, &Rc::new(BTreeSet::new()), 1))
         .prop_map(|(decls, _, _)| ImplFile::AnonModule(decls))
         .boxed()
+}
+
+/// From F# 9 each union case has a tester property, `IsA` for `A` and
+/// `IsEmpty`/`IsCons` for `[]`/`::`, which may share a name with neither
+/// another case (FS0023) nor another tester (FS0438). Over every union of
+/// two cases from the names that can collide, at a version with testers and
+/// one without, [`TypeDefn::new`] must admit exactly the unions FCS accepts.
+#[test]
+fn union_testers_are_refused_exactly() {
+    use borzoi_print::version::{V8_0, V9_0};
+
+    const NAMES: &[&str] = &[
+        "A",
+        "IsA",
+        "op_Nil",
+        "op_ColonColon",
+        "Empty",
+        "Cons",
+        "IsEmpty",
+        "IsCons",
+    ];
+    fn admits<V: Version>(a: &str, b: &str) -> bool {
+        let case = |n: &str| {
+            let name = UnionCaseName::new(ident(n)).expect("a union case's name");
+            UnionCase::new(name, Vec::new()).expect("a case")
+        };
+        let repr = TypeRepr::Union(Vec1::new(case(a), vec![case(b)]));
+        let name = EntityName::new(ident("Y")).expect("an entity's name");
+        TypeDefn::<V>::new(Vec::new(), None, name, Vec::new(), repr).is_ok()
+    }
+    let pairs: Vec<(&str, &str)> = NAMES
+        .iter()
+        .flat_map(|a| NAMES.iter().filter(move |b| *b != a).map(move |b| (*a, *b)))
+        .collect();
+    let failures: Vec<String> = crate::common::par_map(pairs.len() * 2, |i| {
+        let (a, b) = pairs[i / 2];
+        let (lang, admitted) = if i % 2 == 0 {
+            (V8_0::LANGUAGE, admits::<V8_0>(a, b))
+        } else {
+            (V9_0::LANGUAGE, admits::<V9_0>(a, b))
+        };
+        let source = format!("type Y = | {a} | {b}\n");
+        let errors = super::check::check_standalone_errors(&source, lang);
+        (admitted != errors.is_empty()).then(|| {
+            format!(
+                "at {lang}, `{}`: tree admits {admitted}, FCS {errors:?}",
+                source.trim()
+            )
+        })
+    })
+    .into_iter()
+    .flatten()
+    .collect();
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Every first character [`UnionCaseName::new`] and [`ExceptionName::new`]
+/// admit must be one FCS reads as upper case, though Rust's Unicode tables
+/// may be newer than the runtime's: each admitted character up to U+04FF,
+/// and a few past it, starts a case's and an exception's name in one file,
+/// which FCS's checker must accept.
+#[test]
+fn every_admitted_case_initial_checks() {
+    use borzoi_print::names::ExceptionName;
+    use borzoi_print::version::DefaultVersion;
+
+    let candidates = (0x41..=0x4FFu32).chain([0x1C90, 0xA7CE, 0x10400]);
+    let mut source = String::new();
+    let mut admitted = 0;
+    for (i, c) in candidates.filter_map(char::from_u32).enumerate() {
+        let Ok(name) = Ident::new(&format!("{c}C")) else {
+            continue;
+        };
+        if UnionCaseName::new(name.clone()).is_ok() {
+            source.push_str(&format!("type Y{i} = | ``{c}C``\n"));
+            admitted += 1;
+        }
+        if ExceptionName::new(name).is_ok() {
+            source.push_str(&format!("exception ``{c}C{i}``\n"));
+        }
+    }
+    assert!(admitted > 100, "too few initials admitted: {admitted}");
+    let errors = super::check::check_standalone_errors(&source, DefaultVersion::LANGUAGE);
+    let lines: Vec<&str> = source.lines().collect();
+    let refused: Vec<String> = errors
+        .iter()
+        .map(|(line, code, _)| format!("FS{code:04} {}", lines[*line as usize - 1]))
+        .collect();
+    assert!(refused.is_empty(), "{}", refused.join("\n"));
 }
 
 /// A file's `module` or `namespace` header names entities, so F#'s checker

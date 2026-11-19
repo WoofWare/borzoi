@@ -180,9 +180,10 @@ pub fn check_report(failures: &[CheckFailure]) -> String {
 }
 
 /// The errors FCS's checker reports at `lang` in `source`, a whole file
-/// checked on its own: a file with a `module` or `namespace` header cannot
-/// sit in another module after [`PRELUDE`].
-pub fn check_standalone_errors(source: &str, lang: LanguageVersion) -> Vec<(i64, String)> {
+/// checked on its own (a file with a `module` or `namespace` header cannot
+/// sit in another module after [`PRELUDE`]): each error's line, from 1, code
+/// and message.
+pub fn check_standalone_errors(source: &str, lang: LanguageVersion) -> Vec<(u64, i64, String)> {
     let mut tmp = tempfile::Builder::new()
         .prefix("Checked")
         .suffix(".fs")
@@ -197,8 +198,13 @@ pub fn check_standalone_errors(source: &str, lang: LanguageVersion) -> Vec<(i64,
         .iter()
         .filter(|d| d["Severity"] == "Error")
         .map(|d| {
+            let line = d["StartLine"].as_u64().expect("a line");
             let code = d["Code"].as_i64().expect("a code");
-            (code, d["Message"].as_str().expect("a message").to_owned())
+            (
+                line,
+                code,
+                d["Message"].as_str().expect("a message").to_owned(),
+            )
         })
         .collect()
 }

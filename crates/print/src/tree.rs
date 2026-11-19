@@ -333,8 +333,10 @@ pub enum BindingHead<V: Version> {
 /// A type definition, one of a `type … and …` group. F#'s checker refuses a
 /// type parameter declared twice (FS0037), an abbreviation that does not use
 /// every one it declares (FS0035), a record field or union case declared
-/// twice (FS0037), a `_` in a type (FS0715), and from F# 9 a union case named
-/// as another's tester property (FS0023), so [`TypeDefn::new`] refuses them.
+/// twice (FS0037), a `_` in a type (FS0715), a type parameter it does not
+/// declare (FS0039), and from F# 9 a union case named as a case's tester
+/// property (FS0023) or two cases with one tester (FS0438), so
+/// [`TypeDefn::new`] refuses them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeDefn<V: Version> {
     attributes: Vec<Attribute<V>>,
@@ -361,6 +363,12 @@ pub enum DeclRefusal {
     CaseNamedTags,
     /// A declaration's type holds `_` (FS0715).
     AnonymousType,
+    /// A type uses a type parameter its definition does not declare (FS0039);
+    /// an exception declares none.
+    UndeclaredTypar(TyparName),
+    /// Two union cases have the same F# 9 tester property (FS0438), as `[]`
+    /// and `Empty` both have `IsEmpty`.
+    DuplicateTester(String),
     /// A union case is named as F# 9 names another case's tester property,
     /// `IsA` for `A` (FS0023).
     CaseNamedAsTester(Ident),
@@ -381,6 +389,9 @@ impl<V: Version> TypeDefn<V> {
     ) -> Result<Self, DeclRefusal> {
         if let Some(t) = first_duplicate(typars.iter()) {
             return Err(DeclRefusal::DuplicateTypar(t.clone()));
+        }
+        if let Some(t) = repr.typars().into_iter().find(|t| !typars.contains(t)) {
+            return Err(DeclRefusal::UndeclaredTypar(t));
         }
         match &repr {
             TypeRepr::Abbrev(ty) => {
@@ -407,9 +418,17 @@ impl<V: Version> TypeDefn<V> {
                     return Err(DeclRefusal::DuplicateCase(c.clone()));
                 }
                 // From F# 9 each case has a tester property, `IsA` for `A`.
+                // Testers must differ from each other (FS0438: `[]`'s and
+                // `Empty`'s are both `IsEmpty`) and from every case (FS0023).
                 if V::LANGUAGE.supports(LanguageFeature::UnionIsPropertiesVisible) {
-                    let testers: HashSet<String> = cases.iter().map(|c| c.name.tester()).collect();
-                    if let Some(c) = cases.iter().find(|c| testers.contains(c.name.as_str())) {
+                    let testers: Vec<String> = cases.iter().map(|c| c.name.tester()).collect();
+                    if let Some(t) = first_duplicate(testers.iter()) {
+                        return Err(DeclRefusal::DuplicateTester(t.clone()));
+                    }
+                    if let Some(c) = cases
+                        .iter()
+                        .find(|c| testers.iter().any(|t| t == c.name.as_str()))
+                    {
                         return Err(DeclRefusal::CaseNamedAsTester(c.name.ident().clone()));
                     }
                 }
@@ -462,6 +481,26 @@ pub enum TypeRepr {
     Union(Vec1<UnionCase>),
 }
 
+impl TypeRepr {
+    /// The type variables the representation's types use.
+    fn typars(&self) -> Vec<TyparName> {
+        let mut used = Vec::new();
+        match self {
+            TypeRepr::Abbrev(ty) => ty.typars(&mut used),
+            TypeRepr::Record(fields) => fields
+                .as_slice()
+                .iter()
+                .for_each(|f| f.ty.typars(&mut used)),
+            TypeRepr::Union(cases) => cases
+                .as_slice()
+                .iter()
+                .flat_map(|c| &c.fields)
+                .for_each(|f| f.ty.typars(&mut used)),
+        }
+        used
+    }
+}
+
 /// A record type's field.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordField {
@@ -507,8 +546,9 @@ impl UnionCase {
 }
 
 /// An exception's declaration, `exception E of …`. F#'s checker refuses a
-/// field named twice (FS3176), and a field named as F# names an unnamed one
-/// (FS3176), so [`ExceptionDefn::new`] refuses them.
+/// type parameter, which an exception cannot declare (FS0039), a field named
+/// twice (FS3176), and a field named as F# names an unnamed one (FS3176), so
+/// [`ExceptionDefn::new`] refuses them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExceptionDefn {
     name: ExceptionName,
@@ -518,6 +558,12 @@ pub struct ExceptionDefn {
 impl ExceptionDefn {
     /// The exception, or why F#'s checker refuses it.
     pub fn new(name: ExceptionName, fields: Vec<UnionField>) -> Result<Self, DeclRefusal> {
+        // An exception declares no type parameters.
+        let mut used = Vec::new();
+        fields.iter().for_each(|f| f.ty.typars(&mut used));
+        if let Some(t) = used.into_iter().next() {
+            return Err(DeclRefusal::UndeclaredTypar(t));
+        }
         // An unnamed field is `Data0`, `Data1`, ….
         check_fields(&fields, |i| format!("Data{i}"))?;
         Ok(ExceptionDefn { name, fields })

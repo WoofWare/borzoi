@@ -2678,14 +2678,14 @@ tests/FSharp.Compiler.ComponentTests/Conformance/Types/TypeConstraints/IWSAMsAnd
 tests/FSharp.Compiler.ComponentTests/Conformance/Types/TypeConstraints/IWSAMsAndSRTPs/testFiles/UseSRTPFromIWSAMGenericCode.fs	kept=2 dropped=8
 tests/FSharp.Compiler.ComponentTests/Conformance/Types/TypeConstraints/LogicalPropertiesOfTypes/LogicalPropertiesOfTypes.fs	kept=4 dropped=0
 tests/FSharp.Compiler.ComponentTests/Conformance/Types/TypeConstraints/LogicalPropertiesOfTypes/TypeWithNullLiteral_NetRef.fsx	kept=5 dropped=0
-tests/FSharp.Compiler.ComponentTests/Conformance/Types/UnionTypes/BeginWithUppercase01.fsx	kept=2 dropped=1
+tests/FSharp.Compiler.ComponentTests/Conformance/Types/UnionTypes/BeginWithUppercase01.fsx	kept=1 dropped=2
 tests/FSharp.Compiler.ComponentTests/Conformance/Types/UnionTypes/DispatchSlot_Equals01.fsx	kept=13 dropped=0
 tests/FSharp.Compiler.ComponentTests/Conformance/Types/UnionTypes/DispatchSlot_GetHashCode.fsx	kept=3 dropped=0
 tests/FSharp.Compiler.ComponentTests/Conformance/Types/UnionTypes/E_BeginWithUppercase01.fsx	kept=0 dropped=1
 tests/FSharp.Compiler.ComponentTests/Conformance/Types/UnionTypes/E_BeginWithUppercase02.fsx	parse errors
 tests/FSharp.Compiler.ComponentTests/Conformance/Types/UnionTypes/E_BeginWithUppercase03.fsx	parse errors
 tests/FSharp.Compiler.ComponentTests/Conformance/Types/UnionTypes/E_BeginWithUppercase04.fsx	parse errors
-tests/FSharp.Compiler.ComponentTests/Conformance/Types/UnionTypes/E_BeginWithUppercaseNoPipe01.fsx	kept=0 dropped=2
+tests/FSharp.Compiler.ComponentTests/Conformance/Types/UnionTypes/E_BeginWithUppercaseNoPipe01.fsx	kept=0 dropped=5
 tests/FSharp.Compiler.ComponentTests/Conformance/Types/UnionTypes/E_DuplicateUnionCase01.fsx	kept=0 dropped=0
 tests/FSharp.Compiler.ComponentTests/Conformance/Types/UnionTypes/E_FieldMemberClash.fs	kept=0 dropped=2
 tests/FSharp.Compiler.ComponentTests/Conformance/Types/UnionTypes/E_FieldNameUsedMulti.fs	kept=3 dropped=2
@@ -3423,7 +3423,7 @@ tests/FSharp.Compiler.ComponentTests/FSharpChecker/TransparentCompiler.fs	kept=6
 tests/FSharp.Compiler.ComponentTests/Globalization/Arabic.fs	kept=10 dropped=1
 tests/FSharp.Compiler.ComponentTests/Globalization/GlobalizationTestCases.fs	kept=16 dropped=0
 tests/FSharp.Compiler.ComponentTests/Globalization/HexCharEncode.fs	kept=4 dropped=7
-tests/FSharp.Compiler.ComponentTests/Globalization/Hindi.fs	kept=8 dropped=5
+tests/FSharp.Compiler.ComponentTests/Globalization/Hindi.fs	kept=7 dropped=6
 tests/FSharp.Compiler.ComponentTests/Globalization/Mongolian.fs	kept=10 dropped=1
 tests/FSharp.Compiler.ComponentTests/Globalization/RightToLeft.fs	kept=3 dropped=0
 tests/FSharp.Compiler.ComponentTests/Globalization/Surrogates.fs	kept=6 dropped=0
@@ -5237,7 +5237,7 @@ tests/fsharp/typecheck/sigs/neg29.fs	parse errors
 tests/fsharp/typecheck/sigs/neg30.fs	kept=6 dropped=27
 tests/fsharp/typecheck/sigs/neg31.fs	kept=14 dropped=10
 tests/fsharp/typecheck/sigs/neg31.fsi	signature file
-tests/fsharp/typecheck/sigs/neg32.fs	kept=4 dropped=8
+tests/fsharp/typecheck/sigs/neg32.fs	kept=2 dropped=10
 tests/fsharp/typecheck/sigs/neg33.fs	kept=0 dropped=2
 tests/fsharp/typecheck/sigs/neg33.fsi	signature file
 tests/fsharp/typecheck/sigs/neg34.fs	kept=1 dropped=1

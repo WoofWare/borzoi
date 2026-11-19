@@ -153,14 +153,16 @@ fn decls_lossy<V: Version>(decls: &[NormalisedDecl], tally: &mut Tally) -> Vec<M
                 };
                 Ok((entity_name(name)?, attributes_of(attributes)?))
             })();
-            // The module's declarations count as kept only if it is.
+            // The module's declarations count as kept only if it is, and
+            // as dropped with it otherwise, its header's refusal included.
             let mut inner = Tally::default();
+            let body = decls_lossy(decls, &mut inner);
             let module = header.and_then(|(name, attributes)| {
                 Ok(NestedModule {
                     attributes,
                     access: access.map(lower_access),
                     name,
-                    body: module_body(*is_rec, decls_lossy(decls, &mut inner))?,
+                    body: module_body(*is_rec, body)?,
                 })
             });
             match module {
@@ -304,6 +306,8 @@ fn refused(r: DeclRefusal) -> Decline {
         DeclRefusal::FieldNamedAsGenerated(_) => "type: a field named as an unnamed one",
         DeclRefusal::AnonymousType => "type: `_` in a declaration",
         DeclRefusal::CaseNamedAsTester(_) => "type: a union case named as a tester",
+        DeclRefusal::UndeclaredTypar(_) => "type: an undeclared type parameter",
+        DeclRefusal::DuplicateTester(_) => "type: two union cases with one tester",
     })
 }
 
@@ -1295,6 +1299,12 @@ fn is_parenthesised_type_test(p: &NormalisedPat) -> bool {
 
 /// What follows `as`: a variable, or from F# 6 another pattern.
 fn as_alias<V: Version>(p: &NormalisedPat) -> L<AsAlias<V>> {
+    let gate = V::NonVariablePatternsToRightOfAsPatterns::WITNESS;
+    if gate.is_none() && matches!(p, NormalisedPat::Paren(_)) {
+        // Before F# 6, `p as (x)` is a pattern after `as`, which only F# 6
+        // admits; `p as x` is the variable.
+        return decline("pat: a pattern after `as` before F# 6");
+    }
     let p = pat(p)?;
     if let Pat::Name(path) = &p
         && let [only] = path.segments()
@@ -1302,7 +1312,7 @@ fn as_alias<V: Version>(p: &NormalisedPat) -> L<AsAlias<V>> {
     {
         return Ok(AsAlias::Var(v));
     }
-    let Some(gate) = V::NonVariablePatternsToRightOfAsPatterns::WITNESS else {
+    let Some(gate) = gate else {
         return decline("pat: a pattern after `as` before F# 6");
     };
     let alias = AliasPat::new(gate, p).expect("not a variable, which returned above");
