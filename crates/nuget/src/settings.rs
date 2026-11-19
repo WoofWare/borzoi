@@ -55,7 +55,10 @@
 //!   probes once per process. A folder holding a config file is admitted only
 //!   where that belief cannot matter: on macOS every spelling must name one
 //!   file (a case-insensitive volume), and on Linux the spellings present must
-//!   be distinct files. In the two folders NuGet lists, every candidate (a
+//!   be distinct files. A spelling is present as NuGet's `File.Exists` says:
+//!   anything that is not a directory, a link to nothing included, so a
+//!   present spelling that is no regular file is loaded, and declines. In the
+//!   two folders NuGet lists, every candidate (a
 //!   regular file whose name ends in `.config` in any case) must end in
 //!   `.config` or `.Config`, which both platforms' patterns match, must not be
 //!   named `NuGet.Config` in any case, and must sort the same ignoring case as
@@ -128,10 +131,14 @@ const DEFAULT_FILE_NAME: &str = "NuGet.Config";
 pub trait SettingsFs {
     /// [`std::fs::metadata`]: what `path` names, following symlinks.
     fn metadata(&self, path: &Path) -> std::io::Result<Metadata>;
+    /// [`std::fs::symlink_metadata`]: what `path` names, a symlink itself
+    /// rather than what it points at. Asked only where [`Self::metadata`]
+    /// failed, to tell a link that resolves to nothing from nothing at all.
+    fn link_metadata(&self, path: &Path) -> std::io::Result<Metadata>;
     /// The identity (device and inode) of the file `path` names, following
     /// symlinks, which tells two spellings of one file apart from two files.
-    /// Asked only of spellings [`Self::metadata`] found to be files, and only
-    /// where more than one is.
+    /// Asked only of spellings NuGet takes for config files (anything that is
+    /// not a directory), and only where more than one is.
     fn identity(&self, path: &Path) -> std::io::Result<(u64, u64)>;
     /// [`std::fs::read`], failing a path that names no regular file rather
     /// than opening it: a FIFO's open waits for a writer that may never come.
@@ -172,6 +179,14 @@ pub struct HostFs;
 impl SettingsFs for HostFs {
     fn metadata(&self, path: &Path) -> std::io::Result<Metadata> {
         let metadata = std::fs::metadata(path)?;
+        Ok(Metadata {
+            is_file: metadata.is_file(),
+            is_dir: metadata.is_dir(),
+        })
+    }
+
+    fn link_metadata(&self, path: &Path) -> std::io::Result<Metadata> {
+        let metadata = std::fs::symlink_metadata(path)?;
         Ok(Metadata {
             is_file: metadata.is_file(),
             is_dir: metadata.is_dir(),
@@ -848,7 +863,21 @@ fn config_files(
     Ok(files)
 }
 
+/// Whether .NET's `File.Exists` holds of `path`, which is how NuGet decides
+/// that a spelling of the walk's config file is there: something is at the
+/// path, following symlinks or, where that fails, the symlink itself, and it
+/// is not a directory. So a FIFO, a socket, a device, a link to nothing and a
+/// loop of links are each a config file to NuGet, which then opens it.
+fn file_exists(path: &Path, fs: &dyn SettingsFs) -> bool {
+    match fs.metadata(path) {
+        Ok(metadata) => !metadata.is_dir,
+        Err(_) => fs.link_metadata(path).is_ok(),
+    }
+}
+
 /// The config file NuGet loads from `folder` in its walk up from the root.
+/// A spelling NuGet takes for one and that is no regular file is still the
+/// one it loads: reading it then declines.
 fn walk_config_file(
     folder: &Path,
     fs: &dyn SettingsFs,
@@ -856,10 +885,7 @@ fn walk_config_file(
     let present: Vec<usize> = WALK_FILE_NAMES
         .iter()
         .enumerate()
-        .filter(|(_, name)| {
-            fs.metadata(&folder.join(name))
-                .is_ok_and(|metadata| metadata.is_file)
-        })
+        .filter(|(_, name)| file_exists(&folder.join(name), fs))
         .map(|(index, _)| index)
         .collect();
     let Some(first) = present.first() else {
@@ -1098,6 +1124,59 @@ mod fifo_tests {
             for name in ["NuGet.Config", "linked.config"] {
                 let error = HostFs.read(&dir.join(name)).unwrap_err();
                 assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput, "{name}");
+            }
+        });
+    }
+
+    /// NuGet asks `File.Exists` of each spelling of the walk's config file,
+    /// which holds of anything at the path that is not a directory, a link
+    /// that resolves to nothing included, and then loads the file: it waits
+    /// on a FIFO for a writer, and throws on a loop of links. So a folder
+    /// whose config file is such a thing is not a folder with no config
+    /// file, and the model declines it, naming that folder or its file.
+    #[test]
+    fn a_walk_config_file_that_exists_and_is_no_regular_file_declines() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let base = std::fs::canonicalize(tmp.path()).unwrap();
+        let home = base.join("home");
+        std::fs::create_dir(&home).unwrap();
+        let environment: BTreeMap<OsString, OsString> = [
+            ("HOME", home.as_os_str()),
+            (
+                "NUGET_COMMON_APPLICATION_DATA",
+                base.join("common").as_os_str(),
+            ),
+        ]
+        .into_iter()
+        .map(|(name, value)| (OsString::from(name), value.to_owned()))
+        .collect();
+        let mut folders = Vec::new();
+        for kind in ["fifo", "linked-fifo", "dangling", "loop"] {
+            let folder = base.join(kind).join("project");
+            std::fs::create_dir_all(&folder).unwrap();
+            let file = folder.join(DEFAULT_FILE_NAME);
+            match kind {
+                "fifo" => make_fifo(&file),
+                "linked-fifo" => {
+                    make_fifo(&base.join(kind).join("pipe"));
+                    std::os::unix::fs::symlink(base.join(kind).join("pipe"), &file).unwrap();
+                }
+                "dangling" => {
+                    std::os::unix::fs::symlink(base.join(kind).join("nowhere"), &file).unwrap()
+                }
+                _ => std::os::unix::fs::symlink(DEFAULT_FILE_NAME, &file).unwrap(),
+            }
+            folders.push((kind, folder));
+        }
+        within_deadline("loading settings beside a FIFO", move || {
+            for (kind, folder) in folders {
+                match global_packages_folder(&folder, &environment) {
+                    Err(GlobalPackagesFolderDecline::Folder { folder: declined })
+                        if declined == folder => {}
+                    Err(GlobalPackagesFolderDecline::ConfigFile { file, .. })
+                        if file.parent() == Some(folder.as_path()) => {}
+                    other => panic!("{kind}: {other:?}"),
+                }
             }
         });
     }
