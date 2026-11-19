@@ -100,7 +100,9 @@ pub fn directory(cwd: Cwd, project_dir: &Path, segments: &[&str], scratch: &Path
                         && *segment != "..",
                     "{segment:?} is not one plain path component"
                 );
-                std::fs::create_dir(dir.join(segment)).expect("create a segment's directory");
+                // Two of the project's paths may share a first segment, or
+                // spell one in two cases on a file system that folds them.
+                std::fs::create_dir_all(dir.join(segment)).expect("create a segment's directory");
             }
             dir
         }
@@ -127,7 +129,7 @@ mod tests {
         let (project, scratch) = (root.path().join("proj"), root.path().join("scratch"));
         std::fs::create_dir_all(&project).unwrap();
         std::fs::create_dir_all(&scratch).unwrap();
-        let segments = ["obj", "bin", "src"];
+        let segments = ["obj", "bin", "src", "src"];
 
         let unrestored = directory(
             Cwd::ProjectDirectoryUnrestored,

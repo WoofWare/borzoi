@@ -23,12 +23,12 @@ use super::{Alphabet, Dimension, Entry, Kind};
 pub enum Part {
     /// The directory the file is in, relative to the base.
     Dir,
-    /// The directory, in ASCII upper case.
-    DirUpper,
+    /// The directory, each ASCII letter in its other case.
+    DirRecased,
     /// The file's name.
     Name,
-    /// The name, in ASCII upper case.
-    NameUpper,
+    /// The name, each ASCII letter in its other case.
+    NameRecased,
     /// These bytes.
     Lit(&'static [u8]),
     /// These bytes, this many times.
@@ -86,15 +86,37 @@ pub fn prepare(fs: &HostileFs, dir: &str) {
     symlink(&far, base.join(dir).join(FAR_LINK)).expect("link out of the tree");
 }
 
+/// `text` with each ASCII letter in its other case.
+///
+/// # Panics
+///
+/// If `text` has no ASCII letter: the spelling would be the plain one, and
+/// would not mean what a case variant is said to.
+fn recased(text: &str) -> String {
+    assert!(
+        text.bytes().any(|b| b.is_ascii_alphabetic()),
+        "{text:?} has no ASCII letter to write in another case"
+    );
+    text.chars()
+        .map(|c| {
+            if c.is_ascii_lowercase() {
+                c.to_ascii_uppercase()
+            } else {
+                c.to_ascii_lowercase()
+            }
+        })
+        .collect()
+}
+
 impl Spelling {
     fn tail(&self, dir: &str, name: &str) -> Vec<u8> {
         let mut out = Vec::new();
         for part in self.parts {
             match part {
                 Part::Dir => out.extend(dir.as_bytes()),
-                Part::DirUpper => out.extend(dir.to_ascii_uppercase().as_bytes()),
+                Part::DirRecased => out.extend(recased(dir).as_bytes()),
                 Part::Name => out.extend(name.as_bytes()),
-                Part::NameUpper => out.extend(name.to_ascii_uppercase().as_bytes()),
+                Part::NameRecased => out.extend(recased(name).as_bytes()),
                 Part::Lit(bytes) => out.extend(*bytes),
                 Part::Repeat(bytes, n) => {
                     for _ in 0..*n {
@@ -126,7 +148,7 @@ impl Spelling {
     }
 }
 
-use Part::{Dir, DirUpper, Lit, Name, NameUpper, Repeat};
+use Part::{Dir, DirRecased, Lit, Name, NameRecased, Repeat};
 
 const fn relative(parts: &'static [Part], means: Means) -> Spelling {
     Spelling {
@@ -275,12 +297,18 @@ const TABLE: &[(Dimension, Spelling, &str)] = &[
     ),
     (
         Dimension::CaseVariant,
-        relative(&[DirUpper, Lit(b"/"), Name], Means::TheFileIfCaseIsIgnored),
+        relative(
+            &[DirRecased, Lit(b"/"), Name],
+            Means::TheFileIfCaseIsIgnored,
+        ),
         "the directory in another case",
     ),
     (
         Dimension::CaseVariant,
-        relative(&[Dir, Lit(b"/"), NameUpper], Means::TheFileIfCaseIsIgnored),
+        relative(
+            &[Dir, Lit(b"/"), NameRecased],
+            Means::TheFileIfCaseIsIgnored,
+        ),
         "the name in another case",
     ),
     (
@@ -406,6 +434,20 @@ mod tests {
                 );
                 assert!(
                     Path::new(&spelling.relative("sub", "Lib.fs")).is_relative(),
+                    "{}",
+                    entry.why
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_case_variant_differs_whatever_case_the_name_was_in() {
+        for entry in alphabet().of(Dimension::CaseVariant) {
+            for (dir, name) in [("sub", "Lib.fs"), ("SDK", "LIB.FS"), ("Sdk", "a1")] {
+                assert_ne!(
+                    entry.value.relative(dir, name),
+                    PLAIN.relative(dir, name),
                     "{}",
                     entry.why
                 );

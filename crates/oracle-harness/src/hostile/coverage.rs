@@ -39,6 +39,12 @@ use crate::manifest::{self, Manifest};
 /// The table, as checked in.
 pub const BOUNDARIES: &str = include_str!("boundaries.tsv");
 
+/// How many rows may be [`Status::Pending`], per level: the harnesses that
+/// predate the library. `pending` is their status alone, so a new generator
+/// cannot take it: a row added as pending exceeds the ceiling. Lower each
+/// number as its level's retrofit decides rows.
+pub const PENDING_BACKLOG: &[(u8, usize)] = &[(2, 94), (3, 233)];
+
 /// The library's own sources, which [`scan`] passes over.
 const LIBRARY: &str = "crates/oracle-harness/src/hostile/";
 
@@ -192,7 +198,7 @@ pub fn manifest_path(workspace: &Path, declared: &Declared) -> PathBuf {
 /// the point: a harness draws what the table says it draws.
 pub fn open(file: &str, census: &str, excluded: &[(Dimension, &'static str)]) -> Census {
     let declared = declared(BOUNDARIES, file, census).unwrap_or_else(|e| panic!("{e}"));
-    Census::new(declared, excluded)
+    Census::new(declared, excluded).owing_a_finish()
 }
 
 /// What `table` declares for the census `census` of the harness in `file`.
@@ -360,11 +366,23 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
         return;
     };
     for entry in entries {
-        let path = entry.expect("read a directory entry").path();
-        if path.is_dir() {
+        let entry = entry.expect("read a directory entry");
+        let path = entry.path();
+        // The entry's own type: a link is not followed, so the scan stays in
+        // the checkout and never opens what is not a regular file.
+        let kind = entry.file_type().expect("a directory entry's type");
+        if kind.is_dir() {
             rust_files(&path, out);
-        } else if path.extension().is_some_and(|e| e == "rs") {
-            out.push(path);
+        } else if kind.is_file() {
+            if path.extension().is_some_and(|e| e == "rs") {
+                out.push(path);
+            }
+        } else {
+            panic!(
+                "{} is a link or a special file among the sources: the scan reads only \
+                 regular files, and will not pass over one it cannot classify",
+                path.display()
+            );
         }
     }
 }
@@ -606,7 +624,21 @@ mod tests {
     #[test]
     fn the_checked_in_table_matches_the_workspace() {
         match check(&workspace(), BOUNDARIES) {
-            Ok(coverage) => eprintln!("hostile coverage: {coverage:?}"),
+            Ok(coverage) => {
+                eprintln!("hostile coverage: {coverage:?}");
+                for (level, pending) in &coverage.pending {
+                    let ceiling = PENDING_BACKLOG
+                        .iter()
+                        .find(|(l, _)| l == level)
+                        .map_or(0, |(_, n)| *n);
+                    assert!(
+                        *pending <= ceiling,
+                        "{pending} rows are pending at level {level}, and the backlog of \
+                         harnesses that predate the library was {ceiling}: a new generator \
+                         says what it draws or why nothing applies, it is not pending"
+                    );
+                }
+            }
             Err(problems) => panic!(
                 "crates/oracle-harness/src/hostile/boundaries.tsv does not match the \
                  workspace:\n  {}",

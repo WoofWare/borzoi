@@ -292,6 +292,7 @@ crates/sema/tests/all/infer_dropped_namespace_perturbation.rs	pending	3
 crates/sema/tests/all/infer_entry_order_diff.rs	pending	3
 crates/sema/tests/all/infer_extension_damage_sweep.rs	pending	3
 crates/sema/tests/all/infer_extension_scope_grid.rs	pending	3
+crates/sema/tests/all/infer_group_shape_diff.rs	pending	3
 crates/sema/tests/all/infer_incremental_diff.rs	pending	3
 crates/sema/tests/all/infer_literals_diff.rs	pending	3
 crates/sema/tests/all/infer_local_let_diff.rs	pending	3
@@ -301,6 +302,7 @@ crates/sema/tests/all/infer_operators_diff.rs	pending	3
 crates/sema/tests/all/infer_suffix_irrelevance.rs	pending	3
 crates/sema/tests/all/infer_type_budget.rs	pending	3
 crates/sema/tests/all/interning_order.rs	pending	3
+crates/sema/tests/all/manifest_autoopen_surface_diff.rs	pending	3
 crates/sema/tests/all/module_open_matrix.rs	pending	3
 crates/sema/tests/all/namespace_block_type_grid.rs	pending	3
 crates/sema/tests/all/namespace_fold_matrix.rs	pending	3

@@ -170,6 +170,32 @@ impl Race {
     }
 }
 
+/// Why no file can have a name here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NameRefusal {
+    /// It is not one path component.
+    NotAComponent(NotAComponent),
+    /// The file system takes no name this long.
+    TooLong,
+    /// The file system takes no name that is not UTF-8 (APFS).
+    NotUtf8,
+    /// The file system takes the name and its twin for one file.
+    Folded,
+}
+
+impl std::fmt::Display for NameRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NameRefusal::NotAComponent(why) => why.fmt(f),
+            NameRefusal::TooLong => f.write_str("the file system takes no name this long"),
+            NameRefusal::NotUtf8 => f.write_str("the file system takes no name that is not UTF-8"),
+            NameRefusal::Folded => {
+                f.write_str("the file system takes the name and its twin for one file")
+            }
+        }
+    }
+}
+
 /// What the platform could not make, and why. Printed by the census that is
 /// handed it; never dropped.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -177,7 +203,7 @@ pub enum Unmakeable {
     /// No file can have the name here.
     Name {
         /// Why.
-        reason: String,
+        why: NameRefusal,
     },
     /// The name is fine and the state cannot be made here.
     State {
@@ -185,6 +211,9 @@ pub enum Unmakeable {
         state: State,
         /// Why.
         reason: String,
+        /// Whether the platform can make the state under no name at all
+        /// (as opposed to not under this one).
+        whole: bool,
     },
     /// The change cannot be made here.
     Change {
@@ -196,12 +225,18 @@ pub enum Unmakeable {
 }
 
 impl Unmakeable {
-    /// Why.
-    pub fn reason(&self) -> &str {
+    /// The dimension of which the platform can make *no* value, if this
+    /// refusal shows that: what a census may excuse on its strength. A
+    /// refusal of one value (a name with a NUL, a name too long) shows
+    /// nothing about the other values of its dimension, and excuses none.
+    pub fn excuses(&self) -> Option<Dimension> {
         match self {
-            Unmakeable::Name { reason }
-            | Unmakeable::State { reason, .. }
-            | Unmakeable::Change { reason, .. } => reason,
+            Unmakeable::Name {
+                why: NameRefusal::NotUtf8,
+            } => Some(Dimension::NonUtf8),
+            Unmakeable::Name { .. } => None,
+            Unmakeable::State { state, whole, .. } => whole.then(|| state.dimension()),
+            Unmakeable::Change { change, .. } => Some(change.dimension()),
         }
     }
 }
@@ -209,8 +244,8 @@ impl Unmakeable {
 impl std::fmt::Display for Unmakeable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Unmakeable::Name { reason } => write!(f, "the name cannot be made: {reason}"),
-            Unmakeable::State { state, reason } => {
+            Unmakeable::Name { why } => write!(f, "the name cannot be made: {why}"),
+            Unmakeable::State { state, reason, .. } => {
                 write!(f, "{} cannot be made: {reason}", state.dimension())
             }
             Unmakeable::Change { change, reason } => {
@@ -283,9 +318,16 @@ impl HostileFs {
     ///
     /// # Panics
     ///
-    /// If `aside` is inside `tree`: a link "out of the tree" would then point
-    /// into it.
-    pub fn over(tree: PathBuf, aside: PathBuf) -> Self {
+    /// If either directory does not exist, or if `aside` is inside `tree`: a
+    /// link "out of the tree" would then point into it.
+    pub fn over(tree: &Path, aside: &Path) -> Self {
+        // Canonical and absolute: a link's target is read against the link's
+        // own directory, and containment is checked against real paths.
+        let canonical = |dir: &Path| {
+            dir.canonicalize()
+                .unwrap_or_else(|e| panic!("{} is no directory to build in: {e}", dir.display()))
+        };
+        let (tree, aside) = (canonical(tree), canonical(aside));
         assert!(
             !aside.starts_with(&tree),
             "{} is inside the tree {}",
@@ -325,22 +367,22 @@ impl HostileFs {
             r.component()
                 .map(ToOwned::to_owned)
                 .map_err(|why| Unmakeable::Name {
-                    reason: why.to_string(),
+                    why: NameRefusal::NotAComponent(why),
                 })
         };
         let (a, b) = (name(a)?, name(b)?);
         let dir = self.target_dir(&self.aside);
         fs::write(dir.join(&a), b"").map_err(|e| match name_refusal(&e) {
-            Some(reason) => Unmakeable::Name { reason },
+            Some(why) => Unmakeable::Name { why },
             None => panic!("probe {a:?}: {e}"),
         })?;
         match fs::symlink_metadata(dir.join(&b)) {
             Ok(_) => Err(Unmakeable::Name {
-                reason: "the file system takes the name and its twin for one file".into(),
+                why: NameRefusal::Folded,
             }),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(e) => match name_refusal(&e) {
-                Some(reason) => Err(Unmakeable::Name { reason }),
+                Some(why) => Err(Unmakeable::Name { why }),
                 None => panic!("probe {b:?}: {e}"),
             },
         }
@@ -350,25 +392,48 @@ impl HostileFs {
     ///
     /// # Panics
     ///
-    /// If `dir` could name a directory outside the tree: if it is rooted, or
-    /// holds a `..`. A fixture must not write outside its own directory,
-    /// whatever its caller generated.
+    /// If `dir` could name a directory outside the tree: if it is rooted,
+    /// holds a `..`, or goes through anything that is not a real directory
+    /// of the tree (a link, which may point out of it). A fixture must not
+    /// write outside its own directory, whatever its caller generated, so
+    /// each component is checked before anything is made below it.
     fn directory(&self, dir: &Path) -> PathBuf {
         assert!(
             dir.components().all(|c| matches!(c, Component::Normal(_))),
             "{dir:?} is not a plain relative path, so it may name a directory outside the tree"
         );
-        let path = self.tree.join(dir);
-        fs::create_dir_all(&path).unwrap_or_else(|e| panic!("create {}: {e}", path.display()));
+        let mut path = self.tree.clone();
+        for component in dir.components() {
+            path.push(component);
+            match fs::symlink_metadata(&path) {
+                Ok(found) if found.is_dir() => {}
+                Ok(_) => panic!(
+                    "{} is on the way to {dir:?} and is no directory of the tree (a link or a \
+                     file), so it may name a directory outside the tree",
+                    path.display()
+                ),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => fs::create_dir(&path)
+                    .unwrap_or_else(|e| panic!("create {}: {e}", path.display())),
+                Err(e) => panic!("stat {}: {e}", path.display()),
+            }
+        }
         path
     }
 
-    /// A fresh directory for one link's target, under `base`.
+    /// A directory nothing else holds, for one link's target, under `base`
+    /// (which exists).
     fn target_dir(&self, base: &Path) -> PathBuf {
-        let n = self.next.fetch_add(1, Ordering::Relaxed);
-        let dir = base.join(n.to_string());
-        fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("create {}: {e}", dir.display()));
-        dir
+        loop {
+            let n = self.next.fetch_add(1, Ordering::Relaxed);
+            let dir = base.join(n.to_string());
+            // Created, never reused: a tree the caller made may hold a
+            // directory of the same name.
+            match fs::create_dir(&dir) {
+                Ok(()) => return dir,
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(e) => panic!("create {}: {e}", dir.display()),
+            }
+        }
     }
 
     /// Put `state` at `name` in the directory `dir` under the tree. `content`
@@ -395,7 +460,7 @@ impl HostileFs {
         let component = name
             .component()
             .map_err(|why: NotAComponent| Unmakeable::Name {
-                reason: why.to_string(),
+                why: NameRefusal::NotAComponent(why),
             })?;
         let parent = self.directory(dir.as_ref());
         let path = parent.join(component);
@@ -407,7 +472,7 @@ impl HostileFs {
         );
         let made = |result: io::Result<()>| -> Result<(), Unmakeable> {
             result.map_err(|e| match name_refusal(&e) {
-                Some(reason) => Unmakeable::Name { reason },
+                Some(why) => Unmakeable::Name { why },
                 None => panic!("make {state:?} at {}: {e}", path.display()),
             })
         };
@@ -426,7 +491,12 @@ impl HostileFs {
             State::Socket => match bind_socket(&parent, component) {
                 Ok(()) => {}
                 Err(SocketFailure::Path(reason)) => {
-                    return Err(Unmakeable::State { state, reason });
+                    // A shorter name may fit: this is no verdict on sockets.
+                    return Err(Unmakeable::State {
+                        state,
+                        reason,
+                        whole: false,
+                    });
                 }
                 Err(SocketFailure::Io(e)) => made(Err(e))?,
             },
@@ -436,13 +506,14 @@ impl HostileFs {
                     return Err(Unmakeable::State {
                         state,
                         reason: "/dev/null is not a character device here".into(),
+                        whole: true,
                     });
                 }
                 made(symlink(null, &path))?;
             }
             State::Symlink | State::SymlinkOutOfTree => {
                 let base = if state == State::Symlink {
-                    self.tree.join(LINKED)
+                    self.directory(Path::new(LINKED))
                 } else {
                     self.aside.clone()
                 };
@@ -465,6 +536,7 @@ impl HostileFs {
                     return Err(Unmakeable::State {
                         state,
                         reason: "this user reads a file whatever its mode (root?)".into(),
+                        whole: true,
                     });
                 }
             }
@@ -477,6 +549,7 @@ impl HostileFs {
                     return Err(Unmakeable::State {
                         state,
                         reason: "this user writes a file whatever its mode (root?)".into(),
+                        whole: true,
                     });
                 }
             }
@@ -500,8 +573,14 @@ impl HostileFs {
     /// not as the change says; an appearance needs nothing at the path), or
     /// on an I/O error.
     pub fn change(&self, path: &Path, change: Change, new: &[u8]) -> Result<(), Unmakeable> {
+        // Where the change lands, not how the path is spelt: a `..` or a
+        // link to a directory would take it out of the tree.
+        let parent = path
+            .parent()
+            .filter(|_| path.file_name().is_some())
+            .and_then(|parent| parent.canonicalize().ok());
         assert!(
-            path.starts_with(&self.tree),
+            parent.is_some_and(|parent| parent.starts_with(&self.tree)),
             "{} is outside the tree",
             path.display()
         );
@@ -571,10 +650,10 @@ fn set_modified(path: &Path, stamp: SystemTime) {
 /// Why the platform refused to make a file of some name, if `error` is that
 /// refusal: the name is too long, or is not text on a file system that
 /// requires text (APFS).
-fn name_refusal(error: &io::Error) -> Option<String> {
+fn name_refusal(error: &io::Error) -> Option<NameRefusal> {
     match error.raw_os_error()? {
-        libc::ENAMETOOLONG => Some("the file system takes no name this long".into()),
-        libc::EILSEQ => Some("the file system takes no name that is not UTF-8".into()),
+        libc::ENAMETOOLONG => Some(NameRefusal::TooLong),
+        libc::EILSEQ => Some(NameRefusal::NotUtf8),
         _ => None,
     }
 }
@@ -601,23 +680,28 @@ enum SocketFailure {
 ///
 /// A socket address holds about a hundred bytes of path, fewer than a
 /// temporary directory's own path on macOS, so the bind goes through a short
-/// link to `dir`.
+/// link to `dir`: one under the temporary directory, and if that is itself
+/// too long, one under `/tmp`.
 fn bind_socket(dir: &Path, name: &OsStr) -> Result<(), SocketFailure> {
-    let short = tempfile::Builder::new()
-        .prefix("s")
-        .tempdir()
-        .map_err(SocketFailure::Io)?;
-    let link = short.path().join("d");
-    symlink(dir, &link).map_err(SocketFailure::Io)?;
-    match UnixListener::bind(link.join(name)) {
-        Ok(_listener) => Ok(()),
-        // The standard library refuses a path that does not fit before it
-        // asks the operating system.
-        Err(e) if e.kind() == io::ErrorKind::InvalidInput => Err(SocketFailure::Path(format!(
-            "a socket address has no room for the path: {e}"
-        ))),
-        Err(e) => Err(SocketFailure::Io(e)),
+    let mut too_long = None;
+    for base in [std::env::temp_dir(), PathBuf::from("/tmp")] {
+        let Ok(short) = tempfile::Builder::new().prefix("s").tempdir_in(&base) else {
+            continue;
+        };
+        let link = short.path().join("d");
+        symlink(dir, &link).map_err(SocketFailure::Io)?;
+        match UnixListener::bind(link.join(name)) {
+            Ok(_listener) => return Ok(()),
+            // The standard library refuses a path that does not fit before
+            // it asks the operating system.
+            Err(e) if e.kind() == io::ErrorKind::InvalidInput => too_long = Some(e),
+            Err(e) => return Err(SocketFailure::Io(e)),
+        }
     }
+    Err(SocketFailure::Path(match too_long {
+        Some(e) => format!("a socket address has no room for the path: {e}"),
+        None => "no short directory could be made to bind the socket through".into(),
+    }))
 }
 
 #[cfg(test)]
@@ -747,7 +831,12 @@ mod tests {
                         "the file has the name asked for"
                     );
                 }
-                Err(Unmakeable::Name { reason }) => refused.push((entry.dimension, reason)),
+                Err(refusal @ Unmakeable::Name { .. }) => {
+                    // Only a file system that takes no such name at all
+                    // excuses a dimension, and only the one.
+                    assert!(matches!(refusal.excuses(), None | Some(Dimension::NonUtf8)));
+                    refused.push((entry.dimension, refusal.to_string()));
+                }
                 Err(other) => panic!("{rendered:?}: {other}"),
             }
         }
@@ -841,6 +930,74 @@ mod tests {
             Err(Unmakeable::Name { .. })
         ));
         assert!(!fs_.tree().join("escape").exists());
+    }
+
+    #[test]
+    #[should_panic(expected = "is no directory of the tree")]
+    fn a_directory_through_a_link_is_refused() {
+        let fs_ = HostileFs::new();
+        symlink(fs_.aside(), fs_.tree().join("out")).unwrap();
+        let _ = fs_.place("out/d", &plain("f"), State::Regular, b"");
+    }
+
+    #[test]
+    fn a_change_outside_the_tree_is_refused_however_it_is_spelt() {
+        let fs_ = HostileFs::new();
+        let outside = fs_.aside().join("victim");
+        fs::write(&outside, b"mine").unwrap();
+        symlink(fs_.aside(), fs_.tree().join("out")).unwrap();
+        for spelt in [
+            fs_.tree().join("../aside/victim"),
+            fs_.tree().join("out/victim"),
+            outside.clone(),
+        ] {
+            let refused = std::panic::catch_unwind(|| {
+                let _guard = crate::panic_silence::silence_panics_here();
+                let _ = fs_.change(&spelt, Change::Disappears, b"");
+            });
+            assert!(refused.is_err(), "{}", spelt.display());
+            assert_eq!(fs::read(&outside).unwrap(), b"mine");
+        }
+    }
+
+    #[test]
+    fn a_link_target_never_reuses_a_directory_the_tree_already_has() {
+        let root = tempfile::tempdir().unwrap();
+        let (tree, aside) = (root.path().join("t"), root.path().join("a"));
+        fs::create_dir_all(tree.join(LINKED).join("0")).unwrap();
+        fs::create_dir(&aside).unwrap();
+        fs::write(tree.join(LINKED).join("0").join("f"), b"the caller's").unwrap();
+        // Relative roots are resolved, so the link does not dangle.
+        let fs_ = HostileFs::over(&tree, &aside);
+        let placed = fs_.place("", &plain("f"), State::Symlink, b"new").unwrap();
+        assert_eq!(fs::read(&placed.path).unwrap(), b"new");
+        assert_eq!(
+            fs::read(fs_.tree().join(LINKED).join("0").join("f")).unwrap(),
+            b"the caller's"
+        );
+        assert!(placed.path.is_absolute());
+    }
+
+    #[test]
+    fn only_a_refusal_of_every_value_excuses_a_dimension() {
+        let name = |why| Unmakeable::Name { why };
+        assert_eq!(
+            name(NameRefusal::NotUtf8).excuses(),
+            Some(Dimension::NonUtf8)
+        );
+        assert_eq!(name(NameRefusal::TooLong).excuses(), None);
+        assert_eq!(name(NameRefusal::Folded).excuses(), None);
+        assert_eq!(
+            name(NameRefusal::NotAComponent(NotAComponent::Dots)).excuses(),
+            None
+        );
+        let state = |whole| Unmakeable::State {
+            state: State::Socket,
+            reason: String::new(),
+            whole,
+        };
+        assert_eq!(state(true).excuses(), Some(Dimension::Socket));
+        assert_eq!(state(false).excuses(), None);
     }
 
     #[test]

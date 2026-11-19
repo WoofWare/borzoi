@@ -31,8 +31,9 @@ use std::sync::Mutex;
 use super::{Dimension, Kind};
 use crate::manifest::{self, Manifest};
 
-/// What one census of a harness covers: its name, the kinds it draws, and
-/// the dimensions of those kinds it cannot reach.
+/// What one census of a harness covers: its harness, its name and the kinds
+/// it draws. The coverage table ([`super::coverage::BOUNDARIES`]) is where
+/// one is declared.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Declared {
     /// The harness's source file, relative to the workspace.
@@ -50,8 +51,10 @@ struct Counts {
     reached: BTreeMap<Dimension, BTreeMap<String, usize>>,
     /// What the subject did with the harness's own values.
     plain: BTreeMap<String, usize>,
-    /// Why the platform made no value, per dimension.
+    /// Why the platform makes no value at all, per dimension.
     unmakeable: BTreeMap<Dimension, BTreeSet<String>>,
+    /// The refusals of single values, which excuse nothing.
+    refused: BTreeSet<String>,
 }
 
 /// One census. Shared by reference between the threads of a harness.
@@ -60,6 +63,23 @@ pub struct Census {
     declared: Declared,
     excluded: BTreeMap<Dimension, &'static str>,
     counts: Mutex<Counts>,
+    /// Whether dropping the census unfinished is a failure: so for one a
+    /// harness opened ([`super::coverage::open`]).
+    must_finish: bool,
+}
+
+impl Drop for Census {
+    fn drop(&mut self) {
+        // A census that is opened and never finished has checked nothing,
+        // and its pinned manifest would go on saying otherwise.
+        if self.must_finish && !std::thread::panicking() {
+            panic!(
+                "hostile census {} was opened and dropped without `finish`: nothing it recorded \
+                 was checked",
+                self.declared.census
+            );
+        }
+    }
 }
 
 /// The manifest key under which the harness's own values are counted.
@@ -97,7 +117,14 @@ impl Census {
             declared,
             excluded: map,
             counts: Mutex::default(),
+            must_finish: false,
         }
+    }
+
+    /// The census, which must now be finished: dropping it otherwise panics.
+    pub(super) fn owing_a_finish(mut self) -> Self {
+        self.must_finish = true;
+        self
     }
 
     /// Every dimension the census owes: those of its kinds, less the
@@ -138,20 +165,27 @@ impl Census {
         }
     }
 
-    /// Record that the platform could not make a value of `dimension`, and
-    /// print why (once per reason).
-    pub fn unmakeable(&self, dimension: Dimension, reason: &str) {
-        let fresh = self
-            .counts()
-            .unmakeable
-            .entry(dimension)
-            .or_default()
-            .insert(reason.to_owned());
+    /// Record what the platform could not make, and print it (once per
+    /// distinct refusal).
+    ///
+    /// Only a refusal that shows the platform makes *no* value of a
+    /// dimension excuses the dimension
+    /// ([`Unmakeable::excuses`](super::fs::Unmakeable::excuses)). A refusal
+    /// of one value (a name holding a NUL) excuses nothing: the dimension's
+    /// other values must still reach the subject.
+    pub fn unmakeable(&self, refusal: &super::fs::Unmakeable) {
+        let text = refusal.to_string();
+        let fresh = match refusal.excuses() {
+            Some(dimension) => self
+                .counts()
+                .unmakeable
+                .entry(dimension)
+                .or_default()
+                .insert(text.clone()),
+            None => self.counts().refused.insert(text.clone()),
+        };
         if fresh {
-            eprintln!(
-                "hostile census {}: a {dimension} value was not made: {reason}",
-                self.declared.census
-            );
+            eprintln!("hostile census {}: {text}", self.declared.census);
         }
     }
 
@@ -285,7 +319,8 @@ impl Census {
 
     /// [`Self::finish`] against the manifest at `path`.
     #[track_caller]
-    fn finish_at(self, path: &Path, regenerate: &str) {
+    fn finish_at(mut self, path: &Path, regenerate: &str) {
+        self.must_finish = false;
         eprint!("{}", self.report());
         let violations = self.violations();
         assert!(
@@ -381,16 +416,17 @@ mod tests {
     fn a_dimension_the_platform_cannot_make_keeps_another_platforms_line() {
         let census = Census::new(declared(&[Kind::FsChange]), &[]);
         reach_all(&census, &[Dimension::Appears]);
-        census.unmakeable(Dimension::Appears, "no such thing here");
+        let refusal = crate::hostile::fs::Unmakeable::Change {
+            change: crate::hostile::fs::Change::Appears,
+            reason: "no such thing here".into(),
+        };
+        census.unmakeable(&refusal);
         assert_eq!(census.violations(), Vec::<String>::new());
         // With nothing pinned, the line says so, and a platform that reaches
         // the dimension then fails against it.
-        assert!(
-            census
-                .manifest(None)
-                .entries()
-                .contains(&"change.appears\tunmade: no such thing here".to_owned())
-        );
+        assert!(census.manifest(None).entries().contains(
+            &"change.appears\tunmade: change.appears cannot be made: no such thing here".to_owned()
+        ));
         let elsewhere = Manifest::from_entries(["change.appears\treached".to_owned()]).unwrap();
         assert!(
             census
@@ -400,12 +436,57 @@ mod tests {
         );
         // A pinned `unmade` line is replaced by this platform's own reason.
         let unmade = Manifest::from_entries(["change.appears\tunmade: other".to_owned()]).unwrap();
-        assert!(
-            census
-                .manifest(Some(&unmade))
-                .entries()
-                .contains(&"change.appears\tunmade: no such thing here".to_owned())
+        assert!(census.manifest(Some(&unmade)).entries().contains(
+            &"change.appears\tunmade: change.appears cannot be made: no such thing here".to_owned()
+        ));
+    }
+
+    /// A refusal of one value excuses nothing: the rest of its dimension is
+    /// still owed.
+    #[test]
+    fn a_refusal_of_one_value_does_not_excuse_its_dimension() {
+        use crate::hostile::fs::{NameRefusal, State, Unmakeable};
+        let census = Census::new(declared(&[Kind::FileName, Kind::FsState]), &[]);
+        reach_all(
+            &census,
+            &[Dimension::DotName, Dimension::NonUtf8, Dimension::Socket],
         );
+        census.unmakeable(&Unmakeable::Name {
+            why: NameRefusal::NotAComponent(crate::hostile::name::NotAComponent::Dots),
+        });
+        census.unmakeable(&Unmakeable::Name {
+            why: NameRefusal::NotUtf8,
+        });
+        census.unmakeable(&Unmakeable::State {
+            state: State::Socket,
+            reason: "the path is too long".into(),
+            whole: false,
+        });
+        let violations = census.violations();
+        assert_eq!(violations.len(), 2, "{violations:?}");
+        assert!(violations[0].starts_with("name.dot-name is declared"));
+        assert!(violations[1].starts_with("fs.socket is declared"));
+    }
+
+    #[test]
+    fn a_census_owing_a_finish_panics_if_dropped_unfinished() {
+        let dropped = std::panic::catch_unwind(|| {
+            let _guard = crate::panic_silence::silence_panics_here();
+            let census = Census::new(declared(&[Kind::FsChange]), &[]).owing_a_finish();
+            reach_all(&census, &[]);
+        });
+        let message = dropped.unwrap_err();
+        let message = message.downcast_ref::<String>().expect("a formatted panic");
+        assert!(message.contains("dropped without `finish`"), "{message}");
+        // Finished, it is quiet.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("census.txt");
+        let first = Census::new(declared(&[Kind::FsChange]), &[]);
+        reach_all(&first, &[]);
+        manifest::compare_with(&path, &first.manifest(None), "regen", true).unwrap();
+        let census = Census::new(declared(&[Kind::FsChange]), &[]).owing_a_finish();
+        reach_all(&census, &[]);
+        census.finish_at(&path, "regen");
     }
 
     #[test]
