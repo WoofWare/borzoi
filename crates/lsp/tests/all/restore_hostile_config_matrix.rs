@@ -94,15 +94,20 @@ fn scratch_folder(tag: &str) -> PathBuf {
 /// byte-for-byte unchanged, and the outcome matches `expect`.
 fn assert_hazard(tag: &str, fsproj_body: &str, siblings: &[(&str, &str)], expect: Expect) {
     let root = scratch_folder(tag);
-    let outcome = restore_hazard(
-        tag,
-        &root,
-        fsproj_body,
-        siblings,
-        SdkDiscoveryEnv::from_process_env(),
-    );
+    // The caller's home need hold no user config, without which the settings
+    // model declines: a home of the hazard's own holds the one NuGet writes,
+    // and the caller's package-folder overrides stand.
+    let home = scratch_folder(&format!("{tag}-home"));
+    crate::common::seed_user_nuget_config(&home);
+    let mut env = SdkDiscoveryEnv::from_process_env();
+    env.build_environment.remove("DOTNET_CLI_HOME");
+    env.build_environment.remove("HOME");
+    env.dotnet_cli_home = None;
+    env.home_dir = Some(home.clone());
+    let outcome = restore_hazard(tag, &root, fsproj_body, siblings, env);
     assert_outcome(tag, expect, &outcome);
     std::fs::remove_dir_all(&root).ok();
+    std::fs::remove_dir_all(&home).ok();
 }
 
 /// Write the hazard project into `root`, run the on-demand restore under `env`,
