@@ -68,14 +68,78 @@ fn duplicated(good: &Value, field: &str) -> String {
     text.replacen('{', &format!("{{{extra}"), 1)
 }
 
-/// The ops that read one JSON request per line, each held to its framing
-/// here.
-const JSON_OPS: &[&str] = &[
-    "file-batch",
-    "uses-project-batch",
-    "xmldoc-batch",
-    "uses-project-graph-batch",
+/// What a JSON op's lines are held to besides their framing.
+enum Fields {
+    /// The hostile fields of [`hostile_lines`], `path_field` naming the
+    /// request's source path or paths.
+    Request { path_field: &'static str },
+    /// The framing alone ([`framing_lines`]): the op's request shape is its
+    /// own.
+    FramingOnly,
+}
+
+/// An op that reads one JSON request per line: its name, a request it
+/// answers over the source `a`, and what its lines are held to.
+struct JsonOp {
+    op: &'static str,
+    good: fn(a: &str) -> Value,
+    fields: Fields,
+}
+
+/// Every op that reads one JSON request per line. Listing an op here is what
+/// classifies it as a JSON op ([`every_batch_op_is_classified`]) and what
+/// puts its framing to the test
+/// ([`every_json_op_refuses_each_line_that_is_not_one_request`]), so no op
+/// can be classified without being sent its hostile lines.
+const JSON_OPS: &[JsonOp] = &[
+    JsonOp {
+        op: "file-batch",
+        good: file_request,
+        fields: Fields::Request { path_field: "path" },
+    },
+    JsonOp {
+        op: "uses-project-batch",
+        good: project_request,
+        fields: Fields::Request {
+            path_field: "paths",
+        },
+    },
+    JsonOp {
+        op: "xmldoc-batch",
+        good: project_request,
+        fields: Fields::Request {
+            path_field: "paths",
+        },
+    },
+    JsonOp {
+        op: "uses-project-graph-batch",
+        good: graph_request,
+        fields: Fields::FramingOnly,
+    },
 ];
+
+fn file_request(a: &str) -> Value {
+    json!({"kind": "uses", "path": a, "refs": [], "langversion": null})
+}
+
+fn project_request(a: &str) -> Value {
+    json!({"paths": [a], "refs": [], "defines": [], "langversion": null, "exclusiveRefs": false})
+}
+
+fn graph_request(a: &str) -> Value {
+    json!({
+        "op": "check",
+        "projects": [{
+            "id": "a", "assemblyName": "A", "target": "library",
+            "sources": [a], "defines": [],
+            "references": borzoi_oracle_harness::project_graph::framework_references()
+                .iter()
+                .map(|dll| json!({"dll": dll}))
+                .collect::<Vec<_>>()
+        }],
+        "check": "a"
+    })
+}
 
 /// The batch ops that read one path per line. Their driver
 /// (`BatchChild::try_request`) refuses to send a blank or multi-line request,
@@ -107,7 +171,11 @@ fn every_batch_op_is_classified() {
         .collect();
     dispatched.sort_unstable();
     dispatched.dedup();
-    let mut classified: Vec<&str> = JSON_OPS.iter().chain(PATH_OPS).copied().collect();
+    let mut classified: Vec<&str> = JSON_OPS
+        .iter()
+        .map(|json_op| json_op.op)
+        .chain(PATH_OPS.iter().copied())
+        .collect();
     classified.sort_unstable();
     assert_eq!(
         dispatched, classified,
@@ -173,10 +241,6 @@ fn hostile_lines(good: &Value, path_field: &str) -> Vec<(&'static str, String)> 
         lines.push(("a blank symbol", with_field(good, "defines", json!([""]))));
     }
     lines
-}
-
-fn assert_each_line_answered(op: &str, good: Value, path_field: &str) {
-    assert_each_hostile_line_answered(op, &good, hostile_lines(&good, path_field));
 }
 
 fn assert_each_hostile_line_answered(op: &str, good: &Value, hostile: Vec<(&'static str, String)>) {
@@ -247,51 +311,16 @@ fn fixture() -> (tempfile::TempDir, String) {
 }
 
 #[test]
-fn file_batch_refuses_each_line_that_is_not_one_request() {
+fn every_json_op_refuses_each_line_that_is_not_one_request() {
     let (_dir, a) = fixture();
-    assert_each_line_answered(
-        "file-batch",
-        json!({"kind": "uses", "path": a, "refs": [], "langversion": null}),
-        "path",
-    );
-}
-
-#[test]
-fn uses_project_batch_refuses_each_line_that_is_not_one_request() {
-    let (_dir, a) = fixture();
-    assert_each_line_answered(
-        "uses-project-batch",
-        json!({"paths": [a], "refs": [], "defines": [], "langversion": null, "exclusiveRefs": false}),
-        "paths",
-    );
-}
-
-#[test]
-fn uses_project_graph_batch_refuses_each_line_that_is_not_one_request() {
-    let (_dir, a) = fixture();
-    let good = json!({
-        "op": "check",
-        "projects": [{
-            "id": "a", "assemblyName": "A", "target": "library",
-            "sources": [a], "defines": [],
-            "references": borzoi_oracle_harness::project_graph::framework_references()
-                .iter()
-                .map(|dll| json!({"dll": dll}))
-                .collect::<Vec<_>>()
-        }],
-        "check": "a"
-    });
-    assert_each_hostile_line_answered("uses-project-graph-batch", &good, framing_lines(&good));
-}
-
-#[test]
-fn xmldoc_batch_refuses_each_line_that_is_not_one_request() {
-    let (_dir, a) = fixture();
-    assert_each_line_answered(
-        "xmldoc-batch",
-        json!({"paths": [a], "refs": [], "defines": [], "langversion": null, "exclusiveRefs": false}),
-        "paths",
-    );
+    for json_op in JSON_OPS {
+        let good = (json_op.good)(&a);
+        let hostile = match json_op.fields {
+            Fields::Request { path_field } => hostile_lines(&good, path_field),
+            Fields::FramingOnly => framing_lines(&good),
+        };
+        assert_each_hostile_line_answered(json_op.op, &good, hostile);
+    }
 }
 
 /// A `types-project` request checks at FCS's default language version, so it
