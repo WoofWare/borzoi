@@ -1,0 +1,25 @@
+# Generated; do not edit by hand. One line per graded item, sorted.
+# Regenerate with:
+#   BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-nuget --test all compile_assets_diff::compile_asset_selection_matches_the_nuget_content_model
+name.backslash	reached
+name.case-fold	reached
+name.confusable	reached
+name.control-char	reached
+name.dot-name	reached
+name.early-colon	reached
+name.edge-dot-or-space	reached
+name.expansion	reached
+name.glob-char	reached
+name.invisible	reached
+name.kind-by-extension	reached
+name.line-break	reached
+name.list-separator	reached
+name.long	reached
+name.non-utf8	excluded: a package's file list is text: the subject reads `String`s, and the oracle JSON
+name.normalisation	reached
+name.percent-escape	reached
+name.quote	reached
+name.switch-shaped	reached
+name.utf16-width	reached
+name.xml-markup	reached
+plain	reached

@@ -213,7 +213,7 @@ crates/msbuild/tests/workload_locator_diff.rs	pending	2
 crates/msbuild/tests/xml_nesting_pump.rs	pending	2
 crates/nuget/src/dgspec/xml_nesting_pump.rs	pending	2
 crates/nuget/tests/all/common/mod.rs	pending	2
-crates/nuget/tests/all/compile_assets_diff.rs	pending	2
+crates/nuget/tests/all/compile_assets_diff.rs	draws	compile_assets=name
 crates/nuget/tests/all/compile_assets_properties.rs	pending	2
 crates/nuget/tests/all/compile_assets_restore.rs	pending	2
 crates/nuget/tests/all/dgspec_diff.rs	pending	2
