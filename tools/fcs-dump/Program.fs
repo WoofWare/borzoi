@@ -6397,7 +6397,8 @@ extern int systemNativeStat(string path, NativeFileStatus& output)
 /// exists, of length zero), so this asks the runtime's own `stat` shim.
 let private requireRegularFile (what: string) (path: string) =
     let mutable status = NativeFileStatus()
-    if systemNativeStat (path, &status) = 0 then
+    // Windows has no such files at a path, and no `libSystem.Native`.
+    if not (OperatingSystem.IsWindows()) && systemNativeStat (path, &status) = 0 then
         let kind =
             match status.Mode &&& 0xF000 with
             | 0x8000 -> None
@@ -6415,6 +6416,21 @@ let private requireRegularFile (what: string) (path: string) =
 /// `FSharpSigFileSuffixes` and `FSharpImplFileSuffixes`), compared as FCS
 /// compares them, ordinally and ignoring case.
 let private fsharpSourceSuffixes = [ ".fs"; ".fsi"; ".fsx"; ".fsscript" ]
+
+/// The file system FCS reads through: every file FCS opens itself (a
+/// reference, a script's `#load`, a source it reads from disk) is refused
+/// unopened unless it is a regular file ([`requireRegularFile`]), so no name
+/// a request does not spell out can make FCS wait on a FIFO either.
+type private RegularFilesOnly() =
+    inherit FSharp.Compiler.IO.DefaultFileSystem()
+
+    override _.OpenFileForReadShim(filePath: string, ?useMemoryMappedFile: bool, ?shouldShadowCopy: bool) =
+        requireRegularFile "file" filePath
+        base.OpenFileForReadShim(
+            filePath,
+            ?useMemoryMappedFile = useMemoryMappedFile,
+            ?shouldShadowCopy = shouldShadowCopy
+        )
 
 /// The text of the source `path` names, refused unread unless its name ends
 /// in an F# source suffix and it is a regular file ([`requireRegularFile`]).
@@ -8381,8 +8397,9 @@ let private fileBatchCore () =
                     |> Seq.choose (fun e -> Option.ofObj (e.GetString()))
                     |> Seq.toList
                 | _ -> []
+            // As `extraRefArgsOf` will name each to FCS.
             for reference in refs do
-                requireRegularFile "reference" reference
+                requireRegularFile "reference" (reference.Trim())
             if kind = "types-project" then
                 let paths =
                     match root.TryGetProperty("paths") with
@@ -8888,6 +8905,7 @@ let private refuseSelfContained () =
 [<EntryPoint>]
 let main argv =
     refuseSelfContained ()
+    FSharp.Compiler.IO.FileSystemAutoOpens.FileSystem <- RegularFilesOnly()
     match argv with
     | [| "ast"; sourcePath |] ->
         dumpAst (Path.GetFullPath sourcePath) []

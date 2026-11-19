@@ -1,5 +1,7 @@
 //! The resident ops of `fcs-dump` refuse a source or a reference that is not
-//! a regular file, before anything opens it.
+//! a regular file, before anything opens it, and FCS opens no such file for
+//! them, whatever names it (a script's `#load`, a reference spelt with
+//! blanks around it).
 //!
 //! An open of a FIFO for reading waits for a writer, for ever, so a request
 //! naming one wedged the resident child until its driver's deadline killed
@@ -58,6 +60,10 @@ fn a_source_or_reference_that_is_not_a_regular_file_is_refused_unopened() {
     symlink("/dev/null", &device).expect("link to a device");
     let device_dll = dir.path().join("Device.dll");
     symlink("/dev/null", &device_dll).expect("link to a device");
+    let fifo_script = dir.path().join("Fifo.fsx");
+    mkfifo(&fifo_script);
+    let loads_fifo = dir.path().join("Loads.fsx");
+    std::fs::write(&loads_fifo, "#load \"Fifo.fsx\"\nlet z = 1\n").expect("write");
     let text = |p: &Path| p.display().to_string();
     let project =
         |paths: Vec<String>, refs: Vec<String>| json!({"paths": paths, "refs": refs}).to_string();
@@ -76,12 +82,25 @@ fn a_source_or_reference_that_is_not_a_regular_file_is_refused_unopened() {
                 project(vec![text(&a), text(source)], refs)
             }
         };
-        for (what, request) in [
+        let mut cases = vec![
             ("a FIFO source", ask(&fifo, None)),
             ("a device source", ask(&device, None)),
             ("a FIFO reference", ask(&a, Some(&fifo_dll))),
             ("a device reference", ask(&a, Some(&device_dll))),
-        ] {
+        ];
+        if op == "file-batch" {
+            // FCS resolves a script's directives itself, and `refs` are
+            // read as written, blanks and all.
+            cases.push((
+                "a script that loads a FIFO",
+                file(text(&loads_fifo), vec![]),
+            ));
+            cases.push((
+                "a FIFO reference with blanks around it",
+                file(text(&a), vec![format!(" {} ", text(&fifo_dll))]),
+            ));
+        }
+        for (what, request) in cases {
             let answer = oracle
                 .try_request(&request)
                 .unwrap_or_else(|e| panic!("{op}, {what}: {e}"));
@@ -114,16 +133,20 @@ fn a_source_not_named_as_fsharp_source_is_refused() {
     let a = dir.path().join("A.fs");
     std::fs::write(&a, "module A\nlet a = 1\n").expect("write");
     let text = |p: &Path| p.display().to_string();
-    for name in ["Lib.dll", "Lib.fs ", "Lib.fs.", "Lib", "--"] {
-        let lib = dir.path().join(name);
-        std::fs::write(&lib, "module Lib\nlet b = A.a\n").expect("write");
-        for op in ["uses-project-batch", "xmldoc-batch", "file-batch"] {
+    let names = ["Lib.dll", "Lib.fs ", "Lib.fs.", "Lib", "--"];
+    for name in names {
+        std::fs::write(dir.path().join(name), "module Lib\nlet b = A.a\n").expect("write");
+    }
+    for op in ["uses-project-batch", "xmldoc-batch", "file-batch"] {
+        let mut oracle = child(op);
+        for name in names {
+            let lib = dir.path().join(name);
             let request = if op == "file-batch" {
                 json!({"kind": "uses", "path": text(&lib), "refs": []}).to_string()
             } else {
                 json!({"paths": [text(&a), text(&lib)], "refs": []}).to_string()
             };
-            let answer = child(op)
+            let answer = oracle
                 .try_request(&request)
                 .unwrap_or_else(|e| panic!("{op}, {name:?}: {e}"));
             let why = refusal(op, &answer);
