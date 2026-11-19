@@ -2187,12 +2187,9 @@ impl AssemblyEnv {
                 None
             };
             for path in fslib_prepend.into_iter().chain(raw) {
-                // FCS `splitNamespace`: the attribute argument is a plain
-                // dotted path (no quoted-identifier escaping at this level).
-                let segments: Vec<String> = path.split('.').map(str::to_string).collect();
-                if segments.iter().any(String::is_empty) {
+                let Some(segments) = existence::auto_open_segments(&path) else {
                     continue;
-                }
+                };
                 self.existence.add_auto_open_base(segments.clone());
                 if let Some((handle, effectively_public)) =
                     self.assembly_entity_at_path(contributor, &segments)

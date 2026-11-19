@@ -455,6 +455,26 @@ pub fn cells() -> Vec<Cell> {
             "assembly_auto_open",
             "namespace AsmAO\nmodule M =\n    let x = 1\n[<assembly: AutoOpen(\"AsmAO\")>]\n[<assembly: AutoOpen(@\"AsmAO.M\")>]\n[<assembly: AutoOpen(\"AsmAO\")>]\ndo ()\n",
         ),
+        // A standalone attribute with no target is the assembly's when the
+        // attribute allows it, as `[<AutoOpen>]` does.
+        one(
+            "assembly_auto_open_without_target",
+            "namespace AsmNoTarget\nmodule M =\n    let x = 1\n[<AutoOpen(\"AsmNoTarget.M\")>]\ndo ()\n",
+        ),
+        one(
+            "assembly_auto_open_without_target_in_module",
+            "module AsmNoTargetMod\nlet x = 1\n[<AutoOpen(\"AsmNoTargetMod\")>]\ndo ()\n",
+        ),
+        // Abbreviation lenders: each is exact under the certificate, but
+        // for a target that may be a union case, which the walk names.
+        one(
+            "abbreviation_lenders",
+            "namespace Lenders\nopen System.Runtime.CompilerServices\n[<Extension>]\ntype S = string\n[<AutoOpen>]\ntype I = int\ntype Plain = int list\n",
+        ),
+        one(
+            "abbreviation_lender_or_union",
+            "namespace LenderOrUnion\n[<AutoOpen>]\ntype A = Somewhere\n",
+        ),
         one(
             "assembly_auto_open_no_argument",
             "namespace AsmAONone\n[<assembly: AutoOpen>]\ndo ()\n",

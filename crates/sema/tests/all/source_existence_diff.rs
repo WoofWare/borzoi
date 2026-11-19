@@ -35,7 +35,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::PathBuf;
 
 use borzoi_assembly::existence::{
-    ExtensionRow, IndexLayer, PickleLayer, PickledEntityKind, PickledEntityRow,
+    ExistenceIndex, ExtensionRow, IndexLayer, PickleLayer, PickledEntityRow,
 };
 use borzoi_assembly::{Ecma335Assembly, EcmaView};
 use borzoi_cst::parser::{FileKind, ParseOptions, parse_with_options};
@@ -45,9 +45,10 @@ use borzoi_oracle_harness::project_graph::{
     CompileResponse, FixtureFile, FixtureProject, PlainName, ProjectGraphFixture,
     ReferencedResponse, Target, framework_references, parse_response,
 };
+use borzoi_sema::test_support::{ExistenceFacts, ExtensionFact, existence_facts};
 use borzoi_sema::{
-    CompileItem, Marker, MarkerRoutes, Producer, ProjectFile, SourceExistence, SourceFile,
-    SyntaxRecovery, certify_by_spelling, qualified_names, source_existence,
+    Approximation, CompileItem, Marker, MarkerRoutes, Producer, ProjectFile, SourceExistence,
+    SourceFile, SyntaxRecovery, certify_by_spelling, qualified_names, source_existence,
 };
 
 use crate::common::corpus_manifest::{check_manifest, regenerate};
@@ -501,24 +502,6 @@ fn certificate(cell: &Cell, files: &[&ProjectFile]) -> MarkerRoutes {
     MarkerRoutes::Certified(map)
 }
 
-/// Whether `ours` holds every row of `theirs`, as multisets; the rows of
-/// `theirs` it lacks otherwise.
-fn missing<T: Ord + Clone + std::fmt::Debug>(ours: &[T], theirs: &[T]) -> Vec<T> {
-    let mut count: BTreeMap<&T, i64> = BTreeMap::new();
-    for r in ours {
-        *count.entry(r).or_default() += 1;
-    }
-    let mut lacking = Vec::new();
-    for r in theirs {
-        let n = count.entry(r).or_default();
-        *n -= 1;
-        if *n < 0 {
-            lacking.push(r.clone());
-        }
-    }
-    lacking
-}
-
 /// One indented line per row.
 fn lines<T: std::fmt::Debug>(rows: &[T]) -> String {
     rows.iter().map(|r| format!("    {r:?}\n")).collect()
@@ -530,139 +513,192 @@ pub fn grade(cell: &Cell, fcs: &Fcs, ours: &SourceExistence) -> Result<String, S
         SourceExistence::Unread(why) => return Ok(format!("unread {why:?}")),
         SourceExistence::Read(s) => s,
     };
-    let PickleLayer::Read(rows) = &surface.index.pickle else {
-        return Err("a Read surface has no read pickle".to_owned());
+    // Both sides as the existence questions read them: the facts of the set
+    // each index builds, by the code every question runs.
+    let mine = existence_facts(&surface.index, &surface.assembly_auto_opens);
+    let theirs = existence_facts(
+        &ExistenceIndex {
+            il: Vec::new(),
+            pickle: PickleLayer::Read(fcs.memory.entities.clone()),
+            extensions: fcs.memory.extensions.clone(),
+        },
+        &fcs.memory.auto_opens,
+    );
+    // FCS's recovery of a producer it rejects renames a duplicate val
+    // (`f@13`): a source-named val there is covered by ours of its name.
+    let recovered_rename = |f: &ExtensionFact| {
+        !fcs.clean
+            && f.key.find('@').is_some_and(|at| {
+                at > 0
+                    && mine.extensions.contains(&ExtensionFact {
+                        key: f.key[..at].to_owned(),
+                        ..f.clone()
+                    })
+            })
     };
-    let mine = Rows {
-        entities: rows.clone(),
-        extensions: surface.index.extensions.clone(),
-        auto_opens: surface.assembly_auto_opens.clone(),
-    }
-    .sorted();
-    let theirs = &fcs.memory;
-    // A producer FCS rejects: its imported surface is FCS's recovery, whose
-    // kinds and flags the walk does not model exactly. Ours must still cover
-    // every fact an existence question reads of it, in the direction that
-    // answers "something may be there" more often. Per entity path (place
-    // and logical name), as `ExistenceSet` unions every row at one path: the
-    // `[<AutoOpen>]` and `[<Extension>]` flags and being an abbreviation
-    // (what lends names) where FCS's row has them, which recovery may merge
-    // from duplicate definitions, even of different compiled names (FS0249
-    // keeps one definition's compiled name and may keep another's flags);
-    // and each compiled name FCS's rows give the path. Every extension's
-    // place and names, of either staticness where FCS's says, but for a val
-    // recovery renamed (`f@13`: its name holds an `@`, which only recovery
-    // writes for a source-named val here). Every auto-open path.
-    if !fcs.clean {
-        type Path<'r> = (&'r [String], &'r [String], &'r str);
-        type Facts<'r> = (bool, bool, bool, BTreeSet<&'r str>);
-        let mut ours_paths: BTreeMap<Path<'_>, Facts<'_>> = BTreeMap::new();
-        for r in &mine.entities {
-            let facts = ours_paths
-                .entry((&r.namespace, &r.enclosing, &r.logical_name))
-                .or_default();
-            facts.0 |= r.auto_open;
-            facts.1 |= r.extension;
-            facts.2 |= r.kind == PickledEntityKind::Abbreviation;
-            facts.3.insert(&r.compiled_name);
-        }
-        let covers_entity = |f: &PickledEntityRow| {
-            ours_paths
-                .get(&(
-                    f.namespace.as_slice(),
-                    f.enclosing.as_slice(),
-                    f.logical_name.as_str(),
-                ))
-                .is_some_and(|(auto_open, extension, abbreviation, compiled)| {
-                    (*auto_open || !f.auto_open)
-                        && (*extension || !f.extension)
-                        && (*abbreviation || f.kind != PickledEntityKind::Abbreviation)
-                        && compiled.contains(f.compiled_name.as_str())
-                })
-        };
-        let covers_extension = |f: &ExtensionRow| {
-            f.names.iter().any(|n| n.contains('@'))
-                || mine.extensions.iter().any(|r| {
-                    (&r.namespace, &r.enclosing, &r.names) == (&f.namespace, &f.enclosing, &f.names)
-                        && (r.instance.is_none() || r.instance == f.instance)
-                })
-        };
-        let lacking: Vec<String> = theirs
-            .entities
-            .iter()
-            .filter(|f| !covers_entity(f))
-            .map(|f| format!("{f:?}"))
-            .chain(
-                theirs
-                    .extensions
-                    .iter()
-                    .filter(|f| !covers_extension(f))
-                    .map(|f| format!("{f:?}")),
-            )
-            .chain(
-                theirs
-                    .auto_opens
-                    .iter()
-                    .filter(|p| !mine.auto_opens.contains(p))
-                    .map(|p| format!("auto-open {p}")),
-            )
-            .collect();
-        if !lacking.is_empty() {
-            return Err(format!(
-                "{}: FCS rejects it, and ours does not cover the facts of its recovered surface\n{}",
-                cell.name,
-                lines(&lacking)
-            ));
-        }
-        let undecodable = if fcs.undecodable {
-            ", its signature undecodable"
+    let lacking: Vec<String> = facts_lacking(&mine, &theirs, &recovered_rename);
+    if !lacking.is_empty() {
+        let state = if fcs.clean {
+            "FCS accepts it"
         } else {
-            ""
+            "FCS rejects it"
         };
-        return Ok(format!(
-            "covers recovered facts, FCS rejects{undecodable} ({:?})",
-            surface.approximations
-        ));
-    }
-    let lacking_entities = missing(&mine.entities, &theirs.entities);
-    let lacking_extensions = missing(&mine.extensions, &theirs.extensions);
-    let lacking_opens = missing(&mine.auto_opens, &theirs.auto_opens);
-    if !lacking_entities.is_empty() || !lacking_extensions.is_empty() || !lacking_opens.is_empty() {
         return Err(format!(
-            "{}: ours does not cover FCS's rows (approximations {:?})\n  FCS has, ours lacks:\n{}{}    auto-opens {lacking_opens:?}\n  ours:\n{}{}",
+            "{}: {state}, and ours lacks facts FCS's CCU holds (approximations {:?})\n{}",
             cell.name,
             surface.approximations,
-            lines(&lacking_entities),
-            lines(&lacking_extensions),
-            lines(&mine.entities),
-            lines(&mine.extensions),
+            lines(&lacking)
         ));
     }
-    if fcs.clean && fcs.undecodable {
-        return Ok(format!(
-            "covers FCS's entities, the signature undecodable (#1081) ({:?})",
-            surface.approximations
-        ));
-    }
-    if surface.approximations.is_empty() {
-        if mine != *theirs {
-            return Err(format!(
-                "{}: no approximation named, yet ours is not FCS's\n  ours has, FCS lacks:\n{}{}    ours auto-opens {:?}, FCS's {:?}",
-                cell.name,
-                lines(&missing(&theirs.entities, &mine.entities)),
-                lines(&missing(&theirs.extensions, &mine.extensions)),
-                mine.auto_opens,
-                theirs.auto_opens
-            ));
-        }
-        Ok("exact".to_owned())
-    } else {
-        let names: Vec<String> = surface
-            .approximations
+    let surplus = Surplus::of(&mine, &theirs);
+    // A surplus abbreviation lender makes every name a possible extension:
+    // on a producer FCS accepts and the walk read whole, it must come from
+    // a place the walk named.
+    let lender_sources = [
+        Approximation::UncertainAttribute,
+        Approximation::AbbreviationOrUnion,
+        Approximation::SignaturePair,
+    ];
+    if fcs.clean
+        && !fcs.undecodable
+        && surplus.lenders > 0
+        && !lender_sources
             .iter()
-            .map(|a| format!("{a:?}"))
-            .collect();
-        Ok(format!("covers [{}]", names.join(",")))
+            .any(|a| surface.approximations.contains(a))
+    {
+        return Err(format!(
+            "{}: {} surplus abbreviation lender(s) with no approximation that may make one ({:?})\n  ours: {:?}\n  FCS's: {:?}",
+            cell.name,
+            surplus.lenders,
+            surface.approximations,
+            mine.abbreviation_lenders,
+            theirs.abbreviation_lenders
+        ));
+    }
+    let state = match (fcs.clean, fcs.undecodable) {
+        (true, false) => "",
+        (true, true) => ", FCS's signature undecodable (#1081)",
+        (false, false) => ", FCS rejects",
+        (false, true) => ", FCS rejects, its signature undecodable",
+    };
+    let names: Vec<String> = surface
+        .approximations
+        .iter()
+        .map(|a| format!("{a:?}"))
+        .collect();
+    if surplus.is_zero() {
+        Ok(format!("exact{state} [{}]", names.join(",")))
+    } else {
+        Ok(format!("covers{state} {surplus} [{}]", names.join(",")))
+    }
+}
+
+/// Every fact of `theirs` that `mine` lacks, but for an extension `excused`.
+fn facts_lacking(
+    mine: &ExistenceFacts,
+    theirs: &ExistenceFacts,
+    excused: &dyn Fn(&ExtensionFact) -> bool,
+) -> Vec<String> {
+    fn paths(
+        kind: &str,
+        ours: &BTreeSet<Vec<String>>,
+        theirs: &BTreeSet<Vec<String>>,
+    ) -> Vec<String> {
+        theirs
+            .difference(ours)
+            .map(|p| format!("{kind} {}", p.join(".")))
+            .collect()
+    }
+    let mut lacking = Vec::new();
+    if theirs.unknowable && !mine.unknowable {
+        lacking.push("unknowable".to_owned());
+    }
+    lacking.extend(paths("prefix", &mine.prefixes, &theirs.prefixes));
+    lacking.extend(paths("entity", &mine.entities, &theirs.entities));
+    // An entity that may lend anything lends its children too.
+    let lends_children: BTreeSet<Vec<String>> = mine
+        .lends_children
+        .union(&mine.lends_anything)
+        .cloned()
+        .collect();
+    lacking.extend(paths(
+        "lends-children",
+        &lends_children,
+        &theirs.lends_children,
+    ));
+    lacking.extend(paths(
+        "lends-anything",
+        &mine.lends_anything,
+        &theirs.lends_anything,
+    ));
+    lacking.extend(paths(
+        "abbreviation-lender",
+        &mine.abbreviation_lenders,
+        &theirs.abbreviation_lenders,
+    ));
+    lacking.extend(paths(
+        "auto-open",
+        &mine.auto_open_bases,
+        &theirs.auto_open_bases,
+    ));
+    lacking.extend(
+        theirs
+            .extensions
+            .difference(&mine.extensions)
+            .filter(|f| !excused(f))
+            .map(|f| format!("extension {f:?}")),
+    );
+    lacking
+}
+
+/// How many facts ours holds beyond FCS's, per kind: what the superset costs
+/// the gate.
+struct Surplus {
+    prefixes: usize,
+    entities: usize,
+    lends: usize,
+    lenders: usize,
+    auto_opens: usize,
+    extensions: usize,
+}
+
+impl Surplus {
+    fn of(mine: &ExistenceFacts, theirs: &ExistenceFacts) -> Surplus {
+        let n = |a: &BTreeSet<Vec<String>>, b: &BTreeSet<Vec<String>>| a.difference(b).count();
+        Surplus {
+            prefixes: n(&mine.prefixes, &theirs.prefixes),
+            entities: n(&mine.entities, &theirs.entities),
+            lends: n(&mine.lends_children, &theirs.lends_children)
+                + n(&mine.lends_anything, &theirs.lends_anything),
+            lenders: n(&mine.abbreviation_lenders, &theirs.abbreviation_lenders),
+            auto_opens: n(&mine.auto_open_bases, &theirs.auto_open_bases),
+            extensions: mine.extensions.difference(&theirs.extensions).count(),
+        }
+    }
+
+    fn is_zero(&self) -> bool {
+        self.prefixes
+            + self.entities
+            + self.lends
+            + self.lenders
+            + self.auto_opens
+            + self.extensions
+            == 0
+    }
+}
+
+impl std::fmt::Display for Surplus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "surplus(prefix {}, entity {}, lends {}, lender {}, auto-open {}, extension {})",
+            self.prefixes,
+            self.entities,
+            self.lends,
+            self.lenders,
+            self.auto_opens,
+            self.extensions
+        )
     }
 }
 

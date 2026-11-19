@@ -21,6 +21,27 @@ pub fn fsharp_core_type_names() -> &'static [&'static str] {
     crate::source_existence::FSHARP_CORE_TYPE_NAMES
 }
 
+pub use crate::assembly_env::existence::{ExistenceFacts, ExtensionFact};
+
+/// What the existence questions hold of one assembly whose index is `index`
+/// and whose assembly-level `[<AutoOpen("…")>]` arguments are
+/// `auto_opens`: the facts of the [`crate::assembly_env::existence`] set
+/// built from them alone, by the code every question reads.
+pub fn existence_facts(
+    index: &borzoi_assembly::ExistenceIndex,
+    auto_opens: &[String],
+) -> ExistenceFacts {
+    use crate::assembly_env::existence::{ExistenceSet, auto_open_segments};
+    let mut set = ExistenceSet::default();
+    set.add(&crate::ExistenceInput::Read(index.clone()), &[]);
+    for path in auto_opens {
+        if let Some(segments) = auto_open_segments(path) {
+            set.add_auto_open_base(segments);
+        }
+    }
+    set.facts()
+}
+
 /// Which input of the extension-scope gate declines a call of a method named
 /// `name` in the file `resolved` (`is_static`: a type-qualified call), or
 /// `None` when the gate lets the

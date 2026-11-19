@@ -253,30 +253,27 @@ fn witness(channel: Channel) -> Observed {
                     .any(|row| row.logical_name == "Alias")
             },
         ),
+        // `FooModule` may be `FooModuleModule`, which canonical spelling
+        // keeps apart.
         Channel::ModuleSuffix => observe(
-            one("namespace N\ntype T = { X: int }\nmodule T =\n    let x = 1\n"),
-            |r| has_entity(r, "TModule", "TModule", K::Module),
-        ),
-        Channel::CompilationRepresentationArgument => observe(
-            one(
-                "namespace N\n[<CompilationRepresentation(enum<CompilationRepresentationFlags> 4)>]\nmodule T =\n    let x = 1\n",
-            ),
+            one("namespace N\nmodule FooModule =\n    let x = 1\n"),
             |_| true,
         ),
         Channel::TypeDefinition => observe(
             one("namespace N\ntype C() = member _.X = 1\ntype U = A | B\n"),
             |r| has_entity(r, "C", "C", K::Type) && has_entity(r, "U", "U", K::Type),
         ),
+        // Canonical spelling strips the arity: the walk writes none.
         Channel::GenericArity => observe(
             one("namespace N\ntype G<'a, [<Measure>] 'u> = { X: 'a }\n"),
-            |r| has_entity(r, "G`1", "G`1", K::Type),
+            |r| has_entity(r, "G", "G", K::Type),
         ),
         Channel::Abbreviation => observe(one("namespace N\ntype I = int\n"), |r| {
             has_entity(r, "I", "I", K::Abbreviation)
         }),
         Channel::AbbreviationOrUnion => observe(one("namespace N\ntype I = Somewhere\n"), |_| true),
-        Channel::Measure => observe(one("namespace N\n[<Measure>] type m\n"), |r| {
-            has_entity(r, "m", "m", K::Measure)
+        Channel::EntityKind => observe(one("namespace N\n[<Measure>] type m\n"), |r| {
+            has_entity(r, "m", "m", K::Type)
         }),
         Channel::Exception => observe(one("namespace N\nexception E of string\n"), |r| {
             has_entity(r, "E", "E", K::Exception)
@@ -286,7 +283,7 @@ fn witness(channel: Channel) -> Observed {
             |r| {
                 rows(r, "access")
                     .iter()
-                    .any(|row| row.logical_name == "T" && !row.public)
+                    .any(|row| row.logical_name == "T" && row.public)
             },
         ),
         Channel::TypeProviderUse => observe(one("namespace N\ntype T = P<\"x\">\n"), |_| true),
@@ -389,7 +386,7 @@ fn witness(channel: Channel) -> Observed {
             |r| {
                 rows(r, "implied")
                     .iter()
-                    .any(|row| row.logical_name == "M" && row.extension)
+                    .any(|row| row.logical_name == "M" && !row.extension)
             },
         ),
         Channel::UnnamedDeclaration => observe(
@@ -397,15 +394,12 @@ fn witness(channel: Channel) -> Observed {
             |_| true,
         ),
         Channel::ReadingsBudget => {
-            // Twenty nested modules under an attribute that may be
-            // `[<CompilationRepresentation>]` with an unread argument: each
+            // Twenty nested modules whose names end in `Module`: each
             // doubles the paths under it.
             let mut src = String::from("namespace N\n");
             for depth in 0..20 {
                 let indent = "    ".repeat(depth);
-                src.push_str(&format!(
-                    "{indent}[<CompilationRepresentation(flags)>]\n{indent}module M{depth} =\n"
-                ));
+                src.push_str(&format!("{indent}module M{depth}Module =\n"));
             }
             src.push_str(&format!("{}let x = 1\n", "    ".repeat(20)));
             observe(read(&[("Lib.fs", &src)]), |_| true)
@@ -414,21 +408,10 @@ fn witness(channel: Channel) -> Observed {
             one("module M\ntype System.String with\n    abstract M: int\n"),
             |_| true,
         ),
-        // The second `f` takes `f@7`, and the value `v` is no method.
+        // The second `f` takes `f@7`: the walk emits every name it may.
         Channel::ClassLet => observe(
             one(
-                "module M\nopen System.Runtime.CompilerServices\ntype T() =\n    [<Extension>]\n    static let f (s: string) = s\n    [<Extension>]\n    static let f (s: string) = s\n    [<Extension>]\n    static let v = 1\n    member _.G = f \"x\" + string v\n",
-            ),
-            |r| {
-                let mut names = extension_names(r);
-                names.sort();
-                names == [vec!["f".to_owned()], vec!["f@7".to_owned()]]
-            },
-        ),
-        // `f@5` may be a name FCS generated that the walk does not track.
-        Channel::ClassLetName => observe(
-            one(
-                "module M\ntype T() =\n    [<System.Runtime.CompilerServices.Extension>]\n    static let ``f@5`` (s: string) = s\n    member _.G = ``f@5`` \"x\"\n",
+                "module M\nopen System.Runtime.CompilerServices\ntype T() =\n    [<Extension>]\n    static let f (s: string) = s\n    [<Extension>]\n    static let f (s: string) = s\n    member _.G = f \"x\"\n",
             ),
             |_| true,
         ),
@@ -454,6 +437,7 @@ fn the_inventory_is_what_the_walk_does() {
             (Treatment::Approximated(a), Observed::Approximated(names)) => names.contains(&a),
             (Treatment::Declined, Observed::Unread(_)) => true,
             (Treatment::Caller, Observed::CallerDecides) => true,
+            (Treatment::Unconsumed, Observed::Exact | Observed::Approximated(_)) => true,
             _ => false,
         };
         if !agrees {
@@ -487,7 +471,7 @@ fn every_decline_and_approximation_is_a_channel() {
         Approximation::UncertainAttribute,
         Approximation::AbbreviationOrUnion,
         Approximation::AugmentationKind,
-        Approximation::CompilationRepresentationArgument,
+        Approximation::ModuleSuffix,
         Approximation::BindingPattern,
         Approximation::RejectedShape,
         Approximation::ClassLetName,
@@ -498,7 +482,7 @@ fn every_decline_and_approximation_is_a_channel() {
             | Approximation::UncertainAttribute
             | Approximation::AbbreviationOrUnion
             | Approximation::AugmentationKind
-            | Approximation::CompilationRepresentationArgument
+            | Approximation::ModuleSuffix
             | Approximation::BindingPattern
             | Approximation::RejectedShape
             | Approximation::ClassLetName => {}
@@ -596,7 +580,9 @@ fn an_omitted_name_widens_to_unknown() {
         flags(&unknown),
         "an omitted name reads as Unknown"
     );
-    assert!(flags(&omitted).contains(&(true, false)) && flags(&omitted).contains(&(false, false)));
+    // Every reading's facts: the attribute may be `[<AutoOpen>]` and
+    // `[<Extension>]` both.
+    assert_eq!(flags(&omitted), BTreeSet::from([(true, true)]));
     let SourceExistence::Read(s) = &omitted else {
         panic!("{omitted:?}")
     };
