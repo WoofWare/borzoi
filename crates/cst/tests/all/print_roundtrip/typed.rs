@@ -2809,7 +2809,8 @@ fn every_admitted_case_initial_checks() {
 /// Every alias the tree admits must be one FCS accepts after `as`: each name
 /// [`VarName::new`] admits, as `match x with _ as v -> ()` at F# 5 (where
 /// only a variable may stand there) and at preview, and each name
-/// [`AliasPat::new`] admits as a pattern, at preview.
+/// [`AliasPat::new`] admits as a pattern, at preview; and each must round-trip,
+/// our parser reading it as FCS does.
 #[test]
 fn every_admitted_alias_checks() {
     use borzoi_print::version::{Available, Preview, V5_0};
@@ -2898,13 +2899,25 @@ fn every_admitted_alias_checks() {
         .chain(vars.iter().map(|v| format!("{v:?} at preview")))
         .chain(pats.iter().map(|p| format!("{:?} at preview", p.pat())))
         .collect();
-    let failures: Vec<String> = super::check::check_errors(&old, V5_0::LANGUAGE)
+    let mut failures: Vec<String> = super::check::check_errors(&old, V5_0::LANGUAGE)
         .into_iter()
         .chain(super::check::check_errors(&new, Preview::LANGUAGE))
-        .zip(labels)
+        .zip(&labels)
         .filter(|(errors, _)| !errors.is_empty())
         .map(|(errors, label)| format!("{label}: {errors:?}"))
         .collect();
+    // Our parser must read each alias as FCS does, too.
+    let round: Vec<Result<(), String>> = old
+        .iter()
+        .map(super::round_trips)
+        .chain(new.iter().map(super::round_trips))
+        .collect();
+    failures.extend(
+        round
+            .into_iter()
+            .zip(&labels)
+            .filter_map(|(r, label)| r.err().map(|e| format!("{label}: {e}"))),
+    );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
@@ -3075,47 +3088,52 @@ mod run {
             .unwrap_or(default)
     }
 
+    /// Case `i` of `seed`'s tree. Each draws on a runner of its own, seeded
+    /// from both, so a failure can be drawn again to shrink it, and the cap on
+    /// filter rejections bounds one draw: a filter that cannot pass fails
+    /// loudly, naming itself, rather than spinning.
+    fn tree<V: Version>(seed: u64, i: usize) -> Tree<V> {
+        let mut bytes = [0u8; 32];
+        bytes[..8].copy_from_slice(&seed.to_le_bytes());
+        bytes[8..16].copy_from_slice(&(i as u64).to_le_bytes());
+        let config = Config {
+            max_local_rejects: MAX_REJECTS,
+            ..Config::default()
+        };
+        let mut runner =
+            TestRunner::new_with_rng(config, TestRng::from_seed(RngAlgorithm::ChaCha, &bytes));
+        match impl_file::<V>().new_tree(&mut runner) {
+            Ok(tree) => Box::new(tree),
+            Err(e) => panic!("tree {i} of seed {seed}: {e}\n{runner}"),
+        }
+    }
+
+    /// How many trees are drawn and checked at a time: only a batch's trees
+    /// are alive at once, and a failure is drawn again to shrink.
+    const BATCH: usize = 256;
+
     /// `cases` typed files at `V` drawn from `seed`, each type-checked and
     /// round-tripped at `V`; the shrunk failures, described.
     fn failures<V: Version>(cases: usize, seed: u64) -> Vec<String> {
-        let mut bytes = [0u8; 32];
-        bytes[..8].copy_from_slice(&seed.to_le_bytes());
-        let mut seeds = TestRunner::new_with_rng(
-            Config::default(),
-            TestRng::from_seed(RngAlgorithm::ChaCha, &bytes),
-        );
-        let strategy = impl_file::<V>();
-        // Each tree draws on its own runner, so the cap on filter rejections
-        // bounds one draw: a filter that cannot pass fails loudly, naming
-        // itself, rather than spinning.
-        let mut trees: Vec<Tree<V>> = (0..cases)
-            .map(|i| {
-                let config = Config {
-                    max_local_rejects: MAX_REJECTS,
-                    ..Config::default()
-                };
-                let mut runner = TestRunner::new_with_rng(config, seeds.new_rng());
-                match strategy.new_tree(&mut runner) {
-                    Ok(tree) => Box::new(tree) as Tree<V>,
-                    Err(e) => panic!("tree {i} of seed {seed}: {e}\n{runner}"),
-                }
-            })
-            .collect();
-        let files: Vec<ImplFile<V>> = trees.iter().map(|t| t.current()).collect();
-        let checked = check_errors(&files, V::LANGUAGE);
-        let round: Vec<Option<String>> = par_map(files.len(), |i| round_trips(&files[i]).err());
-        let failing: Vec<(usize, Failure)> = checked
-            .into_iter()
-            .zip(round)
-            .enumerate()
-            .filter_map(|(i, (errors, round))| {
-                if !errors.is_empty() {
-                    Some((i, Failure::Check(errors)))
-                } else {
-                    round.map(|r| (i, Failure::RoundTrip(r)))
-                }
-            })
-            .collect();
+        let mut failing: Vec<(usize, Failure)> = Vec::new();
+        for start in (0..cases).step_by(BATCH) {
+            let range = start..cases.min(start + BATCH);
+            let files: Vec<ImplFile<V>> = range
+                .clone()
+                .map(|i| tree::<V>(seed, i).current())
+                .collect();
+            let checked = check_errors(&files, V::LANGUAGE);
+            let round: Vec<Option<String>> = par_map(files.len(), |k| round_trips(&files[k]).err());
+            failing.extend(checked.into_iter().zip(round).zip(range).filter_map(
+                |((errors, round), i)| {
+                    if !errors.is_empty() {
+                        Some((i, Failure::Check(errors)))
+                    } else {
+                        round.map(|r| (i, Failure::RoundTrip(r)))
+                    }
+                },
+            ));
+        }
         let total = failing.len();
         let all: Vec<Failure> = failing.iter().map(|(_, f)| f.clone()).collect();
         let mut shown: Vec<Failure> = Vec::new();
@@ -3125,11 +3143,13 @@ mod run {
                 continue;
             }
             shown.push(f.clone());
-            let (file, why) = shrink(&mut trees[i], &f);
+            let mut tree = tree::<V>(seed, i);
+            let drawn = tree.current();
+            let (file, why) = shrink(&mut tree, &f);
             out.push(format!(
                 "{why}--- shrunk ---\n{}--- drawn ---\n{}",
                 print_impl_file(&file),
-                print_impl_file(&files[i])
+                print_impl_file(&drawn)
             ));
         }
         if total > 0 {

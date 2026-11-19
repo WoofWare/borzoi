@@ -1319,8 +1319,11 @@ pub enum AsAlias<V: Version> {
 }
 
 /// A pattern after `as` other than a variable. F# reads `p as (x)` as
-/// `p as x`, so [`AliasPat::new`] refuses a variable, which is
-/// [`AsAlias::Var`]'s, and a name spelled as an active pattern's (FS1209).
+/// `p as x`, so [`AliasPat::new`] refuses a single name unless it starts
+/// with a capital every Unicode version agrees on: a variable is
+/// [`AsAlias::Var`]'s, and on an uncertain initial FCS and our parser may
+/// read the name differently. It refuses a name spelled as an active
+/// pattern's too (FS1209).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AliasPat<V: Version> {
     gate: V::NonVariablePatternsToRightOfAsPatterns,
@@ -1333,12 +1336,13 @@ impl<V: Version> AliasPat<V> {
         gate: V::NonVariablePatternsToRightOfAsPatterns,
         pat: Pat<V>,
     ) -> Result<Self, Box<Pat<V>>> {
-        // A variable is `AsAlias::Var`'s; a name spelled as an active
-        // pattern's is no variable, but FCS refuses it there (FS1209).
+        // A single name is a variable, `AsAlias::Var`'s, unless it starts with
+        // a capital F# and our parser both read as one; one spelled as an
+        // active pattern's FCS refuses there (FS1209).
         let refused = match &pat {
             Pat::Name(path) => match path.segments() {
                 [only] => {
-                    VarName::new(only.clone()).is_ok()
+                    !crate::names::leads_stably_uppercase(only.as_str())
                         || crate::names::is_active_pattern_spelling(only.as_str())
                 }
                 _ => false,

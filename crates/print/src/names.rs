@@ -306,9 +306,16 @@ impl ExceptionName {
 /// capital whose case every version agrees on is admitted: ASCII's,
 /// Latin-1's, and basic Greek's and Cyrillic's.
 fn leads_uppercase(name: &EntityName) -> bool {
-    name.as_str().chars().next().is_some_and(|c| {
+    leads_stably_uppercase(name.as_str())
+}
+
+/// Whether `text` starts with a capital whose case every Unicode version
+/// agrees on: an ASCII, Latin-1, basic Greek or basic Cyrillic one, which
+/// FCS and `borzoi-cst`'s parser both read as upper case.
+pub fn leads_stably_uppercase(text: &str) -> bool {
+    text.chars().next().is_some_and(|c| {
         matches!(c, 'A'..='Z' | 'À'..='Þ' | 'Α'..='Ω' | 'Ѐ'..='Я') && c.is_uppercase()
-    }) && borzoi_cst::parser::ident_leads_uppercase(name.as_str())
+    }) && borzoi_cst::parser::ident_leads_uppercase(text)
 }
 
 /// A name F# reads as a variable where a pattern may also name a constructor:
