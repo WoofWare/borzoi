@@ -176,10 +176,15 @@ fn both_routes(project: &Path, env: &SdkDiscoveryEnv) -> Result<Graphs, String> 
 /// SDK, since each runs its own SDK's NuGet.
 static ORACLES: Mutex<BTreeMap<PathBuf, Oracle>> = Mutex::new(BTreeMap::new());
 
-/// The home every restore here runs under: a folder of the suite's own, with
-/// no user config (restore writes its default there).
-static SUITE_HOME: LazyLock<tempfile::TempDir> =
-    LazyLock::new(|| tempfile::tempdir().expect("temp dir"));
+/// The home every restore here runs under: a folder of the suite's own,
+/// holding the user config NuGet writes where there is none.
+static SUITE_HOME: LazyLock<tempfile::TempDir> = LazyLock::new(|| {
+    let home = tempfile::tempdir().expect("temp dir");
+    // The user config NuGet would write, which the settings model reads only
+    // once it is there.
+    crate::common::seed_user_nuget_config(home.path());
+    home
+});
 
 /// The environment every restore here runs under: the process's, with every
 /// variable B₁ has a verdict on removed from the build environment, no
