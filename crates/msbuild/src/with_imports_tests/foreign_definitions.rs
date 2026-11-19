@@ -210,6 +210,45 @@ fn the_queries_match_computed_names_and_short_task_names() {
     assert!(!computed.defines_target("CoreCompile"));
 }
 
+/// An item element's children and its attributes beyond the item operations
+/// are metadata, in an item group (inside a target or not) or an item
+/// definition group. An item group's elements are item types; a definition
+/// group's are recorded apart, as types given defaults.
+#[test]
+fn item_metadata_names_are_recorded() {
+    let doc = crate::document::parse(
+        r#"<Project>
+  <ItemGroup Label="g">
+    <Compile Include="a.fs" Exclude="b.fs" Condition="true" Link="x" Visible="false"><DependentUpon>b</DependentUpon></Compile>
+    <Compile Update="a.fs" KeepMetadata="Link" MatchOnMetadata="Link" MatchOnMetadataOptions="CaseSensitive" />
+    <Compile Remove="c.fs" RemoveMetadata="Visible" KeepDuplicates="false" />
+    <Compile Include="d.fs"><Project>p</Project></Compile>
+  </ItemGroup>
+  <ItemDefinitionGroup><None><CopyToOutputDirectory>Always</CopyToOutputDirectory></None></ItemDefinitionGroup>
+  <Target Name="T"><ItemGroup><Extra Include="e" Pack="true" /></ItemGroup></Target>
+  <PropertyGroup><NotMetadata>1</NotMetadata></PropertyGroup>
+</Project>"#,
+    )
+    .unwrap();
+    let mut foreign = ForeignDefinitions::default();
+    foreign.record_document(doc.root_element(), Path::new("/w/x.targets"));
+    assert_eq!(names(&foreign.items), ["compile", "extra"]);
+    assert_eq!(names(&foreign.item_definitions), ["none"]);
+    assert_eq!(
+        names(&foreign.item_metadata),
+        [
+            "copytooutputdirectory",
+            "dependentupon",
+            "link",
+            "pack",
+            "project",
+            "visible"
+        ]
+    );
+    assert_eq!(names(&foreign.properties), ["notmetadata"]);
+    assert!(foreign.defines_metadata("Link") && !foreign.defines_metadata("Include"));
+}
+
 /// MSBuild decodes an escape in a name, so an escaped spelling may be any
 /// name; and it does not read inside `<ProjectExtensions>`.
 #[test]

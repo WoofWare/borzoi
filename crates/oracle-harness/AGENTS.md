@@ -22,6 +22,27 @@ recurses per element; `borzoi-msbuild`'s `xml_nesting_pump` and
 `borzoi-nuget`'s `dgspec::xml_nesting_pump` hold every reader of untrusted
 XML to that without naming the recursive paths. A new reader belongs in one.
 
+And `msbuild_oracle::fsc_args`, what fsc is really handed: it runs a real
+`dotnet msbuild -nodeReuse:false -restore -t:Build` on a project where it
+lies (hand it a fixture of its own), with `tools/msbuild-condition-oracle`'s
+`FscArgsLogger` attached, and reads each `Fsc` invocation's response file
+off the command line the task logs (its reported items unescape `%XX`, turn
+`\` into `/` and leave out `--refout:`), parsed into a typed
+`fsc_args::FscArguments` (a terminal option, `--version` and the like, yields
+no assembly). A real build, not an imitation of one: an in-process imitation
+(its own restore, its own target list, references left unbuilt, the compiler
+skipped) differed from the CLI in each of those, in review after review.
+Its domain is a build that does not read the process's command line, where
+the logger shows. That is stated, not checked: a check against a second,
+uninstrumented build kept missing what it did not know to compare, so it was
+deleted, and the trees the differentials generate hold it by grammar (no
+property function, no build code), which the generators assert. Callers set
+globals and environment variables only through `BuildInputs`, which refuses
+names that choose the toolchain, the compiler, the restore or MSBuild's
+machinery. `borzoi-msbuild`'s `fsc_args_oracle_calibration` holds the
+reading to real compiling builds (the arguments `-getItem` reports, and the
+file fsc writes).
+
 ## Hostile values
 
 `hostile` holds the strange values every generator should search, once, by the

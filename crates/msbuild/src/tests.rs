@@ -11201,3 +11201,93 @@ fn an_indirect_define_read_is_not_the_self_append() {
          define set must not be certain"
     );
 }
+
+/// Each write a document outside the install makes of a name the
+/// compiled-name derivation admits is checked as it is made, and the first
+/// one out of its grammar kept: a write under a gate that decided against it
+/// is not one, and one under a gate the walk cannot decide may have stored
+/// anything. A later clean write does not discharge it.
+#[test]
+fn foreign_write_failures_keep_the_first_value_out_of_grammar() {
+    let parsed = parse(
+        r#"<Project>
+  <PropertyGroup><Configuration>Debug</Configuration></PropertyGroup>
+  <PropertyGroup Condition="'a' == 'b'"><Configuration>Skipped one</Configuration></PropertyGroup>
+  <PropertyGroup><Configuration>Moved one</Configuration></PropertyGroup>
+  <PropertyGroup><Configuration>Debug</Configuration></PropertyGroup>
+  <PropertyGroup Condition="'$([System.Guid]::NewGuid())' == ''"><Version>1.0</Version></PropertyGroup>
+  <PropertyGroup><Unlisted>any thing</Unlisted></PropertyGroup>
+</Project>"#,
+    );
+    assert_eq!(
+        parsed.foreign_write_failures.get("configuration"),
+        Some(&Some("Moved one".to_string()))
+    );
+    assert_eq!(parsed.foreign_write_failures.get("version"), Some(&None));
+    assert_eq!(parsed.foreign_write_failures.len(), 2);
+}
+
+/// Repeated appends hold nothing beyond the first failure: memory stays as
+/// small as the lists, however long the document.
+#[test]
+fn repeated_appends_retain_nothing() {
+    let mut source = String::from("<Project>");
+    for _ in 0..4000 {
+        source.push_str("<PropertyGroup><NoWarn>$(NoWarn);FS0001</NoWarn><Unlisted>$(Unlisted);x</Unlisted></PropertyGroup>");
+    }
+    source.push_str("</Project>");
+    let parsed = parse(&source);
+    assert!(parsed.foreign_write_failures.is_empty());
+    assert!(matches!(
+        parsed.property("NoWarn"),
+        crate::PropertyRead::Value(v) if v.len() == 4000 * 7
+    ));
+}
+
+/// NuGet's `Exists('…')` guard names the very path it imports, spaces and
+/// all: a guard whose quoted path differs only in its spaces is not NuGet's,
+/// and one that matches exactly is.
+#[test]
+fn nuget_shaped_exists_guards_keep_their_spaces() {
+    let shaped = |import: &str, guard: &str| {
+        let text = format!(
+            "<Project><ImportGroup Condition=\" '$(ExcludeRestorePackageImports)' != 'true' \">\
+             <Import Project=\"{import}\" Condition=\"{guard}\" /></ImportGroup></Project>"
+        );
+        let doc = crate::document::parse(&text).unwrap();
+        let file = Path::new("/p/obj/Demo.fsproj.nuget.g.props");
+        let mut foreign = crate::ForeignDefinitions::default();
+        foreign.record_document(doc.root_element(), file);
+        !foreign.unlike_nuget.contains(file)
+    };
+    assert!(!shaped("/p/a b.props", "Exists('/p/a  b.props')"));
+    assert!(shaped("/p/a  b.props", "Exists('/p/a  b.props')"));
+    assert!(shaped("/p/a.props", " Exists('/p/a.props') "));
+    // A literal tab, which MSBuild keeps, against a space.
+    assert!(!shaped("/p/a\tb.props", "Exists('/p/a b.props')"));
+    // A quote closes the literal: two calls, not a guard of the import.
+    assert!(!shaped(
+        "/p/a') Or Exists('b",
+        "Exists('/p/a') Or Exists('b')"
+    ));
+}
+
+/// An item definition gives a type metadata defaults and creates no item, so
+/// it is not an item type a document declares (which the language-version
+/// consumer reads); the derivation still sees it.
+#[test]
+fn item_definitions_are_not_items() {
+    let text = "<Project><ItemDefinitionGroup><DisabledLanguageFeatures><M>v</M>\
+                </DisabledLanguageFeatures></ItemDefinitionGroup></Project>";
+    let doc = crate::document::parse(text).unwrap();
+    let file = Path::new("/p/Demo.fsproj");
+    let mut foreign = crate::ForeignDefinitions::default();
+    foreign.record_document(doc.root_element(), file);
+    assert!(!foreign.names_item("DisabledLanguageFeatures"));
+    assert!(
+        foreign
+            .item_definitions
+            .contains_key("disabledlanguagefeatures")
+    );
+    assert!(foreign.item_metadata.contains_key("m"));
+}

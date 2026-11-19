@@ -1,0 +1,23 @@
+# Generated; do not edit by hand. One line per .NET SDK the compiled-name
+# derivation (`fsc::compiled_assembly_name`) has been graded against, then one
+# per workload manifest file that grading loaded with it
+# (`<sdk> manifest <path under sdk-manifests>`).
+# Regenerate with:
+#   BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-msbuild --test fsproj_assembly_name_perturbation_diff deep_every_perturbation -- --ignored
+10.0.401
+10.0.401 manifest 10.0.100/microsoft.net.sdk.android/36.1.2/WorkloadManifest.targets
+10.0.401 manifest 10.0.100/microsoft.net.sdk.ios/26.0.11017/WorkloadManifest.targets
+10.0.401 manifest 10.0.100/microsoft.net.sdk.maccatalyst/26.0.11017/WorkloadManifest.targets
+10.0.401 manifest 10.0.100/microsoft.net.sdk.macos/26.0.11017/WorkloadManifest.targets
+10.0.401 manifest 10.0.100/microsoft.net.sdk.maui/10.0.0/WorkloadManifest.targets
+10.0.401 manifest 10.0.100/microsoft.net.sdk.tvos/26.0.11017/WorkloadManifest.targets
+10.0.401 manifest 10.0.100/microsoft.net.workload.emscripten.current/10.0.112/WorkloadManifest.targets
+10.0.401 manifest 10.0.100/microsoft.net.workload.emscripten.net6/10.0.112/WorkloadManifest.targets
+10.0.401 manifest 10.0.100/microsoft.net.workload.emscripten.net7/10.0.112/WorkloadManifest.targets
+10.0.401 manifest 10.0.100/microsoft.net.workload.emscripten.net8/10.0.112/WorkloadManifest.targets
+10.0.401 manifest 10.0.100/microsoft.net.workload.emscripten.net9/10.0.112/WorkloadManifest.targets
+10.0.401 manifest 10.0.100/microsoft.net.workload.mono.toolchain.current/10.0.112/WorkloadManifest.targets
+10.0.401 manifest 10.0.100/microsoft.net.workload.mono.toolchain.net6/10.0.112/WorkloadManifest.targets
+10.0.401 manifest 10.0.100/microsoft.net.workload.mono.toolchain.net7/10.0.112/WorkloadManifest.targets
+10.0.401 manifest 10.0.100/microsoft.net.workload.mono.toolchain.net8/10.0.112/WorkloadManifest.targets
+10.0.401 manifest 10.0.100/microsoft.net.workload.mono.toolchain.net9/10.0.112/WorkloadManifest.targets
