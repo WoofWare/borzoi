@@ -242,3 +242,46 @@ fn batch_try_request_reports_a_spawn_failure() {
         Err(BatchFailure::Spawn(_))
     ));
 }
+
+/// A request that is not one line, being blank or holding a line break, is
+/// refused before anything reaches the child: a line-based oracle reads it as
+/// no request (so the driver waits out its deadline) or as several (so every
+/// later answer is matched to the request before it). The child stays in
+/// step, and saw only the requests that were lines.
+#[test]
+fn a_request_that_is_not_one_line_is_refused_before_it_reaches_the_child() {
+    let dir = tempdir().unwrap();
+    let seen = dir.path().join("seen");
+    let seen_s = seen.to_str().unwrap().to_string();
+    let factory = move || {
+        let mut c = Command::new("sh");
+        c.arg("-c")
+            .arg(
+                r#"while IFS= read -r line; do
+                       printf '%s\n' "$line" >> "$L"
+                       printf 'ok:%s\n' "$line"
+                   done"#,
+            )
+            .env("L", &seen_s);
+        c
+    };
+    let mut child =
+        BatchChild::with_factory(Box::new(factory), "fake-oracle", Duration::from_secs(5), 1);
+    assert_eq!(child.request("first").trim_end(), "ok:first");
+    for request in [
+        "",
+        "  \t",
+        "\u{a0}\u{3000}",
+        "a\nb",
+        "a\rb",
+        "{\"x\": 1}\r\n",
+        "\n",
+    ] {
+        assert!(
+            matches!(child.try_request(request), Err(BatchFailure::NotOneLine)),
+            "{request:?} must be refused"
+        );
+    }
+    assert_eq!(child.request("second").trim_end(), "ok:second");
+    assert_eq!(std::fs::read_to_string(&seen).unwrap(), "first\nsecond\n");
+}
