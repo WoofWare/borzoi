@@ -89,21 +89,28 @@ fn scratch_folder(tag: &str) -> PathBuf {
     crate::common::host_fs::canonicalize(&root).unwrap()
 }
 
+/// The process environment with `home` as the home, holding the user config
+/// NuGet writes where there is none. The caller's home need hold no user
+/// config, without which the settings model declines, so a fixture that took
+/// it would decline for that and not for what it tests. The caller's
+/// package-folder overrides stand.
+fn env_with_a_home_of_its_own(home: &Path) -> SdkDiscoveryEnv {
+    crate::common::seed_user_nuget_config(home);
+    let mut env = SdkDiscoveryEnv::from_process_env();
+    env.build_environment.remove("DOTNET_CLI_HOME");
+    env.build_environment.remove("HOME");
+    env.dotnet_cli_home = None;
+    env.home_dir = Some(home.to_owned());
+    env
+}
+
 /// Write a hazard project (`App.fsproj` body + optional sibling files), run the
 /// on-demand restore against it, and assert both invariants: the project tree is
 /// byte-for-byte unchanged, and the outcome matches `expect`.
 fn assert_hazard(tag: &str, fsproj_body: &str, siblings: &[(&str, &str)], expect: Expect) {
     let root = scratch_folder(tag);
-    // The caller's home need hold no user config, without which the settings
-    // model declines: a home of the hazard's own holds the one NuGet writes,
-    // and the caller's package-folder overrides stand.
     let home = scratch_folder(&format!("{tag}-home"));
-    crate::common::seed_user_nuget_config(&home);
-    let mut env = SdkDiscoveryEnv::from_process_env();
-    env.build_environment.remove("DOTNET_CLI_HOME");
-    env.build_environment.remove("HOME");
-    env.dotnet_cli_home = None;
-    env.home_dir = Some(home.clone());
+    let env = env_with_a_home_of_its_own(&home);
     let outcome = restore_hazard(tag, &root, fsproj_body, siblings, env);
     assert_outcome(tag, expect, &outcome);
     std::fs::remove_dir_all(&root).ok();
@@ -476,10 +483,11 @@ fn version_parts(version: &str) -> Vec<u64> {
         .collect()
 }
 
-/// The process environment with `packages` as the global packages folder.
-fn env_with_packages_folder(packages: &Path) -> SdkDiscoveryEnv {
+/// The process environment with `packages` as the global packages folder and
+/// `home` as a home of the fixture's own.
+fn env_with_packages_folder(packages: &Path, home: &Path) -> SdkDiscoveryEnv {
     std::fs::create_dir_all(packages).unwrap();
-    let mut env = SdkDiscoveryEnv::from_process_env();
+    let mut env = env_with_a_home_of_its_own(home);
     env.nuget_packages_dir = Some(packages.to_owned());
     env
 }
@@ -508,7 +516,8 @@ fn restore_with_packages_folder(
 ) -> RestoreOutcome {
     let root = scratch.join("app");
     std::fs::create_dir_all(&root).unwrap();
-    restore_hazard(tag, &root, body, &[], env_with_packages_folder(packages))
+    let env = env_with_packages_folder(packages, &scratch.join("home"));
+    restore_hazard(tag, &root, body, &[], env)
 }
 
 #[test]

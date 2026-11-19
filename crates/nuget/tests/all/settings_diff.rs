@@ -117,10 +117,10 @@ struct Case {
     folders: Vec<&'static str>,
     variables: Vec<(&'static str, Option<String>)>,
     root: String,
-    /// The name the user config is written under, where the case has one.
-    /// `NuGet.Config` is loaded on every platform; `nuget.config` only where
-    /// the file system ignores case.
-    user_config: Option<&'static str>,
+    /// Where NuGet opens the user config, under the harness's base. The
+    /// case may have written it there, or under a spelling that is this file
+    /// only where the file system ignores case, or not at all.
+    user_config: String,
 }
 
 /// What grading one case found.
@@ -139,7 +139,9 @@ enum Verdict {
 }
 
 /// Write `case` into a clean tree, ask both sides, and assert the contract.
-fn grade(harness: &mut Harness, case: &Case) -> Verdict {
+/// Returns the verdict, and whether the case has a user config: a regular
+/// file where NuGet opens one, before NuGet was asked.
+fn grade(harness: &mut Harness, case: &Case) -> (Verdict, bool) {
     for folder in ["tree", "home", "cli-home", "common"] {
         let path = harness.base.join(folder);
         if path.exists() {
@@ -165,6 +167,17 @@ fn grade(harness: &mut Harness, case: &Case) -> Verdict {
     }
     // The model first: NuGet writes a default user config where there is none.
     let ours = global_packages_folder(&root, &environment);
+    // NuGet writes a user config where there is none, and answers. The model
+    // does not know that NuGet can write one, so no agreement with NuGet's
+    // answer makes a commit there sound. Asked of the tree as it is laid
+    // out, since which spelling is the file depends on the file system.
+    let user_config = harness.base.join(&case.user_config).is_file();
+    assert!(
+        user_config || ours.is_err(),
+        "the model committed where there is no user config: {ours:?}\nroot {}\nfiles {:?}",
+        case.root,
+        case.files.iter().map(|(path, _)| path).collect::<Vec<_>>()
+    );
     let request = json!({
         "op": "globalPackagesFolder",
         "root": root.to_str().expect("UTF-8"),
@@ -185,7 +198,7 @@ fn grade(harness: &mut Harness, case: &Case) -> Verdict {
         )
     };
     let answered = theirs["ok"].as_bool().expect("ok is a bool");
-    match ours {
+    let verdict = match ours {
         Ok(committed) => {
             if !answered {
                 assert!(
@@ -193,7 +206,10 @@ fn grade(harness: &mut Harness, case: &Case) -> Verdict {
                     "the model committed to {committed:?} where NuGet threw\n{}",
                     describe()
                 );
-                return Verdict::CommittedWhereNuGetThrewOnAnUnreadSection;
+                return (
+                    Verdict::CommittedWhereNuGetThrewOnAnUnreadSection,
+                    user_config,
+                );
             }
             let folder = normalise(theirs["folder"].as_str().expect("folder"));
             assert_eq!(
@@ -227,7 +243,8 @@ fn grade(harness: &mut Harness, case: &Case) -> Verdict {
                 )
             }),
         },
-    }
+    };
+    (verdict, user_config)
 }
 
 /// An absolute path made lexically normal, without a trailing separator: the
@@ -451,7 +468,7 @@ fn gen_case(rng: &mut SplitMix64, base: &Path, cli_home: bool) -> Case {
     let home = if cli_home { "cli-home" } else { "home" };
     // Mostly present: the model declines where there is no user config,
     // which NuGet would write.
-    let user_config = (rng.below(8) != 0).then(|| {
+    if rng.below(8) != 0 {
         // Mostly the spelling NuGet loads on every platform: on Linux the
         // other is no user config.
         let spelling = if rng.below(16) == 0 {
@@ -460,8 +477,7 @@ fn gen_case(rng: &mut SplitMix64, base: &Path, cli_home: bool) -> Case {
             "NuGet.Config"
         };
         files.push((format!("{home}/.nuget/NuGet/{spelling}"), config(rng)));
-        spelling
-    });
+    }
     let mut listed = |folder: &str, rng: &mut SplitMix64| {
         let mut names = BTreeSet::new();
         for _ in 0..=rng.below(3) {
@@ -509,7 +525,7 @@ fn gen_case(rng: &mut SplitMix64, base: &Path, cli_home: bool) -> Case {
             ("BORZOI_GPF_EMPTY", Some(String::new())),
         ],
         root,
-        user_config,
+        user_config: format!("{home}/.nuget/NuGet/NuGet.Config"),
     }
 }
 
@@ -517,8 +533,8 @@ fn gen_case(rng: &mut SplitMix64, base: &Path, cli_home: bool) -> Case {
 #[derive(Default, Debug)]
 struct Census {
     cases: usize,
-    /// The cases whose user config is spelt as every platform loads it: the
-    /// ones a commit is possible in wherever the sweep runs.
+    /// The cases with a user config, which are the ones a commit is
+    /// possible in.
     user_config: usize,
     environment: usize,
     config: usize,
@@ -540,19 +556,8 @@ fn sweep(seed: u64, cases: usize, cli_home: bool) -> Census {
     for _ in 0..cases {
         let case = gen_case(&mut rng, &harness.base.clone(), cli_home);
         census.cases += 1;
-        if case.user_config == Some("NuGet.Config") {
-            census.user_config += 1;
-        }
-        let verdict = grade(&mut harness, &case);
-        // NuGet writes a user config where there is none, and answers. The
-        // model does not know that NuGet can write one, so no agreement with
-        // NuGet's answer makes a commit there sound.
-        assert!(
-            case.user_config.is_some() || matches!(verdict, Verdict::Declined { .. }),
-            "the model committed where there is no user config: {verdict:?}\nroot {}\nfiles {:?}",
-            case.root,
-            case.files.iter().map(|(path, _)| path).collect::<Vec<_>>()
-        );
+        let (verdict, user_config) = grade(&mut harness, &case);
+        census.user_config += usize::from(user_config);
         match verdict {
             Verdict::Committed(committed) => {
                 if committed.config_files.len() >= 3 {
