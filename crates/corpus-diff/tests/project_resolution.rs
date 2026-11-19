@@ -2363,9 +2363,9 @@ fn one_oracle_answers_every_real_project_of_a_run() {
 /// would answer the second request from the assembly it read for the first.
 ///
 /// The reference set is the whole one (`exclusiveRefs`, as for any project
-/// with references): the running SDK's .NET 10 reference pack, the oracle's
-/// own FSharp.Core, and `Lib.dll`, which first holds the oracle's
-/// FSharp.Compiler.Service.
+/// with references), all from the .NET 10 SDK under `DOTNET_ROOT`: its
+/// reference pack, its F# compiler's FSharp.Core, and `Lib.dll`, which first
+/// holds that compiler's FSharp.Compiler.Service.
 #[test]
 #[ignore = "builds/runs FCS; use --ignored for oracle smoke"]
 fn a_real_projects_reference_rewritten_in_place_is_read() {
@@ -2381,30 +2381,51 @@ fn a_real_projects_reference_rewritten_in_place_is_read() {
     );
     let mut loaded = load_lsp_project(&project).expect("project should load");
     let mut oracle = UsesProjectOracle::default();
-    let out = borzoi_corpus_diff::fcs_dump_directory().expect("the oracle's directory");
+    let dotnet_root = PathBuf::from(
+        std::env::var_os("DOTNET_ROOT").expect("DOTNET_ROOT (run under `nix develop`)"),
+    );
+    // The newest of `dir`'s entries for which `pick` names a directory.
+    let newest = |dir: PathBuf, pick: &dyn Fn(PathBuf) -> PathBuf| -> PathBuf {
+        fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
+            .map(|e| pick(e.expect("an entry").path()))
+            .filter(|p| p.is_dir())
+            .max()
+            .unwrap_or_else(|| panic!("no .NET 10 entry under {}", dir.display()))
+    };
+    let pack = newest(
+        dotnet_root.join("packs").join("Microsoft.NETCore.App.Ref"),
+        &|v| v.join("ref").join("net10.0"),
+    );
+    let fsharp = newest(dotnet_root.join("sdk"), &|v| {
+        if v.file_name()
+            .is_some_and(|n| n.to_string_lossy().starts_with("10."))
+        {
+            v.join("FSharp")
+        } else {
+            PathBuf::new()
+        }
+    });
     let lib = tmp.path().join("lib").join("Lib.dll");
     fs::create_dir_all(lib.parent().expect("a parent")).expect("mkdir");
-    fs::copy(out.join("FSharp.Compiler.Service.dll"), &lib).expect("copy the referenced assembly");
+    // Bytes, not a copy: a copy keeps the SDK's read-only mode, and the file
+    // is rewritten below.
+    let put = |from: &str| {
+        fs::write(
+            &lib,
+            fs::read(fsharp.join(from)).expect("read an SDK assembly"),
+        )
+        .expect("write the referenced assembly");
+    };
+    put("FSharp.Compiler.Service.dll");
     let stamp = fs::metadata(&lib)
         .and_then(|m| m.modified())
         .expect("modification time");
-    // The oracle's FSharp.Compiler.Service is built for .NET 10.
-    let packs = PathBuf::from(
-        std::env::var_os("DOTNET_ROOT").expect("DOTNET_ROOT (run under `nix develop`)"),
-    )
-    .join("packs")
-    .join("Microsoft.NETCore.App.Ref");
-    let pack = fs::read_dir(&packs)
-        .expect("read the reference packs")
-        .map(|e| e.expect("an entry").path().join("ref").join("net10.0"))
-        .filter(|p| p.is_dir())
-        .max()
-        .expect("a .NET 10 reference pack");
     loaded.fcs_extra_refs = fs::read_dir(&pack)
         .expect("read the reference pack")
         .map(|e| e.expect("an entry").path())
         .filter(|p| p.extension().is_some_and(|x| x == "dll"))
-        .chain([out.join("FSharp.Core.dll"), lib.clone()])
+        .chain([fsharp.join("FSharp.Core.dll"), lib.clone()])
         .collect();
     let errors = |json: &str| -> Vec<i64> {
         let v: serde_json::Value = serde_json::from_str(json).expect("JSON");
@@ -2424,7 +2445,7 @@ fn a_real_projects_reference_rewritten_in_place_is_read() {
         Vec::<i64>::new(),
         "the type resolves in the reference: {before}"
     );
-    fs::copy(out.join("FSharp.Core.dll"), &lib).expect("rewrite the referenced assembly");
+    put("FSharp.Core.dll");
     fs::File::options()
         .write(true)
         .open(&lib)

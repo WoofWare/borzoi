@@ -310,6 +310,81 @@ fn a_request_the_oracle_cannot_read_exactly_is_refused() {
     }
 }
 
+/// Every hostile spelling of a well-formed request (`hostile::wire`) is
+/// refused or means that request: the driver refuses what is not one line,
+/// and the oracle answers anything else with a refusal or with exactly the
+/// well-formed request's answer. So no spelling of a request is read as
+/// another request: a misspelt, repeated, mistyped or dropped field never
+/// selects a mode or a reference set the caller did not write.
+#[test]
+fn every_hostile_spelling_of_a_request_is_refused_or_means_it() {
+    use std::collections::BTreeSet;
+
+    use borzoi_oracle_harness::BatchFailure;
+    use borzoi_oracle_harness::hostile::{coverage, wire};
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let a = dir.path().join("A.fs");
+    write(&a, "module A\nlet y = 1\n");
+    // Every field a project-check request has, each at its default but
+    // `paths`, so that dropping one leaves the request it was.
+    let request = serde_json::json!({
+        "paths": [a.display().to_string()],
+        "refs": [],
+        "defines": [],
+        "langversion": null,
+        "exclusiveRefs": false,
+        "inputsMayChange": false,
+    });
+    let census = coverage::open(file!(), "project_check_requests", &[]);
+    let mutations = wire::mutations(&request);
+    for oracle in ORACLES {
+        let mut child = fcs_dump_batch_child(oracle);
+        let expected = child.request(&request.to_string());
+        assert!(
+            !expected.contains("\"BatchError\""),
+            "{oracle}: the well-formed request is answered: {expected}"
+        );
+        census.reached(&BTreeSet::new(), "answer");
+        for entry in mutations.entries() {
+            let hostile = BTreeSet::from([entry.dimension]);
+            // A request goes over the pipe as text: bytes that are not UTF-8
+            // are no request the driver can be handed.
+            let Ok(text) = std::str::from_utf8(&entry.value) else {
+                continue;
+            };
+            let outcome = match child.try_request(text) {
+                Err(BatchFailure::NotOneLine) => "driver-refuse",
+                Err(other) => panic!("{oracle}: {} ({text:?}): {other}", entry.why),
+                Ok(line) => {
+                    let v: Value = serde_json::from_str(&line).unwrap_or_else(|e| {
+                        panic!(
+                            "{oracle}: {} ({text:?}): unparseable ({e}): {line}",
+                            entry.why
+                        )
+                    });
+                    if v.get("BatchError").is_some() {
+                        "refuse"
+                    } else {
+                        assert_eq!(
+                            line, expected,
+                            "{oracle}: {} ({text:?}) is answered as another request",
+                            entry.why
+                        );
+                        "same-answer"
+                    }
+                }
+            };
+            census.reached(&hostile, outcome);
+        }
+        child.finish(Duration::from_secs(30));
+    }
+    census.finish(
+        "BORZOI_UPDATE_MANIFESTS=1 cargo test -p borzoi --test all \
+         project_check_records::every_hostile_spelling_of_a_request_is_refused_or_means_it",
+    );
+}
+
 /// A fixture reference rewritten in place breaks the precondition the
 /// fixture requests rest on (the oracle's module doc), so the next request
 /// naming it is refused, naming the path, rather than answered from what FCS
