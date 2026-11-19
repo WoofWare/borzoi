@@ -1,6 +1,5 @@
-//! The resident JSON ops of `fcs-dump` (`file-batch`, `uses-project-batch`,
-//! `xmldoc-batch`) answer each line they read with one line, and read a line
-//! as exactly one request or refuse it.
+//! The resident JSON ops of `fcs-dump` ([`JSON_OPS`]) answer each line they
+//! read with one line, and read a line as exactly one request or refuse it.
 //!
 //! The answers are matched to the requests by position, so a line read as no
 //! request (a blank one, skipped) moves every later answer onto the request
@@ -69,14 +68,69 @@ fn duplicated(good: &Value, field: &str) -> String {
     text.replacen('{', &format!("{{{extra}"), 1)
 }
 
-fn hostile_lines(good: &Value, path_field: &str) -> Vec<(&'static str, String)> {
+/// The ops that read one JSON request per line, each held to its framing
+/// here.
+const JSON_OPS: &[&str] = &[
+    "file-batch",
+    "uses-project-batch",
+    "xmldoc-batch",
+    "uses-project-graph-batch",
+];
+
+/// The batch ops that read one path per line. Their driver
+/// (`BatchChild::try_request`) refuses to send a blank or multi-line request,
+/// so their framing is not held here.
+const PATH_OPS: &[&str] = &[
+    "ast-batch",
+    "tokens-filtered-batch",
+    "tokens-raw-batch",
+    "tokens-lexfilter-internal-batch",
+    "attrs-batch",
+    "script-options-batch",
+    "uses-census-batch",
+    "types-census-batch",
+];
+
+/// Every batch op `fcs-dump` dispatches is one of [`JSON_OPS`] or
+/// [`PATH_OPS`], so a new op is held to one rule or the other.
+#[test]
+fn every_batch_op_is_classified() {
+    let program = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/fcs-dump/Program.fs"),
+    )
+    .expect("read fcs-dump's source");
+    let mut dispatched: Vec<&str> = program
+        .split("| [| \"")
+        .skip(1)
+        .filter_map(|rest| rest.split('"').next())
+        .filter(|mode| mode.ends_with("-batch"))
+        .collect();
+    dispatched.sort_unstable();
+    dispatched.dedup();
+    let mut classified: Vec<&str> = JSON_OPS.iter().chain(PATH_OPS).copied().collect();
+    classified.sort_unstable();
+    assert_eq!(
+        dispatched, classified,
+        "each batch op is a JSON op or a path op"
+    );
+}
+
+/// Lines that are not one line of one request, whatever the op.
+fn framing_lines(good: &Value) -> Vec<(&'static str, String)> {
     let line = good.to_string();
-    let mut lines = vec![
+    vec![
         ("a blank line", String::new()),
         ("a line of blanks", "  \t".into()),
         ("a trailing no-break space", format!("{line}\u{a0}")),
         ("a trailing line separator", format!("{line}\u{2028}")),
         ("a leading byte order mark", format!("\u{feff}{line}")),
+    ]
+}
+
+fn hostile_lines(good: &Value, path_field: &str) -> Vec<(&'static str, String)> {
+    let line = good.to_string();
+    let mut lines = framing_lines(good);
+    lines.extend([
         (
             "an unknown field",
             with_field(good, "borzoiUnknown", json!(true)),
@@ -98,7 +152,7 @@ fn hostile_lines(good: &Value, path_field: &str) -> Vec<(&'static str, String)> 
         ),
         ("an array", json!([good]).to_string()),
         ("a trailing comma", line.replacen('}', ",}", 1)),
-    ];
+    ]);
     lines.push((
         "a language version FCS would read as a switch",
         with_field(good, "langversion", json!("?")),
@@ -122,7 +176,11 @@ fn hostile_lines(good: &Value, path_field: &str) -> Vec<(&'static str, String)> 
 }
 
 fn assert_each_line_answered(op: &str, good: Value, path_field: &str) {
-    let mut hostile: Vec<(&str, Vec<u8>)> = hostile_lines(&good, path_field)
+    assert_each_hostile_line_answered(op, &good, hostile_lines(&good, path_field));
+}
+
+fn assert_each_hostile_line_answered(op: &str, good: &Value, hostile: Vec<(&'static str, String)>) {
+    let mut hostile: Vec<(&str, Vec<u8>)> = hostile
         .into_iter()
         .map(|(what, line)| (what, line.into_bytes()))
         .collect();
@@ -209,6 +267,24 @@ fn uses_project_batch_refuses_each_line_that_is_not_one_request() {
 }
 
 #[test]
+fn uses_project_graph_batch_refuses_each_line_that_is_not_one_request() {
+    let (_dir, a) = fixture();
+    let good = json!({
+        "op": "check",
+        "projects": [{
+            "id": "a", "assemblyName": "A", "target": "library",
+            "sources": [a], "defines": [],
+            "references": borzoi_oracle_harness::project_graph::framework_references()
+                .iter()
+                .map(|dll| json!({"dll": dll}))
+                .collect::<Vec<_>>()
+        }],
+        "check": "a"
+    });
+    assert_each_hostile_line_answered("uses-project-graph-batch", &good, framing_lines(&good));
+}
+
+#[test]
 fn xmldoc_batch_refuses_each_line_that_is_not_one_request() {
     let (_dir, a) = fixture();
     assert_each_line_answered(
@@ -239,12 +315,13 @@ fn types_project_refuses_a_language_version_pin() {
 /// A `file-batch` reference is held to what the project checks hold theirs
 /// to: one that names no file (a trailing blank, say) or a file that is no
 /// assembly is refused, since FCS drops a reference it cannot read and checks
-/// without it. A recognised older language version is still taken.
+/// without it (the padded spelling of an assembly is not that assembly). A
+/// recognised older language version, and `preview` in any case, are taken.
 #[test]
 fn file_batch_refuses_a_reference_that_is_not_an_assembly() {
     let (dir, a) = fixture();
-    let empty = dir.path().join("Empty.dll");
-    std::fs::write(&empty, "").expect("write");
+    let real = dir.path().join("Real.dll");
+    std::fs::copy(crate::common::ensure_system_runtime_dll(), &real).expect("copy an assembly");
     let text = dir.path().join("Text.dll");
     std::fs::write(&text, "not an assembly").expect("write");
     let request = |refs: Vec<String>| {
@@ -253,12 +330,19 @@ fn file_batch_refuses_a_reference_that_is_not_an_assembly() {
             .into_bytes()
     };
     let lines = vec![
-        request(vec![format!("{} ", empty.display())]),
+        request(vec![format!("{} ", real.display())]),
         request(vec![dir.path().join("Missing.dll").display().to_string()]),
         request(vec![text.display().to_string()]),
         json!({"kind": "uses", "path": a, "refs": [], "langversion": "7.0"})
             .to_string()
             .into_bytes(),
+        json!({"kind": "uses", "path": a, "refs": [], "langversion": "preview"})
+            .to_string()
+            .into_bytes(),
+        json!({"kind": "uses", "path": a, "refs": [], "langversion": "Preview"})
+            .to_string()
+            .into_bytes(),
+        request(vec![real.display().to_string()]),
     ];
     let got = answers("file-batch", &lines);
     for (i, what) in ["padded", "missing", "not an assembly"].iter().enumerate() {
@@ -268,5 +352,13 @@ fn file_batch_refuses_a_reference_that_is_not_an_assembly() {
         !is_refusal(&got[3]),
         "a recognised older version: {}",
         got[3]
+    );
+    for (i, what) in [(4, "preview"), (5, "Preview, in another case")] {
+        assert!(!is_refusal(&got[i]), "{what}: {}", got[i]);
+    }
+    assert!(
+        !is_refusal(&got[6]),
+        "the assembly the padded spelling is not: {}",
+        got[6]
     );
 }
