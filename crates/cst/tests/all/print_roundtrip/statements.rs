@@ -22,8 +22,8 @@ use borzoi_print::print_impl_file;
 use borzoi_print::tree::{
     AndBang, Args, Binding, BindingHead, Comp, CompClause, CompItem, Const, Context, Expr,
     ForDirection, ForSource, ImplFile, InBuilder, InCollection, LetBang, LetBindings, ListBody,
-    ListComp, LocalBindings, MatchClause, ModuleDecl, Pat, Range, Stmt, StmtExpr, Type, UseBang,
-    UseBinding, UseName,
+    ListComp, LocalBindings, MatchClause, ModuleBindings, ModuleDecl, Pat, Range, Stmt, StmtExpr,
+    Type, UseBang, UseBinding, UseName,
 };
 use borzoi_print::vec::{Vec1, Vec2};
 use borzoi_print::version::{
@@ -42,7 +42,7 @@ fn name<V: Version>(s: &str) -> Expr<V> {
     Expr::Name(LongIdent::single(ident(s)))
 }
 
-fn var(s: &str) -> Pat {
+fn var<V: Version>(s: &str) -> Pat<V> {
     Pat::Name(LongIdent::single(ident(s)))
 }
 
@@ -209,7 +209,7 @@ fn use_names<G: Gate>() -> Vec<UseName<G>> {
 /// Each kind of local `let` group the types take: `binding`, then mutable,
 /// an inline function, a recursive pair, and a pattern.
 fn local_groups<V: Version>(binding: Binding<V>) -> Vec<LocalBindings<V>> {
-    let with_head = |head: BindingHead, is_inline: bool| Binding {
+    let with_head = |head: BindingHead<V>, is_inline: bool| Binding {
         attributes: Vec::new(),
         is_inline,
         body: name(if matches!(head, BindingHead::Pattern(_)) {
@@ -323,8 +323,8 @@ fn nestings<V: Version, K: Context>() -> Vec<Comp<V, K>> {
 /// `let x () = e`: a function, so a body that never yields, whose element
 /// type is generic, is not a value the checker must generalise.
 fn file<V: Version>(e: Expr<V>) -> ImplFile<V> {
-    ImplFile::AnonModule(vec![ModuleDecl::Let(LetBindings::NonRec(Box::new(
-        Binding {
+    ImplFile::AnonModule(vec![ModuleDecl::Let(
+        ModuleBindings::new(LetBindings::NonRec(Box::new(Binding {
             attributes: Vec::new(),
             is_inline: false,
             head: BindingHead::Function {
@@ -333,8 +333,9 @@ fn file<V: Version>(e: Expr<V>) -> ImplFile<V> {
                 params: Vec1::new(Pat::Const(Const::Unit), Vec::new()),
             },
             body: e,
-        },
-    )))])
+        })))
+        .expect("a module's group"),
+    )])
 }
 
 /// The table's files at `V`: each nesting in `builder { }`, `[ ]` and

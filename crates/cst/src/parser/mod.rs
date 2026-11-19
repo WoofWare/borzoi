@@ -424,6 +424,15 @@ impl DiagnosticClass {
 
 type FilteredTok<'src> = (Result<FilteredToken<'src>, LexError>, Range<usize>);
 
+/// Whether F# reads an identifier whose text is `text` as starting with an
+/// upper-case letter: FCS's `String.isLeadingIdentifierCharacterUpperCase`,
+/// which decides whether a pattern's head names a constructor and whether a
+/// union case's or an exception's name is legal (FS0053). `text` may be
+/// quoted in double backticks.
+pub fn ident_leads_uppercase(text: &str) -> bool {
+    ident_text_leads_uppercase(text)
+}
+
 /// Parse an F# source string with no preprocessor symbols defined — every
 /// `#if <ident>` is false, so the active branch is the `#else` / post-`#endif`
 /// code. Always returns a tree — see [`Parse`]. For project-aware parsing

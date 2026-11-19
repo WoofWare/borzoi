@@ -32,10 +32,10 @@
 
 use crate::names::{Ident, LongIdent, Operator, TyparName, ValueName};
 use crate::tree::{
-    Access, Args, Attribute, AttributeArgs, Binding, BindingHead, Comp, CompClause, CompItem,
-    Const, Context, Expr, ForDirection, ForSource, ImplFile, LetBindings, ListBody, MatchClause,
-    ModuleDecl, NamespaceName, NestedModule, Pat, Range, Stmt, Type, TypeDefn, TypeRepr, UnionCase,
-    UseName, needs_parentheses,
+    Access, Args, AsAlias, Attribute, AttributeArgs, Binding, BindingHead, Comp, CompClause,
+    CompItem, Const, Context, Expr, ForDirection, ForSource, ImplFile, LetBindings, ListBody,
+    MatchClause, ModuleDecl, NamespaceName, NestedModule, Pat, Range, Stmt, Type, TypeDefn,
+    TypeRepr, UnionField, UseName, needs_parentheses,
 };
 use crate::version::{Gate, Version};
 
@@ -63,18 +63,18 @@ fn print_file<V: Version>(file: &ImplFile<V>) -> Printer {
             p.attribute_line(&m.attributes, 0);
             p.out.push_str("module");
             p.access(m.access);
-            if m.is_rec {
+            if m.body.is_rec() {
                 p.out.push_str(" rec");
             }
             p.out.push(' ');
             p.long_ident(&m.name);
             p.out.push('\n');
-            p.decls(&m.decls, 0);
+            p.decls(m.body.decls(), 0);
         }
         ImplFile::Namespaces(namespaces) => {
             for ns in namespaces.as_slice() {
                 p.out.push_str("namespace");
-                if ns.is_rec {
+                if ns.body.is_rec() {
                     p.out.push_str(" rec");
                 }
                 p.out.push(' ');
@@ -83,7 +83,7 @@ fn print_file<V: Version>(file: &ImplFile<V>) -> Printer {
                     NamespaceName::Named(name) => p.long_ident(name),
                 }
                 p.out.push('\n');
-                p.decls(&ns.decls, 0);
+                p.decls(ns.body.decls(), 0);
             }
         }
     }
@@ -123,7 +123,7 @@ impl Printer {
         }
         self.indent(depth);
         match decl {
-            ModuleDecl::Let(bindings) => self.let_bindings(bindings),
+            ModuleDecl::Let(bindings) => self.let_bindings(bindings.bindings()),
             ModuleDecl::Expr(e) => self.expr(e),
             ModuleDecl::Open(target) => {
                 self.out.push_str("open ");
@@ -148,9 +148,9 @@ impl Printer {
                     self.type_defn(defn);
                 }
             }
-            ModuleDecl::Exception(case) => {
+            ModuleDecl::Exception(exn) => {
                 self.out.push_str("exception ");
-                self.union_case(case);
+                self.case(exn.name().ident(), exn.fields());
             }
         }
         self.out.push('\n');
@@ -161,16 +161,16 @@ impl Printer {
         self.indent(depth);
         self.out.push_str("module");
         self.access(m.access);
-        if m.is_rec {
+        if m.body.is_rec() {
             self.out.push_str(" rec");
         }
         self.out.push(' ');
-        self.ident(&m.name);
-        if m.decls.is_empty() {
+        self.ident(m.name.ident());
+        if m.body.decls().is_empty() {
             self.out.push_str(" = begin end\n");
         } else {
             self.out.push_str(" =\n");
-            self.decls(&m.decls, depth + 1);
+            self.decls(m.body.decls(), depth + 1);
         }
     }
 
@@ -247,6 +247,9 @@ impl Printer {
                     self.pat(p);
                 }
             }
+            // `_` bare, as F# refuses a parenthesised head in a recursive
+            // group (FS3521).
+            BindingHead::Pattern(Pat::Wildcard) => self.out.push_str(" _"),
             BindingHead::Pattern(p) => {
                 self.out.push(' ');
                 self.pat(p);
@@ -257,13 +260,13 @@ impl Printer {
     }
 
     fn type_defn<V: Version>(&mut self, d: &TypeDefn<V>) {
-        self.attributes(&d.attributes);
-        self.access(d.access);
+        self.attributes(d.attributes());
+        self.access(d.access());
         self.out.push(' ');
-        self.ident(&d.name);
-        if !d.typars.is_empty() {
+        self.ident(d.name().ident());
+        if !d.typars().is_empty() {
             self.out.push('<');
-            for (i, t) in d.typars.iter().enumerate() {
+            for (i, t) in d.typars().iter().enumerate() {
                 if i > 0 {
                     self.out.push_str(", ");
                 }
@@ -272,7 +275,7 @@ impl Printer {
             self.out.push('>');
         }
         self.out.push_str(" = ");
-        match &d.repr {
+        match d.repr() {
             TypeRepr::Abbrev(ty) => self.ty(ty),
             TypeRepr::Record(fields) => {
                 self.out.push_str("{ ");
@@ -295,15 +298,16 @@ impl Printer {
                         self.out.push(' ');
                     }
                     self.out.push_str("| ");
-                    self.union_case(case);
+                    self.case(case.name().ident(), case.fields());
                 }
             }
         }
     }
 
-    fn union_case(&mut self, case: &UnionCase) {
-        self.ident(&case.name);
-        for (i, field) in case.fields.iter().enumerate() {
+    /// A union case or an exception, `name of fields`.
+    fn case(&mut self, name: &Ident, fields: &[UnionField]) {
+        self.ident(name);
+        for (i, field) in fields.iter().enumerate() {
             self.out.push_str(if i == 0 { " of " } else { " * " });
             if let Some(name) = &field.name {
                 self.ident(name);
@@ -560,8 +564,13 @@ impl Printer {
 
     /// One argument, passed whole. A tuple takes a second pair of parentheses,
     /// or F#'s checker reads its elements as an argument list.
+    /// An argument: a tuple in parentheses of its own, and `()` bare, as F#'s
+    /// checker reads `M (())` as a method given one argument and `M ()` as
+    /// one given none.
     fn argument<V: Version>(&mut self, e: &Expr<V>) {
-        if let Expr::Tuple(_) = e {
+        if let Expr::Const(Const::Unit) = e {
+            self.out.push_str("()");
+        } else if let Expr::Tuple(_) = e {
             self.out.push('(');
             self.expr(e);
             self.out.push(')');
@@ -869,7 +878,7 @@ impl Printer {
 
     // ---- patterns: each `(…)` ----
 
-    fn pat(&mut self, p: &Pat) {
+    fn pat<V: Version>(&mut self, p: &Pat<V>) {
         self.out.push('(');
         match p {
             Pat::Wildcard => self.out.push('_'),
@@ -907,7 +916,11 @@ impl Printer {
             Pat::As { pat, alias } => {
                 self.pat(pat);
                 self.out.push_str(" as ");
-                self.pat(alias);
+                match alias {
+                    // Bare: before F# 6, FCS's checker refuses `p as (x)`.
+                    AsAlias::Var(name) => self.ident(name.ident()),
+                    AsAlias::Pat(alias) => self.pat(alias.pat()),
+                }
             }
             Pat::Or(a, b) => {
                 self.pat(a);
@@ -1205,13 +1218,15 @@ fn clauses_one_line<V: Version>(
 mod tests {
     use super::print_impl_file;
     use crate::names::{Ident, LongIdent, Operator, ValueName};
-    use crate::tree::{BindingHead, Const, InBuilder, InCollection, ListBody, Pat};
+    use crate::tree::{Const, InBuilder, InCollection, ListBody};
     type ForSource = crate::tree::ForSource<DefaultVersion>;
     use crate::vec::{Vec1, Vec2};
     use crate::version::{Available, DefaultVersion};
 
     type Args = crate::tree::Args<DefaultVersion>;
     type Binding = crate::tree::Binding<DefaultVersion>;
+    type BindingHead = crate::tree::BindingHead<DefaultVersion>;
+    type Pat = crate::tree::Pat<DefaultVersion>;
     type LetBang = crate::tree::LetBang<DefaultVersion, InBuilder>;
     type Comp = crate::tree::Comp<DefaultVersion, InBuilder>;
     type CompItem = crate::tree::CompItem<DefaultVersion, InBuilder>;
@@ -1225,6 +1240,9 @@ mod tests {
     type LetBindings = crate::tree::LetBindings<DefaultVersion>;
     type ModuleDecl = crate::tree::ModuleDecl<DefaultVersion>;
     type NestedModule = crate::tree::NestedModule<DefaultVersion>;
+    type ModuleBindings = crate::tree::ModuleBindings<DefaultVersion>;
+    type ModuleBody = crate::tree::ModuleBody<DefaultVersion>;
+    use crate::names::EntityName;
 
     fn id(s: &str) -> Ident {
         Ident::new(s).unwrap()
@@ -1259,9 +1277,9 @@ mod tests {
     }
 
     fn let_x(body: Expr) -> String {
-        file(vec![ModuleDecl::Let(LetBindings::NonRec(Box::new(value(
-            "x", body,
-        ))))])
+        file(vec![ModuleDecl::Let(
+            ModuleBindings::new(LetBindings::NonRec(Box::new(value("x", body)))).unwrap(),
+        )])
     }
 
     #[test]
@@ -1298,10 +1316,13 @@ mod tests {
             name: LongIdent::single(id("Some")),
             args: Vec1::new(Pat::Name(LongIdent::single(id("x"))), Vec::new()),
         };
-        let decl = ModuleDecl::Let(LetBindings::NonRec(Box::new(binding(
-            BindingHead::Pattern(some_x),
-            name("y"),
-        ))));
+        let decl = ModuleDecl::Let(
+            ModuleBindings::new(LetBindings::NonRec(Box::new(binding(
+                BindingHead::Pattern(some_x),
+                name("y"),
+            ))))
+            .unwrap(),
+        );
         assert_eq!(file(vec![decl]), "let (Some (x)) = (y)\n");
     }
 
@@ -1599,23 +1620,30 @@ mod tests {
     }
 
     #[test]
+    fn a_unit_argument_is_bare() {
+        let call = Expr::App {
+            func: Box::new(name("f")),
+            arg: Box::new(Expr::Const(Const::Unit)),
+        };
+        assert_eq!(let_x(call), "let x = (f ())\n");
+    }
+
+    #[test]
     fn a_nested_modules_declarations_are_indented() {
         let inner = NestedModule {
             attributes: Vec::new(),
             access: None,
-            is_rec: false,
-            name: id("N"),
-            decls: Vec::new(),
+            name: EntityName::new(id("N")).unwrap(),
+            body: ModuleBody::NonRec(Vec::new()),
         };
         let outer = NestedModule {
             attributes: Vec::new(),
             access: None,
-            is_rec: false,
-            name: id("M"),
-            decls: vec![
+            name: EntityName::new(id("M")).unwrap(),
+            body: ModuleBody::NonRec(vec![
                 ModuleDecl::NestedModule(inner),
                 ModuleDecl::Expr(Expr::Const(Const::Unit)),
-            ],
+            ]),
         };
         assert_eq!(
             file(vec![ModuleDecl::NestedModule(outer)]),

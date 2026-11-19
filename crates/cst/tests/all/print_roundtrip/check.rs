@@ -56,6 +56,19 @@ let s = 1
 let f = ()
 let v = { new System.IDisposable with member this.Dispose () = () }
 let t = (1, 2)
+let w = \"w\"
+let ls = [ 1 ]
+type R = { A: int; mutable C: int }
+let rv = { A = 1; C = 2 }
+type Meth =
+    static member F (a: int, b: int, ?c: int) : int = a
+    static member G (x: int) : int = x
+[<System.AttributeUsage(System.AttributeTargets.All, AllowMultiple = true)>]
+type AAttribute () =
+    inherit System.Attribute ()
+[<System.AttributeUsage(System.AttributeTargets.All, AllowMultiple = true)>]
+type BAttribute (x: int) =
+    inherit System.Attribute ()
 ";
 
 /// How many trees share one checked source.
@@ -66,13 +79,27 @@ const CHECK_CHUNK: usize = 64;
 pub type CheckFailure = (String, Vec<(i64, String)>);
 
 /// Each of `files` that FCS's checker rejects at `lang`, with the errors it
-/// reports. Warnings are not graded: the leaves' values go unused. The files
-/// are checked [`CHECK_CHUNK`] at a time after [`PRELUDE`], each in a module
-/// of its own, indented whole so its layout is unchanged.
+/// reports.
 pub fn check_failures<V: Version>(
     files: &[ImplFile<V>],
     lang: LanguageVersion,
 ) -> Vec<CheckFailure> {
+    files
+        .iter()
+        .map(print_impl_file)
+        .zip(check_errors(files, lang))
+        .filter(|(_, errors)| !errors.is_empty())
+        .collect()
+}
+
+/// The errors FCS's checker reports at `lang` in each of `files`, in order.
+/// Warnings are not graded: the leaves' values go unused. The files are
+/// checked [`CHECK_CHUNK`] at a time after [`PRELUDE`], each in a module of
+/// its own, indented whole so its layout is unchanged.
+pub fn check_errors<V: Version>(
+    files: &[ImplFile<V>],
+    lang: LanguageVersion,
+) -> Vec<Vec<(i64, String)>> {
     let chunks: Vec<&[ImplFile<V>]> = files.chunks(CHECK_CHUNK).collect();
     par_map(chunks.len(), |n| {
         let mut source = String::from(PRELUDE);
@@ -111,11 +138,7 @@ pub fn check_failures<V: Version>(
                 .unwrap_or_else(|| panic!("FCS rejects the prelude at {lang}: {code} {message}"));
             errors[i].push((code, message));
         }
-        printed
-            .into_iter()
-            .zip(errors)
-            .filter(|(_, errors)| !errors.is_empty())
-            .collect::<Vec<_>>()
+        errors
     })
     .into_iter()
     .flatten()

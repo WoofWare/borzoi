@@ -17,13 +17,16 @@
 //! reads them: `f (a, b)` and `f (x = c)` apply `f` to an argument list, and
 //! `f ((a, b))` to one tuple ([`application`]).
 
-use borzoi_print::names::{Ident, InfixOperator, LongIdent, Operator, TyparName, ValueName};
+use borzoi_print::names::{
+    CaseName, EntityName, Ident, InfixOperator, LongIdent, Operator, TyparName, ValueName, VarName,
+};
 use borzoi_print::tree::{
-    Access, AndBang, Args, ArrayRank, Attribute, AttributeArgs, Binding, BindingHead, Comp,
-    CompClause, CompItem, Const, Context, Expr, Float32, Float64, ForDirection, ForSource,
-    ImplFile, LetBang, LetBindings, ListBody, ListComp, LocalBindings, MatchClause, ModuleDecl,
-    NamedModule, Namespace, NamespaceName, NestedModule, Pat, Range, RecordField, Stmt, StmtExpr,
-    Type, TypeDefn, TypeRepr, UnionCase, UnionField, UseBang, UseBinding, UseName,
+    Access, AliasPat, AndBang, Args, ArrayRank, AsAlias, Attribute, AttributeArgs, Binding,
+    BindingHead, Comp, CompClause, CompItem, Const, Context, DeclRefusal, ExceptionDefn, Expr,
+    Float32, Float64, ForDirection, ForSource, ImplFile, LetBang, LetBindings, ListBody, ListComp,
+    LocalBindings, MatchClause, ModuleBindings, ModuleBody, ModuleDecl, NamedModule, Namespace,
+    NamespaceName, NestedModule, Pat, Range, RecDecls, RecordField, Stmt, StmtExpr, Type, TypeDefn,
+    TypeRepr, UnionCase, UnionField, UseBang, UseBinding, UseName,
 };
 use borzoi_print::vec::{Vec1, Vec2};
 use borzoi_print::version::{Gate, Version};
@@ -103,9 +106,8 @@ fn file<V: Version>(root: &NormalisedRoot, tally: &mut Tally) -> L<ImplFile<V>> 
         ] => Ok(ImplFile::NamedModule(NamedModule {
             attributes: attributes_of(attributes)?,
             access: access.map(lower_access),
-            is_rec: *is_rec,
             name: long_ident(long_id)?,
-            decls: decls_lossy(decls, tally),
+            body: module_body(*is_rec, decls_lossy(decls, tally))?,
         })),
         modules => {
             let mut namespaces = Vec::new();
@@ -122,9 +124,8 @@ fn file<V: Version>(root: &NormalisedRoot, tally: &mut Tally) -> L<ImplFile<V>> 
                     NamedKind::Module => return decline("file shape"),
                 };
                 namespaces.push(Namespace {
-                    is_rec: m.is_rec,
                     name,
-                    decls: decls_lossy(&m.decls, tally),
+                    body: module_body(m.is_rec, decls_lossy(&m.decls, tally))?,
                 });
             }
             Vec1::from_vec(namespaces)
@@ -149,16 +150,18 @@ fn decls_lossy<V: Version>(decls: &[NormalisedDecl], tally: &mut Tally) -> Vec<M
                 let [name] = long_id.as_slice() else {
                     return decline("dotted nested module name");
                 };
-                Ok((ident(name)?, attributes_of(attributes)?))
+                Ok((entity_name(name)?, attributes_of(attributes)?))
             })();
-            match header {
-                Ok((name, attributes)) => out.push(ModuleDecl::NestedModule(NestedModule {
+            let module = header.and_then(|(name, attributes)| {
+                Ok(NestedModule {
                     attributes,
                     access: access.map(lower_access),
-                    is_rec: *is_rec,
                     name,
-                    decls: decls_lossy(decls, tally),
-                })),
+                    body: module_body(*is_rec, decls_lossy(decls, tally))?,
+                })
+            });
+            match module {
+                Ok(m) => out.push(ModuleDecl::NestedModule(m)),
                 Err(d) => tally.dropped.push(d),
             }
             continue;
@@ -178,7 +181,10 @@ fn decl<V: Version>(d: &NormalisedDecl) -> L<ModuleDecl<V>> {
     match d {
         NormalisedDecl::Expr(e) => Ok(ModuleDecl::Expr(expr(e)?)),
         NormalisedDecl::Let { is_rec, bindings } => {
-            Ok(ModuleDecl::Let(let_bindings(*is_rec, bindings)?))
+            let group = let_bindings(*is_rec, bindings)?;
+            ModuleBindings::new(group)
+                .map(ModuleDecl::Let)
+                .map_err(|_| Decline("let: a group F# refuses in a module"))
         }
         NormalisedDecl::Open {
             target: NormalisedOpenTarget::ModuleOrNamespace(path),
@@ -203,7 +209,10 @@ fn decl<V: Version>(d: &NormalisedDecl) -> L<ModuleDecl<V>> {
             {
                 return decline("exception attributes, access, abbreviation or members");
             }
-            Ok(ModuleDecl::Exception(union_case(&exn.case)?))
+            let (name, fields) = case_parts(&exn.case)?;
+            ExceptionDefn::new(name, fields)
+                .map(ModuleDecl::Exception)
+                .map_err(refused)
         }
         NormalisedDecl::Attributes(_) => decline("standalone attributes"),
         NormalisedDecl::HashDirective { .. } => decline("hash directive"),
@@ -252,12 +261,35 @@ fn type_defn<V: Version>(d: &NormalisedTypeDefn) -> L<TypeDefn<V>> {
         NormalisedTypeRepr::ObjectModel { .. } => return decline("class, struct or interface"),
         NormalisedTypeRepr::Delegate(_) => return decline("delegate type"),
     };
-    Ok(TypeDefn {
-        attributes: attributes_of(&d.attributes)?,
-        access: d.access.map(lower_access),
-        name: ident(name)?,
-        typars: d.typars.iter().map(typar_decl).collect::<L<_>>()?,
+    TypeDefn::new(
+        attributes_of(&d.attributes)?,
+        d.access.map(lower_access),
+        entity_name(name)?,
+        d.typars.iter().map(typar_decl).collect::<L<_>>()?,
         repr,
+    )
+    .map_err(refused)
+}
+
+/// `decls` as a module's body, recursive if `is_rec`.
+fn module_body<V: Version>(is_rec: bool, decls: Vec<ModuleDecl<V>>) -> L<ModuleBody<V>> {
+    if !is_rec {
+        return Ok(ModuleBody::NonRec(decls));
+    }
+    RecDecls::new(decls)
+        .map(ModuleBody::Rec)
+        .map_err(|_| Decline("module rec: declarations out of order, or a mutable"))
+}
+
+/// What a declaration constructor's refusal declines.
+fn refused(r: DeclRefusal) -> Decline {
+    Decline(match r {
+        DeclRefusal::DuplicateTypar(_) => "type: a type parameter twice",
+        DeclRefusal::UnusedTypar(_) => "type: an abbreviation's unused type parameter",
+        DeclRefusal::DuplicateField(_) => "type: a field twice",
+        DeclRefusal::DuplicateCase(_) => "type: a union case twice",
+        DeclRefusal::CaseNamedTags => "type: a union case named Tags",
+        DeclRefusal::FieldNamedAsGenerated(_) => "type: a field named as an unnamed one",
     })
 }
 
@@ -269,15 +301,21 @@ fn typar_decl(t: &NormalisedTypar) -> L<TyparName> {
 }
 
 fn union_case(c: &NormalisedUnionCase) -> L<UnionCase> {
+    let (name, fields) = case_parts(c)?;
+    UnionCase::new(name, fields).map_err(refused)
+}
+
+/// A union case's or an exception's name and fields.
+fn case_parts(c: &NormalisedUnionCase) -> L<(CaseName, Vec<UnionField>)> {
     if !c.attributes.is_empty() {
         return decline("union case attributes");
     }
     let NormalisedUnionCaseKind::Fields(fields) = &c.kind else {
         return decline("union case with a full type");
     };
-    Ok(UnionCase {
-        name: ident(&c.ident)?,
-        fields: fields
+    Ok((
+        case_name(&c.ident)?,
+        fields
             .iter()
             .map(|f| {
                 if !f.attributes.is_empty() || f.access.is_some() || f.is_mutable || f.is_static {
@@ -289,7 +327,7 @@ fn union_case(c: &NormalisedUnionCase) -> L<UnionCase> {
                 })
             })
             .collect::<L<_>>()?,
-    })
+    ))
 }
 
 fn let_bindings<V: Version>(is_rec: bool, bindings: &[NormalisedBinding]) -> L<LetBindings<V>> {
@@ -1145,7 +1183,7 @@ fn match_clause<V: Version>(c: &NormalisedMatchClause) -> L<MatchClause<V>> {
     })
 }
 
-fn pat(p: &NormalisedPat) -> L<Pat> {
+fn pat<V: Version>(p: &NormalisedPat) -> L<Pat<V>> {
     use NormalisedPat as P;
     let b = |p: &NormalisedPat| pat(p).map(Box::new);
     Ok(match p {
@@ -1177,7 +1215,7 @@ fn pat(p: &NormalisedPat) -> L<Pat> {
         P::Tuple { .. } => return decline("pat: struct tuple"),
         P::As { lhs, rhs } => Pat::As {
             pat: b(lhs)?,
-            alias: b(rhs)?,
+            alias: as_alias(rhs)?,
         },
         P::ArrayOrList { is_array, elements } => {
             let items = elements.iter().map(pat).collect::<L<Vec<_>>>()?;
@@ -1202,6 +1240,22 @@ fn pat(p: &NormalisedPat) -> L<Pat> {
         P::QuoteExpr(_) => return decline("pat: quotation"),
         P::FromParseError(_) => return decline("pat: error"),
     })
+}
+
+/// What follows `as`: a variable, or from F# 6 another pattern.
+fn as_alias<V: Version>(p: &NormalisedPat) -> L<AsAlias<V>> {
+    let p = pat(p)?;
+    if let Pat::Name(path) = &p
+        && let [only] = path.segments()
+        && let Ok(v) = VarName::new(only.clone())
+    {
+        return Ok(AsAlias::Var(v));
+    }
+    let Some(gate) = V::NonVariablePatternsToRightOfAsPatterns::WITNESS else {
+        return decline("pat: a pattern after `as` before F# 6");
+    };
+    let alias = AliasPat::new(gate, p).expect("not a variable, which returned above");
+    Ok(AsAlias::Pat(alias))
 }
 
 fn ty(t: &NormalisedType) -> L<Type> {
@@ -1290,6 +1344,14 @@ fn constant(c: &NormalisedConst) -> L<Const> {
 
 fn ident(s: &str) -> L<Ident> {
     Ident::new(s).map_err(|_| Decline("name: not an identifier"))
+}
+
+fn entity_name(s: &str) -> L<EntityName> {
+    EntityName::new(ident(s)?).map_err(|_| Decline("name: refused for a type, module or case"))
+}
+
+fn case_name(s: &str) -> L<CaseName> {
+    CaseName::new(ident(s)?).map_err(|_| Decline("name: refused for a union case or exception"))
 }
 
 fn long_ident(path: &[String]) -> L<LongIdent> {

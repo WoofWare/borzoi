@@ -2,9 +2,12 @@
 //! random ones: every keyword in every position a name can take, and every
 //! short operator spelling in every position an operator can take.
 
-use borzoi_print::names::{Ident, InfixOperator, LongIdent, Operator, TyparName, ValueName};
+use borzoi_print::names::{
+    CaseName, EntityName, Ident, InfixOperator, LongIdent, Operator, TyparName, ValueName,
+};
 use borzoi_print::tree::{
-    BindingHead, Const, ForDirection, Pat, RecordField, Type, TypeRepr, UnionCase, UnionField,
+    Const, ExceptionDefn, ForDirection, ModuleBody, RecordField, Type, TypeRepr, UnionCase,
+    UnionField,
 };
 use borzoi_print::vec::Vec1;
 use borzoi_print::version::DefaultVersion;
@@ -20,6 +23,14 @@ type Args = borzoi_print::tree::Args<DefaultVersion>;
 type Attribute = borzoi_print::tree::Attribute<DefaultVersion>;
 type AttributeArgs = borzoi_print::tree::AttributeArgs<DefaultVersion>;
 type TypeDefn = borzoi_print::tree::TypeDefn<DefaultVersion>;
+type Pat = borzoi_print::tree::Pat<DefaultVersion>;
+type BindingHead = borzoi_print::tree::BindingHead<DefaultVersion>;
+type ModuleBindings = borzoi_print::tree::ModuleBindings<DefaultVersion>;
+
+/// `group` as a module's `let`.
+fn module_let(group: LetBindings) -> ModuleDecl {
+    ModuleDecl::Let(ModuleBindings::new(group).expect("a module's group"))
+}
 
 use super::round_trips;
 use crate::common::{corpus_root, par_map};
@@ -97,7 +108,7 @@ fn name(id: &Ident) -> Expr {
 }
 
 fn let_decl(head: BindingHead, body: Expr) -> ModuleDecl {
-    ModuleDecl::Let(LetBindings::NonRec(Box::new(Binding {
+    module_let(LetBindings::NonRec(Box::new(Binding {
         attributes: Vec::new(),
         is_inline: false,
         head,
@@ -105,8 +116,14 @@ fn let_decl(head: BindingHead, body: Expr) -> ModuleDecl {
     })))
 }
 
-/// A file using `id` in every position a name takes.
+/// A file using `id` in every position a name takes. A union case's or an
+/// exception's name takes `id` only where F# admits it there; `C` stands in
+/// elsewhere, with `id` its field's name.
 fn name_positions(id: &Ident) -> ImplFile {
+    let entity = EntityName::new(id.clone()).expect("an entity's name");
+    let case = CaseName::new(id.clone()).unwrap_or_else(|_| {
+        CaseName::new(Ident::new("C").expect("an identifier")).expect("a case")
+    });
     let path = LongIdent(Vec1::new(id.clone(), vec![id.clone()]));
     let ty = Type::App {
         head: single(id),
@@ -126,7 +143,7 @@ fn name_positions(id: &Ident) -> ImplFile {
             },
             Expr::Name(path.clone()),
         ),
-        ModuleDecl::Let(LetBindings::NonRec(Box::new(Binding {
+        module_let(LetBindings::NonRec(Box::new(Binding {
             attributes: vec![Attribute {
                 name: path.clone(),
                 args: AttributeArgs::List(Args::Named {
@@ -182,12 +199,12 @@ fn name_positions(id: &Ident) -> ImplFile {
             ),
         }))),
         ModuleDecl::Types(Vec1::new(
-            TypeDefn {
-                attributes: Vec::new(),
-                access: None,
-                name: id.clone(),
-                typars: Vec::new(),
-                repr: TypeRepr::Record(Vec1::new(
+            TypeDefn::new(
+                Vec::new(),
+                None,
+                entity.clone(),
+                Vec::new(),
+                TypeRepr::Record(Vec1::new(
                     RecordField {
                         is_mutable: false,
                         name: id.clone(),
@@ -195,41 +212,50 @@ fn name_positions(id: &Ident) -> ImplFile {
                     },
                     Vec::new(),
                 )),
-            },
-            vec![TypeDefn {
-                attributes: Vec::new(),
-                access: None,
-                name: id.clone(),
-                typars: Vec::new(),
-                repr: TypeRepr::Union(Vec1::new(
-                    UnionCase {
-                        name: id.clone(),
-                        fields: vec![UnionField {
-                            name: Some(id.clone()),
-                            ty,
-                        }],
-                    },
+            )
+            .expect("a definition"),
+            vec![
+                TypeDefn::new(
                     Vec::new(),
-                )),
-            }],
+                    None,
+                    entity.clone(),
+                    Vec::new(),
+                    TypeRepr::Union(Vec1::new(
+                        UnionCase::new(
+                            case.clone(),
+                            vec![UnionField {
+                                name: Some(id.clone()),
+                                ty: ty.clone(),
+                            }],
+                        )
+                        .expect("a case"),
+                        Vec::new(),
+                    )),
+                )
+                .expect("a definition"),
+            ],
         )),
-        ModuleDecl::Exception(UnionCase {
-            name: id.clone(),
-            fields: Vec::new(),
-        }),
+        ModuleDecl::Exception(
+            ExceptionDefn::new(
+                case,
+                vec![UnionField {
+                    name: Some(id.clone()),
+                    ty,
+                }],
+            )
+            .expect("an exception"),
+        ),
     ];
     ImplFile::NamedModule(NamedModule {
         attributes: Vec::new(),
         access: None,
-        is_rec: false,
         name: path,
-        decls: vec![ModuleDecl::NestedModule(NestedModule {
+        body: ModuleBody::NonRec(vec![ModuleDecl::NestedModule(NestedModule {
             attributes: Vec::new(),
             access: None,
-            is_rec: false,
-            name: id.clone(),
-            decls,
-        })],
+            name: entity,
+            body: ModuleBody::NonRec(decls),
+        })]),
     })
 }
 
@@ -237,16 +263,17 @@ fn name_positions(id: &Ident) -> ImplFile {
 fn typar_positions(t: &TyparName) -> ImplFile {
     let id = Ident::new("T").expect("an identifier");
     ImplFile::AnonModule(vec![ModuleDecl::Types(Vec1::new(
-        TypeDefn {
-            attributes: Vec::new(),
-            access: None,
-            name: id,
-            typars: vec![t.clone()],
-            repr: TypeRepr::Abbrev(Type::Fun {
+        TypeDefn::new(
+            Vec::new(),
+            None,
+            EntityName::new(id).expect("an entity's name"),
+            vec![t.clone()],
+            TypeRepr::Abbrev(Type::Fun {
                 arg: Box::new(Type::Var(t.clone())),
                 ret: Box::new(Type::Var(t.clone())),
             }),
-        },
+        )
+        .expect("a definition"),
         Vec::new(),
     ))])
 }
@@ -316,7 +343,7 @@ fn every_operator_round_trips(max_len: usize) {
     let failures = par_map(ops.len(), |i| {
         let op = &ops[i];
         let mut decls = vec![
-            ModuleDecl::Let(LetBindings::NonRec(Box::new(Binding {
+            module_let(LetBindings::NonRec(Box::new(Binding {
                 attributes: Vec::new(),
                 is_inline: false,
                 head: BindingHead::Function {

@@ -9,13 +9,16 @@
 //! The strategies are generic over the tree's language version, and offer a
 //! gated construct exactly where the version's gate has a witness.
 
-use borzoi_print::names::{Ident, InfixOperator, LongIdent, Operator, TyparName, ValueName};
+use borzoi_print::names::{
+    CaseName, EntityName, Ident, InfixOperator, LongIdent, Operator, TyparName, ValueName, VarName,
+};
 use borzoi_print::tree::{
-    Access, AndBang, Args, ArrayRank, Attribute, AttributeArgs, Binding, BindingHead, Comp,
-    CompClause, CompItem, Const, Context, Expr, Float32, Float64, ForDirection, ForSource,
-    ImplFile, LetBang, LetBindings, ListBody, ListComp, LocalBindings, MatchClause, ModuleDecl,
-    NamedModule, Namespace, NamespaceName, NestedModule, Pat, Range, RecordField, Stmt, StmtExpr,
-    Type, TypeDefn, TypeRepr, UnionCase, UnionField, UseBang, UseBinding, UseName,
+    Access, AliasPat, AndBang, Args, ArrayRank, AsAlias, Attribute, AttributeArgs, Binding,
+    BindingHead, Comp, CompClause, CompItem, Const, Context, ExceptionDefn, Expr, Float32, Float64,
+    ForDirection, ForSource, ImplFile, LetBang, LetBindings, ListBody, ListComp, LocalBindings,
+    MatchClause, ModuleBindings, ModuleBody, ModuleDecl, NamedModule, Namespace, NamespaceName,
+    NestedModule, Pat, Range, RecDecls, RecordField, Stmt, StmtExpr, Type, TypeDefn, TypeRepr,
+    UnionCase, UnionField, UseBang, UseBinding, UseName,
 };
 use borzoi_print::vec::{Vec1, Vec2};
 use borzoi_print::version::{Gate, Version};
@@ -104,6 +107,23 @@ fn ident() -> BoxedStrategy<Ident> {
         1 => ".{1,4}",
     ]
     .prop_filter_map("not an identifier", |s| Ident::new(&s).ok())
+    .boxed()
+}
+
+fn entity_name() -> BoxedStrategy<EntityName> {
+    ident()
+        .prop_filter_map("not an entity's name", |i| EntityName::new(i).ok())
+        .boxed()
+}
+
+/// A union case's or an exception's name; most identifiers are lower-case,
+/// so upper-case ones are drawn too.
+fn case_name() -> BoxedStrategy<CaseName> {
+    prop_oneof![
+        1 => ident(),
+        1 => "[A-Z][a-zA-Z0-9_']{0,5}".prop_filter_map("not an identifier", |s| Ident::new(&s).ok()),
+    ]
+    .prop_filter_map("not a case's name", |i| CaseName::new(i).ok())
     .boxed()
 }
 
@@ -245,7 +265,23 @@ fn ty() -> BoxedStrategy<Type> {
     .boxed()
 }
 
-fn pat() -> BoxedStrategy<Pat> {
+/// What follows `as`: a variable, or from F# 6 another pattern.
+fn as_alias<V: Version>(pat: BoxedStrategy<Pat<V>>) -> BoxedStrategy<AsAlias<V>> {
+    let var = ident()
+        .prop_filter_map("not a variable", |i| VarName::new(i).ok())
+        .prop_map(AsAlias::Var);
+    match V::NonVariablePatternsToRightOfAsPatterns::WITNESS {
+        None => var.boxed(),
+        Some(gate) => prop_oneof![
+            var,
+            pat.prop_filter_map("a variable", move |p| AliasPat::new(gate, p).ok())
+                .prop_map(AsAlias::Pat),
+        ]
+        .boxed(),
+    }
+}
+
+fn pat<V: Version>() -> BoxedStrategy<Pat<V>> {
     let leaf = prop_oneof![
         1 => Just(Pat::Wildcard),
         4 => long_ident().prop_map(Pat::Name),
@@ -268,7 +304,7 @@ fn pat() -> BoxedStrategy<Pat> {
             prop::collection::vec(inner.clone(), 0..=2).prop_map(Pat::Array),
             (b.clone(), b.clone()).prop_map(|(head, tail)| Pat::Cons { head, tail }),
             (b.clone(), ty()).prop_map(|(pat, ty)| Pat::Typed { pat, ty }),
-            (b.clone(), b.clone()).prop_map(|(pat, alias)| Pat::As { pat, alias }),
+            (b.clone(), as_alias(inner.clone())).prop_map(|(pat, alias)| Pat::As { pat, alias }),
             (b.clone(), b).prop_map(|(l, r)| Pat::Or(l, r)),
             prop::collection::vec(inner.clone(), 2..=3)
                 .prop_map(|ps| Pat::Ands(Vec2::from_vec(ps).expect("two"))),
@@ -752,16 +788,40 @@ pub fn expr<V: Version>() -> BoxedStrategy<Expr<V>> {
     .boxed()
 }
 
-fn union_case() -> BoxedStrategy<UnionCase> {
-    (
-        ident(),
-        prop::collection::vec(
-            (prop::option::of(ident()), ty()).prop_map(|(name, ty)| UnionField { name, ty }),
-            0..=2,
-        ),
+fn union_fields() -> BoxedStrategy<Vec<UnionField>> {
+    prop::collection::vec(
+        (prop::option::of(ident()), ty()).prop_map(|(name, ty)| UnionField { name, ty }),
+        0..=2,
     )
-        .prop_map(|(name, fields)| UnionCase { name, fields })
+    .boxed()
+}
+
+fn union_case() -> BoxedStrategy<UnionCase> {
+    (case_name(), union_fields())
+        .prop_filter_map("F# refuses the case", |(name, fields)| {
+            UnionCase::new(name, fields).ok()
+        })
         .boxed()
+}
+
+fn exception() -> BoxedStrategy<ExceptionDefn> {
+    (case_name(), union_fields())
+        .prop_filter_map("F# refuses the exception", |(name, fields)| {
+            ExceptionDefn::new(name, fields).ok()
+        })
+        .boxed()
+}
+
+/// `decls` as a module's body, recursive if `is_rec` and F# admits them as a
+/// recursive group.
+fn module_body<V: Version>() -> impl Fn((bool, Vec<ModuleDecl<V>>)) -> Option<ModuleBody<V>> {
+    |(is_rec, decls)| {
+        if is_rec {
+            RecDecls::new(decls).ok().map(ModuleBody::Rec)
+        } else {
+            Some(ModuleBody::NonRec(decls))
+        }
+    }
 }
 
 fn type_defn<V: Version>() -> BoxedStrategy<TypeDefn<V>> {
@@ -782,46 +842,47 @@ fn type_defn<V: Version>() -> BoxedStrategy<TypeDefn<V>> {
     (
         attributes(expr()),
         access(),
-        ident(),
+        entity_name(),
         prop::collection::vec(typar(), 0..=2),
         repr,
     )
-        .prop_map(|(attributes, access, name, typars, repr)| TypeDefn {
-            attributes,
-            access,
-            name,
-            typars,
-            repr,
-        })
+        .prop_filter_map(
+            "F# refuses the definition",
+            |(attributes, access, name, typars, repr)| {
+                TypeDefn::new(attributes, access, name, typars, repr).ok()
+            },
+        )
         .boxed()
 }
 
 fn decls<V: Version>() -> BoxedStrategy<Vec<ModuleDecl<V>>> {
     let leaf = prop_oneof![
-        4 => let_bindings(expr()).prop_map(ModuleDecl::Let),
+        4 => let_bindings(expr())
+            .prop_filter_map("F# refuses the group in a module", |b| {
+                ModuleBindings::new(b).ok().map(ModuleDecl::Let)
+            }),
         2 => expr().prop_map(ModuleDecl::Expr),
         1 => long_ident().prop_map(ModuleDecl::Open),
         1 => (ident(), long_ident())
             .prop_map(|(name, target)| ModuleDecl::ModuleAbbrev { name, target }),
         2 => prop::collection::vec(type_defn(), 1..=2)
             .prop_map(|ds| ModuleDecl::Types(Vec1::from_vec(ds).expect("non-empty"))),
-        1 => union_case().prop_map(ModuleDecl::Exception),
+        1 => exception().prop_map(ModuleDecl::Exception),
     ];
     let decl = leaf.prop_recursive(2, 8, 3, |inner| {
         (
             attributes(expr()),
             access(),
-            any::<bool>(),
-            ident(),
-            prop::collection::vec(inner, 0..=3),
+            entity_name(),
+            (any::<bool>(), prop::collection::vec(inner, 0..=3))
+                .prop_filter_map("F# refuses the recursive group", module_body()),
         )
-            .prop_map(|(attributes, access, is_rec, name, decls)| {
+            .prop_map(|(attributes, access, name, body)| {
                 ModuleDecl::NestedModule(NestedModule {
                     attributes,
                     access,
-                    is_rec,
                     name,
-                    decls,
+                    body,
                 })
             })
     });
@@ -834,33 +895,28 @@ pub fn impl_file<V: Version>() -> BoxedStrategy<ImplFile<V>> {
         (
             attributes(expr()),
             access(),
-            any::<bool>(),
             long_ident(),
-            decls()
+            (any::<bool>(), decls())
+                .prop_filter_map("F# refuses the recursive group", module_body()),
         )
-            .prop_map(|(attributes, access, is_rec, name, decls)| {
+            .prop_map(|(attributes, access, name, body)| {
                 ImplFile::NamedModule(NamedModule {
                     attributes,
                     access,
-                    is_rec,
                     name,
-                    decls,
+                    body,
                 })
             }),
         prop::collection::vec(
             (
-                any::<bool>(),
                 prop_oneof![
                     1 => Just(NamespaceName::Global),
                     3 => long_ident().prop_map(NamespaceName::Named),
                 ],
-                decls(),
+                (any::<bool>(), decls())
+                    .prop_filter_map("F# refuses the recursive group", module_body()),
             )
-                .prop_map(|(is_rec, name, decls)| Namespace {
-                    is_rec,
-                    name,
-                    decls
-                }),
+                .prop_map(|(name, body)| Namespace { name, body }),
             1..=2,
         )
         .prop_map(|ns| ImplFile::Namespaces(Vec1::from_vec(ns).expect("non-empty"))),

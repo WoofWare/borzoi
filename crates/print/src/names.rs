@@ -190,6 +190,94 @@ fn is_plain_word(s: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '\'')
 }
 
+/// The characters F#'s checker refuses in the name of a type, module,
+/// namespace, union case or exception (FCS's
+/// `IllegalCharactersInTypeAndNamespaceNames`, FS0883). A backtick is one too,
+/// but no [`Ident`] holds one.
+const ENTITY_NAME_REFUSED: &[char] = &['.', '+', '$', '&', '[', ']', '/', '\\', '*', '"'];
+
+/// The name of a type, nested module, union case or exception: an [`Ident`]
+/// without the characters F#'s checker refuses there (FS0883).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct EntityName(Ident);
+
+impl EntityName {
+    /// `ident` as an entity's name, or `ident` back if it holds a character
+    /// F# refuses there.
+    pub fn new(ident: Ident) -> Result<Self, Ident> {
+        if ident.as_str().contains(ENTITY_NAME_REFUSED) {
+            Err(ident)
+        } else {
+            Ok(EntityName(ident))
+        }
+    }
+
+    pub fn ident(&self) -> &Ident {
+        &self.0
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+/// The name of a union case or an exception: an [`EntityName`] that F# reads
+/// as starting with an upper-case letter (FS0053), by `borzoi-cst`'s mirror of
+/// FCS's rule ([`borzoi_cst::parser::ident_leads_uppercase`]). F# 7 also
+/// admits a lower-case union case in a type with the
+/// `RequireQualifiedAccess` attribute, which takes resolving the attribute's
+/// name to see, so the name refuses it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CaseName(EntityName);
+
+impl CaseName {
+    /// `ident` as a case's name, or `ident` back if F# refuses it as one.
+    pub fn new(ident: Ident) -> Result<Self, Ident> {
+        let name = EntityName::new(ident)?;
+        if borzoi_cst::parser::ident_leads_uppercase(name.as_str()) {
+            Ok(CaseName(name))
+        } else {
+            Err(name.0)
+        }
+    }
+
+    pub fn ident(&self) -> &Ident {
+        self.0.ident()
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+/// A name F# reads as a variable where a pattern may also name a constructor:
+/// an [`Ident`] that does not start with an upper-case letter, by
+/// `borzoi-cst`'s mirror of FCS's rule
+/// ([`borzoi_cst::parser::ident_leads_uppercase`]). FCS reads an upper-case
+/// name there as a constructor's, or as a variable only if none resolves.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct VarName(Ident);
+
+impl VarName {
+    /// `ident` as a variable's name, or `ident` back if F# could read it as a
+    /// constructor's.
+    pub fn new(ident: Ident) -> Result<Self, Ident> {
+        if borzoi_cst::parser::ident_leads_uppercase(ident.as_str()) {
+            Err(ident)
+        } else {
+            Ok(VarName(ident))
+        }
+    }
+
+    pub fn ident(&self) -> &Ident {
+        &self.0
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
 /// A dotted path of identifiers, `A.B.c`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct LongIdent(pub Vec1<Ident>);
