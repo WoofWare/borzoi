@@ -113,6 +113,7 @@ crates/lsp/src/xml_doc/depth.rs	pending	3
 crates/lsp/src/xml_doc/markdown.rs	pending	3
 crates/lsp/src/xml_doc/render.rs	pending	3
 crates/lsp/src/xml_doc/source.rs	pending	3
+crates/lsp/tests/all/alias_resolve_through_diff.rs	pending	3
 crates/lsp/tests/all/dispatch_coalescing.rs	pending	3
 crates/lsp/tests/all/env_read_set_soundness.rs	pending	3
 crates/lsp/tests/all/evaluation_cutoff.rs	pending	3
@@ -301,6 +302,7 @@ crates/sema/tests/all/infer_local_let_diff.rs	pending	3
 crates/sema/tests/all/infer_match_diff.rs	pending	3
 crates/sema/tests/all/infer_measure_erasure_diff.rs	pending	3
 crates/sema/tests/all/infer_operators_diff.rs	pending	3
+crates/sema/tests/all/infer_project_type_annotation_diff.rs	pending	3
 crates/sema/tests/all/infer_suffix_irrelevance.rs	pending	3
 crates/sema/tests/all/infer_type_budget.rs	pending	3
 crates/sema/tests/all/interning_order.rs	pending	3

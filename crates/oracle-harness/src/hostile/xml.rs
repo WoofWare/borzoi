@@ -93,7 +93,8 @@ pub fn escape(text: &str, place: Place) -> Result<String, char> {
 }
 
 /// `text` written `how` in `place`, or `None` where the place has no such
-/// spelling (an attribute holds no CDATA section and no comment).
+/// spelling (an attribute holds no CDATA section and no comment) or the
+/// spelling of this text is the plain one.
 pub fn spell(text: &str, how: How, place: Place) -> Option<Spelt> {
     let well_formed = text.chars().all(representable);
     let xml = match how {
@@ -135,6 +136,12 @@ pub fn spell(text: &str, how: How, place: Place) -> Option<Spelt> {
             out
         }
     };
+    // A spelling that writes nothing the plain one does not (a comment split
+    // of one character, literal whitespace in a text with none) has put no
+    // hostile syntax in front of the reader, and is no draw of its dimension.
+    if escape(text, place).is_ok_and(|plain| plain == xml) {
+        return None;
+    }
     Some(Spelt { xml, well_formed })
 }
 
@@ -228,11 +235,23 @@ mod tests {
             let plain = escape(&text, place).expect("representable");
             prop_assert_eq!(read_back(&plain, place).unwrap(), text.clone());
             for entry in alphabet().entries() {
+                // What each spelling needs of a text to write anything the
+                // plain spelling does not.
+                let realised = match entry.value {
+                    // The plain spelling writes a tab or a line break as a
+                    // decimal reference already.
+                    How::DecimalRefs => text.chars().any(|c| !matches!(c, '\t' | '\r' | '\n')),
+                    How::HexRefs | How::PaddedHexRefs => !text.is_empty(),
+                    How::Cdata => place == Place::Element,
+                    How::CommentSplit => place == Place::Element && text.chars().count() > 1,
+                    How::LiteralWhitespace => text.contains(['\t', '\r', '\n']),
+                };
                 let Some(spelt) = spell(&text, entry.value, place) else {
-                    prop_assert_eq!(place, Place::Attribute);
-                    prop_assert!(matches!(entry.value, How::Cdata | How::CommentSplit));
+                    prop_assert!(!realised, "{:?} of {text:?} was not spelt", entry.value);
                     continue;
                 };
+                prop_assert!(realised, "{:?} of {text:?} is the plain spelling", entry.value);
+                prop_assert_ne!(&spelt.xml, &plain);
                 prop_assert!(spelt.well_formed);
                 let read = read_back(&spelt.xml, place)
                     .unwrap_or_else(|e| panic!("{:?} of {text:?}: {e}", entry.value));

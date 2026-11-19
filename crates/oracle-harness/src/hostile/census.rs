@@ -416,40 +416,40 @@ mod tests {
 
     #[test]
     fn a_dimension_the_platform_cannot_make_keeps_another_platforms_line() {
-        let census = Census::new(declared(&[Kind::FsChange]), &[]);
-        reach_all(&census, &[Dimension::Appears]);
-        let refusal = crate::hostile::fs::Unmakeable::Change {
-            change: crate::hostile::fs::Change::Appears,
+        let census = Census::new(declared(&[Kind::FsState]), &[]);
+        reach_all(&census, &[Dimension::Socket]);
+        let refusal = crate::hostile::fs::Unmakeable::State {
+            state: crate::hostile::fs::State::Socket,
             reason: "no such thing here".into(),
+            whole: true,
         };
         census.unmakeable(&refusal);
         assert_eq!(census.violations(), Vec::<String>::new());
         // With nothing pinned, the line says so, and a platform that reaches
         // the dimension then fails against it.
         assert!(census.manifest(None).entries().contains(
-            &"change.appears\tunmade: change.appears cannot be made: no such thing here".to_owned()
+            &"fs.socket\tunmade: fs.socket cannot be made: no such thing here".to_owned()
         ));
-        let elsewhere = Manifest::from_entries(["change.appears\treached".to_owned()]).unwrap();
+        let elsewhere = Manifest::from_entries(["fs.socket\treached".to_owned()]).unwrap();
         assert!(
             census
                 .manifest(Some(&elsewhere))
                 .entries()
-                .contains(&"change.appears\treached".to_owned())
+                .contains(&"fs.socket\treached".to_owned())
         );
         // A pinned exclusion is not an observation, and does not stand.
-        let excluded =
-            Manifest::from_entries(["change.appears\texcluded: once".to_owned()]).unwrap();
+        let excluded = Manifest::from_entries(["fs.socket\texcluded: once".to_owned()]).unwrap();
         assert!(
             census
                 .manifest(Some(&excluded))
                 .entries()
                 .iter()
-                .any(|e| e.starts_with("change.appears\tunmade: "))
+                .any(|e| e.starts_with("fs.socket\tunmade: "))
         );
         // A pinned `unmade` line is replaced by this platform's own reason.
-        let unmade = Manifest::from_entries(["change.appears\tunmade: other".to_owned()]).unwrap();
+        let unmade = Manifest::from_entries(["fs.socket\tunmade: other".to_owned()]).unwrap();
         assert!(census.manifest(Some(&unmade)).entries().contains(
-            &"change.appears\tunmade: change.appears cannot be made: no such thing here".to_owned()
+            &"fs.socket\tunmade: fs.socket cannot be made: no such thing here".to_owned()
         ));
     }
 

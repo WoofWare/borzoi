@@ -5,3 +5,5 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc cb1fd05428810105198d55321285c719a7abced401d27c2c5f0c501b301c9aed # shrinks to text = "\r<", place = Element
+cc dd2ef54e120e06d4dfd099af83eea0c17c5f1fd9afe553636fb1563dd30df1ba # shrinks to text = "", place = Element
+cc b0cda69f915f026583da05ef4e9cd631c5e5f2e1c1ba381d5af387f7882865d1 # shrinks to text = "\r", place = Element
