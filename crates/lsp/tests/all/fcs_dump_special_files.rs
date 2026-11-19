@@ -8,6 +8,8 @@
 //! it; a character device may be read without end, or read as an empty file
 //! fsc would not be handed. The refusal names the file and what it is.
 
+#![cfg(unix)]
+
 use std::os::unix::fs::symlink;
 use std::path::Path;
 use std::process::Command;
@@ -64,6 +66,8 @@ fn a_source_or_reference_that_is_not_a_regular_file_is_refused_unopened() {
     mkfifo(&fifo_script);
     let loads_fifo = dir.path().join("Loads.fsx");
     std::fs::write(&loads_fifo, "#load \"Fifo.fsx\"\nlet z = 1\n").expect("write");
+    let references_device = dir.path().join("References.fsx");
+    std::fs::write(&references_device, "#r \"Device.dll\"\nlet z = 1\n").expect("write");
     let text = |p: &Path| p.display().to_string();
     let project =
         |paths: Vec<String>, refs: Vec<String>| json!({"paths": paths, "refs": refs}).to_string();
@@ -97,6 +101,13 @@ fn a_source_or_reference_that_is_not_a_regular_file_is_refused_unopened() {
             cases.push((
                 "a script that loads a FIFO",
                 file(text(&loads_fifo), vec![]),
+                SPECIAL,
+            ));
+            // FCS reports a reference it could not open as a diagnostic and
+            // goes on: the answer would describe a check without it.
+            cases.push((
+                "a script that references a device",
+                file(text(&references_device), vec![]),
                 SPECIAL,
             ));
             cases.push((
@@ -171,4 +182,36 @@ fn a_source_not_named_as_fsharp_source_is_refused() {
         serde_json::from_str::<Value>(&answer).expect("JSON")["BatchError"].is_null(),
         "{answer}"
     );
+}
+
+/// The resident path-reading ops (`ast-batch`, the token batches) refuse a
+/// FIFO on its own line, and answer the next path.
+#[test]
+fn a_path_batch_answers_a_fifo_with_an_error_and_goes_on() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let a = dir.path().join("A.fs");
+    std::fs::write(&a, "module A\nlet a = 1\n").expect("write");
+    let fifo = dir.path().join("Fifo.fs");
+    mkfifo(&fifo);
+    for op in [
+        "ast-batch",
+        "tokens-filtered-batch",
+        "tokens-raw-batch",
+        "tokens-lexfilter-internal-batch",
+    ] {
+        let input = format!("{}\n{}\n", fifo.display(), a.display());
+        let out = BoundedCommand::new(fcs_dump_command(op))
+            .stdin_bytes(input.into_bytes())
+            .timeout(Duration::from_secs(120))
+            .run_ok(format_args!("fcs-dump {op}"));
+        let lines: Vec<Value> = String::from_utf8(out.stdout)
+            .expect("UTF-8")
+            .lines()
+            .map(|l| serde_json::from_str(l).expect("JSON"))
+            .collect();
+        assert_eq!(lines.len(), 2, "{op}: one line per path: {lines:?}");
+        let error = lines[0]["Error"].as_str().unwrap_or_default();
+        assert!(error.contains("not a regular file"), "{op}: {:?}", lines[0]);
+        assert!(lines[1].get("Error").is_none(), "{op}: {:?}", lines[1]);
+    }
 }
