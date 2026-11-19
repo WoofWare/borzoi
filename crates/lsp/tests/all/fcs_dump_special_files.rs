@@ -208,6 +208,7 @@ fn a_path_batch_answers_a_fifo_with_an_error_and_goes_on() {
         "tokens-filtered-batch",
         "tokens-raw-batch",
         "tokens-lexfilter-internal-batch",
+        "script-options-batch",
     ] {
         let input = format!("{}\n{}\n", fifo.display(), a.display());
         let out = BoundedCommand::new(fcs_dump_command(op))

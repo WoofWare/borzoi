@@ -6504,12 +6504,20 @@ let private scriptOptionsBatch () =
         let path = (Option.ofObj line |> Option.defaultValue "").Trim()
         if path <> "" then
             let path = Path.GetFullPath path
-            let text = readRegularText path
+            // One path's failure (a file refused unread) is its own line's,
+            // and the batch goes on.
             let response =
-                {| ResolvedAs = sharedScriptPath path text
-                   Shared = side (projectScriptOptions checker path text [||])
-                   Direct = side (scriptOptionsAs checker path text [||]) |}
-            Console.Out.WriteLine(JsonSerializer.Serialize(response, compact))
+                try
+                    let text = readRegularText path
+                    JsonSerializer.Serialize(
+                        {| ResolvedAs = sharedScriptPath path text
+                           Shared = side (projectScriptOptions checker path text [||])
+                           Direct = side (scriptOptionsAs checker path text [||]) |},
+                        compact
+                    )
+                with ex ->
+                    JsonSerializer.Serialize({| Path = path; Error = ex.Message |}, compact)
+            Console.Out.WriteLine(response)
             Console.Out.Flush()
         line <- Console.In.ReadLine()
 
