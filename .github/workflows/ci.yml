@@ -194,6 +194,15 @@ jobs:
           nix develop --command cargo test -p borzoi-cst --test all accessor_coverage:: \
             -- --skip accessor_fixtures_match_fcs
 
+      # Every generator in the workspace has a row in the hostile-value
+      # library's table saying which hostile kinds it draws, or why none
+      # applies (crates/oracle-harness/src/hostile/coverage.rs). The check
+      # reads every crate's sources, so it belongs to no one crate's change
+      # filter: a new generator in any crate can break it.
+      - name: Check every generator declares its hostile kinds
+        run: |
+          nix develop --command cargo test -p borzoi-oracle-harness --lib hostile::
+
   fcs-dump:
     name: Build fcs-dump
     needs: changes

@@ -36,6 +36,7 @@
 pub mod alloc_limit;
 pub mod corpus_key;
 pub mod fcs_position;
+pub mod hostile;
 pub mod manifest;
 pub mod module_tree;
 pub mod nuget_oracle;

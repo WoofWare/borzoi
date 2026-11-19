@@ -16,7 +16,7 @@ proc-macro2.workspace = true
 serde_json.workspace = true
 # `xml_pump` locates the element paths it repeats.
 roxmltree.workspace = true
-
-[dev-dependencies]
+# `hostile` offers its alphabets as proptest strategies, and its fixture
+# builder makes its trees in temporary directories.
 proptest.workspace = true
 tempfile.workspace = true

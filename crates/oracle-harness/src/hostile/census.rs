@@ -1,0 +1,448 @@
+//! The census: which hostile dimensions reached a harness's subject.
+//!
+//! Drawing a hostile value proves nothing. A fixture builder may refuse it, a
+//! place may not carry it, a pre-check may drop the case, and the test then
+//! passes having checked nothing. So a harness records each drawn value at
+//! the point its subject has been run on it ([`Census::reached`]), with what
+//! the subject did, and [`Census::finish`] fails unless every dimension the
+//! harness declared was reached.
+//!
+//! A dimension may be left unreached for two reasons only, both stated:
+//!
+//! - the harness **excludes** it, with the reason no value of the family can
+//!   reach this subject (a place that carries text draws no name that is not
+//!   UTF-8). An excluded dimension that is reached after all fails too: the
+//!   exclusion has gone stale.
+//! - the **platform** could not make any value of it on this run
+//!   ([`Census::unmakeable`]), which is printed.
+//!
+//! What became of each dimension is pinned as an exact manifest, one keyed
+//! line per dimension, so a reviewer sees a dimension gained, lost or
+//! excluded as a line of the diff. The manifest records `reached`, `excluded`
+//! and `unmade`, and not what the subject did: outcomes are printed with
+//! their counts, and may differ between platforms where the manifest must
+//! not. A dimension this platform could not make keeps the line another
+//! platform pinned for it.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
+use std::sync::Mutex;
+
+use super::{Dimension, Kind};
+use crate::manifest::{self, Manifest};
+
+/// What one census of a harness covers: its name, the kinds it draws, and
+/// the dimensions of those kinds it cannot reach.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Declared {
+    /// The harness's source file, relative to the workspace.
+    pub harness: String,
+    /// The census's name: unique within its crate, and the stem of its
+    /// manifest.
+    pub census: String,
+    /// The kinds drawn.
+    pub kinds: BTreeSet<Kind>,
+}
+
+#[derive(Debug, Default)]
+struct Counts {
+    /// What the subject did with values of each dimension, counted.
+    reached: BTreeMap<Dimension, BTreeMap<String, usize>>,
+    /// What the subject did with the harness's own values.
+    plain: BTreeMap<String, usize>,
+    /// Why the platform made no value, per dimension.
+    unmakeable: BTreeMap<Dimension, BTreeSet<String>>,
+}
+
+/// One census. Shared by reference between the threads of a harness.
+#[derive(Debug)]
+pub struct Census {
+    declared: Declared,
+    excluded: BTreeMap<Dimension, &'static str>,
+    counts: Mutex<Counts>,
+}
+
+/// The manifest key under which the harness's own values are counted.
+const PLAIN_KEY: &str = "plain";
+
+impl Census {
+    /// A census of `declared`, excluding `excluded` (each with the reason no
+    /// value of the dimension can reach this subject).
+    ///
+    /// # Panics
+    ///
+    /// If an excluded dimension is of a kind the census does not draw, is
+    /// excluded twice, or has an empty reason.
+    pub fn new(declared: Declared, excluded: &[(Dimension, &'static str)]) -> Self {
+        let mut map = BTreeMap::new();
+        for (dimension, reason) in excluded {
+            assert!(
+                declared.kinds.contains(&dimension.kind()),
+                "census {}: {dimension} is excluded, and the census draws no {}",
+                declared.census,
+                dimension.kind()
+            );
+            assert!(
+                !reason.trim().is_empty(),
+                "census {}: {dimension} is excluded without a reason",
+                declared.census
+            );
+            assert!(
+                map.insert(*dimension, *reason).is_none(),
+                "census {}: {dimension} is excluded twice",
+                declared.census
+            );
+        }
+        Census {
+            declared,
+            excluded: map,
+            counts: Mutex::default(),
+        }
+    }
+
+    /// Every dimension the census owes: those of its kinds, less the
+    /// excluded.
+    pub fn owed(&self) -> BTreeSet<Dimension> {
+        self.declared
+            .kinds
+            .iter()
+            .flat_map(|k| k.dimensions())
+            .filter(|d| !self.excluded.contains_key(d))
+            .collect()
+    }
+
+    fn counts(&self) -> std::sync::MutexGuard<'_, Counts> {
+        // A panic elsewhere in the harness must not hide this census's own
+        // report behind a poisoned lock.
+        self.counts.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Record that the subject ran on a value of these dimensions, and what
+    /// it did (`commit`, `decline`, `refuse`: the harness's own words, which
+    /// the report counts). A value of no hostile dimension counts as the
+    /// harness's own.
+    ///
+    /// Call this after the subject has run, never where the value is drawn.
+    pub fn reached(&self, hostile: &BTreeSet<Dimension>, outcome: &str) {
+        let mut counts = self.counts();
+        if hostile.is_empty() {
+            *counts.plain.entry(outcome.to_owned()).or_default() += 1;
+        }
+        for dimension in hostile {
+            *counts
+                .reached
+                .entry(*dimension)
+                .or_default()
+                .entry(outcome.to_owned())
+                .or_default() += 1;
+        }
+    }
+
+    /// Record that the platform could not make a value of `dimension`, and
+    /// print why (once per reason).
+    pub fn unmakeable(&self, dimension: Dimension, reason: &str) {
+        let fresh = self
+            .counts()
+            .unmakeable
+            .entry(dimension)
+            .or_default()
+            .insert(reason.to_owned());
+        if fresh {
+            eprintln!(
+                "hostile census {}: a {dimension} value was not made: {reason}",
+                self.declared.census
+            );
+        }
+    }
+
+    /// The census as text: each dimension, what met it, and how often.
+    pub fn report(&self) -> String {
+        let counts = self.counts();
+        let tally = |outcomes: &BTreeMap<String, usize>| {
+            outcomes
+                .iter()
+                .map(|(outcome, n)| format!("{outcome} {n}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let mut out = format!("hostile census {}:\n", self.declared.census);
+        out.push_str(&format!("  {PLAIN_KEY}: {}\n", tally(&counts.plain)));
+        let mut all: BTreeSet<Dimension> = self.owed();
+        all.extend(self.excluded.keys());
+        all.extend(counts.reached.keys());
+        for dimension in all {
+            let line = if let Some(outcomes) = counts.reached.get(&dimension) {
+                tally(outcomes)
+            } else if let Some(reason) = self.excluded.get(&dimension) {
+                format!("excluded: {reason}")
+            } else if let Some(reasons) = counts.unmakeable.get(&dimension) {
+                format!(
+                    "not made here: {}",
+                    reasons.iter().cloned().collect::<Vec<_>>().join("; ")
+                )
+            } else {
+                "NEVER REACHED".to_owned()
+            };
+            out.push_str(&format!("  {dimension}: {line}\n"));
+        }
+        out
+    }
+
+    /// What is wrong with the census, if anything: a dimension owed and
+    /// never reached, one excluded and reached, or one reached that the
+    /// census never declared.
+    pub fn violations(&self) -> Vec<String> {
+        let counts = self.counts();
+        let mut out = Vec::new();
+        if counts.plain.is_empty() {
+            out.push(
+                "no value of the harness's own reached the subject: with nothing plain to \
+                 compare, a subject that mishandles everything looks the same"
+                    .to_owned(),
+            );
+        }
+        for dimension in self.owed() {
+            if !counts.reached.contains_key(&dimension)
+                && !counts.unmakeable.contains_key(&dimension)
+            {
+                out.push(format!(
+                    "{dimension} is declared and no value of it reached the subject \
+                     ({}). Reach it, or exclude it with the reason it cannot be reached.",
+                    dimension.why()
+                ));
+            }
+        }
+        for dimension in counts.reached.keys() {
+            if let Some(reason) = self.excluded.get(dimension) {
+                out.push(format!(
+                    "{dimension} is excluded (\"{reason}\") and a value of it reached the \
+                     subject: remove the exclusion."
+                ));
+            } else if !self.declared.kinds.contains(&dimension.kind()) {
+                out.push(format!(
+                    "{dimension} reached the subject and the census declares no {}: declare \
+                     the kind in the coverage table.",
+                    dimension.kind()
+                ));
+            }
+        }
+        out
+    }
+
+    /// The manifest of this run, given the manifest checked in (if any): one
+    /// line per dimension owed or excluded.
+    fn manifest(&self, pinned: Option<&Manifest>) -> Manifest {
+        let counts = self.counts();
+        let pinned: BTreeMap<&str, &str> = pinned
+            .map(|m| {
+                m.entries()
+                    .iter()
+                    .filter_map(|e| e.split_once(manifest::KEY_SEPARATOR))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut entries = vec![format!("{PLAIN_KEY}\treached")];
+        let mut all: BTreeSet<Dimension> = self.owed();
+        all.extend(self.excluded.keys());
+        for dimension in all {
+            let key = dimension.key();
+            let value = if let Some(reason) = self.excluded.get(&dimension) {
+                format!("excluded: {reason}")
+            } else if counts.reached.contains_key(&dimension) {
+                "reached".to_owned()
+            } else if let Some(reasons) = counts.unmakeable.get(&dimension) {
+                // Another platform's verdict stands where this one has none.
+                match pinned.get(key.as_str()) {
+                    Some(line) if !line.starts_with("unmade") => (*line).to_owned(),
+                    _ => format!(
+                        "unmade: {}",
+                        reasons.iter().cloned().collect::<Vec<_>>().join("; ")
+                    ),
+                }
+            } else {
+                // Reported by `violations`; the manifest still needs a line.
+                "never reached".to_owned()
+            };
+            entries.push(format!("{key}\t{value}"));
+        }
+        Manifest::from_entries(entries).expect("dimension keys are distinct single lines")
+    }
+
+    /// End the census: print it, fail on any violation, and compare what
+    /// became of each dimension with the census's pinned manifest
+    /// ([`super::coverage::manifest_path`]). `regenerate` is the command
+    /// that rewrites it.
+    ///
+    /// # Panics
+    ///
+    /// On a violation ([`Self::violations`]), whether or not manifests are
+    /// being regenerated, and on any difference from the manifest.
+    #[track_caller]
+    pub fn finish(self, regenerate: &str) {
+        let path = super::coverage::manifest_path(&super::coverage::workspace(), &self.declared);
+        self.finish_at(&path, regenerate);
+    }
+
+    /// [`Self::finish`] against the manifest at `path`.
+    #[track_caller]
+    fn finish_at(self, path: &Path, regenerate: &str) {
+        eprint!("{}", self.report());
+        let violations = self.violations();
+        assert!(
+            violations.is_empty(),
+            "hostile census {}:\n  {}",
+            self.declared.census,
+            violations.join("\n  ")
+        );
+        let pinned = std::fs::read_to_string(path)
+            .ok()
+            .and_then(|text| Manifest::parse(&text).ok());
+        manifest::check(path, &self.manifest(pinned.as_ref()), regenerate);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn declared(kinds: &[Kind]) -> Declared {
+        Declared {
+            harness: "crates/demo/tests/x.rs".into(),
+            census: "test".into(),
+            kinds: kinds.iter().copied().collect(),
+        }
+    }
+
+    fn reach_all(census: &Census, except: &[Dimension]) {
+        census.reached(&BTreeSet::new(), "commit");
+        for dimension in census.owed() {
+            if !except.contains(&dimension) {
+                census.reached(&BTreeSet::from([dimension]), "decline");
+            }
+        }
+    }
+
+    #[test]
+    fn a_census_that_reached_everything_has_no_violation() {
+        let census = Census::new(declared(&[Kind::FsChange, Kind::WorkingDirectory]), &[]);
+        reach_all(&census, &[]);
+        assert_eq!(census.violations(), Vec::<String>::new());
+        let manifest = census.manifest(None);
+        assert_eq!(
+            manifest.entries().len(),
+            1 + Kind::FsChange.dimensions().count() + Kind::WorkingDirectory.dimensions().count()
+        );
+        assert!(manifest.entries().iter().all(|e| e.ends_with("\treached")));
+    }
+
+    #[test]
+    fn a_declared_dimension_never_reached_is_a_violation() {
+        let census = Census::new(declared(&[Kind::FsChange]), &[]);
+        reach_all(&census, &[Dimension::Appears]);
+        let violations = census.violations();
+        assert_eq!(violations.len(), 1, "{violations:?}");
+        assert!(violations[0].starts_with("change.appears is declared and no value"));
+        assert!(census.report().contains("change.appears: NEVER REACHED"));
+    }
+
+    #[test]
+    fn a_census_with_no_plain_value_is_a_violation() {
+        let census = Census::new(declared(&[Kind::FsChange]), &[]);
+        for dimension in census.owed() {
+            census.reached(&BTreeSet::from([dimension]), "decline");
+        }
+        assert!(census.violations()[0].starts_with("no value of the harness's own"));
+    }
+
+    #[test]
+    fn an_excluded_dimension_is_not_owed_and_must_stay_unreached() {
+        let excluded = [(Dimension::Appears, "the subject is handed one snapshot")];
+        let census = Census::new(declared(&[Kind::FsChange]), &excluded);
+        reach_all(&census, &[]);
+        assert_eq!(census.violations(), Vec::<String>::new());
+        assert!(
+            census.manifest(None).entries().contains(
+                &"change.appears\texcluded: the subject is handed one snapshot".to_owned()
+            )
+        );
+        census.reached(&BTreeSet::from([Dimension::Appears]), "commit");
+        assert!(census.violations()[0].contains("remove the exclusion"));
+    }
+
+    #[test]
+    fn a_dimension_of_an_undeclared_kind_is_a_violation() {
+        let census = Census::new(declared(&[Kind::FsChange]), &[]);
+        reach_all(&census, &[]);
+        census.reached(&BTreeSet::from([Dimension::Fifo]), "decline");
+        assert!(census.violations()[0].contains("declares no fs"));
+    }
+
+    #[test]
+    fn a_dimension_the_platform_cannot_make_keeps_another_platforms_line() {
+        let census = Census::new(declared(&[Kind::FsChange]), &[]);
+        reach_all(&census, &[Dimension::Appears]);
+        census.unmakeable(Dimension::Appears, "no such thing here");
+        assert_eq!(census.violations(), Vec::<String>::new());
+        // With nothing pinned, the line says so, and a platform that reaches
+        // the dimension then fails against it.
+        assert!(
+            census
+                .manifest(None)
+                .entries()
+                .contains(&"change.appears\tunmade: no such thing here".to_owned())
+        );
+        let elsewhere = Manifest::from_entries(["change.appears\treached".to_owned()]).unwrap();
+        assert!(
+            census
+                .manifest(Some(&elsewhere))
+                .entries()
+                .contains(&"change.appears\treached".to_owned())
+        );
+        // A pinned `unmade` line is replaced by this platform's own reason.
+        let unmade = Manifest::from_entries(["change.appears\tunmade: other".to_owned()]).unwrap();
+        assert!(
+            census
+                .manifest(Some(&unmade))
+                .entries()
+                .contains(&"change.appears\tunmade: no such thing here".to_owned())
+        );
+    }
+
+    #[test]
+    fn finishing_pins_the_manifest_and_fails_on_movement() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("census.txt");
+        let run = |except: &[Dimension], excluded: &[(Dimension, &'static str)]| {
+            let census = Census::new(declared(&[Kind::FsChange]), excluded);
+            reach_all(&census, except);
+            let pinned = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|t| Manifest::parse(&t).ok());
+            manifest::compare_with(&path, &census.manifest(pinned.as_ref()), "regen", false)
+        };
+        // Written once, as a regeneration does.
+        let first = Census::new(declared(&[Kind::FsChange]), &[]);
+        reach_all(&first, &[]);
+        manifest::compare_with(&path, &first.manifest(None), "regen", true).unwrap();
+        assert_eq!(run(&[], &[]), Ok(()));
+        // Excluding a dimension moves its line.
+        let moved = run(&[], &[(Dimension::Appears, "why")]).unwrap_err();
+        assert!(moved.contains("change.appears"), "{moved}");
+        // The whole of `finish`, against the same file.
+        let whole = Census::new(declared(&[Kind::FsChange]), &[]);
+        reach_all(&whole, &[]);
+        whole.finish_at(&path, "regen");
+    }
+
+    #[test]
+    #[should_panic(expected = "the census draws no fs")]
+    fn excluding_a_dimension_of_an_undeclared_kind_is_refused() {
+        Census::new(declared(&[Kind::FsChange]), &[(Dimension::Fifo, "why")]);
+    }
+
+    #[test]
+    #[should_panic(expected = "without a reason")]
+    fn excluding_without_a_reason_is_refused() {
+        Census::new(declared(&[Kind::FsChange]), &[(Dimension::Appears, " ")]);
+    }
+}
