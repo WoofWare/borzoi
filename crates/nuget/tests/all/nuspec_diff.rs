@@ -36,9 +36,11 @@ fn respell(input: &str, how: xml::How) -> Option<String> {
     let mut in_root = false;
     while let Some(open) = rest.find('<') {
         let (text, tag_and_rest) = rest.split_at(open);
+        // A spelling the text is written in already changes nothing.
         let spelt = (in_root && !text.is_empty() && text.trim().is_empty())
             .then(|| xml::spell(text, how, xml::Place::Element))
-            .flatten();
+            .flatten()
+            .filter(|spelt| spelt.xml != text);
         match spelt {
             Some(spelt) => {
                 changed = true;
@@ -59,7 +61,8 @@ fn respell(input: &str, how: xml::How) -> Option<String> {
                 // Every other piece is between quotes: a value.
                 let spelt = (index % 2 == 0 && !piece.contains('&'))
                     .then(|| xml::spell(piece, how, xml::Place::Attribute))
-                    .flatten();
+                    .flatten()
+                    .filter(|spelt| spelt.xml != piece);
                 match spelt {
                     Some(spelt) => {
                         changed = true;
@@ -460,7 +463,16 @@ fn oracle_i64(v: &serde_json::Value, field: &str) -> i64 {
 
 #[test]
 fn nuspec_dependency_projection_agrees_with_oracle() {
-    let census = hostile::coverage::open(file!(), CENSUS, &[]);
+    let census = hostile::coverage::open(
+        file!(),
+        CENSUS,
+        &[(
+            Dimension::LiteralWhitespace,
+            "the fixtures write their whitespace literally already, and no compared attribute \
+             holds a tab or a line break, so no fixture has a literal-whitespace spelling other \
+             than itself",
+        )],
+    );
     let mut oracle = Oracle::spawn();
     let mut mismatches = Vec::new();
     let cases = nuspec_cases();

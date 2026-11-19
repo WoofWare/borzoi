@@ -767,12 +767,17 @@ fn gen_case(rng: &mut SplitMix64, base: &Path, cli_home: bool) -> Case {
                 continue;
             }
             let spelling = rng.pick(WALK_SPELLINGS);
-            let (bytes, fault) = gen_config(rng, base, mix, &mut hostile);
+            // Two spellings in one folder may be one file (the same pick, or
+            // a volume that ignores case), the second written over the
+            // first: neither then holds a hostile spelling, which the census
+            // would count for bytes no reader saw.
+            let two = rng.below(10) == 0;
+            let (bytes, fault) = gen_config(rng, base, mix && !two, &mut hostile);
             unread_fault |= fault;
             files.push((format!("{folder}/{spelling}"), bytes));
-            if rng.below(10) == 0 {
+            if two {
                 let other = rng.pick(WALK_SPELLINGS);
-                let (bytes, fault) = gen_config(rng, base, mix, &mut hostile);
+                let (bytes, fault) = gen_config(rng, base, false, &mut hostile);
                 unread_fault |= fault;
                 files.push((format!("{folder}/{other}"), bytes));
             }
@@ -838,7 +843,9 @@ fn gen_case(rng: &mut SplitMix64, base: &Path, cli_home: bool) -> Case {
             files.push((format!("{folder}/{name}"), bytes));
         }
         if let Some((dimension, name)) = hostile_name {
-            let (bytes, fault) = gen_config(rng, base, mix, hostile);
+            // Its content holds no hostile spelling: on a volume that ignores
+            // case a listed name written after it may be the same file.
+            let (bytes, fault) = gen_config(rng, base, false, hostile);
             unread_fault |= fault;
             hostile.insert(dimension);
             placements.push(Placement {

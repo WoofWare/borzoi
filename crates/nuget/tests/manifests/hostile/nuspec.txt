@@ -5,4 +5,4 @@ plain	reached
 xml.cdata	reached
 xml.char-ref	reached
 xml.comment-split	reached
-xml.literal-whitespace	reached
+xml.literal-whitespace	excluded: the fixtures write their whitespace literally already, and no compared attribute holds a tab or a line break, so no fixture has a literal-whitespace spelling other than itself
