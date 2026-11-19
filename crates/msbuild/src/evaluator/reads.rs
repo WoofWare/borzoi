@@ -132,10 +132,15 @@ impl State<'_> {
             .iter()
             .map(|name| (name.clone(), self.read_property(name)))
             .collect();
+        // MSBuild may hold no value for anything (`ParsedProject::rejection`).
+        let rejected = self.rejection.is_some();
         let candidates = probe
             .properties
             .iter()
             .map(|name| {
+                if rejected {
+                    return (name.clone(), None);
+                }
                 // The current file's names hold the file's while the walk
                 // expands it, and nothing once it has finished, and MSBuild
                 // adds to `MSBuildAllProjects` once it has: what the walk

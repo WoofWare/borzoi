@@ -2051,6 +2051,10 @@ impl<'r> State<'r> {
             if !self.lookup.is_bound(name)
                 && !self.env_property_names.contains(&name.to_ascii_lowercase())
             {
+                // A refused write unbound the slot this fills, and the build
+                // holds that write's value, not the toolset's (#1049): the
+                // candidate channel names nothing past it.
+                self.candidates_withdrawn |= self.trust_of(name).refused();
                 // Same provenance as the reserved seeds above: our own paths.
                 self.lookup.insert_computed(name, value);
             }
@@ -4809,7 +4813,10 @@ fn walk_property_child_inner(
         || !own_gate_decided_for_candidates
         || state.inside_doubted_gate();
     let before = doubted.then(|| state.candidates_of(&name));
-    let value_candidates = (state.track_candidates && !state.reads_only_certain(&raw))
+    // A doubted write's value is one the real build may not have written as
+    // the walk did, so it is expanded as speculatively as an untaken one
+    // ([`candidates`]): assuming nothing of MSBuild's working directory.
+    let value_candidates = (state.track_candidates && (doubted || !state.reads_only_certain(&raw)))
         .then(|| state.value_candidates(&raw));
     let carried_certain = carried.is_certain();
     state.write_property(&name, value, provenance);

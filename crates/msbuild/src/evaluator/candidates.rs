@@ -225,7 +225,10 @@ impl State<'_> {
         }
         for element in group.children().filter(Node::is_element) {
             let name = element.tag_name().name();
+            // A name the walk holds exactly reads as its value whatever is
+            // recorded, so it needs no record.
             if self.protected.contains(&name.to_ascii_lowercase())
+                || self.held_exactly_for_candidates(name)
                 || self.ruled_out_without_files(element)
             {
                 continue;
