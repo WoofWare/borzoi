@@ -56,6 +56,11 @@
 //! ([`MarkerRoutes::Unknown`]), in which case every attribute may denote every
 //! marker.
 //!
+//! Whether a type application, or a bare type name, is a generative type
+//! provider's (`type T = Gen<N>`, `N` a literal) depends on whether one of A's
+//! references is a provider: the caller states that too
+//! ([`ProviderReferences`]).
+//!
 //! # The input inventory
 //!
 //! Every channel through which A's source or evaluation decides its surface
@@ -63,15 +68,20 @@
 //! [`Channel::treatment`]. The unit test `the_inventory_is_what_the_walk_does`
 //! runs one witness per channel and holds the walk to its treatment.
 
+// A match over a syntax enum that skips the kinds it does not name is where
+// a construct the walk never reads hides: every arm names its kinds, so a
+// new one is a compile error until the walk reads it or declines it.
+#![deny(clippy::wildcard_enum_match_arm)]
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use borzoi_assembly::existence::{
     ExistenceIndex, ExtensionRow, IndexLayer, PickleLayer, PickledEntityKind, PickledEntityRow,
 };
 use borzoi_cst::syntax::{
-    AstNode, Attribute, AttributeList, Binding, Expr, LongIdent, MemberDefn, MemberLetBindings,
-    ModuleDecl, ModuleOrNamespace, ModuleOrNamespaceKind, Pat, SigDecl, SyntaxKind, SyntaxNode,
-    TextSize, Type, TypeDefn, TypeDefnRepr,
+    AstNode, Attribute, AttributeList, Binding, Expr, ImplicitCtor, LongIdent, MemberDefn,
+    MemberLetBindings, ModuleDecl, ModuleOrNamespace, ModuleOrNamespaceKind, Pat, SigDecl,
+    SyntaxKind, SyntaxNode, TextSize, Type, TypeDefn, TypeDefnRepr,
 };
 
 use crate::FcsRange;
@@ -636,28 +646,26 @@ fn written_name(attr: &Attribute) -> Option<Vec<String>> {
 /// text: a regular string with no escape, a verbatim string, and a
 /// triple-quoted one. `None` for anything else.
 fn string_literal(expr: &Expr) -> Option<String> {
-    match expr {
-        Expr::Paren(p) => p.inner().as_ref().and_then(string_literal),
-        Expr::Const(c) => {
-            let tok = c.literal()?;
-            let text = tok.text();
-            match tok.kind() {
-                SyntaxKind::STRING_LIT => {
-                    let inner = text.strip_prefix('"')?.strip_suffix('"')?;
-                    (!inner.contains('\\')).then(|| inner.to_owned())
-                }
-                SyntaxKind::VERBATIM_STRING_LIT => {
-                    let inner = text.strip_prefix("@\"")?.strip_suffix('"')?;
-                    Some(inner.replace("\"\"", "\""))
-                }
-                SyntaxKind::TRIPLE_STRING_LIT => {
-                    let inner = text.strip_prefix("\"\"\"")?.strip_suffix("\"\"\"")?;
-                    Some(inner.to_owned())
-                }
-                _ => None,
-            }
-        }
-        _ => None,
+    if let Expr::Paren(p) = expr {
+        return p.inner().as_ref().and_then(string_literal);
+    }
+    let Expr::Const(c) = expr else {
+        return None;
+    };
+    let tok = c.literal()?;
+    let text = tok.text();
+    let kind = tok.kind();
+    if kind == SyntaxKind::STRING_LIT {
+        let inner = text.strip_prefix('"')?.strip_suffix('"')?;
+        (!inner.contains('\\')).then(|| inner.to_owned())
+    } else if kind == SyntaxKind::VERBATIM_STRING_LIT {
+        let inner = text.strip_prefix("@\"")?.strip_suffix('"')?;
+        Some(inner.replace("\"\"", "\""))
+    } else if kind == SyntaxKind::TRIPLE_STRING_LIT {
+        let inner = text.strip_prefix("\"\"\"")?.strip_suffix("\"\"\"")?;
+        Some(inner.to_owned())
+    } else {
+        None
     }
 }
 
@@ -1021,7 +1029,12 @@ impl FileWalk<'_> {
                         }
                         ModuleDecl::Exception(e) => exception(i, e, &mut ctx),
                         ModuleDecl::Open(_) | ModuleDecl::NestedModule(_) => ctx.barriers.push(i),
-                        _ => {}
+                        ModuleDecl::Let(_)
+                        | ModuleDecl::Extern(_)
+                        | ModuleDecl::Expr(_)
+                        | ModuleDecl::ModuleAbbrev(_)
+                        | ModuleDecl::Attributes(_)
+                        | ModuleDecl::HashDirective(_) => {}
                     }
                 }
             }
@@ -1035,7 +1048,7 @@ impl FileWalk<'_> {
                         }
                         SigDecl::Exception(e) => exception(i, e, &mut ctx),
                         SigDecl::Open(_) | SigDecl::NestedModule(_) => ctx.barriers.push(i),
-                        _ => {}
+                        SigDecl::Val(_) | SigDecl::ModuleAbbrev(_) | SigDecl::HashDirective(_) => {}
                     }
                 }
             }
@@ -1101,6 +1114,7 @@ impl FileWalk<'_> {
                 let marks = self.routes.entity_marks(&attrs);
                 let members: Vec<MemberDefn> = e.members().collect();
                 self.members(&scope.inner(&name), &members, None)?;
+                self.type_bodies(&scope.inner(&name), None, &members)?;
                 self.entity(scope, &name, &[PickledEntityKind::Exception], &marks, false)
             }
             ModuleDecl::Let(l) => {
@@ -1173,6 +1187,7 @@ impl FileWalk<'_> {
                 let marks = self.routes.entity_marks(&attrs);
                 let members: Vec<MemberDefn> = e.members().collect();
                 self.members(&scope.inner(&name), &members, None)?;
+                self.type_bodies(&scope.inner(&name), None, &members)?;
                 self.entity(scope, &name, &[PickledEntityKind::Exception], &marks, false)
             }
             SigDecl::Val(v) => {
@@ -1292,8 +1307,7 @@ impl FileWalk<'_> {
                 let target = a.ty();
                 let provided = |t: &Type| {
                     has_static_argument(t)
-                        || (self.providers == ProviderReferences::Possible
-                            && has_prefix_application(t))
+                        || (self.providers == ProviderReferences::Possible && may_be_provided(t))
                 };
                 if target.as_ref().is_some_and(provided) {
                     return Err(ExistenceUnread::TypeProvider(self.index));
@@ -1309,7 +1323,7 @@ impl FileWalk<'_> {
         }
         let inner = scope.inner(&name);
         self.members(&inner, &members, None)?;
-        self.type_bodies(&inner, defn, &members)?;
+        self.type_bodies(&inner, defn.implicit_ctor(), &members)?;
         self.entity(scope, &name, &kinds, &marks, true)
     }
 
@@ -1353,24 +1367,27 @@ impl FileWalk<'_> {
         }
     }
 
-    /// The rows of what a type declares beside its members: a primary
+    /// The rows of what a type, an augmentation or an exception declares
+    /// beside its members (`ctor` its primary constructor): a primary
     /// constructor and class `let`s under `[<Extension>]` are pickled as
     /// C#-style rows; a marked interface implementation's member has an
-    /// interface-qualified compiled name the walk does not spell.
+    /// interface-qualified compiled name the walk does not spell. Every
+    /// caller of [`Self::members`] runs this too, so between them every
+    /// member kind is read.
     fn type_bodies(
         &mut self,
         inner: &Scope,
-        defn: &TypeDefn,
+        ctor: Option<ImplicitCtor>,
         members: &[MemberDefn],
     ) -> Result<(), ExistenceUnread> {
-        if let Some(ctor) = defn.implicit_ctor() {
+        if let Some(ctor) = &ctor {
             let lists: Vec<AttributeList> = ctor.attributes().collect();
             let marks = self.routes.entity_marks(&lists);
             if marks.may(Marker::Extension) {
                 self.csharp_row(inner, ".ctor", &marks)?;
             }
         }
-        self.class_lets(inner, defn, members)?;
+        self.class_lets(inner, ctor.as_ref(), members)?;
         for m in members {
             if let MemberDefn::Interface(i) = m {
                 for im in i.members() {
@@ -1403,14 +1420,17 @@ impl FileWalk<'_> {
     fn class_lets(
         &mut self,
         inner: &Scope,
-        defn: &TypeDefn,
+        ctor: Option<&ImplicitCtor>,
         members: &[MemberDefn],
     ) -> Result<(), ExistenceUnread> {
         let lets: Vec<&MemberLetBindings> = members
             .iter()
-            .filter_map(|m| match m {
-                MemberDefn::LetBindings(l) => Some(l),
-                _ => None,
+            .filter_map(|m| {
+                if let MemberDefn::LetBindings(l) = m {
+                    Some(l)
+                } else {
+                    None
+                }
             })
             .collect();
         // Each binding with its attribute lists: a group's own lists mark
@@ -1440,8 +1460,7 @@ impl FileWalk<'_> {
         // An upper bound on the type's binders: every identifier or
         // wildcard of the constructor's arguments, its self identifier, and
         // each binding's identifiers and matched value.
-        let ctor = defn.implicit_ctor();
-        let ctor_binders = ctor.as_ref().and_then(|c| c.args()).map_or(0, |p| {
+        let ctor_binders = ctor.and_then(|c| c.args()).map_or(0, |p| {
             p.syntax()
                 .descendants_with_tokens()
                 .filter_map(|el| el.into_token())
@@ -1449,7 +1468,7 @@ impl FileWalk<'_> {
                 .count()
         });
         let binders = ctor_binders
-            + usize::from(ctor.as_ref().and_then(|c| c.self_id()).is_some())
+            + usize::from(ctor.and_then(|c| c.self_id()).is_some())
             + bindings
                 .iter()
                 .map(|(b, _)| b.pat().map_or(0, |p| pattern_idents(&p).len()) + 1)
@@ -1525,7 +1544,23 @@ impl FileWalk<'_> {
             self.within_budget()?;
             let (lists, shape) = member_shape(m);
             let (vals, role) = match shape {
-                MemberShape::NoVal => continue,
+                MemberShape::NoVal => match m {
+                    // A `do` binds nothing; a `let` and an interface
+                    // implementation are [`Self::type_bodies`]'s, which
+                    // every caller runs.
+                    MemberDefn::Do(_) | MemberDefn::LetBindings(_) | MemberDefn::Interface(_) => {
+                        continue;
+                    }
+                    MemberDefn::Member(_)
+                    | MemberDefn::ValField(_)
+                    | MemberDefn::Inherit(_)
+                    | MemberDefn::GetSetMember(_)
+                    | MemberDefn::AutoProperty(_)
+                    | MemberDefn::AbstractSlot(_)
+                    | MemberDefn::MemberSig(_) => {
+                        return Err(ExistenceUnread::UnnamedDeclaration(self.index));
+                    }
+                },
                 MemberShape::Inherit => {
                     if augmented.is_some() {
                         self.out.approximations.insert(Approximation::RejectedShape);
@@ -1622,15 +1657,15 @@ impl FileWalk<'_> {
                         .approximations
                         .insert(Approximation::UncertainAttribute);
                 }
-                if marks.compiled_name_unreadable && v.accessor.is_none() {
-                    return Err(ExistenceUnread::UnreadableCompiledName(self.index));
-                }
                 // A `[<CompiledName>]` renames a method, never a property's
                 // or an event's accessor. A signature's getter reading may be
                 // a method whose type the walk does not classify (`'T -> bool
                 // when 'T: equality`), so its rename applies too.
                 let renames =
                     (v.accessor.is_none() || signature) && !event_vals.contains(&v.logical);
+                if marks.compiled_name_unreadable && renames {
+                    return Err(ExistenceUnread::UnreadableCompiledName(self.index));
+                }
                 match augmented {
                     Some(type_names) => {
                         if role == MemberRole::Constructor {
@@ -1749,6 +1784,11 @@ impl FileWalk<'_> {
                 if names.is_empty() {
                     return Err(ExistenceUnread::UnnamedDeclaration(self.index));
                 }
+                // A row per name and compiled name: charged before expanding.
+                let rows = names.len() * (marks.compiled_names.len() + 1);
+                if self.out.entities.len() + self.out.extensions.len() + rows > MAX_ROWS {
+                    return Err(ExistenceUnread::TooManyReadings);
+                }
                 self.out
                     .approximations
                     .insert(Approximation::BindingPattern);
@@ -1822,6 +1862,23 @@ impl FileWalk<'_> {
                 .approximations
                 .insert(Approximation::AugmentationKind);
         }
+        // A marked `let` compiles into the type only where the augmentation
+        // is intrinsic (FCS rejects one elsewhere, with no recovery the walk
+        // knows).
+        let marked_let = members.iter().any(|m| {
+            let MemberDefn::LetBindings(l) = m else {
+                return false;
+            };
+            let mut lists: Vec<AttributeList> = l.attributes().collect();
+            for b in l.bindings() {
+                lists.extend(b.attributes());
+            }
+            self.routes.marks(&lists).may(Marker::Extension)
+        });
+        if marked_let && intrinsic != Maybe::Yes {
+            return Err(ExistenceUnread::UnnamedDeclaration(self.index));
+        }
+        self.type_bodies(&scope.inner(&last), None, &members)?;
         if intrinsic != Maybe::No {
             self.members(&scope.inner(&last), &members, None)?;
             if intrinsic == Maybe::Yes {
@@ -1889,6 +1946,14 @@ fn certainly_class_like(defn: &TypeDefn) -> bool {
 fn is_augmentation(defn: &TypeDefn) -> bool {
     matches!(defn.repr(), Some(TypeDefnRepr::ObjectModel(om)) if om.is_augmentation())
         || defn.tuple_type_head().is_some()
+        // A signature's `type T with member …`: no representation, its
+        // `with` directly on the definition.
+        || (defn.repr().is_none()
+            && defn
+                .syntax()
+                .children_with_tokens()
+                .filter_map(|el| el.into_token())
+                .any(|t| t.kind() == SyntaxKind::WITH_TOK))
 }
 
 fn long_id_segments(li: Option<LongIdent>) -> Option<Vec<String>> {
@@ -1934,19 +1999,19 @@ pub(crate) const FSHARP_CORE_TYPE_NAMES: &[&str] = &[
 /// The single identifier an abbreviation's target names, parentheses
 /// stripped: the shape FCS may read as a union case.
 fn abbrev_single_ident(ty: &Type) -> Option<String> {
-    match ty {
-        Type::Paren(p) => p.inner().as_ref().and_then(abbrev_single_ident),
-        Type::LongIdent(t) => {
-            let li = t.long_ident()?;
-            let mut idents = li.idents();
-            let first = idents.next()?;
-            idents
-                .next()
-                .is_none()
-                .then(|| id_text(&first).into_owned())
-        }
-        _ => None,
+    if let Type::Paren(p) = ty {
+        return p.inner().as_ref().and_then(abbrev_single_ident);
     }
+    let Type::LongIdent(t) = ty else {
+        return None;
+    };
+    let li = t.long_ident()?;
+    let mut idents = li.idents();
+    let first = idents.next()?;
+    idents
+        .next()
+        .is_none()
+        .then(|| id_text(&first).into_owned())
 }
 
 /// Whether a type holds a static argument (a type provider's): a constant
@@ -1976,17 +2041,34 @@ fn tuple_arity(head: &borzoi_cst::syntax::TupleTypeExtensionHead) -> usize {
     }
 }
 
+/// Whether an abbreviation's target may be a generative provider's type,
+/// where a reference may be a provider: a prefix application (`Gen<N>`,
+/// whose arguments may be static ones), or a bare name, which FCS hands a
+/// provider with an empty argument list (`Provider.Generated`). Only a
+/// structural type (a tuple, a function, an array, a variable) or a type
+/// FSharp.Core declares in every file's scope is no provider's.
+fn may_be_provided(ty: &Type) -> bool {
+    if let Type::Paren(p) = ty {
+        return p.inner().as_ref().is_some_and(may_be_provided);
+    }
+    if let Type::LongIdent(t) = ty {
+        return match abbrev_single_ident(ty) {
+            Some(name) => !FSHARP_CORE_TYPE_NAMES.contains(&name.as_str()),
+            None => t.long_ident().is_some(),
+        };
+    }
+    has_prefix_application(ty)
+}
+
 /// Whether a type applies a head to arguments in angle brackets (`Foo<N>`):
 /// a provider's static arguments may be among them.
 fn has_prefix_application(ty: &Type) -> bool {
     std::iter::once(ty.syntax().clone())
         .chain(ty.syntax().descendants())
-        .any(|n| match n.kind() {
-            SyntaxKind::LONG_IDENT_APP_TYPE => true,
-            SyntaxKind::APP_TYPE => {
-                borzoi_cst::syntax::AppType::cast(n).is_some_and(|a| !a.is_postfix())
-            }
-            _ => false,
+        .any(|n| {
+            n.kind() == SyntaxKind::LONG_IDENT_APP_TYPE
+                || (n.kind() == SyntaxKind::APP_TYPE
+                    && borzoi_cst::syntax::AppType::cast(n).is_some_and(|a| !a.is_postfix()))
         })
 }
 
@@ -2064,7 +2146,21 @@ fn binding_name_at(pat: &Pat, top: bool) -> Option<String> {
         Pat::Paren(p) => p.inner().as_ref().and_then(|p| binding_name_at(p, false)),
         Pat::Typed(t) => t.pat().as_ref().and_then(|p| binding_name_at(p, top)),
         Pat::Attrib(a) => a.pat().as_ref().and_then(|p| binding_name_at(p, top)),
-        _ => None,
+        // A pattern binding no single name, or several.
+        Pat::Wildcard(_)
+        | Pat::Const(_)
+        | Pat::MeasureLit(_)
+        | Pat::Null(_)
+        | Pat::Tuple(_)
+        | Pat::As(_)
+        | Pat::ArrayOrList(_)
+        | Pat::Record(_)
+        | Pat::IsInst(_)
+        | Pat::ListCons(_)
+        | Pat::Ands(_)
+        | Pat::Or(_)
+        | Pat::OptionalVal(_)
+        | Pat::Quote(_) => None,
     }
 }
 

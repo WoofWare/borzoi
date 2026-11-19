@@ -32,6 +32,10 @@
 //! a region holds an attribute list, a directive or an active-pattern member,
 //! whose effect no single token's name bounds.
 
+// The member reader the existence walk dispatches through: every arm names
+// its kinds, so a new syntax kind is read or declined, never skipped.
+#![deny(clippy::wildcard_enum_match_arm)]
+
 use crate::FcsRange as _;
 use borzoi_assembly::op_name::compile_op_name;
 use borzoi_cst::syntax::{

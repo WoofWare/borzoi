@@ -661,6 +661,26 @@ fn a_type_application_may_be_a_provider_only_where_a_reference_may_be_one() {
         "Lib.fs",
         "namespace N\nmodule C =\n    [<Literal>]\n    let N = 2\ntype T = Gen<C.N>\ntype L = int list\n",
     )];
+    // A bare name: FCS hands a provider an empty argument list.
+    let bare = [(
+        "Lib.fs",
+        "namespace N\ntype T = Provider.Generated\ntype I = int\n",
+    )];
+    let bare_project = project(&bare);
+    let bare_refs: Vec<&ProjectFile> = bare_project.iter().collect();
+    let bare_routes = certify_by_spelling(&bare_refs);
+    let bare_items: Vec<CompileItem<'_>> = bare_project.iter().map(CompileItem::Parsed).collect();
+    assert!(
+        matches!(
+            source_existence(Producer::Evaluated {
+                items: &bare_items,
+                routes: &bare_routes,
+                providers: ProviderReferences::Possible,
+            }),
+            SourceExistence::Unread(ExistenceUnread::TypeProvider(0))
+        ),
+        "a possible provider's bare type declines"
+    );
     let project = project(&src);
     let refs: Vec<&ProjectFile> = project.iter().collect();
     let routes = certify_by_spelling(&refs);

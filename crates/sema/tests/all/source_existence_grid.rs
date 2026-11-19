@@ -513,6 +513,47 @@ pub fn cells() -> Vec<Cell> {
             "self_named_generic_abbreviation",
             "namespace SelfGeneric\ntype Foo = { X: int }\n[<System.Runtime.CompilerServices.Extension>]\ntype Foo<'a> = Foo\n",
         ),
+        // Codex round 4's shapes.
+        one(
+            "intrinsic_augmentation_class_let",
+            "module AugLet\ntype T() =\n    member _.X = 1\ntype T with\n    [<System.Runtime.CompilerServices.Extension>]\n    static let f (s: string) = s\n    static member G = f \"x\"\n",
+        ),
+        Cell::new(
+            "signature_method_unreadable_rename",
+            &[
+                (
+                    "Lib.fsi",
+                    "module SigRename\ntype T =\n    new: unit -> T\n    [<System.Runtime.CompilerServices.Extension; CompiledName(\"X\" + \"Y\")>]\n    static member M: s: 'T -> bool when 'T: equality\n",
+                ),
+                (
+                    "Lib.fs",
+                    "module SigRename\ntype T() =\n    [<CompiledName(\"XY\")>]\n    static member M(s: 'T) = s = s\n",
+                ),
+            ],
+        ),
+        Cell::new(
+            "signature_augmentation",
+            &[
+                (
+                    "Lib.fsi",
+                    "module SigAug\ntype System.String with\n    member S: int\n",
+                ),
+                (
+                    "Lib.fs",
+                    "module SigAug\ntype System.String with\n    member s.S = 1\n",
+                ),
+            ],
+        ),
+        Cell::new(
+            "signature_augmentation_missing_in_implementation",
+            &[
+                (
+                    "Lib.fsi",
+                    "module SigAugMissing\ntype System.String with\n    member S: int\n",
+                ),
+                ("Lib.fs", "module SigAugMissing\nlet x = 1\n"),
+            ],
+        ),
         // A standalone attribute with no target is the assembly's when the
         // attribute allows it, as `[<AutoOpen>]` does.
         one(

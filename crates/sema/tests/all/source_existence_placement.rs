@@ -299,6 +299,13 @@ const MEMBER_SNIPPETS: &[(&str, &str, &str)] = &[
         "event",
         "{I}{A}\n{I}member x.Ev = Event<int>().Publish\n",
     ),
+    // A `let` in every context: the type's own, an augmentation's (where
+    // FCS rejects it, or for an intrinsic one compiles it into the type).
+    (
+        "MemberLetBindings",
+        "class_let",
+        "{I}{A}\n{I}static let f (s: string) = s\n{I}static member UseF = f \"x\"\n",
+    ),
 ];
 
 /// The shapes a signature's type takes, which decide whether its member is
@@ -344,6 +351,22 @@ fn templates() -> Vec<Template> {
         }
     }
     for (shape, ty) in SIGNATURE_TYPES {
+        // A signature file's augmentation: no representation, its `with`
+        // directly on the definition, its members signatures.
+        out.push(Template {
+            node: "MemberSig",
+            label: format!("signature_augmentation_{shape}"),
+            files: vec![
+                (
+                    "Lib.fsi".to_owned(),
+                    format!("module G\ntype System.String with\n    {{A}}\n    member S: {ty}\n"),
+                ),
+                (
+                    "Lib.fs".to_owned(),
+                    "module G\ntype System.String with\n    member s.S = 1\n".to_owned(),
+                ),
+            ],
+        });
         out.push(Template {
             node: "MemberSig",
             label: format!("member_signature_{shape}"),

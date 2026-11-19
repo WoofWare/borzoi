@@ -280,9 +280,9 @@ pub fn try_invoke_fcs_dump_with_refs(
 
 /// The number of resident `fcs-dump` pools in this test binary; the child budget
 /// (`BORZOI_FCS_CHILDREN`, default three a pool) is split evenly between them,
-/// mirroring `cst`'s harness. Three: the single-file `file-batch` pool
+/// mirroring `cst`'s harness. Four: the single-file `file-batch` pool
 /// ([`fcs_file_batch_pool`]), the multi-file `uses-project` pool
-/// ([`fcs_project_batch_pool`]), and the legacy oracle's `file-batch` pool
+/// ([`fcs_project_batch_pool`]), the legacy oracle's `file-batch` pool
 /// ([`legacy_file_batch_pool`]), which spawns only for a check below the
 /// support floor, and the project-graph pool ([`fcs_graph_batch_pool`]).
 const FCS_POOLS: usize = 4;
@@ -292,13 +292,23 @@ const FCS_POOLS: usize = 4;
 /// MB and lives until the test binary exits, so the default is deliberately
 /// modest (and, like `cst`, a machine with sibling worktrees running their own
 /// suites should not be crowded out); override with `BORZOI_FCS_CHILDREN`.
+///
+/// # Panics
+///
+/// On a `BORZOI_FCS_CHILDREN` below [`FCS_POOLS`]: each pool keeps one child,
+/// so the cap could not hold, and exceeding it silently is no cap.
 fn fcs_children_budget() -> usize {
-    std::env::var("BORZOI_FCS_CHILDREN")
+    let budget = std::env::var("BORZOI_FCS_CHILDREN")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
         .filter(|n| *n > 0)
-        .unwrap_or(3 * FCS_POOLS)
-        .max(FCS_POOLS)
+        .unwrap_or(3 * FCS_POOLS);
+    assert!(
+        budget >= FCS_POOLS,
+        "BORZOI_FCS_CHILDREN={budget} is below the {FCS_POOLS} oracle pools this binary \
+         keeps a child each in; set it to at least {FCS_POOLS}"
+    );
+    budget
 }
 
 /// The lowest language version the current oracle's compiler supports

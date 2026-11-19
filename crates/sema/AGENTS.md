@@ -54,7 +54,11 @@ grades those itself.** Its input enumerates what only the caller knows (an
 unreadable Compile item, a refused fold, an unserved producer TFM) and what
 A's references route each written attribute name to (`MarkerRoutes`:
 `Unknown`, or a `Certified` map in which an omitted name reads as
-`Unknown`). Every channel it reads is a `Channel` with a `Treatment`, and
+`Unknown`), and whether one of them may be a type provider
+(`ProviderReferences`, under which any abbreviation to a named type
+declines). Every match over a syntax enum in the walk and its member reader
+names its kinds (`clippy::wildcard_enum_match_arm` is denied there), so a
+construct no arm reads is a compile error, not a silent skip. Every channel it reads is a `Channel` with a `Treatment`, and
 `the_inventory_is_what_the_walk_does` runs a witness of each. The harness
 grades a hand-written grid (`source_existence_grid.rs`), generated projects
 (`source_existence_gen.rs`, `deep_` for more seeds), and the
