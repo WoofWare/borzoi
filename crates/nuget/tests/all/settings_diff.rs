@@ -117,6 +117,10 @@ struct Case {
     folders: Vec<&'static str>,
     variables: Vec<(&'static str, Option<String>)>,
     root: String,
+    /// The name the user config is written under, where the case has one.
+    /// `NuGet.Config` is loaded on every platform; `nuget.config` only where
+    /// the file system ignores case.
+    user_config: Option<&'static str>,
 }
 
 /// What grading one case found.
@@ -447,17 +451,17 @@ fn gen_case(rng: &mut SplitMix64, base: &Path, cli_home: bool) -> Case {
     let home = if cli_home { "cli-home" } else { "home" };
     // Mostly present: the model declines where there is no user config,
     // which NuGet would write.
-    if rng.below(8) != 0 {
+    let user_config = (rng.below(8) != 0).then(|| {
         // Mostly the spelling NuGet loads on every platform: on Linux the
-        // other is no user config, which the model declines, and the
-        // generator's commits must stay above its floor there too.
+        // other is no user config.
         let spelling = if rng.below(16) == 0 {
             "nuget.config"
         } else {
             "NuGet.Config"
         };
         files.push((format!("{home}/.nuget/NuGet/{spelling}"), config(rng)));
-    }
+        spelling
+    });
     let mut listed = |folder: &str, rng: &mut SplitMix64| {
         let mut names = BTreeSet::new();
         for _ in 0..=rng.below(3) {
@@ -505,6 +509,7 @@ fn gen_case(rng: &mut SplitMix64, base: &Path, cli_home: bool) -> Case {
             ("BORZOI_GPF_EMPTY", Some(String::new())),
         ],
         root,
+        user_config,
     }
 }
 
@@ -512,6 +517,9 @@ fn gen_case(rng: &mut SplitMix64, base: &Path, cli_home: bool) -> Case {
 #[derive(Default, Debug)]
 struct Census {
     cases: usize,
+    /// The cases whose user config is spelt as every platform loads it: the
+    /// ones a commit is possible in wherever the sweep runs.
+    user_config: usize,
     environment: usize,
     config: usize,
     config_relative: usize,
@@ -532,7 +540,20 @@ fn sweep(seed: u64, cases: usize, cli_home: bool) -> Census {
     for _ in 0..cases {
         let case = gen_case(&mut rng, &harness.base.clone(), cli_home);
         census.cases += 1;
-        match grade(&mut harness, &case) {
+        if case.user_config == Some("NuGet.Config") {
+            census.user_config += 1;
+        }
+        let verdict = grade(&mut harness, &case);
+        // NuGet writes a user config where there is none, and answers. The
+        // model does not know that NuGet can write one, so no agreement with
+        // NuGet's answer makes a commit there sound.
+        assert!(
+            case.user_config.is_some() || matches!(verdict, Verdict::Declined { .. }),
+            "the model committed where there is no user config: {verdict:?}\nroot {}\nfiles {:?}",
+            case.root,
+            case.files.iter().map(|(path, _)| path).collect::<Vec<_>>()
+        );
+        match verdict {
             Verdict::Committed(committed) => {
                 if committed.config_files.len() >= 3 {
                     census.many_files += 1;
@@ -599,9 +620,11 @@ fn cases(default: usize) -> usize {
 
 fn assert_floors(census: &Census) {
     let committed = census.environment + census.config + census.default;
+    // Over the cases with a user config: without one the model declines,
+    // so such a case says nothing of how much the model commits.
     assert!(
-        committed * 3 >= census.cases,
-        "fewer than a third of the cases committed: {census:#?}"
+        committed * 3 >= census.user_config,
+        "fewer than a third of the cases with a user config committed: {census:#?}"
     );
     for (what, count) in [
         ("from NUGET_PACKAGES", census.environment),
