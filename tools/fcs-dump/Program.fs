@@ -6373,6 +6373,50 @@ let private withFullReferencePaths (projOpts: FSharpProjectOptions) : FSharpProj
                 | Some prefix -> "-r:" + Path.GetFullPath(o.Substring prefix.Length)
                 | None -> o) }
 
+/// What `stat(2)` says of a path, as .NET's own native shim
+/// (`libSystem.Native`, which `System.IO` calls) reports it. Only `Mode` is
+/// read; the struct is larger than the shim's `FileStatus`, which the call
+/// fills from the start.
+[<Struct; System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential, Size = 512)>]
+type NativeFileStatus =
+    val mutable Flags: int32
+    val mutable Mode: int32
+
+/// `stat(2)`, following links: 0 on success.
+[<System.Runtime.InteropServices.DllImport("libSystem.Native", EntryPoint = "SystemNative_Stat", SetLastError = true)>]
+extern int systemNativeStat(string path, NativeFileStatus& output)
+
+/// Refuse `path`, a file a request names as a `what` (a source, a
+/// reference), if something exists there that is not a regular file once
+/// links are followed. Nothing opens it first: an open of a FIFO for reading
+/// waits for a writer for ever, a character device may be read without end,
+/// and neither is a file fsc is handed. A path where nothing exists is left
+/// to the reader, which reports it missing.
+///
+/// `System.IO` says nothing of a file's type on Unix (a FIFO is a file that
+/// exists, of length zero), so this asks the runtime's own `stat` shim.
+let private requireRegularFile (what: string) (path: string) =
+    let mutable status = NativeFileStatus()
+    if systemNativeStat (path, &status) = 0 then
+        let kind =
+            match status.Mode &&& 0xF000 with
+            | 0x8000 -> None
+            | 0x1000 -> Some "a FIFO"
+            | 0x2000 -> Some "a character device"
+            | 0x6000 -> Some "a block device"
+            | 0x4000 -> Some "a directory"
+            | 0xC000 -> Some "a socket"
+            | other -> Some(sprintf "a file of type %x" other)
+        match kind with
+        | Some kind -> failwithf "%s %s is %s, not a regular file" what path kind
+        | None -> ()
+
+/// The text of the source `path` names, refused unread unless it is a regular
+/// file ([`requireRegularFile`]).
+let private readSourceText (path: string) : string =
+    requireRegularFile "source" path
+    File.ReadAllText path
+
 /// The references `projOpts` names (`-r:`), each refused if fsc would reject
 /// it: one that is not a file, or not an assembly (FS0084). FCS's project
 /// check resolves its references without reporting these, so a project with
@@ -6382,6 +6426,7 @@ let private readableReferences (projOpts: FSharpProjectOptions) : string list =
           match [ "-r:"; "/r:"; "--reference:" ] |> List.tryFind (fun prefix -> o.StartsWith prefix) with
           | Some prefix ->
               let path = o.Substring prefix.Length
+              requireRegularFile "reference" path
               if not (File.Exists path) then
                   failwithf "reference %s is not a file" path
               try
@@ -6468,7 +6513,7 @@ let private checkProjectNow (checker: FSharpChecker) (projOpts: FSharpProjectOpt
     try
         requestSources.Clear()
         for path in opts.SourceFiles do
-            requestSources[path] <- File.ReadAllText path
+            requestSources[path] <- readSourceText path
         let results = checker.ParseAndCheckProject(opts, userOpName = userOpName) |> Async.RunSynchronously
         let parsed (path: string) =
             (checker.GetBackgroundParseResultsForFileInProject(path, opts, userOpName = userOpName)
@@ -7637,7 +7682,7 @@ let private dumpOverloads (absolute: string) =
 /// its errors.
 let private typesProjectFiles (checker: FSharpChecker) (paths: string[]) (refArgs: string[]) =
     let scriptOpts, scriptDiags =
-        projectScriptOptions checker paths.[0] (File.ReadAllText(paths.[0])) [||]
+        projectScriptOptions checker paths.[0] (readSourceText paths.[0]) [||]
     let blocking =
         scriptDiags
         |> List.filter (fun d -> d.Severity = FSharp.Compiler.Diagnostics.FSharpDiagnosticSeverity.Error)
@@ -7660,7 +7705,7 @@ let private typesProjectFiles (checker: FSharpChecker) (paths: string[]) (refArg
             UseScriptResolutionRules = false }
     paths
     |> Array.map (fun absolute ->
-        let sourceText = SourceText.ofString (File.ReadAllText(absolute))
+        let sourceText = SourceText.ofString (readSourceText absolute)
         let parseResults, checkAnswer =
             checker.ParseAndCheckFileInProject(
                 absolute, 0, sourceText, projOpts, userOpName = "fcs-dump-types-project")
@@ -8323,6 +8368,8 @@ let private fileBatchCore () =
                     |> Seq.choose (fun e -> Option.ofObj (e.GetString()))
                     |> Seq.toList
                 | _ -> []
+            for reference in refs do
+                requireRegularFile "reference" reference
             if kind = "types-project" then
                 let paths =
                     match root.TryGetProperty("paths") with
@@ -8341,7 +8388,7 @@ let private fileBatchCore () =
             let absolute = Path.GetFullPath path
             let refArgs = extraRefArgsOf refs
 
-            let text = File.ReadAllText absolute
+            let text = readSourceText absolute
             let sourceText = SourceText.ofString text
 
             // Mirror the one-shot handlers exactly: script-mode options (SDK
