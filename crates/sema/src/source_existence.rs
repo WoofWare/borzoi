@@ -33,9 +33,10 @@
 //!
 //! # The input inventory
 //!
-//! Every channel through which A's source decides its surface, and what the
-//! walk does with it, is [`INVENTORY`]; `source_existence_diff`'s
-//! `the_inventory_is_what_the_walk_does` runs one witness per row.
+//! Every channel through which A's source or evaluation decides its surface
+//! is a [`Channel`], and what the walk does with it is
+//! [`Channel::treatment`]. The unit test `the_inventory_is_what_the_walk_does`
+//! runs one witness per channel and holds the walk to its treatment.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -50,6 +51,9 @@ use borzoi_cst::syntax::{
 
 use crate::def::id_text;
 use crate::recovery::SyntaxRecovery;
+use crate::resolve::extension_names::{
+    MemberShape, MemberVal, active_pattern_name, member_shape, val_sig_name,
+};
 use crate::resolve::{ProjectFile, SourceFile, signature_partners};
 
 /// A producer project, as the caller evaluated it for the dependant that
@@ -242,42 +246,164 @@ impl SourceExistence {
     }
 }
 
-/// One row of the input inventory: a channel through which A's source can
-/// decide its existence surface.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum Channel {
+/// Declares [`Channel`] and [`Channel::ALL`] from one list, so a channel
+/// cannot be added to the one without the other.
+macro_rules! channels {
+    ($($(#[doc = $doc:literal])* $name:ident,)*) => {
+        /// One row of the input inventory: a channel through which A's
+        /// source, or A's evaluation, can decide A's existence surface.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+        pub enum Channel {
+            $($(#[doc = $doc])* $name,)*
+        }
+
+        impl Channel {
+            /// Every channel, in declaration order.
+            pub const ALL: &'static [Channel] = &[$(Channel::$name,)*];
+        }
+    };
+}
+
+channels! {
+    /// A Compile item the evaluation lists whose text cannot be read.
     UnreadableItem,
+    /// A's fold is refused.
     FoldRefused,
+    /// The producer TFM is not the served one.
     UnservedTfm,
+    /// A's `DefineConstants`: the caller parses A under A's, not B's.
+    Defines,
+    /// A's language version: the caller parses A under it.
+    LanguageVersion,
+    /// Compile items a target adds at execution, and the SDK's generated
+    /// `AssemblyInfo.fs`: the caller's Compile set must hold them.
+    GeneratedItems,
+    /// A file the parser recovered from.
     Recovered,
+    /// `#r`, `#load`, `#I` and their kin.
     HashReference,
+    /// A `.fsi` and its implementation.
     SignaturePair,
+    /// A file with no header: its implicit module, named from the file.
     HeaderlessFile,
+    /// A headerless file whose implicit module's name the walk cannot spell.
+    AnonymousModuleName,
+    /// `namespace`, `namespace rec`, `namespace global`, repeated fragments.
     Namespace,
+    /// `module` headers and nested modules, `rec` or not.
     Module,
+    /// `module X = Y`, which declares no entity.
     ModuleAbbreviation,
+    /// The `Module` suffix a module takes beside a type of its name, or from
+    /// `[<CompilationRepresentation(ModuleSuffix)>]`.
     ModuleSuffix,
+    /// A `[<CompilationRepresentation>]` argument the walk cannot read.
+    CompilationRepresentationArgument,
+    /// Class, struct, interface, record, union, enum, delegate.
     TypeDefinition,
+    /// A generic type's arity suffix, which units of measure do not count.
     GenericArity,
+    /// `type A = T`.
     Abbreviation,
+    /// `type A = B` with `B` one identifier that may be a union case.
     AbbreviationOrUnion,
+    /// `[<Measure>] type m`.
     Measure,
+    /// `exception E`.
     Exception,
-    Augmentation,
+    /// Accessibility, combined with the enclosing entities'.
     Accessibility,
+    /// A static argument in an abbreviation's target (a type provider).
     TypeProviderUse,
+    /// `[<AutoOpen>]` on an entity.
     AutoOpenAttribute,
+    /// `[<Extension>]` on an entity or a member.
     ExtensionAttribute,
+    /// `[<CompiledName("…")>]` on a type (modules and exceptions ignore it).
     CompiledNameAttribute,
+    /// An attribute that may be `[<CompiledName>]` with an argument the walk
+    /// cannot read.
+    UnreadableCompiledName,
+    /// `[<assembly: AutoOpen("…")>]`.
     AssemblyAutoOpen,
+    /// An assembly attribute that may be `[<AutoOpen>]` with an argument the
+    /// walk cannot read.
     AssemblyAutoOpenUnreadable,
+    /// An assembly attribute that may be `[<TypeProviderAssembly>]`.
     TypeProviderAssembly,
+    /// An attribute name the certificate does not cover.
     UncertifiedAttribute,
+    /// A member of an optional augmentation (`type T with` of a type the
+    /// list does not declare).
     OptionalExtensionMember,
+    /// An augmentation of a class-like type of the same list: intrinsic.
     IntrinsicAugmentation,
+    /// An augmentation whose kind the walk cannot decide.
+    AugmentationKind,
+    /// A member under `[<Extension>]`, C# style.
     CSharpExtensionMember,
+    /// A module `let`, `extern` or signature `val` under `[<Extension>]`.
     ExtensionBinding,
+    /// An `[<Extension>]` binding whose pattern is not one name.
+    BindingPattern,
+    /// The `[<Extension>]` FCS adds to a type or module from its members.
     ImpliedExtensionAttribute,
+    /// A member or declaration the walk cannot name.
+    UnnamedDeclaration,
+    /// A member FCS rejects in an augmentation.
+    RejectedShape,
+}
+
+impl Channel {
+    /// What the walk does with this channel: the inventory.
+    pub fn treatment(self) -> Treatment {
+        use Approximation as A;
+        match self {
+            Channel::UnreadableItem
+            | Channel::FoldRefused
+            | Channel::UnservedTfm
+            | Channel::Recovered
+            | Channel::HashReference
+            | Channel::AnonymousModuleName
+            | Channel::TypeProviderUse
+            | Channel::UnreadableCompiledName
+            | Channel::AssemblyAutoOpenUnreadable
+            | Channel::TypeProviderAssembly
+            | Channel::UnnamedDeclaration => Treatment::Declined,
+            Channel::Defines | Channel::LanguageVersion | Channel::GeneratedItems => {
+                Treatment::Caller
+            }
+            Channel::SignaturePair => Treatment::Approximated(A::SignaturePair),
+            Channel::CompilationRepresentationArgument => {
+                Treatment::Approximated(A::CompilationRepresentationArgument)
+            }
+            Channel::AbbreviationOrUnion => Treatment::Approximated(A::AbbreviationOrUnion),
+            Channel::UncertifiedAttribute => Treatment::Approximated(A::UncertainAttribute),
+            Channel::AugmentationKind => Treatment::Approximated(A::AugmentationKind),
+            Channel::BindingPattern => Treatment::Approximated(A::BindingPattern),
+            Channel::RejectedShape => Treatment::Approximated(A::RejectedShape),
+            Channel::HeaderlessFile
+            | Channel::Namespace
+            | Channel::Module
+            | Channel::ModuleAbbreviation
+            | Channel::ModuleSuffix
+            | Channel::TypeDefinition
+            | Channel::GenericArity
+            | Channel::Abbreviation
+            | Channel::Measure
+            | Channel::Exception
+            | Channel::Accessibility
+            | Channel::AutoOpenAttribute
+            | Channel::ExtensionAttribute
+            | Channel::CompiledNameAttribute
+            | Channel::AssemblyAutoOpen
+            | Channel::OptionalExtensionMember
+            | Channel::IntrinsicAugmentation
+            | Channel::CSharpExtensionMember
+            | Channel::ExtensionBinding
+            | Channel::ImpliedExtensionAttribute => Treatment::Modelled,
+        }
+    }
 }
 
 /// What the walk does with a channel.
@@ -289,54 +415,9 @@ pub enum Treatment {
     Approximated(Approximation),
     /// A is unread.
     Declined,
-    /// The caller's: the input type carries it.
+    /// The caller's: the input carries it, already applied.
     Caller,
 }
-
-/// The input inventory: every channel, and what the walk does with it.
-pub const INVENTORY: &[(Channel, Treatment)] = &[
-    (Channel::UnreadableItem, Treatment::Declined),
-    (Channel::FoldRefused, Treatment::Declined),
-    (Channel::UnservedTfm, Treatment::Declined),
-    (Channel::Recovered, Treatment::Declined),
-    (Channel::HashReference, Treatment::Declined),
-    (
-        Channel::SignaturePair,
-        Treatment::Approximated(Approximation::SignaturePair),
-    ),
-    (Channel::HeaderlessFile, Treatment::Modelled),
-    (Channel::Namespace, Treatment::Modelled),
-    (Channel::Module, Treatment::Modelled),
-    (Channel::ModuleAbbreviation, Treatment::Modelled),
-    (Channel::ModuleSuffix, Treatment::Modelled),
-    (Channel::TypeDefinition, Treatment::Modelled),
-    (Channel::GenericArity, Treatment::Modelled),
-    (Channel::Abbreviation, Treatment::Modelled),
-    (
-        Channel::AbbreviationOrUnion,
-        Treatment::Approximated(Approximation::AbbreviationOrUnion),
-    ),
-    (Channel::Measure, Treatment::Modelled),
-    (Channel::Exception, Treatment::Modelled),
-    (Channel::Augmentation, Treatment::Modelled),
-    (Channel::Accessibility, Treatment::Modelled),
-    (Channel::TypeProviderUse, Treatment::Declined),
-    (Channel::AutoOpenAttribute, Treatment::Modelled),
-    (Channel::ExtensionAttribute, Treatment::Modelled),
-    (Channel::CompiledNameAttribute, Treatment::Modelled),
-    (Channel::AssemblyAutoOpen, Treatment::Modelled),
-    (Channel::AssemblyAutoOpenUnreadable, Treatment::Declined),
-    (Channel::TypeProviderAssembly, Treatment::Declined),
-    (
-        Channel::UncertifiedAttribute,
-        Treatment::Approximated(Approximation::UncertainAttribute),
-    ),
-    (Channel::OptionalExtensionMember, Treatment::Modelled),
-    (Channel::IntrinsicAugmentation, Treatment::Modelled),
-    (Channel::CSharpExtensionMember, Treatment::Modelled),
-    (Channel::ExtensionBinding, Treatment::Modelled),
-    (Channel::ImpliedExtensionAttribute, Treatment::Modelled),
-];
 
 /// A's existence surface, read from its source. See the module docs.
 pub fn source_existence(producer: Producer<'_>) -> SourceExistence {
@@ -1468,12 +1549,21 @@ impl FileWalk<'_> {
             }
             let vals = match shape {
                 MemberShape::NoVal => continue,
-                MemberShape::Unnamed => return Err(ExistenceUnread::UnnamedDeclaration(self.index)),
-                MemberShape::Rejected => {
-                    self.out.approximations.insert(Approximation::RejectedShape);
+                MemberShape::Inherit => {
+                    if augmented.is_some() {
+                        self.out.approximations.insert(Approximation::RejectedShape);
+                    }
                     continue;
                 }
-                MemberShape::Vals(vals) => vals,
+                MemberShape::Unnamed => return Err(ExistenceUnread::UnnamedDeclaration(self.index)),
+                MemberShape::Named { vals, rejected, .. } => {
+                    // An abstract slot or a `val` field FCS rejects in an
+                    // augmentation: its rows are read as written.
+                    if rejected && augmented.is_some() {
+                        self.out.approximations.insert(Approximation::RejectedShape);
+                    }
+                    vals
+                }
             };
             for v in vals {
                 match augmented {
@@ -1909,194 +1999,6 @@ fn binding_name(pat: &Pat) -> Option<String> {
         Pat::Typed(t) => t.pat().as_ref().and_then(binding_name),
         Pat::Attrib(a) => a.pat().as_ref().and_then(binding_name),
         _ => None,
-    }
-}
-
-/// An active pattern's logical name, `|A|B|` or `|A|_|`.
-fn active_pattern_name(ap: &borzoi_cst::syntax::ActivePatName) -> String {
-    let cases: Vec<String> = ap
-        .case_tokens()
-        .map(|t| id_text(&t).into_owned())
-        .collect();
-    format!("|{}|", cases.join("|"))
-}
-
-fn val_sig_name(s: &borzoi_cst::syntax::ValSig) -> Option<String> {
-    if let Some(ap) = s.active_pat_name() {
-        return Some(active_pattern_name(&ap));
-    }
-    s.ident().map(|t| id_text(&t).into_owned())
-}
-
-/// One val a member compiles to.
-#[derive(Debug, Clone)]
-struct MemberVal {
-    /// FCS's logical name: a method's or operator's own (`op_Addition`), a
-    /// property accessor's `get_P`/`set_P`.
-    logical: String,
-    /// A property accessor's prefix, or `None`.
-    accessor: Option<&'static str>,
-    is_static: bool,
-}
-
-/// What a member compiles to.
-enum MemberShape {
-    /// No val: a constructor, an interface implementation, a class `let` or
-    /// `do`, an `inherit`.
-    NoVal,
-    /// Vals.
-    Vals(Vec<MemberVal>),
-    /// A member whose name the walk cannot read.
-    Unnamed,
-    /// A member FCS rejects where it is (an abstract slot or a `val` field in
-    /// an augmentation).
-    Rejected,
-}
-
-/// A member's own attribute lists, and the vals it compiles to.
-fn member_shape(m: &MemberDefn) -> (Vec<AttributeList>, MemberShape) {
-    match m {
-        MemberDefn::Member(mm) => {
-            let lists: Vec<AttributeList> = mm.attributes().collect();
-            use borzoi_cst::syntax::MemberLeading;
-            if mm.leading_keyword() == MemberLeading::New {
-                return (lists, MemberShape::NoVal);
-            }
-            let is_static = mm.leading_keyword() == MemberLeading::StaticMember;
-            // The head: `this.Name args` (a long-ident pattern), or a bare
-            // name with no receiver (`static member Name = …`).
-            let (name, is_property) = match mm.binding().and_then(|b| b.pat()) {
-                Some(Pat::LongIdent(l)) => {
-                    let name = if let Some(ap) = l.active_pat_name() {
-                        active_pattern_name(&ap)
-                    } else {
-                        match l.head().and_then(|h| h.idents().last()) {
-                            Some(t) => id_text(&t).into_owned(),
-                            None => return (lists, MemberShape::Unnamed),
-                        }
-                    };
-                    // A member with no argument pattern is a property's getter.
-                    (name, l.args().next().is_none())
-                }
-                Some(Pat::Named(n)) => match n.ident() {
-                    Some(t) => (id_text(&t).into_owned(), true),
-                    None => return (lists, MemberShape::Unnamed),
-                },
-                _ => return (lists, MemberShape::Unnamed),
-            };
-            let val = if is_property {
-                MemberVal {
-                    logical: format!("get_{name}"),
-                    accessor: Some("get_"),
-                    is_static,
-                }
-            } else {
-                MemberVal {
-                    logical: name,
-                    accessor: None,
-                    is_static,
-                }
-            };
-            (lists, MemberShape::Vals(vec![val]))
-        }
-        MemberDefn::GetSetMember(g) => {
-            let lists: Vec<AttributeList> = g.attributes().collect();
-            let Some(name) = g
-                .name()
-                .and_then(|n| n.idents().last())
-                .map(|t| id_text(&t).into_owned())
-            else {
-                return (lists, MemberShape::Unnamed);
-            };
-            let is_static = g.is_static();
-            let mut vals = Vec::new();
-            if g.getter().is_some() {
-                vals.push(MemberVal {
-                    logical: format!("get_{name}"),
-                    accessor: Some("get_"),
-                    is_static,
-                });
-            }
-            if g.setter().is_some() {
-                vals.push(MemberVal {
-                    logical: format!("set_{name}"),
-                    accessor: Some("set_"),
-                    is_static,
-                });
-            }
-            (lists, MemberShape::Vals(vals))
-        }
-        MemberDefn::AutoProperty(a) => {
-            let lists: Vec<AttributeList> = a.attributes().collect();
-            let Some(name) = a.ident().map(|t| id_text(&t).into_owned()) else {
-                return (lists, MemberShape::Unnamed);
-            };
-            let is_static = a.is_static();
-            let mut vals = vec![MemberVal {
-                logical: format!("get_{name}"),
-                accessor: Some("get_"),
-                is_static,
-            }];
-            if a.syntax().text().to_string().contains("set") {
-                vals.push(MemberVal {
-                    logical: format!("set_{name}"),
-                    accessor: Some("set_"),
-                    is_static,
-                });
-            }
-            (lists, MemberShape::Vals(vals))
-        }
-        MemberDefn::AbstractSlot(s) => (s.attributes().collect(), MemberShape::Rejected),
-        MemberDefn::ValField(v) => (v.attributes().collect(), MemberShape::Rejected),
-        MemberDefn::MemberSig(ms) => {
-            let lists: Vec<AttributeList> = ms.attributes().collect();
-            use borzoi_cst::syntax::MemberSigLeading;
-            let leading = ms.leading_keyword();
-            if leading == MemberSigLeading::New {
-                return (lists, MemberShape::NoVal);
-            }
-            let is_static = matches!(
-                leading,
-                MemberSigLeading::Static | MemberSigLeading::StaticMember
-            );
-            let Some(name) = ms.val_sig().and_then(|s| val_sig_name(&s)) else {
-                return (lists, MemberShape::Unnamed);
-            };
-            // `with get, set` reads as two vals; a plain sig as one, whose
-            // shape (method or property) the type decides: both readings.
-            let text = ms.syntax().text().to_string();
-            let (get, set) = match text.rsplit_once(" with ") {
-                Some((_, tail)) => (tail.contains("get"), tail.contains("set")),
-                None => (false, false),
-            };
-            let mut vals = Vec::new();
-            if get {
-                vals.push(MemberVal {
-                    logical: format!("get_{name}"),
-                    accessor: Some("get_"),
-                    is_static,
-                });
-            }
-            if set {
-                vals.push(MemberVal {
-                    logical: format!("set_{name}"),
-                    accessor: Some("set_"),
-                    is_static,
-                });
-            }
-            if !get && !set {
-                vals.push(MemberVal {
-                    logical: name,
-                    accessor: None,
-                    is_static,
-                });
-            }
-            (lists, MemberShape::Vals(vals))
-        }
-        MemberDefn::Inherit(_)
-        | MemberDefn::Interface(_)
-        | MemberDefn::LetBindings(_)
-        | MemberDefn::Do(_) => (Vec::new(), MemberShape::NoVal),
     }
 }
 

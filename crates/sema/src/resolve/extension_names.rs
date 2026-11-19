@@ -455,115 +455,310 @@ enum AugmentationMember {
     Contributes,
 }
 
+/// An active pattern's logical name, `|A|B|` or `|A|_|`.
+pub(crate) fn active_pattern_name(ap: &borzoi_cst::syntax::ActivePatName) -> String {
+    let cases: Vec<String> = ap
+        .case_tokens()
+        .map(|t| id_text(&t).into_owned())
+        .collect();
+    format!("|{}|", cases.join("|"))
+}
+
+/// A value signature's name: its identifier, or its active pattern's.
+pub(crate) fn val_sig_name(s: &borzoi_cst::syntax::ValSig) -> Option<String> {
+    if let Some(ap) = s.active_pat_name() {
+        return Some(active_pattern_name(&ap));
+    }
+    s.ident().map(|t| id_text(&t).into_owned())
+}
+
+/// One val a member compiles to.
+#[derive(Debug, Clone)]
+pub(crate) struct MemberVal {
+    /// FCS's logical name: a method's or operator's own (`op_Addition`), a
+    /// property accessor's `get_P`/`set_P`.
+    pub(crate) logical: String,
+    /// A property accessor's prefix, or `None`.
+    pub(crate) accessor: Option<&'static str>,
+    pub(crate) is_static: bool,
+}
+
+/// What one member of a type definition or an augmentation declares: the
+/// one reading of a member's name and shape that both the extension-name
+/// pass and `source_existence`'s rows take.
+pub(crate) enum MemberShape {
+    /// Nothing a call names: a constructor, an interface implementation, a
+    /// class `let` or `do`.
+    NoVal,
+    /// An `inherit`: the base's members, under names it does not spell.
+    Inherit,
+    /// A member named `name`, compiling to `vals`.
+    Named {
+        name: String,
+        vals: Vec<MemberVal>,
+        /// `Some(true)` for a static member, `Some(false)` for an instance
+        /// one, `None` where the shape does not say (an abstract slot, a
+        /// `val` field, a member signature).
+        statics: Option<bool>,
+        /// A shape FCS rejects in an augmentation (an abstract slot, a `val`
+        /// field), read as written.
+        rejected: bool,
+        /// An active-pattern member (`member x.(|A|_|)`), named by its
+        /// recognizer: a dotted call spells none of it.
+        active_pattern: bool,
+    },
+    /// A member whose name the reader cannot spell.
+    Unnamed,
+}
+
+/// A member's own attribute lists, and what it declares.
+pub(crate) fn member_shape(m: &MemberDefn) -> (Vec<AttributeList>, MemberShape) {
+    use borzoi_cst::syntax::{MemberLeading, MemberSigLeading};
+    let property = |name: &str, is_static: bool, get: bool, set: bool| {
+        let mut vals = Vec::new();
+        if get {
+            vals.push(MemberVal {
+                logical: format!("get_{name}"),
+                accessor: Some("get_"),
+                is_static,
+            });
+        }
+        if set {
+            vals.push(MemberVal {
+                logical: format!("set_{name}"),
+                accessor: Some("set_"),
+                is_static,
+            });
+        }
+        vals
+    };
+    match m {
+        MemberDefn::Member(mm) => {
+            let lists: Vec<AttributeList> = mm.attributes().collect();
+            if mm.leading_keyword() == MemberLeading::New {
+                return (lists, MemberShape::NoVal);
+            }
+            let is_static = mm.leading_keyword() == MemberLeading::StaticMember;
+            // The head: `this.Name args` (a long-ident pattern), or a bare
+            // name with no receiver (`static member Name = …`). An operator
+            // member (`static member (+.)`) is named by its compiled name
+            // (`op_PlusDot`), which is what `id_text` gives.
+            let mut active_pattern = false;
+            let (name, is_property) = match mm.binding().and_then(|b| b.pat()) {
+                Some(Pat::LongIdent(l)) => {
+                    let name = if let Some(ap) = l.active_pat_name() {
+                        active_pattern = true;
+                        active_pattern_name(&ap)
+                    } else {
+                        match l.head().and_then(|h| h.idents().last()) {
+                            Some(t) => id_text(&t).into_owned(),
+                            None => return (lists, MemberShape::Unnamed),
+                        }
+                    };
+                    // A member with no argument pattern is a property's getter.
+                    (name, l.args().next().is_none())
+                }
+                Some(Pat::Named(n)) => match n.ident() {
+                    Some(t) => (id_text(&t).into_owned(), true),
+                    None => return (lists, MemberShape::Unnamed),
+                },
+                _ => return (lists, MemberShape::Unnamed),
+            };
+            let vals = if is_property {
+                property(&name, is_static, true, false)
+            } else {
+                vec![MemberVal {
+                    logical: name.clone(),
+                    accessor: None,
+                    is_static,
+                }]
+            };
+            let shape = MemberShape::Named {
+                name,
+                vals,
+                statics: Some(is_static),
+                rejected: false,
+                active_pattern,
+            };
+            (lists, shape)
+        }
+        MemberDefn::GetSetMember(g) => {
+            let active_pattern = false;
+            let lists: Vec<AttributeList> = g.attributes().collect();
+            let Some(name) = g
+                .name()
+                .and_then(|n| n.idents().last())
+                .map(|t| id_text(&t).into_owned())
+            else {
+                return (lists, MemberShape::Unnamed);
+            };
+            let is_static = g.is_static();
+            let vals = property(&name, is_static, g.getter().is_some(), g.setter().is_some());
+            let shape = MemberShape::Named {
+                name,
+                vals,
+                statics: Some(is_static),
+                rejected: false,
+                active_pattern,
+            };
+            (lists, shape)
+        }
+        MemberDefn::AutoProperty(a) => {
+            let active_pattern = false;
+            let lists: Vec<AttributeList> = a.attributes().collect();
+            let Some(name) = a.ident().map(|t| id_text(&t).into_owned()) else {
+                return (lists, MemberShape::Unnamed);
+            };
+            let is_static = a.is_static();
+            use borzoi_cst::syntax::AutoPropertyKind;
+            let (get, set) = match a.prop_kind() {
+                AutoPropertyKind::Member | AutoPropertyKind::PropertyGet => (true, false),
+                AutoPropertyKind::PropertySet => (false, true),
+                AutoPropertyKind::PropertyGetSet => (true, true),
+            };
+            let vals = property(&name, is_static, get, set);
+            let shape = MemberShape::Named {
+                name,
+                vals,
+                statics: Some(is_static),
+                rejected: false,
+                active_pattern,
+            };
+            (lists, shape)
+        }
+        MemberDefn::AbstractSlot(s) => {
+            let active_pattern = s.val_sig().is_some_and(|v| v.active_pat_name().is_some());
+            let lists: Vec<AttributeList> = s.attributes().collect();
+            let shape = match s.val_sig().and_then(|v| val_sig_name(&v)) {
+                Some(name) => MemberShape::Named {
+                    vals: vec![MemberVal {
+                        logical: name.clone(),
+                        accessor: None,
+                        is_static: s.is_static(),
+                    }],
+                    name,
+                    statics: None,
+                    rejected: true,
+                    active_pattern,
+                },
+                None => MemberShape::Unnamed,
+            };
+            (lists, shape)
+        }
+        MemberDefn::ValField(v) => {
+            let active_pattern = false;
+            let lists: Vec<AttributeList> = v.attributes().collect();
+            let shape = match v.ident().map(|t| id_text(&t).into_owned()) {
+                Some(name) => MemberShape::Named {
+                    vals: vec![MemberVal {
+                        logical: name.clone(),
+                        accessor: None,
+                        is_static: false,
+                    }],
+                    name,
+                    statics: None,
+                    rejected: true,
+                    active_pattern,
+                },
+                None => MemberShape::Unnamed,
+            };
+            (lists, shape)
+        }
+        MemberDefn::MemberSig(ms) => {
+            let active_pattern = ms.val_sig().is_some_and(|v| v.active_pat_name().is_some());
+            let lists: Vec<AttributeList> = ms.attributes().collect();
+            let leading = ms.leading_keyword();
+            if leading == MemberSigLeading::New {
+                return (lists, MemberShape::NoVal);
+            }
+            let is_static = matches!(
+                leading,
+                MemberSigLeading::Static | MemberSigLeading::StaticMember
+            );
+            let Some(name) = ms.val_sig().and_then(|s| val_sig_name(&s)) else {
+                return (lists, MemberShape::Unnamed);
+            };
+            // `with get, set` reads as an accessor each; a plain signature as
+            // a method, the type deciding nothing a signature spells.
+            let text = ms.syntax().text().to_string();
+            let (get, set) = match text.rsplit_once(" with ") {
+                Some((_, tail)) => (tail.contains("get"), tail.contains("set")),
+                None => (false, false),
+            };
+            let vals = if get || set {
+                property(&name, is_static, get, set)
+            } else {
+                vec![MemberVal {
+                    logical: name.clone(),
+                    accessor: None,
+                    is_static,
+                }]
+            };
+            let shape = MemberShape::Named {
+                name,
+                vals,
+                statics: None,
+                rejected: false,
+                active_pattern,
+            };
+            (lists, shape)
+        }
+        MemberDefn::Inherit(_) => (Vec::new(), MemberShape::Inherit),
+        MemberDefn::Interface(_) | MemberDefn::LetBindings(_) | MemberDefn::Do(_) => {
+            (Vec::new(), MemberShape::NoVal)
+        }
+    }
+}
+
 /// What one member of a `type … with` augmentation adds to the name sets.
 /// Over-approximate where the shape is uncertain: an unknown staticness joins
 /// both groups, an `override` counts as an instance name, and a shape FCS
 /// rejects in an augmentation still names its name.
 fn augmentation_member(m: &MemberDefn) -> AugmentationMember {
-    use borzoi_cst::syntax::MemberLeading;
-    let named = |tok: Option<borzoi_cst::syntax::SyntaxToken>, group| match tok {
-        Some(t) => AugmentationMember::Named(id_text(&t).to_string(), group),
-        None => AugmentationMember::Unnamed,
-    };
-    match m {
-        MemberDefn::Member(mm) => {
-            if mm.leading_keyword() == MemberLeading::New {
-                return AugmentationMember::Contributes;
-            }
-            let group = if mm.leading_keyword() == MemberLeading::StaticMember {
-                Group::Static
-            } else {
-                Group::Instance
-            };
-            match method_name(mm) {
-                Some(name) => AugmentationMember::Named(name, group),
-                None => AugmentationMember::Unnamed,
-            }
-        }
-        MemberDefn::GetSetMember(g) => {
-            let group = if g.is_static() {
-                Group::Static
-            } else {
-                Group::Instance
-            };
-            named(g.name().and_then(|n| n.idents().last()), group)
-        }
-        MemberDefn::AutoProperty(a) => {
-            let group = if a.is_static() {
-                Group::Static
-            } else {
-                Group::Instance
-            };
-            named(a.ident(), group)
-        }
-        MemberDefn::AbstractSlot(s) => named(s.val_sig().and_then(|v| v.ident()), Group::Both),
-        MemberDefn::ValField(v) => named(v.ident(), Group::Both),
-        MemberDefn::MemberSig(ms) => named(ms.val_sig().and_then(|v| v.ident()), Group::Both),
+    match member_shape(m).1 {
+        MemberShape::Named {
+            active_pattern: true,
+            ..
+        } => AugmentationMember::Unnamed,
+        MemberShape::Named { name, statics, .. } => AugmentationMember::Named(
+            name,
+            match statics {
+                Some(true) => Group::Static,
+                Some(false) => Group::Instance,
+                None => Group::Both,
+            },
+        ),
         // An `inherit` pulls the base's members in under names we cannot
         // enumerate.
-        MemberDefn::Inherit(_) => AugmentationMember::Unnamed,
-        // Class-local bindings are lexically private; an interface
-        // implementation's members are reachable only through the interface,
-        // never the receiver's own name group.
-        MemberDefn::Interface(_) | MemberDefn::LetBindings(_) | MemberDefn::Do(_) => {
-            AugmentationMember::Contributes
-        }
+        MemberShape::Inherit | MemberShape::Unnamed => AugmentationMember::Unnamed,
+        // A constructor, a class-local binding (lexically private) or an
+        // interface implementation (reachable only through the interface)
+        // joins no group of the receiver's own name.
+        MemberShape::NoVal => AugmentationMember::Contributes,
     }
-}
-
-/// A method member's name: the last segment of its head (`this.Name`), as
-/// its group spells it. An operator member (`static member (+.)`) joins under
-/// its compiled name (`op_PlusDot`), which is what `id_text` gives. `None`
-/// for an active-pattern head or any head the pass cannot read.
-fn method_name(mm: &borzoi_cst::syntax::MemberMethod) -> Option<String> {
-    let Pat::LongIdent(l) = mm.binding()?.pat()? else {
-        return None;
-    };
-    if l.syntax()
-        .children()
-        .any(|c| borzoi_cst::syntax::ActivePatName::can_cast(c.kind()))
-    {
-        return None;
-    }
-    let tok = l.head()?.idents().last()?;
-    Some(id_text(&tok).to_string())
 }
 
 enum MemberName {
     Named(String),
     Unnamed,
-    /// The attribute sits on a class `let`, a `do`, an `inherit` or an
-    /// interface implementation's header: no method of a group.
+    /// The attribute sits on a class `let`, a `do`, an `inherit`, a
+    /// constructor or an interface implementation's header: no method of a
+    /// group.
     NotAMember,
 }
 
 /// The name of the member an attribute decorates.
 fn member_name(m: &MemberDefn) -> MemberName {
-    let named = |tok: Option<borzoi_cst::syntax::SyntaxToken>| match tok {
-        Some(t) => MemberName::Named(id_text(&t).to_string()),
-        None => MemberName::Unnamed,
-    };
-    match m {
-        MemberDefn::Member(mm) => match method_name(mm) {
-            Some(name) => MemberName::Named(name),
-            // A constructor is no method of a named group.
-            None if mm.leading_keyword() == borzoi_cst::syntax::MemberLeading::New => {
-                MemberName::NotAMember
-            }
-            None => MemberName::Unnamed,
-        },
-        MemberDefn::GetSetMember(g) => named(g.name().and_then(|n| n.idents().last())),
-        MemberDefn::AutoProperty(a) => named(a.ident()),
-        MemberDefn::AbstractSlot(s) => named(s.val_sig().and_then(|v| v.ident())),
-        MemberDefn::ValField(v) => named(v.ident()),
-        MemberDefn::MemberSig(ms) => named(ms.val_sig().and_then(|v| v.ident())),
-        MemberDefn::LetBindings(_)
-        | MemberDefn::Do(_)
-        | MemberDefn::Inherit(_)
-        | MemberDefn::Interface(_) => MemberName::NotAMember,
+    match member_shape(m).1 {
+        MemberShape::Named {
+            active_pattern: true,
+            ..
+        } => MemberName::Unnamed,
+        MemberShape::Named { name, .. } => MemberName::Named(name),
+        MemberShape::Unnamed => MemberName::Unnamed,
+        MemberShape::NoVal | MemberShape::Inherit => MemberName::NotAMember,
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::{ExtensionNames, MarkerQuestion, NamesUnknowable, file_extension_names};
