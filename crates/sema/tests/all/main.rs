@@ -156,6 +156,8 @@ mod resolve_types;
 mod resolve_union_cases;
 mod sig_namespace_fold_diff;
 mod silent_region_sweep;
+mod source_existence_diff;
+mod source_existence_grid;
 mod tier_order_diff;
 mod type_arity_route_grid;
 mod type_name_env_grid;

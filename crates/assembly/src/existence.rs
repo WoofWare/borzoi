@@ -334,7 +334,7 @@ const VAL_IS_EXTENSION_MEMBER: i64 = 0b1_0000_0000;
 
 /// The entity layer of the host pickle `pickled` and its extension rows, or
 /// why it cannot be read.
-pub(crate) fn pickled_rows(
+pub fn pickled_rows(
     pickled: &PickledCcu,
 ) -> Result<(Vec<PickledEntityRow>, Vec<ExtensionRow>), String> {
     // Every entity's full logical path, so an attribute whose type the

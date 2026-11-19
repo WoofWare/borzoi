@@ -1,0 +1,62 @@
+# Generated; do not edit by hand. One line per graded item, sorted.
+# Regenerate with:
+#   BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-sema --test all source_existence_diff::source_rows_are_fcs_rows_over_the_grid
+abbreviation_or_union	certified: covers [AbbreviationOrUnion]; unknown: covers [AbbreviationOrUnion]
+abbreviations	certified: exact; unknown: exact
+access	certified: exact; unknown: exact
+access_inherited	certified: exact; unknown: exact
+assembly_auto_open	certified: exact; unknown: unread TypeProvider(0)
+assembly_auto_open_constant	certified: unread UnreadableAutoOpen(0); unknown: unread TypeProvider(0)
+assembly_auto_open_no_argument	certified: exact; unknown: unread TypeProvider(0)
+assembly_other_attribute	certified: exact; unknown: unread TypeProvider(0)
+auto_open_header	certified: exact; unknown: covers [UncertainAttribute]
+auto_open_spellings	certified: exact; unknown: covers [UncertainAttribute]
+auto_open_type_and_abbreviation	certified: exact; unknown: covers [UncertainAttribute]
+auto_open_with_other_attributes	certified: exact; unknown: covers [UncertainAttribute]
+compiled_name	certified: exact; unknown: covers [UncertainAttribute]
+compiled_name_exception_and_union	certified: exact; unknown: covers [UncertainAttribute]
+defines	certified: exact; unknown: exact
+exceptions	certified: exact; unknown: exact
+extension_active_pattern	certified: exact; unknown: covers [UncertainAttribute]
+extension_compiled_name	certified: exact; unknown: covers [UncertainAttribute]
+extension_csharp_style	certified: exact; unknown: covers [UncertainAttribute]
+extension_extern	certified: exact; unknown: covers [UncertainAttribute]
+extension_forms	certified: exact; unknown: exact
+extension_generic	certified: exact; unknown: covers [UncertainAttribute]
+extension_intrinsic	certified: exact; unknown: exact
+extension_namespace_level	certified: covers, FCS rejects ({}); unknown: covers, FCS rejects ({}) [FCS: FS644,FS73]
+extension_of_abbreviation	certified: covers, FCS rejects ({}); unknown: covers, FCS rejects ({UncertainAttribute}) [FCS: FS964,FS895]
+fsi_pair_access	certified: covers [SignaturePair]; unknown: covers [SignaturePair]
+fsi_pair_auto_open	certified: covers [SignaturePair]; unknown: covers [SignaturePair,UncertainAttribute]
+fsi_pair_hiding	certified: covers [SignaturePair]; unknown: covers [SignaturePair]
+hash_nowarn	certified: exact; unknown: exact
+headerless	certified: exact; unknown: exact
+headerless_last_of_two	certified: exact; unknown: exact
+measures	certified: exact; unknown: covers [UncertainAttribute]
+module_abbreviation	certified: exact; unknown: exact
+module_header	certified: exact; unknown: exact
+module_nested_deep	certified: exact; unknown: exact
+module_rec	certified: exact; unknown: exact
+module_suffix	certified: exact; unknown: covers [UncertainAttribute]
+module_suffix_augmentation_only	certified: exact; unknown: exact
+module_suffix_later_type	certified: exact; unknown: exact
+names_backticked	certified: exact; unknown: exact
+names_backticked_namespace	certified: exact; unknown: exact
+names_colliding	certified: exact; unknown: exact
+names_fsharp_core	certified: exact; unknown: exact
+names_operators_and_keywords	certified: exact; unknown: exact
+names_unicode	certified: exact; unknown: exact
+names_with_dot	certified: covers, FCS rejects ({}); unknown: covers, FCS rejects ({}) [FCS: FS883]
+namespace	certified: exact; unknown: exact
+namespace_dotted_and_fragments	certified: exact; unknown: exact
+namespace_empty	certified: exact; unknown: exact
+namespace_global	certified: exact; unknown: exact
+namespace_rec	certified: exact; unknown: exact
+namespace_shared_across_files	certified: exact; unknown: exact
+namespace_two_files	certified: exact; unknown: exact
+route_alias_auto_open	certified: exact; unknown: covers [UncertainAttribute]
+route_alias_extension	certified: exact; unknown: covers [UncertainAttribute]
+route_shadow_auto_open	certified: exact; unknown: covers [UncertainAttribute]
+type_and_group	certified: exact; unknown: covers [UncertainAttribute]
+type_generic	certified: exact; unknown: covers [UncertainAttribute]
+type_kinds	certified: exact; unknown: covers [UncertainAttribute]

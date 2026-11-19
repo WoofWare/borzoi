@@ -34,6 +34,7 @@
 //! runs in its binary — never of shipping code.
 
 pub mod alloc_limit;
+pub mod assembly_entities;
 pub mod corpus_key;
 pub mod fcs_position;
 pub mod fsc_args;
