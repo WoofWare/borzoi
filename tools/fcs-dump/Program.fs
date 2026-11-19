@@ -248,6 +248,23 @@ let private isScriptPath (absolute: string) =
         | e -> e.ToLowerInvariant()
     ext = ".fsx" || ext = ".fsscript"
 
+// ============================================================================
+// Files that are not regular.
+//
+// Nothing fcs-dump reads, and nothing it lets FCS read (`RegularFilesOnly`),
+// may be a file that is not regular: an open of a FIFO for reading waits for
+// a writer for ever, and a device may be read without end. Two limits, stated
+// here once:
+//
+// - The guard is Unix's. On Windows (which no CI lane runs) it takes a file
+//   that exists and is neither a directory nor a device for regular, and a
+//   named pipe is not caught; fcs-dump is not supported there.
+// - The check and the open are two steps on a pathname, so a file replaced
+//   between them is still opened: a race during one request, recorded as
+//   https://github.com/WoofWare/borzoi/issues/1087, which the hostile-value
+//   library's level-4 harness (replacing files during a request) exercises.
+// ============================================================================
+
 /// Refuse `path` unless it is a regular, non-empty file, links followed,
 /// before anything opens it: opening a FIFO or a device blocks or reads
 /// forever, and an assembly is never empty.
@@ -296,6 +313,82 @@ let private refuseUnlessRegular (what: string) (path: string) =
 let private readRegularText (path: string) : string =
     refuseUnlessRegular "file" path
     File.ReadAllText path
+
+/// The bytes of the file `path` names, refused unread unless it is a regular
+/// file ([`refuseUnlessRegular`]).
+let private readRegularBytes (path: string) : byte[] =
+    refuseUnlessRegular "file" path
+    File.ReadAllBytes path
+
+/// What [`RegularFilesOnly`] refused FCS since the answer in progress began.
+/// FCS may turn a failed open into a diagnostic and go on (a script's `#r`),
+/// so an answer computed while this is not empty describes a check FCS did not
+/// carry out as asked, and is refused: in a batch mode by [`writeAnswer`], in
+/// a one-shot mode by [`answerOnce`]. Those two are the only places an answer
+/// leaves the process.
+let private fcsRefusals = ResizeArray<string>()
+
+/// Every checker this process made ([`liveChecker`]).
+let private liveCheckers = ResizeArray<FSharpChecker>()
+
+/// `checker`, recorded so that [`forgetEveryCheck`] can clear it. Every
+/// checker is made through this.
+let private liveChecker (checker: FSharpChecker) : FSharpChecker =
+    liveCheckers.Add checker
+    checker
+
+/// Drop everything every live checker has kept. FCS keeps the check it made
+/// around a refused open and would serve it to a later request without
+/// opening the file again, so after a refusal nothing a checker holds may be
+/// reused.
+let private forgetEveryCheck () =
+    for checker in liveCheckers do
+        checker.InvalidateAll()
+        checker.ClearLanguageServiceRootCachesAndCollectAndFinalizeAllTransients()
+
+/// The refusal FCS met while the answer in progress was computed, if any.
+let private fcsRefusal () : string option =
+    if fcsRefusals.Count = 0 then
+        None
+    else
+        Some(sprintf "FCS was refused a file it would have read: %s" fcsRefusals[0])
+
+/// Write one batch request's answer line: `answer`, or `refuse message` if FCS
+/// was refused a file while it was computed, after clearing every live
+/// checker ([`forgetEveryCheck`]). Every batch mode writes its answers here,
+/// and here the refusals are cleared for the next request.
+let private writeAnswer (refuse: string -> string) (answer: string) =
+    let line =
+        match fcsRefusal () with
+        | None -> answer
+        | Some message ->
+            forgetEveryCheck ()
+            refuse message
+    fcsRefusals.Clear()
+    Console.Out.WriteLine(line)
+    Console.Out.Flush()
+
+/// Run `run`, a one-shot mode, holding back what it writes: written as it is
+/// if FCS was refused no file meanwhile, and otherwise withheld, the refusal
+/// said on standard error and the exit code 3.
+let private answerOnce (run: unit -> int) : int =
+    let stdout = Console.Out
+    let held = new StringWriter()
+    Console.SetOut held
+    fcsRefusals.Clear()
+    let code =
+        try
+            run ()
+        finally
+            Console.SetOut stdout
+    match fcsRefusal () with
+    | Some message ->
+        eprintfn "fcs-dump: %s" message
+        3
+    | None ->
+        stdout.Write(held.ToString())
+        stdout.Flush()
+        code
 
 /// The caller's `<LangVersion>` pin (`BORZOI_FCS_LANGVERSION`, a single
 /// canonical token such as `preview` / `7.0`), or `None` when unset. Applied to
@@ -543,8 +636,7 @@ let private answerEachLine (respond: string -> string) =
                     {| BatchError = sprintf "the line is not UTF-8: %s" why |},
                     buildOptionsCompact ()
                 )
-        Console.Out.WriteLine(reply)
-        Console.Out.Flush()
+        writeAnswer (fun message -> JsonSerializer.Serialize({| BatchError = message |}, buildOptionsCompact ())) reply
     let mutable next = input.ReadByte()
     while next >= 0 do
         if next = 10 then answer () else line.Add(byte next)
@@ -561,7 +653,7 @@ let private withLangVersion (opts: FSharpParsingOptions) : FSharpParsingOptions 
 let private dumpAst (absolute: string) (defines: string list) =
     let text = readRegularText absolute
     let sourceText = SourceText.ofString text
-    let checker = FSharpChecker.Create()
+    let checker = liveChecker (FSharpChecker.Create())
     let isScript = isScriptPath absolute
 
     let parsingOptions0, _ =
@@ -616,7 +708,7 @@ let private dumpAst (absolute: string) (defines: string list) =
 /// `<LangVersion>`, overriding `BORZOI_FCS_LANGVERSION`.
 let private dumpAstBatchCore () =
     let options = buildOptionsCompact ()
-    let checker = FSharpChecker.Create()
+    let checker = liveChecker (FSharpChecker.Create())
 
     let mutable line = Console.In.ReadLine()
     while not (isNull line) do
@@ -670,7 +762,7 @@ let private dumpAstBatchCore () =
                     JsonSerializer.Serialize(payload, options)
                 with ex ->
                     JsonSerializer.Serialize({| Path = path; Error = ex.Message |}, options)
-            Console.Out.WriteLine(json)
+            writeAnswer (fun message -> JsonSerializer.Serialize({| Path = path; Error = message |}, options)) json
         line <- Console.In.ReadLine()
 
 /// Batch AST dump driver. Runs [`dumpAstBatchCore`] on a thread with a large
@@ -744,7 +836,7 @@ let private parseBenchCore (cache: bool) (iterations: int) =
     if cache then
         Environment.SetEnvironmentVariable("FCS_ParseFileCacheSize", "1000000")
 
-    let checker = FSharpChecker.Create()
+    let checker = liveChecker (FSharpChecker.Create())
 
     // Strict UTF-8 decoder: throws on invalid bytes (so a UTF-16 / code-page
     // file is skipped, not silently re-encoded) and does not strip a BOM.
@@ -763,7 +855,7 @@ let private parseBenchCore (cache: bool) (iterations: int) =
         if path <> "" then
             try
                 let absolute = Path.GetFullPath path
-                let bytes = File.ReadAllBytes(absolute)
+                let bytes = readRegularBytes absolute
                 let decoded = utf8Strict.GetString(bytes)
                 // Strip a leading UTF-8 BOM (kept by GetString) so FCS parses
                 // BOM-free source, as its real consumers do; the Rust side strips
@@ -958,7 +1050,10 @@ let private dumpTokensBatch (withLexFilter: bool) =
                            WithLexFilter = withLexFilter
                            Error = ex.Message |}
             let json = JsonSerializer.Serialize(payload, options)
-            Console.Out.WriteLine(json)
+            writeAnswer
+                (fun message ->
+                    JsonSerializer.Serialize({| Path = path; WithLexFilter = withLexFilter; Error = message |}, options))
+                json
         line <- Console.In.ReadLine()
 
 /// The parser-facing token stream *before* the public tokenizer drops what it
@@ -1093,7 +1188,9 @@ let private dumpTokensInternalBatch () =
                     box {| Path = path
                            WithLexFilter = true
                            Error = ex.ToString() |}
-            Console.Out.WriteLine(JsonSerializer.Serialize(payload, options))
+            writeAnswer
+                (fun message -> JsonSerializer.Serialize({| Path = path; WithLexFilter = true; Error = message |}, options))
+                (JsonSerializer.Serialize(payload, options))
         line <- Console.In.ReadLine()
 
 // ============================================================================
@@ -5155,7 +5252,7 @@ let private dumpEntities (dllAbsolute: string) =
     // does `#r "<dll>"`. ParseAndCheckProject forces FCS to import the
     // referenced assembly; we then pull the matching FSharpAssembly out
     // of GetReferencedAssemblies and walk its Entities tree.
-    let checker = FSharpChecker.Create()
+    let checker = liveChecker (FSharpChecker.Create())
     let scriptPath = Path.Combine(Path.GetTempPath(), sprintf "fcs-dump-entities-%s.fsx" (System.Guid.NewGuid().ToString("N")))
     // If the target DLL has sibling `.dll`s in its directory they are
     // (almost certainly) its dependencies that MSBuild's CopyLocal pass
@@ -5175,10 +5272,14 @@ let private dumpEntities (dllAbsolute: string) =
     // on PE files without managed metadata, both of which we treat as
     // "not a managed assembly".
     let isManagedAssembly (path: string) =
-        try
-            System.Reflection.AssemblyName.GetAssemblyName(path) |> ignore
-            true
-        with _ -> false
+        // A file that is not regular is no assembly, and opening a FIFO to
+        // find out would wait for a writer.
+        isRegularFile path
+        && (try
+                System.Reflection.AssemblyName.GetAssemblyName(path) |> ignore
+                true
+            with _ ->
+                false)
     let dir = Path.GetDirectoryName dllAbsolute |> Option.ofObj
     let extraRefs =
         match dir with
@@ -5867,7 +5968,7 @@ let private projectSymbolUseCensus (u: FSharpSymbolUse) =
 let private dumpUses (absolute: string) =
     let text = readRegularText absolute
     let sourceText = SourceText.ofString text
-    let checker = FSharpChecker.Create()
+    let checker = liveChecker (FSharpChecker.Create())
 
     // Resolve options as for a single-file script: this pulls the SDK
     // references (FSharp.Core, the runtime) without an .fsproj, so the file
@@ -5930,7 +6031,7 @@ let private dumpTooltips (absolute: string) =
     let text = readRegularText absolute
     let sourceText = SourceText.ofString text
     let lines = text.Split('\n')
-    let checker = FSharpChecker.Create()
+    let checker = liveChecker (FSharpChecker.Create())
 
     let opts0, scriptDiags =
         checker.GetProjectOptionsFromScript(
@@ -6213,7 +6314,7 @@ let private collectAttrRecords (parsed: ParsedInput) (checkResults: FSharpCheckF
 let private dumpAttrs (absolute: string) =
     let text = readRegularText absolute
     let sourceText = SourceText.ofString text
-    let checker = FSharpChecker.Create()
+    let checker = liveChecker (FSharpChecker.Create())
 
     // Script-mode options, exactly as `dumpUses`: SDK references without an
     // .fsproj, plus any fixture references from `BORZOI_FCS_EXTRA_REFS`.
@@ -6275,7 +6376,7 @@ let private dumpAttrs (absolute: string) =
 /// `Errors` carries them, exactly as the single-file op does.
 let private dumpAttrsBatchCore () =
     let options = buildOptionsCompact ()
-    let checker = FSharpChecker.Create()
+    let checker = liveChecker (FSharpChecker.Create())
 
     let mutable baseOpts: FSharpProjectOptions option = None
     let mutable switches: string[] = [||]
@@ -6378,8 +6479,17 @@ let private dumpAttrsBatchCore () =
                         options
                     )
 
-            Console.Out.WriteLine(json)
-            Console.Out.Flush()
+            writeAnswer
+                (fun message ->
+                    JsonSerializer.Serialize(
+                        {| Path = path
+                           Ok = false
+                           Error = message
+                           Attrs = ([||]: obj[])
+                           Errors = ([||]: obj[]) |},
+                        options
+                    ))
+                json
 
         line <- Console.In.ReadLine()
 
@@ -6506,7 +6616,7 @@ let private projectScriptOptions
 /// `OtherOptions` and its diagnostics' severities and numbers. The test-only
 /// oracle for the claim that sharing changes nothing a caller reads.
 let private scriptOptionsBatch () =
-    let checker = FSharpChecker.Create()
+    let checker = liveChecker (FSharpChecker.Create())
     let compact = buildOptionsCompact ()
     let side (opts: FSharpProjectOptions, diags: FSharp.Compiler.Diagnostics.FSharpDiagnostic list) =
         {| OtherOptions = opts.OtherOptions
@@ -6530,8 +6640,7 @@ let private scriptOptionsBatch () =
                     )
                 with ex ->
                     JsonSerializer.Serialize({| Path = path; Error = ex.Message |}, compact)
-            Console.Out.WriteLine(response)
-            Console.Out.Flush()
+            writeAnswer (fun message -> JsonSerializer.Serialize({| Path = path; Error = message |}, compact)) response
         line <- Console.In.ReadLine()
 
 /// Which of a project's sources each file name the check reports is, if any,
@@ -6649,25 +6758,6 @@ let private requireRegularSource (path: string) =
     if not (isRegularFile path) then
         failwithf "source %s is not a regular file" path
 
-/// What [`RegularFilesOnly`] refused FCS while the request in progress was
-/// answered. FCS may turn a failed open into a diagnostic and go on (a
-/// script's `#r`), so the request is refused when this is not empty
-/// ([`answerUnlessFcsWasRefused`]).
-let private fcsRefusals = ResizeArray<string>()
-
-/// `respond`'s answer to `line`, or a refusal if FCS was refused a file
-/// while it was computed.
-let private answerUnlessFcsWasRefused (respond: string -> string) (line: string) : string =
-    fcsRefusals.Clear()
-    let reply = respond line
-    if fcsRefusals.Count > 0 then
-        JsonSerializer.Serialize(
-            {| BatchError = sprintf "FCS was refused a file it would have read: %s" fcsRefusals[0] |},
-            buildOptionsCompact ()
-        )
-    else
-        reply
-
 /// The file system FCS reads through: every file FCS opens itself (a
 /// reference, a script's `#load`, a source it reads from disk) is refused
 /// unopened unless it is a regular file ([`refuseUnlessRegular`]), so no name
@@ -6774,14 +6864,16 @@ let private requestSources = System.Collections.Generic.Dictionary<string, strin
 /// The checker of the project-check oracles: it reads each source from
 /// [`requestSources`].
 let private projectChecker () =
-    FSharpChecker.Create(
-        documentSource =
-            DocumentSource.Custom(fun path ->
-                async {
-                    match requestSources.TryGetValue path with
-                    | true, text -> return Some(SourceText.ofString text)
-                    | false, _ -> return None
-                })
+    liveChecker (
+        FSharpChecker.Create(
+            documentSource =
+                DocumentSource.Custom(fun path ->
+                    async {
+                        match requestSources.TryGetValue path with
+                        | true, text -> return Some(SourceText.ofString text)
+                        | false, _ -> return None
+                    })
+        )
     )
 
 /// Refuse a project two of whose sources FCS would take for one file. FCS
@@ -7105,7 +7197,7 @@ let private usesProjectBatchCore () =
         with ex ->
             JsonSerializer.Serialize({| BatchError = ex.Message |}, compact)
 
-    answerEachLine (answerUnlessFcsWasRefused respond)
+    answerEachLine respond
 
 /// [`usesProjectBatchCore`] on a large-stack thread, mirroring [`fileBatch`]:
 /// a deeply-nested project's typed tree can recurse past the default 1 MB stack
@@ -7704,7 +7796,9 @@ let private usesProjectGraphBatchCore () =
     while not (isNull line) do
         let trimmed = (Option.ofObj line |> Option.defaultValue "").Trim()
         if trimmed <> "" then
-            Console.Out.WriteLine(respond trimmed)
+            writeAnswer
+                (fun message -> JsonSerializer.Serialize({| BatchError = message |}, compact))
+                (respond trimmed)
             Console.Out.Flush()
         line <- Console.In.ReadLine()
 
@@ -7752,7 +7846,7 @@ let private usesProjectGraphBatch () =
 /// / extension vs simple) is intrinsic to each symbol and so unbiased.
 let private dumpUsesCensusBatchCore () =
     let options = buildOptionsCompact ()
-    let checker = FSharpChecker.Create()
+    let checker = liveChecker (FSharpChecker.Create())
 
     // Harvested lazily from the first path that resolves: the SDK `-r:` switches
     // (FSharp.Core + the runtime) plus any `BORZOI_FCS_EXTRA_REFS`. Reused
@@ -7845,8 +7939,16 @@ let private dumpUsesCensusBatchCore () =
                            HasCheckErrors = false
                            References = ([||]: string[])
                            Uses = ([||]: obj[]) |}, options)
-            Console.Out.WriteLine(json)
-            Console.Out.Flush()
+            writeAnswer
+                (fun message ->
+                    JsonSerializer.Serialize(
+                        {| Path = path
+                           Ok = false
+                           Error = message
+                           HasCheckErrors = false
+                           References = ([||]: string[])
+                           Uses = ([||]: obj[]) |}, options))
+                json
         line <- Console.In.ReadLine()
 
 /// Batch census driver on a large-stack thread, mirroring [`dumpAstBatch`]:
@@ -7896,7 +7998,7 @@ let private dumpUsesCensusProjectCore () =
     if Array.isEmpty paths then
         failwith "fcs-dump uses-census-project: no source files on stdin"
 
-    let checker = FSharpChecker.Create()
+    let checker = liveChecker (FSharpChecker.Create())
 
     let scriptOpts, _scriptDiags =
         projectScriptOptions checker paths.[0] (readRegularText paths.[0]) [||]
@@ -8226,7 +8328,7 @@ let private checkScriptImplFileWithDiags
     : FSharpImplementationFileContents * FSharp.Compiler.Diagnostics.FSharpDiagnostic[] =
     let text = readRegularText absolute
     let sourceText = SourceText.ofString text
-    let checker = FSharpChecker.Create(keepAssemblyContents = true)
+    let checker = liveChecker (FSharpChecker.Create(keepAssemblyContents = true))
 
     let opts0, scriptDiags =
         checker.GetProjectOptionsFromScript(
@@ -9274,7 +9376,7 @@ let private fileBatchCore () =
     // projections can read the elaborated implementation file; harmless to the
     // `uses` / `attrs` projections (they never touch it). One checker, reused for
     // every request, is what makes the referenced-assembly reads warm.
-    let checker = FSharpChecker.Create(keepAssemblyContents = true)
+    let checker = liveChecker (FSharpChecker.Create(keepAssemblyContents = true))
     let compact = buildOptionsCompact ()
 
     let respond (line: string) : string =
@@ -9399,7 +9501,7 @@ let private fileBatchCore () =
         with ex ->
             JsonSerializer.Serialize({| BatchError = ex.Message |}, compact)
 
-    answerEachLine (answerUnlessFcsWasRefused respond)
+    answerEachLine respond
 
 /// [`fileBatchCore`] on a large-stack thread, mirroring [`dumpAstBatch`]: the
 /// `types` / `binder-types` projections serialise a deeply-nested typed tree,
@@ -9434,7 +9536,7 @@ let private fileBatch () =
 /// not appearing), and the Rust side reports that fraction.
 let private dumpTypesCensusBatchCore () =
     let options = buildOptionsCompact ()
-    let checker = FSharpChecker.Create(keepAssemblyContents = true)
+    let checker = liveChecker (FSharpChecker.Create(keepAssemblyContents = true))
 
     let mutable baseOpts: FSharpProjectOptions option = None
     let mutable switches: string[] = [||]
@@ -9510,8 +9612,10 @@ let private dumpTypesCensusBatchCore () =
                 with ex ->
                     JsonSerializer.Serialize(
                         {| Path = path; Ok = false; Error = ex.Message; Exprs = ([||]: obj[]) |}, options)
-            Console.Out.WriteLine(json)
-            Console.Out.Flush()
+            writeAnswer
+                (fun message ->
+                    JsonSerializer.Serialize({| Path = path; Ok = false; Error = message; Exprs = ([||]: obj[]) |}, options))
+                json
         line <- Console.In.ReadLine()
 
 /// Batch type-census driver on a large-stack thread, mirroring
@@ -9676,7 +9780,7 @@ let private xmlDocBatchCore () =
             JsonSerializer.Serialize(payload, compact)
         with ex ->
             JsonSerializer.Serialize({| BatchError = ex.Message |}, compact)
-    answerEachLine (answerUnlessFcsWasRefused respond)
+    answerEachLine respond
 
 /// [`xmlDocBatchCore`] on a large-stack thread, as the other resident oracles.
 let private xmlDocBatch () =
@@ -9753,10 +9857,8 @@ let private refuseSelfContained () =
             (if String.IsNullOrEmpty coreLib then "<single-file bundle>" else coreLib)
         exit 2
 
-[<EntryPoint>]
-let main argv =
-    refuseSelfContained ()
-    FSharp.Compiler.IO.FileSystemAutoOpens.FileSystem <- RegularFilesOnly()
+/// Run the mode `argv` names.
+let private run (argv: string[]) : int =
     match argv with
     | [| "ast"; sourcePath |] ->
         dumpAst (Path.GetFullPath sourcePath) []
@@ -9855,3 +9957,12 @@ let main argv =
         xmlDocBatch ()
         0
     | _ -> usage ()
+
+[<EntryPoint>]
+let main argv =
+    refuseSelfContained ()
+    FSharp.Compiler.IO.FileSystemAutoOpens.FileSystem <- RegularFilesOnly()
+    // A batch mode answers each request through `writeAnswer`; every other
+    // mode gives one answer, held back by `answerOnce`.
+    if argv.Length > 0 && argv.[0].EndsWith "-batch" then run argv
+    else answerOnce (fun () -> run argv)
