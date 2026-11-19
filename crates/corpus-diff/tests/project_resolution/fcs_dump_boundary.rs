@@ -1217,11 +1217,14 @@ fn run_case(residents: &mut Residents, case: Case) -> Result<Verdict, String> {
             State::Regular | State::Symlink | State::SymlinkOutOfTree | State::ReadOnly
         ),
         Case::SourceChange(Change::Disappears) | Case::ReferenceChange(Change::Disappears) => true,
-        // A reference FCS cannot open as an assembly is no reference it read.
-        Case::ScriptReferenceState(s) => !matches!(
-            s,
-            State::Regular | State::Symlink | State::SymlinkOutOfTree | State::ReadOnly
-        ),
+        // A script's `#r` of a file an open would wait on or read without end:
+        // FCS checks the script as fsc would only if it opens the file, which
+        // it is refused. A `#r` of a file that is missing, empty, a
+        // directory or unreadable is FCS's own FS0084, and is answered as fsc
+        // answers it.
+        Case::ScriptReferenceState(s) => {
+            matches!(s, State::Fifo | State::Socket | State::CharDevice)
+        }
         Case::ScriptMutation(e) => {
             e.dimension == Dimension::ScriptDirective
                 && !e.value.apply("").windows(3).any(|w| w == b"#if")
