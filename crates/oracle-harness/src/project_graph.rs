@@ -143,7 +143,11 @@ impl GraphProject {
             }
             // fsc reads an argument that starts `/` with no other `/` as a
             // switch, so a source at the root has no spelling it reads.
-            if s.parent() == Some(Path::new("/")) {
+            // Nor one whose third character is `:`, which fsc reads as a
+            // short option (`/r:…`).
+            if s.parent() == Some(Path::new("/"))
+                || s.to_str().is_some_and(|t| t.chars().nth(2) == Some(':'))
+            {
                 return Err(format!(
                     "{id}: source {} has the shape of a switch",
                     s.display()
@@ -1033,6 +1037,12 @@ mod tests {
         let mut p = project("Ay", &[]);
         p.sources = vec![PathBuf::from("/Lib.fs")];
         assert!(GraphRequest::new(vec![p], name("Ay")).is_err(), "/Lib.fs");
+        let mut p = project("Ay", &[]);
+        p.sources = vec![PathBuf::from("/r:/Lib.fs")];
+        assert!(
+            GraphRequest::new(vec![p], name("Ay")).is_err(),
+            "/r:/Lib.fs"
+        );
     }
 
     /// Two projects, or two files, whose names differ only in case are

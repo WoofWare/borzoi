@@ -7030,7 +7030,9 @@ let private parseGraphProject (e: JsonElement) : GraphProject =
         if not (s.EndsWith ".fs" || s.EndsWith ".fsi") then
             failwithf "%s: source %s is not a .fs or .fsi file" where s
         // fsc reads an argument that starts `/` with no other `/` as a switch.
-        if s.StartsWith "/" && not (s.Substring(1).Contains '/') then
+        // fsc reads an argument as a switch when it starts `/` with no other
+        // `/`, or has a `:` third (a short option, `-r:`, `/r:`).
+        if (s.StartsWith "/" && not (s.Substring(1).Contains '/')) || (s.Length > 2 && s.[2] = ':') then
             failwithf "%s: source %s has the shape of a switch" where s
         requireRegularSource s
     if List.length (List.distinct sources) <> List.length sources then
@@ -7291,6 +7293,12 @@ let private respondGraphCompile (checker: FSharpChecker) (root: JsonElement) =
     let outDir = absolutePath "outDir" (required "request" "outDir" fields)
     if p.References |> List.exists (function ProjectRef _ -> true | Dll _ -> false) then
         failwithf "project %s: a compiled project references DLLs only" p.Id
+    // The bytes of each source as the check reads them: a source saved
+    // between the check and the compile would give a DLL of text the check
+    // never saw, so the compile's result is refused then.
+    let digestOf (path: string) =
+        Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes path))
+    let checkedText = p.Sources |> Array.map digestOf
     // The check's verdict first: the project as a check request is refused
     // exactly where a compile must be (an assembly the request does not
     // name, a source the project check cannot describe), whether or not the
@@ -7312,6 +7320,8 @@ let private respondGraphCompile (checker: FSharpChecker) (root: JsonElement) =
     let diagnostics, failure =
         checker.Compile(Array.append [| "fsc.exe" |] argv, userOpName = "fcs-dump-graph-compile")
         |> Async.RunSynchronously
+    if p.Sources |> Array.map digestOf <> checkedText then
+        failwithf "project %s: a source changed between the check and the compile" p.Id
     // A source error comes back as diagnostics *and* an exception; only an
     // exception with no error diagnostic is a compiler failure.
     let errors =

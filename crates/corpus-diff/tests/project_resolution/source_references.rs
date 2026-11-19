@@ -308,7 +308,7 @@ fn d1_over_generated_cases(cases: &[(u64, usize)], pinned_census: Option<&[&str]
                     && u["IsFromDefinition"] == false
             })
             .and_then(|u| u["Value"]["TypeCanon"].as_str());
-        if !defined_type.is_some_and(|t| t.contains("Int32")) {
+        if defined_type != Some("System.Int32") {
             problems.push(format!(
                 "`{DEFINED_USE}{defined}` does not bind into {} as the int {LIBRARY_DEFINE} makes it: {defined_type:?}",
                 case.library
