@@ -29,13 +29,20 @@ pub enum Mutation {
     /// These bytes after the file, which is first ended with a line feed.
     Append(&'static [u8]),
     /// Every line end (a line feed, a carriage return, or the two together)
-    /// replaced by this.
+    /// replaced by this, in the file ended with a line end if it had none.
     LineEnds(&'static str),
     /// These bytes this many times, after the file.
     AppendRepeated(&'static [u8], usize),
 }
 
 impl Mutation {
+    /// Whether the mutation changes `source` at all. One that does not (line
+    /// ends in a file that spells them so already) has put nothing hostile
+    /// before the reader, and is no draw of its dimension.
+    pub fn varies(&self, source: &str) -> bool {
+        self.apply(source) != source.as_bytes()
+    }
+
     /// The mutated file.
     pub fn apply(&self, source: &str) -> Vec<u8> {
         let mut out = Vec::new();
@@ -53,7 +60,11 @@ impl Mutation {
             }
             Mutation::LineEnds(end) => {
                 // Each line end once, however the source spelt it.
-                let unix = source.replace("\r\n", "\n").replace('\r', "\n");
+                let mut unix = source.replace("\r\n", "\n").replace('\r', "\n");
+                // A file of one line has a line end to spell too.
+                if !unix.ends_with('\n') {
+                    unix.push('\n');
+                }
                 out.extend(unix.replace('\n', end).as_bytes());
             }
             Mutation::AppendRepeated(bytes, n) => {
@@ -218,6 +229,7 @@ mod tests {
         for entry in alphabet().entries() {
             let mutated = entry.value.apply(source);
             assert_ne!(mutated, source.as_bytes(), "{}", entry.why);
+            assert!(entry.value.varies(source), "{}", entry.why);
             match entry.value {
                 Mutation::Prepend(_) => assert!(mutated.ends_with(source.as_bytes())),
                 Mutation::Append(_) | Mutation::AppendRepeated(..) => {
@@ -230,14 +242,23 @@ mod tests {
                 Mutation::LineEnds(end) => {
                     assert_eq!(
                         String::from_utf8(mutated).unwrap().replace(end, "\n"),
-                        source
+                        format!("{source}\n")
                     );
                     // A source already spelt with other line ends has each
                     // replaced once, none doubled.
                     assert_eq!(
                         entry.value.apply("a\r\nb\rc\nd"),
-                        format!("a{end}b{end}c{end}d").into_bytes()
+                        format!("a{end}b{end}c{end}d{end}").into_bytes()
                     );
+                    // A file of one line has a line end to spell too.
+                    assert_eq!(
+                        entry.value.apply("let x = 1"),
+                        format!("let x = 1{end}").into_bytes()
+                    );
+                    // A source spelt this way already is not varied, and
+                    // says so.
+                    let already = format!("a{end}b{end}");
+                    assert!(!entry.value.varies(&already), "{}", entry.why);
                 }
             }
         }

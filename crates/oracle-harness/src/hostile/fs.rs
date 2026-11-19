@@ -16,7 +16,7 @@
 
 use std::ffi::OsStr;
 use std::fs::{self, File, Permissions};
-use std::io;
+use std::io::{self, Read, Seek, Write};
 use std::os::unix::fs::{FileTypeExt, PermissionsExt, symlink};
 use std::os::unix::net::UnixListener;
 use std::path::{Component, Path, PathBuf};
@@ -385,7 +385,7 @@ impl HostileFs {
     ///
     /// [`Unmakeable::Name`] if either name cannot be made, or if the file
     /// system takes the two for one.
-    pub fn holds_apart(&self, a: &Rendered, b: &Rendered) -> Result<(), Unmakeable> {
+    pub fn holds_apart(&self, first: &Rendered, second: &Rendered) -> Result<(), Unmakeable> {
         let name = |r: &Rendered| {
             r.component()
                 .map(ToOwned::to_owned)
@@ -393,9 +393,9 @@ impl HostileFs {
                     why: NameRefusal::NotAComponent(why),
                 })
         };
-        let (a, b) = (name(a)?, name(b)?);
+        let (a, b) = (name(first)?, name(second)?);
         let dir = self.target_dir(&self.aside);
-        write_new(&dir.join(&a), b"").map_err(|e| match name_refusal(&e) {
+        write_new(&dir.join(&a), b"").map_err(|e| match name_refusal_in(&e, first, &dir) {
             Some(why) => Unmakeable::Name { why },
             None => panic!("probe {a:?}: {e}"),
         })?;
@@ -406,7 +406,7 @@ impl HostileFs {
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Err(Unmakeable::Name {
                 why: NameRefusal::Folded,
             }),
-            Err(e) => match name_refusal(&e) {
+            Err(e) => match name_refusal_in(&e, second, &dir) {
                 Some(why) => Err(Unmakeable::Name { why }),
                 None => panic!("probe {b:?}: {e}"),
             },
@@ -505,19 +505,8 @@ impl HostileFs {
         // A refusal is the platform's only if it is shown to be: an error
         // that could as well be a broken fixture is a panic.
         let made = |result: io::Result<()>| -> Result<(), Unmakeable> {
-            result.map_err(|e| match name_refusal(&e) {
+            result.map_err(|e| match name_refusal_in(&e, name, &parent) {
                 Some(why) => Unmakeable::Name { why },
-                // Some sandboxes refuse a name that is not text with a plain
-                // permission error. It is the name's if another name can be
-                // made in the same directory.
-                None if e.kind() == io::ErrorKind::PermissionDenied
-                    && name.to_str().is_none()
-                    && tempfile::tempfile_in(&parent).is_ok() =>
-                {
-                    Unmakeable::Name {
-                        why: NameRefusal::NotUtf8,
-                    }
-                }
                 None => panic!("make {state:?} at {}: {e}", path.display()),
             })
         };
@@ -663,7 +652,24 @@ impl HostileFs {
                 fs::remove_file(path).expect("remove the file that disappears");
             }
             Change::SameStampRewrite | Change::SameStampResize | Change::SameStampReplace => {
-                let before = fs::symlink_metadata(path).expect("stat the file to change");
+                // One handle on the file, opened without following a link:
+                // what is checked is then what is read and rewritten,
+                // whatever becomes of the path meanwhile.
+                assert!(
+                    fs::symlink_metadata(path).is_ok_and(|entry| entry.is_file()),
+                    "{} is no regular file",
+                    path.display()
+                );
+                let mut file = {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    File::options()
+                        .read(true)
+                        .write(change != Change::SameStampReplace)
+                        .custom_flags(libc::O_NOFOLLOW)
+                        .open(path)
+                        .expect("open the file to change")
+                };
+                let before = file.metadata().expect("stat the file to change");
                 assert!(before.is_file(), "{} is no regular file", path.display());
                 if change != Change::SameStampReplace {
                     use std::os::unix::fs::MetadataExt;
@@ -676,7 +682,8 @@ impl HostileFs {
                         path.display()
                     );
                 }
-                let old = fs::read(path).expect("read the file to change");
+                let mut old = Vec::new();
+                file.read_to_end(&mut old).expect("read the file to change");
                 assert_ne!(old, new, "the change must change the bytes");
                 match change {
                     Change::SameStampRewrite => assert_eq!(
@@ -696,11 +703,17 @@ impl HostileFs {
                     let staged = self.target_dir(&self.aside).join("staged");
                     fs::write(&staged, new).expect("write the replacement");
                     set_modified(&staged, stamp);
+                    // A rename replaces the entry at the path, link or file,
+                    // and writes through neither.
                     fs::rename(&staged, path).expect("rename the replacement into place");
                 } else {
-                    fs::write(path, new).expect("rewrite the file");
-                    set_modified(path, stamp);
+                    file.set_len(0).expect("empty the file");
+                    file.rewind().expect("return to the file's start");
+                    file.write_all(new).expect("rewrite the file");
+                    file.set_modified(stamp)
+                        .expect("set the file's modification time");
                 }
+                drop(file);
                 let after = fs::symlink_metadata(path).expect("stat the changed file");
                 let kept = after.modified().expect("the file's modification time");
                 if kept != stamp {
@@ -740,6 +753,18 @@ fn name_refusal(error: &io::Error) -> Option<NameRefusal> {
         libc::EILSEQ => Some(NameRefusal::NotUtf8),
         _ => None,
     }
+}
+
+/// [`name_refusal`], and the refusal some sandboxes give a name that is not
+/// text: a plain permission error. That is the name's if another name can be
+/// made in `dir`, the directory `name` was to be made in.
+fn name_refusal_in(error: &io::Error, name: &Rendered, dir: &Path) -> Option<NameRefusal> {
+    name_refusal(error).or_else(|| {
+        (error.kind() == io::ErrorKind::PermissionDenied
+            && name.to_str().is_none()
+            && tempfile::tempfile_in(dir).is_ok())
+        .then_some(NameRefusal::NotUtf8)
+    })
 }
 
 fn mkfifo(path: &Path) -> io::Result<()> {
@@ -911,6 +936,43 @@ mod tests {
         let races: BTreeSet<_> = Race::ALL.iter().map(|r| r.dimension()).collect();
         assert_eq!(races.len(), Race::ALL.len());
         assert_eq!(races, Kind::FsRace.dimensions().collect());
+    }
+
+    /// The twin probe says of every name of the alphabet what `place` says:
+    /// one the platform refuses comes back as the name's refusal, where it
+    /// is a name's refusal at all, and the probe never panics on one.
+    #[test]
+    fn the_twin_probe_refuses_a_name_as_placing_it_does() {
+        let fs_ = HostileFs::new();
+        let plain = name::Name {
+            parts: name::PLAIN,
+            twin: None,
+        }
+        .render("Lib", ".fs");
+        for (i, entry) in name::alphabet().entries().iter().enumerate() {
+            let rendered = entry.value.render("Lib", ".fs");
+            let placed = fs_.place(format!("twins/{i}"), &rendered, State::Regular, b"x");
+            for probe in [
+                fs_.holds_apart(&plain, &rendered),
+                fs_.holds_apart(&rendered, &plain),
+            ] {
+                match (&placed, probe) {
+                    (Ok(_), Ok(())) => {}
+                    // A name the file system takes for the plain one.
+                    (
+                        Ok(_),
+                        Err(Unmakeable::Name {
+                            why: NameRefusal::Folded,
+                        }),
+                    ) => {}
+                    (
+                        Err(Unmakeable::Name { why: placing }),
+                        Err(Unmakeable::Name { why: probing }),
+                    ) => assert_eq!(*placing, probing, "{rendered:?}"),
+                    (placed, probe) => panic!("{rendered:?}: placed {placed:?}, probed {probe:?}"),
+                }
+            }
+        }
     }
 
     /// Every name of the alphabet is made, or refused for a reason that is

@@ -139,7 +139,13 @@ pub fn spell(text: &str, how: How, place: Place) -> Option<Spelt> {
     // A spelling that writes nothing the plain one does not (a comment split
     // of one character, literal whitespace in a text with none) has put no
     // hostile syntax in front of the reader, and is no draw of its dimension.
-    if escape(text, place).is_ok_and(|plain| plain == xml) {
+    // Asked of a text XML cannot hold as of one it can: its plain spelling
+    // is as ill-formed as this one, and no more a spelling of the dimension.
+    let mut plain = String::with_capacity(text.len());
+    for c in text.chars() {
+        escaped_char(c, place, false, &mut plain);
+    }
+    if plain == xml {
         return None;
     }
     Some(Spelt { xml, well_formed })
@@ -196,6 +202,23 @@ pub fn alphabet() -> &'static Alphabet<How> {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    /// A spelling that puts none of its syntax into the text is no spelling
+    /// of it, for a text XML cannot hold as for one it can: a comment split
+    /// of one character has no comment, and literal whitespace in a text
+    /// with none has none.
+    #[test]
+    fn a_spelling_with_none_of_its_syntax_is_no_spelling() {
+        for text in ["a", "\0", "\u{b}"] {
+            for how in [How::CommentSplit, How::LiteralWhitespace] {
+                assert_eq!(spell(text, how, Place::Element), None, "{text:?} {how:?}");
+            }
+        }
+        let split = spell("\0\0", How::CommentSplit, Place::Element).expect("two characters split");
+        assert!(split.xml.contains("<!---->") && !split.well_formed);
+        let literal = spell("\0\n", How::LiteralWhitespace, Place::Element).expect("a line feed");
+        assert!(literal.xml.contains('\n') && !literal.well_formed);
+    }
 
     /// What `roxmltree` reads back from `spelt`, written in `place`.
     fn read_back(spelt: &str, place: Place) -> Result<String, roxmltree::Error> {

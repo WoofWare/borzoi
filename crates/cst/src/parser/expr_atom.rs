@@ -2255,7 +2255,17 @@ impl<'src> Parser<'src> {
             };
         }
         i += 1;
-        // Consume the rest of a dotted longident: (DOT Ident)*.
+        // Consume the rest of a dotted longident: (DOT Ident)*. Each `.` and
+        // ident must also be the next significant *raw* token: past this
+        // brace's swallowed `}` (and the closers around it) the filtered stream
+        // holds the enclosing expression, whose `.M` of `(builder { a }).M = b`
+        // is no part of this head.
+        let raw_next_after = |idx: usize| {
+            self.filtered
+                .tokens()
+                .get(idx)
+                .and_then(|(_, span)| self.next_non_trivia_raw_after(span.end))
+        };
         while (self.filtered.tokens().kind_at(i) == Some(FilteredKind::Token(TokenKind::Dot)))
             && matches!(
                 self.filtered.tokens().get(i + 1),
@@ -2264,32 +2274,36 @@ impl<'src> Parser<'src> {
                     _
                 ))
             )
+            && matches!(raw_next_after(i - 1), Some(Token::Dot))
+            && matches!(
+                raw_next_after(i),
+                Some(Token::Ident(_) | Token::QuotedIdent(_))
+            )
         {
             i += 2;
         }
-        // The copy-update `with` must belong to *this* brace. With the source's
-        // closers (`}`/`)`) LexFilter-swallowed, a nested ident-only brace — the
-        // inner `{ x }` of `{ f { x } with … }` or `{ f (seq { x }) with … }` —
-        // would otherwise see the *enclosing* brace's `with` past its own swallowed
-        // `}` in the filtered stream and steal the update fields. Confirm on the
-        // **raw** stream that the next significant token after the head longident
-        // is the `with` itself (no swallowed closer sits between), the same nesting
-        // guard the object-expression handler applies. When it fails, the brace is
-        // a closed ident body (`{ x }`) whose enclosing `with` is not ours: fall
-        // through to the appExpr/CE route, which re-checks ownership before
-        // claiming the `with`.
-        let with_is_own = self
-            .filtered
-            .tokens()
-            .get(i - 1)
-            .is_some_and(|(_, head_span)| {
-                matches!(
-                    self.next_non_trivia_raw_after(head_span.end),
-                    Some(Token::With)
-                )
-            });
+        // A record's `=` or copy-update `with` must belong to *this* brace.
+        // LexFilter swallows the brace's `}` and any `)` around it, so in the
+        // filtered stream the token after the head longident of a closed ident
+        // body (`{ x }`) may be an enclosing expression's: the `=` of
+        // `(builder { a }) = b`, or the `with` of `{ f { x } with … }` /
+        // `{ f (seq { x }) with … }`. FCS shifts the
+        // `=`/`with` into `recdExprCore` only when it is the next token of this
+        // brace, so confirm on the **raw** stream that it is the next
+        // significant token after the head longident (no swallowed closer sits
+        // between), the same nesting guard the object-expression handler
+        // applies.
+        let head_next_raw = raw_next_after(i - 1);
+        // The body is the head longident alone (`{ x }`, `{ a.b }`): a
+        // computation expression, whatever follows its `}`.
+        if matches!(head_next_raw, Some(Token::RBrace)) {
+            return BraceBody::Computation;
+        }
+        let with_is_own = matches!(head_next_raw, Some(Token::With));
         match self.filtered.tokens().get(i) {
-            Some((Ok(FilteredToken::Raw(Token::Equals)), _)) => {
+            Some((Ok(FilteredToken::Raw(Token::Equals)), _))
+                if matches!(head_next_raw, Some(Token::Equals)) =>
+            {
                 BraceBody::Record { copy_update: false }
             }
             // `with` surfaces as `Virtual::With` (`OWITH`) in the offside brace
@@ -2426,10 +2440,16 @@ impl<'src> Parser<'src> {
     fn parse_record_fields(&mut self) {
         // First field — required, except for an empty record (`{}`, and the
         // empty copy-update `{ x with }`), where the swallowed `}` is the next
-        // significant raw token and there is simply no field to parse.
-        if self.peek_is_record_binding_start() {
+        // significant raw token and there is simply no field to parse. The raw
+        // `}` is checked first: past it, the filtered stream holds the
+        // enclosing expression's tokens, so the `b` of `(f { }) b` would
+        // otherwise read as this record's first field.
+        let empty = matches!(self.next_non_trivia_raw_at_pos(), Some(Token::RBrace));
+        if empty {
+            // No field: the swallowed `}` is next.
+        } else if self.peek_is_record_binding_start() {
             self.parse_record_binding();
-        } else if !matches!(self.next_non_trivia_raw_at_pos(), Some(Token::RBrace)) {
+        } else {
             let span = self
                 .peek()
                 .map(|(_, s)| s.clone())

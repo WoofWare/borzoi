@@ -60,8 +60,25 @@ to the dimension that generates each, or the reason none does, and to what
 became of it.
 
 Known and out of scope for the library itself, so a review finding of the kind
-is closed: the alphabets and the hand-added grid rows are incomplete by
-design, and grow when a harness or a finding needs a value.
+is closed:
+
+- The alphabets and the hand-added grid rows are incomplete by design, and
+  grow when a harness or a finding needs a value.
+- A special file the platform refuses at one path (a sandbox's policy, say)
+  excuses its dimension for that run, though another path might have taken
+  it. CI's runners refuse none, so the census there is exact.
+- `coverage::PENDING_BACKLOG` caps the pending rows by count, not by path.
+- The table's check ties a `draws` row to a file that uses the library and
+  names its census. That the census is opened is for its manifest and the
+  harness's own test to show.
+- A seed row's outcome is checked against the kinds its census declares, not
+  against the dimensions the census's manifest pins as owed.
+- A spelling that looks like a Windows path is handed to the subject and not
+  resolved. `spelling::resolve` compares canonical paths, so a hard link to
+  the file is another file to it.
+- The fixture's own names are not names a harness can ask for: `linked` at
+  the tree's root, and `b` under the far link, which its `..` spelling then
+  finds.
 
 ## Working here
 

@@ -590,9 +590,11 @@ impl<V: Clone + fmt::Debug + PartialEq> Alphabet<V> {
         sample(&self.entries, entropy)
     }
 
-    /// An entry chosen by `entropy`, for a case that [`mixes`].
+    /// An entry chosen by `entropy`, for a case that [`mixes`]. The number
+    /// may be the one `mixes` took: the choice is by what is left of it once
+    /// the part `mixes` read is taken off, as [`Alphabet::sample`] chooses.
     pub fn pick(&self, entropy: u64) -> &Entry<V> {
-        &self.entries[(entropy % self.entries.len() as u64) as usize]
+        &self.entries[((entropy / RATE) % self.entries.len() as u64) as usize]
     }
 
     /// A proptest strategy: `plain`'s values, with a hostile entry mixed in
@@ -686,15 +688,40 @@ mod tests {
         );
         assert!(sample::<u32>(&[], 0).is_none());
         assert_eq!((0..RATE * 100).filter(|e| mixes(*e)).count(), 100);
-        let alphabet = fs::alphabet();
-        let picked: BTreeSet<_> = (0..alphabet.entries().len() as u64 * 2)
-            .map(|e| alphabet.pick(e).dimension)
+    }
+
+    /// A case that mixes takes its entries by `pick`, and may hand it the
+    /// number `mixes` took or another: either way every entry is picked,
+    /// whatever the alphabet's length shares with [`RATE`].
+    #[test]
+    fn a_case_that_mixes_picks_every_entry() {
+        for alphabet in [
+            fs::alphabet().entries().len(),
+            xml::alphabet().entries().len(),
+        ] {
+            assert!(alphabet > 1);
+        }
+        let xml = xml::alphabet();
+        let states = fs::alphabet();
+        let numbers = 0..RATE * 64;
+        let same: BTreeSet<_> = numbers
+            .clone()
+            .filter(|e| mixes(*e))
+            .map(|e| (xml.pick(e).value, states.pick(e).value))
+            .map(|(how, state)| (format!("{how:?}"), format!("{state:?}")))
             .collect();
+        let other: BTreeSet<_> = numbers
+            .map(|e| format!("{:?}", xml.pick(e).value))
+            .collect();
+        let hows: BTreeSet<_> = same.iter().map(|(how, _)| how.clone()).collect();
+        let picked_states: BTreeSet<_> = same.iter().map(|(_, state)| state.clone()).collect();
+        assert_eq!(hows.len(), xml.entries().len(), "{hows:?}");
         assert_eq!(
-            picked.len(),
-            alphabet.entries().len(),
-            "every entry is picked"
+            picked_states.len(),
+            states.entries().len(),
+            "{picked_states:?}"
         );
+        assert_eq!(other.len(), xml.entries().len(), "{other:?}");
     }
 
     #[test]

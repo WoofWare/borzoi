@@ -1079,3 +1079,15 @@ fn diff_ast_ce_join_in_open_lower_range_rhs() {
 fn diff_ast_ce_join_in_bounded_range_outside() {
     assert_asts_match("query { a in b..c }\n");
 }
+
+/// A computation expression whose single statement is a bare identifier,
+/// followed past its swallowed `}` and `)` closers by the `=` of an enclosing
+/// equality (WoofWare/borzoi#1052). The `=` is not a record field's: the brace
+/// is a computation expression, `App(builder, a)`.
+#[test]
+fn diff_ast_ce_ident_body_left_of_equality() {
+    assert_asts_match("let x = ((builder { a }) = (b))\n");
+    assert_asts_match("let x = ((builder { a }) = b)\n");
+    assert_asts_match("let x = f (builder { a }) = b\n");
+    assert_asts_match("let x = builder { a } = b\n");
+}
