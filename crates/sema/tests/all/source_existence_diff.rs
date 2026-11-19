@@ -535,35 +535,50 @@ pub fn grade(cell: &Cell, fcs: &Fcs, ours: &SourceExistence) -> Result<String, S
     // A producer FCS rejects: its imported surface is FCS's recovery, whose
     // kinds and flags the walk does not model exactly. Ours must still cover
     // every fact an existence question reads of it, in the direction that
-    // answers "something may be there" more often: every entity's place and
-    // names, with its `[<AutoOpen>]` and `[<Extension>]` flags and its being
-    // an abbreviation (what `ExistenceSet` lends names by) where FCS's has
-    // them; every extension's place and names, of either staticness where
-    // FCS's says; every auto-open path.
+    // answers "something may be there" more often. Per entity path (place
+    // and both names), as `ExistenceSet` unions every row at one path: the
+    // `[<AutoOpen>]` and `[<Extension>]` flags and being an abbreviation
+    // (what lends names) where FCS's row has them, which recovery may merge
+    // from duplicate definitions. Every extension's place and names, of
+    // either staticness where FCS's says, but for a val recovery renamed
+    // (`f@13`: its name holds an `@`, which only recovery writes for a
+    // source-named val here). Every auto-open path.
     if !fcs.clean {
-        let covers_entity = |f: &PickledEntityRow| {
-            mine.entities.iter().any(|r| {
-                (
+        type Path<'r> = (&'r [String], &'r [String], &'r str, &'r str);
+        let mut ours_paths: BTreeMap<Path<'_>, (bool, bool, bool)> = BTreeMap::new();
+        for r in &mine.entities {
+            let facts = ours_paths
+                .entry((
                     &r.namespace,
                     &r.enclosing,
                     &r.logical_name,
                     &r.compiled_name,
-                ) == (
-                    &f.namespace,
-                    &f.enclosing,
-                    &f.logical_name,
-                    &f.compiled_name,
-                ) && (r.auto_open || !f.auto_open)
-                    && (r.extension || !f.extension)
-                    && (f.kind != PickledEntityKind::Abbreviation
-                        || r.kind == PickledEntityKind::Abbreviation)
-            })
+                ))
+                .or_default();
+            facts.0 |= r.auto_open;
+            facts.1 |= r.extension;
+            facts.2 |= r.kind == PickledEntityKind::Abbreviation;
+        }
+        let covers_entity = |f: &PickledEntityRow| {
+            ours_paths
+                .get(&(
+                    f.namespace.as_slice(),
+                    f.enclosing.as_slice(),
+                    f.logical_name.as_str(),
+                    f.compiled_name.as_str(),
+                ))
+                .is_some_and(|&(auto_open, extension, abbreviation)| {
+                    (auto_open || !f.auto_open)
+                        && (extension || !f.extension)
+                        && (abbreviation || f.kind != PickledEntityKind::Abbreviation)
+                })
         };
         let covers_extension = |f: &ExtensionRow| {
-            mine.extensions.iter().any(|r| {
-                (&r.namespace, &r.enclosing, &r.names) == (&f.namespace, &f.enclosing, &f.names)
-                    && (r.instance.is_none() || r.instance == f.instance)
-            })
+            f.names.iter().any(|n| n.contains('@'))
+                || mine.extensions.iter().any(|r| {
+                    (&r.namespace, &r.enclosing, &r.names) == (&f.namespace, &f.enclosing, &f.names)
+                        && (r.instance.is_none() || r.instance == f.instance)
+                })
         };
         let lacking: Vec<String> = theirs
             .entities
