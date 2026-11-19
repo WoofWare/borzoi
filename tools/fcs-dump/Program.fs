@@ -8478,6 +8478,11 @@ let private fileBatchCore () =
             let request = fileRequest line
             let kind = request.Kind
             let refs = request.Refs
+            // Read exactly as written: FCS drops a reference it cannot find
+            // and checks without it.
+            for reference in refs do
+                if not (File.Exists reference) then
+                    failwithf "reference %s is not a file" reference
             match request.Target with
             | Project paths ->
                 let files = typesProjectFiles checker (paths |> Array.map Path.GetFullPath) (requestRefArgs refs)
