@@ -153,6 +153,10 @@
 ///     run code the JIT has not yet optimised. A caller wanting MSBuild's
 ///     steady state waits on this between batches.
 ///
+/// Not an op: `FscArgsLogger`, which `borzoi-oracle-harness`'s `fsc_args`
+/// driver loads into a real `dotnet msbuild -restore -t:Build` to record what
+/// each `Fsc` invocation hands fsc.
+///
 /// The process takes one optional argument pair, `--msbuild-sdk <dir>`, which
 /// pins it to the MSBuild of the SDK installed at `<dir>` instead of the one
 /// `dotnet` resolves from the working directory (`registerMSBuild`).
@@ -805,6 +809,214 @@ type ConeLogger() =
                        errors = List.ofSeq errors |}
 
                 File.WriteAllText(parameters, JsonSerializer.Serialize cone)
+
+/// Whether a task MSBuild ran is the `Fsc` task: by name, bare or qualified
+/// with its namespace, in any case, as MSBuild looks tasks up.
+let private isFsc (name: string) =
+    name.Equals("Fsc", StringComparison.OrdinalIgnoreCase)
+    || name.EndsWith(".Fsc", StringComparison.OrdinalIgnoreCase)
+
+/// The `Fsc` task's parameters that choose the program it runs.
+let private compilerParameters = [ "ToolPath"; "ToolExe"; "DotnetFscCompilerPath" ]
+
+/// One `Fsc` invocation as [`FscArgsLogger`] sees it.
+type private FscRun =
+    { Project: string
+      Globals: Collections.Generic.IDictionary<string, string>
+      Assembly: string
+      Inputs: Collections.Generic.Dictionary<string, string>
+      Messages: ResizeArray<string>
+      /// What fsc itself said, in the task's context: its banner on standard
+      /// output (`Microsoft (R) F# Compiler …`, which `ToolTask` logs), and
+      /// its diagnostics (errors and warnings coded `FS…`). Evidence that fsc
+      /// ran, tied to this invocation.
+      CompilerOutput: ResizeArray<string> }
+
+/// The response file `run` handed fsc, read off the command line the task
+/// logged before running it (`ToolTask` logs
+/// `<tool path> <command-line commands> <response-file commands>`; `Fsc`'s
+/// tool path is `ToolPath` joined with `ToolExe`, and its command-line
+/// commands are its `DotnetFscCompilerPath`, verbatim), or why it cannot be.
+///
+/// Only for the SDK's own launch, where all three are logged (a parameter
+/// whose logging a project suppresses is indistinguishable from an empty one)
+/// and `DotnetFscCompilerPath` is one quoted path, the compiler's: anything
+/// more would reach fsc as arguments of its own, ahead of the response file.
+/// The driver checks that the paths are the build's `dotnet` host and its
+/// SDK's `fsc.dll`.
+let private responseFileOf (run: FscRun) : Result<string, string> =
+    let logged = compilerParameters |> List.forall run.Inputs.ContainsKey
+
+    let input name =
+        match run.Inputs.TryGetValue name with
+        | true, value -> value
+        | _ -> ""
+
+    let tool = Path.Combine(input "ToolPath", input "ToolExe")
+    let compiler = input "DotnetFscCompilerPath"
+
+    let pathAlone =
+        compiler.Length >= 2
+        && compiler.StartsWith "\""
+        && compiler.EndsWith "\""
+        && not (compiler.Substring(1, compiler.Length - 2).Contains '"')
+
+    let prefix = tool + " " + compiler + " "
+
+    if not logged then
+        Error $"the compiler's launch was not logged in full: %A{List.ofSeq run.Inputs.Keys}"
+    elif not pathAlone then
+        Error $"DotnetFscCompilerPath is not one quoted path: %s{compiler}"
+    else
+        match run.Messages |> Seq.filter (fun m -> m.StartsWith(prefix, StringComparison.Ordinal)) |> List.ofSeq with
+        | [ message ] -> Ok(message.Substring prefix.Length)
+        | [] -> Error $"Fsc logged no command line starting %s{prefix}"
+        | many -> Error $"Fsc logged %d{many.Length} command lines"
+
+/// Records every `Fsc` invocation of a real build, for the `fsc_args` driver
+/// in `borzoi-oracle-harness`, which loads it into `dotnet msbuild -restore
+/// -t:Build` (`-logger:MsBuildConditionOracle.Program+FscArgsLogger,<this
+/// assembly>;<file>`). When the build ends it writes to `<file>`, as JSON,
+/// whether the build succeeded, its errors, and for each invocation the
+/// project and global properties it ran under, the task assembly, the
+/// parameters choosing the program it runs (MSBuild logs a task's inputs only
+/// when asked: the driver asks with a diagnostic file log, which sets nothing
+/// the build can read), the diagnostics fsc itself reported, and the response
+/// file it handed fsc (or why that could not be read).
+///
+/// That `Fsc` started is MSBuild's account; that fsc ran is fsc's own: its
+/// banner or diagnostics in the task's context. The report also carries the
+/// program running the build (`Environment.ProcessPath`, the `dotnet` host)
+/// and the directory of the MSBuild running it (its SDK's), which the driver
+/// holds the launch to.
+///
+/// A real build, not an imitation of one: the restore, the targets, the
+/// project references and the compiler are the CLI's own, so what it reports
+/// is what fsc is handed, and an invocation that never happens is one a real
+/// build does not make.
+type FscArgsLogger() =
+    let errors = ResizeArray<string>()
+    let projects = Collections.Generic.Dictionary<int, string * Collections.Generic.IDictionary<string, string>>()
+    let runs = Collections.Generic.Dictionary<struct (int * int * int * int), FscRun>()
+    let order = ResizeArray<struct (int * int * int * int)>()
+    let mutable succeeded = false
+    let mutable verbosity = Microsoft.Build.Framework.LoggerVerbosity.Normal
+    let mutable parameters: string = null
+
+    let key (c: Microsoft.Build.Framework.BuildEventContext) =
+        struct (c.NodeId, c.ProjectContextId, c.TargetId, c.TaskId)
+
+    interface Microsoft.Build.Framework.ILogger with
+        member _.Verbosity
+            with get () = verbosity
+            and set v = verbosity <- v
+
+        member _.Parameters
+            with get () = parameters
+            and set v = parameters <- v
+
+        member _.Initialize(source: Microsoft.Build.Framework.IEventSource) =
+            source.ProjectStarted.Add(fun e ->
+                let globals =
+                    match e.GlobalProperties with
+                    | null -> Collections.Generic.Dictionary<string, string>() :> Collections.Generic.IDictionary<_, _>
+                    | globals -> globals
+
+                projects[e.BuildEventContext.ProjectContextId] <- (e.ProjectFile, globals))
+
+            source.TaskStarted.Add(fun e ->
+                if isFsc e.TaskName then
+                    let k = key e.BuildEventContext
+
+                    let project, globals =
+                        match projects.TryGetValue e.BuildEventContext.ProjectContextId with
+                        | true, found -> found
+                        | _ -> (e.ProjectFile, Collections.Generic.Dictionary<string, string>() :> _)
+
+                    runs[k] <-
+                        { Project = project
+                          Globals = globals
+                          Assembly = e.TaskAssemblyLocation
+                          Inputs = Collections.Generic.Dictionary<string, string>()
+                          Messages = ResizeArray<string>()
+                          CompilerOutput = ResizeArray<string>() }
+
+                    order.Add k)
+
+            source.MessageRaised.Add(fun e ->
+                let run =
+                    match e.BuildEventContext with
+                    | null -> None
+                    | context ->
+                        match runs.TryGetValue(key context) with
+                        | true, run -> Some run
+                        | _ -> None
+
+                match run, e with
+                | Some run, (:? Microsoft.Build.Framework.TaskParameterEventArgs as p) ->
+                    if
+                        p.Kind = Microsoft.Build.Framework.TaskParameterMessageKind.TaskInput
+                        && List.contains p.ItemType compilerParameters
+                    then
+                        run.Inputs[p.ItemType] <-
+                            match p.Items |> Seq.cast<obj> |> List.ofSeq with
+                            | [ :? string as value ] -> value
+                            | [ :? Microsoft.Build.Framework.ITaskItem as item ] -> item.ItemSpec
+                            | items -> String.Join(";", items)
+                | Some run, e ->
+                    run.Messages.Add e.Message
+
+                    if not (isNull e.Message) && e.Message.StartsWith("Microsoft (R) F# Compiler", StringComparison.Ordinal) then
+                        run.CompilerOutput.Add e.Message
+                | None, _ -> ())
+
+            let compilerSpoke (context: Microsoft.Build.Framework.BuildEventContext) (code: string) message =
+                match context with
+                | null -> ()
+                | context ->
+                    match runs.TryGetValue(key context) with
+                    | true, run when not (isNull code) && code.StartsWith("FS", StringComparison.Ordinal) ->
+                        run.CompilerOutput.Add $"%s{code} %s{message}"
+                    | _ -> ()
+
+            source.ErrorRaised.Add(fun e ->
+                errors.Add $"%s{e.File}(%d{e.LineNumber}): %s{e.Code} %s{e.Message}"
+                compilerSpoke e.BuildEventContext e.Code e.Message)
+
+            source.WarningRaised.Add(fun e -> compilerSpoke e.BuildEventContext e.Code e.Message)
+
+            source.BuildFinished.Add(fun e -> succeeded <- e.Succeeded)
+
+        member _.Shutdown() =
+            if not (String.IsNullOrEmpty parameters) then
+                let invocations =
+                    order
+                    |> Seq.map (fun k ->
+                        let run = runs[k]
+                        let file, problem =
+                            match responseFileOf run with
+                            | Ok file -> file, null
+                            | Error why -> null, why
+
+                        {| project = run.Project
+                           globals = run.Globals
+                           taskAssembly = run.Assembly
+                           compiler = run.Inputs
+                           responseFile = file
+                           compilerOutput = List.ofSeq run.CompilerOutput
+                           problem = problem |})
+                    |> List.ofSeq
+
+                File.WriteAllText(
+                    parameters,
+                    JsonSerializer.Serialize
+                        {| succeeded = succeeded
+                           errors = List.ofSeq errors
+                           processPath = Environment.ProcessPath
+                           msbuildDirectory =
+                            Path.GetDirectoryName typeof<Microsoft.Build.Framework.ILogger>.Assembly.Location
+                           invocations = invocations |}
+                )
 
 /// Every assembly loaded while a `restoreCone` build ran, across the process's
 /// life, by path. Task assemblies load their dependencies lazily, as the code
