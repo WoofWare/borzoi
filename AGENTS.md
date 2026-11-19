@@ -5,15 +5,15 @@ You should find the F# compiler checked out in ../fsharp ; shout if it's not the
 
 ## Read the crate's own AGENTS.md
 
-Each crate has an `AGENTS.md` beside its `Cargo.toml` (and a `CLAUDE.md` that
-includes it, so Claude Code loads it when it reads files in that crate). Before
-changing or reviewing code in a crate, read that crate's file. It records the
+Each crate under `crates/` has an `AGENTS.md` beside its `Cargo.toml` (and a
+`CLAUDE.md` that includes it, so Claude Code loads it when it reads files in
+that crate). Before changing or reviewing code in one of them, read its file. It records the
 crate's invariants, the oracles and sweeps it is held to, and the review
 findings already known to be out of scope, none of which this file repeats.
 
 ## Workspace layout
 
-A Cargo workspace with ten members:
+A Cargo workspace with ten crates under `crates/` and two tools:
 
 - `crates/cst/` — `borzoi-cst`: lexer, lex-filter (offside rewriter),
   recursive-descent parser, the lossless tree, and the typed AST, both as the
@@ -35,10 +35,13 @@ A Cargo workspace with ten members:
 - `crates/sema/` — `borzoi-sema`: name resolution and type inference over the
   `borzoi-cst` AST, held to FCS.
 - `crates/lsp/` — `borzoi` (the package id is just `borzoi`, *not*
-  `borzoi-lsp`; use `cargo test -p borzoi`): the LSP server, and the only
-  binary, so `cargo run` from the root launches it.
+  `borzoi-lsp`; use `cargo test -p borzoi`): the LSP server (`cargo run -p borzoi`).
 - `crates/corpus-diff/` — `borzoi-corpus-diff`, test-only: the whole-project
   name-resolution differential over real F# projects.
+- `tools/astgen/` — `borzoi-astgen`: generates `borzoi-cst`'s typed AST and each facade from its
+  lock (`crates/cst/AGENTS.md` and `docs/ast-versioning-plan.md` describe it).
+- `tools/stats/` — `borzoi-stats`: the continuous measurements `stats.yml`
+  records (`docs/continuous-measurements.md`).
 
 Workspace-level files (`tools/`, `docs/`, `flake.nix`) sit at the repo root.
 `tools/` holds the test-only oracles (`fcs-dump`, `msbuild-condition-oracle`,

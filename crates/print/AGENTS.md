@@ -34,4 +34,9 @@ cannot be built; CI runs the printer's tests under the `cst` change filter.
 
 ## Working here
 
-Iterate with `nix develop -c cargo test -p borzoi-print`; the repository's root `AGENTS.md` has the pre-push gate.
+Iterate with `nix develop -c cargo test -p borzoi-print`, which runs only the
+printer's own tests. Its FCS round-trip oracle lives in `borzoi-cst`'s tests, so
+a change to what it prints needs
+`nix develop -c cargo test -p borzoi-cst --test all print_roundtrip::` as well
+(and `bash tools/ci/corpus-sweeps.sh print-roundtrip` for the corpus). The
+repository's root `AGENTS.md` has the pre-push gate.

@@ -36,18 +36,27 @@ job_of() {
   esac
 }
 
-# `JOB STEP` for every step `ci.yml` names on a `corpus-sweeps.sh` line, in
-# file order.
+# `JOB STEP` for every step a `run: bash tools/ci/corpus-sweeps.sh STEP...`
+# line of `ci.yml` runs, in file order. Only that one-line form counts: inside
+# a `run: |` block the line could be commented out, guarded or echoed, and
+# telling those apart is parsing shell. `stray_mentions` refuses every other
+# use of the script, so a step run any other way fails rather than counts.
 ci_steps() {
   awk '
     /^  [A-Za-z0-9_-]+:$/ { job = $1; sub(/:$/, "", job) }
-    /tools\/ci\/corpus-sweeps\.sh/ {
-      line = $0
-      sub(/.*tools\/ci\/corpus-sweeps\.sh/, "", line)
-      n = split(line, words, " ")
-      for (i = 1; i <= n; i++) print job, words[i]
+    /^ +run: bash tools\/ci\/corpus-sweeps\.sh( [a-z0-9-]+)+$/ {
+      n = split($0, words, " ")
+      for (i = 4; i <= n; i++) print job, words[i]
     }
   ' "$ci"
+}
+
+# `ci.yml`'s lines outside YAML comments, numbered.
+code_lines() { grep -n -v '^ *#' "$ci"; }
+
+stray_mentions() {
+  code_lines | grep 'corpus-sweeps\.sh' |
+    grep -Ev '^[0-9]+: +run: bash tools/ci/corpus-sweeps\.sh( [a-z0-9-]+)+$|^[0-9]+: +run: bash tools/ci/corpus-sweeps\.test\.sh$'
 }
 
 expected=""
@@ -62,8 +71,12 @@ expected="${expected%$'\n'}"
 assert_eq "ci.yml runs every step once, from its crate's job, in list order" \
   "$expected" "$(ci_steps)"
 
+assert_eq "ci.yml uses corpus-sweeps.sh only as a whole one-line run" "" \
+  "$(stray_mentions)"
+
+# Libtest runs ignored tests under either flag.
 assert_eq "ci.yml runs no ignored test except through corpus-sweeps.sh" "" \
-  "$(grep -n -- '--ignored' "$ci")"
+  "$(code_lines | grep -E -- '--ignored|--include-ignored')"
 
 for crate in cst msbuild nuget sema lsp; do
   listed="$(bash "$script" --list "$crate")"
@@ -78,6 +91,10 @@ printf '#!/usr/bin/env bash\necho ran\n' >"$fake/nix"
 chmod +x "$fake/nix"
 assert_eq "an unknown step is refused before any step runs" "2 " \
   "$(out="$(PATH="$fake:$PATH" bash "$script" parser-corpus no-such-step 2>/dev/null)"
+    echo "$? $out")"
+# A step name is matched literally, not as a pattern.
+assert_eq "a step name with a regex metacharacter is refused before any step runs" "2 " \
+  "$(out="$(PATH="$fake:$PATH" bash "$script" parser-corpus parser.corpus 2>/dev/null)"
     echo "$? $out")"
 
 # Every listed step has a command, and it is an ignored cargo test.

@@ -119,6 +119,7 @@ run_step() { # name
 }
 
 is_crate() { local c; for c in "${crates[@]}"; do [[ "$c" == "$1" ]] && return 0; done; return 1; }
+is_step() { local e; for e in "${steps[@]}"; do [[ "${e#* }" == "$1" ]] && return 0; done; return 1; }
 
 list() { # [crate]
   local entry
@@ -146,7 +147,7 @@ else
   for arg in "$@"; do
     if is_crate "$arg"; then
       while IFS= read -r entry; do selected+=("${entry#* }"); done < <(list "$arg")
-    elif list | grep -qx "[a-z]* $arg"; then
+    elif is_step "$arg"; then
       selected+=("$arg")
     else
       echo "corpus-sweeps.sh: unknown step '$arg' (see --list)" >&2
