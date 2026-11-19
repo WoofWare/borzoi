@@ -170,8 +170,9 @@ fn assert_outcome(tag: &str, expect: Expect, outcome: &RestoreOutcome) {
 /// `DOTNET_CLI_HOME`, and `home` as the home: the package folder then comes
 /// from the config files, and the user's own config is not read.
 fn env_choosing_the_folder_by_config(home: &Path) -> SdkDiscoveryEnv {
-    // .NET hands NuGet `HOME` only if it can read it.
-    std::fs::create_dir_all(home).unwrap();
+    // .NET hands NuGet `HOME` only if it can read it, and the settings model
+    // reads only a user config that is there already.
+    crate::common::seed_user_nuget_config(home);
     let mut env = SdkDiscoveryEnv::from_process_env();
     for name in ["NUGET_PACKAGES", "DOTNET_CLI_HOME", "HOME"] {
         env.build_environment.remove(name);

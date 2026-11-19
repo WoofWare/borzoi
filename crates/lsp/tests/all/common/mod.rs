@@ -183,6 +183,22 @@ fn ensure_fcs_dump_built() -> &'static Path {
         .as_path()
 }
 
+/// Write the user config NuGet itself writes under `home` where there is none
+/// (its package source is nuget.org), and the folders it sits in. The NuGet
+/// settings model declines where there is no user config, so a fixture whose
+/// restore must go ahead seeds the one NuGet would have written.
+pub fn seed_user_nuget_config(home: &Path) {
+    let folder = home.join(".nuget").join("NuGet");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(
+        folder.join("NuGet.Config"),
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<configuration>\n  <packageSources>\n    \
+         <add key=\"nuget.org\" value=\"https://api.nuget.org/v3/index.json\" \
+         protocolVersion=\"3\" />\n  </packageSources>\n</configuration>\n",
+    )
+    .unwrap();
+}
+
 pub fn project_dir() -> PathBuf {
     workspace_root().join("tools").join("fcs-dump")
 }
