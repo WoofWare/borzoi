@@ -455,3 +455,23 @@ fn package_file_listing_follows_symlinked_folders_and_refuses_cycles() {
         Err(AssetSelectionDecline::SymlinkCycle { .. })
     ));
 }
+
+/// No file name holds a NUL, and NuGet's content model takes a path holding
+/// one for no asset: asked for `lib/net8.0/Pkg\0.dll` beside
+/// `lib/netstandard2.0/Pkg.dll`, it selects the latter. A list holding one
+/// came from no file system, and selection declines it rather than pick the
+/// nearer folder's asset.
+#[test]
+fn a_package_file_holding_a_nul_declines() {
+    let files = ["lib/net8.0/Pkg\0.dll", "lib/netstandard2.0/Pkg.dll"]
+        .map(str::to_owned)
+        .to_vec();
+    let selected = select_compile_assets(&files, &bare_nuspec(), &framework("net8.0"));
+    assert!(
+        matches!(
+            &selected,
+            Err(AssetSelectionDecline::NulInPackageFile { path }) if path == "lib/net8.0/Pkg\0.dll"
+        ),
+        "{selected:?}"
+    );
+}
