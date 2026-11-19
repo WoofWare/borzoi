@@ -211,26 +211,26 @@ crates/msbuild/tests/taint_closure_metamorphic.rs	pending	2
 crates/msbuild/tests/toolset_seed_provenance.rs	pending	2
 crates/msbuild/tests/workload_locator_diff.rs	pending	2
 crates/msbuild/tests/xml_nesting_pump.rs	pending	2
-crates/nuget/src/dgspec/xml_nesting_pump.rs	pending	2
-crates/nuget/tests/all/common/mod.rs	pending	2
+crates/nuget/src/dgspec/xml_nesting_pump.rs	not-applicable	it pumps the nesting depth of fixed documents, which no spelling of their text changes; nuspec_diff and settings_diff draw the XML spellings
+crates/nuget/tests/all/common/mod.rs	not-applicable	the shared generators of version, range and framework strings, which are grammar inputs no hostile kind describes; each harness that uses them has its own row
 crates/nuget/tests/all/compile_assets_diff.rs	draws	compile_assets=name
 crates/nuget/tests/all/compile_assets_properties.rs	pending	2
 crates/nuget/tests/all/compile_assets_restore.rs	pending	2
 crates/nuget/tests/all/dgspec_diff.rs	pending	2
 crates/nuget/tests/all/dgspec_resolve_diff.rs	pending	2
-crates/nuget/tests/all/framework_diff.rs	pending	2
-crates/nuget/tests/all/framework_exhaustive.rs	pending	2
-crates/nuget/tests/all/framework_properties.rs	pending	2
+crates/nuget/tests/all/framework_diff.rs	not-applicable	its inputs are framework strings, a grammar no hostile kind describes
+crates/nuget/tests/all/framework_exhaustive.rs	not-applicable	its inputs are framework strings, a grammar no hostile kind describes
+crates/nuget/tests/all/framework_properties.rs	not-applicable	its inputs are framework strings, a grammar no hostile kind describes
 crates/nuget/tests/all/nuspec_diff.rs	draws	nuspec=xml
-crates/nuget/tests/all/range_diff.rs	pending	2
-crates/nuget/tests/all/range_properties.rs	pending	2
+crates/nuget/tests/all/range_diff.rs	not-applicable	its inputs are version range strings, a grammar no hostile kind describes
+crates/nuget/tests/all/range_properties.rs	not-applicable	its inputs are version range strings, a grammar no hostile kind describes
 crates/nuget/tests/all/resolver.rs	pending	2
 crates/nuget/tests/all/resolver_diff.rs	pending	2
 crates/nuget/tests/all/restore_items_diff.rs	pending	2
 crates/nuget/tests/all/settings_diff.rs	draws	settings=name+fs+xml+env
-crates/nuget/tests/all/soak.rs	pending	2
-crates/nuget/tests/all/version_diff.rs	pending	2
-crates/nuget/tests/all/version_properties.rs	pending	2
+crates/nuget/tests/all/soak.rs	not-applicable	its inputs are version, range and framework strings, grammars no hostile kind describes
+crates/nuget/tests/all/version_diff.rs	not-applicable	its inputs are version strings, a grammar no hostile kind describes
+crates/nuget/tests/all/version_properties.rs	not-applicable	its inputs are version strings, a grammar no hostile kind describes
 crates/oracle-harness/src/fcs_position.rs	pending	3
 crates/oracle-harness/src/manifest.rs	pending	3
 crates/oracle-harness/src/module_tree.rs	pending	3
