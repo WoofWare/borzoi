@@ -894,45 +894,67 @@ fn walk_config_file(
         .filter(|(_, name)| file_exists(&folder.join(name), fs))
         .map(|(index, _)| index)
         .collect();
-    let Some(first) = present.first() else {
+    if present.is_empty() {
         return Ok(None);
-    };
-    let unpredictable = || GlobalPackagesFolderDecline::Folder {
-        folder: folder.to_owned(),
-    };
+    }
     // A spelling whose identity cannot be had cannot be said to be the same
     // file as the others, nor another one.
-    let same_file = || same_file(folder, &present, fs).ok_or_else(unpredictable);
-    if cfg!(target_os = "macos") {
-        // NuGet believes a macOS volume case-insensitive and looks for
-        // `NuGet.Config` alone; that agrees with every belief only where all
-        // three spellings name one file.
-        if present.len() != WALK_FILE_NAMES.len() || !same_file()? {
-            return Err(unpredictable());
-        }
-        Ok(Some(folder.join(DEFAULT_FILE_NAME)))
-    } else {
-        // NuGet believes a Linux volume case-sensitive and takes the first
-        // spelling present; on a case-insensitive one every spelling is
-        // present and names one file, and the belief may differ.
-        if present.len() > 1 && same_file()? {
-            return Err(unpredictable());
-        }
-        Ok(Some(folder.join(WALK_FILE_NAMES[*first])))
+    let identities = || {
+        present
+            .iter()
+            .map(|index| fs.identity(&folder.join(WALK_FILE_NAMES[*index])).ok())
+            .collect::<Option<Vec<_>>>()
+    };
+    match walk_spelling(cfg!(target_os = "macos"), &present, identities) {
+        Some(name) => Ok(Some(folder.join(name))),
+        None => Err(GlobalPackagesFolderDecline::Folder {
+            folder: folder.to_owned(),
+        }),
     }
 }
 
-/// Whether the spellings of [`WALK_FILE_NAMES`] at the indices `present`, in
-/// `folder`, all name one file; `None` where an identity cannot be had.
-fn same_file(folder: &Path, present: &[usize], fs: &dyn SettingsFs) -> Option<bool> {
-    if !cfg!(unix) {
-        return Some(false);
+/// The spelling NuGet loads from a folder of the walk, whatever it believes
+/// of the file system's case sensitivity, or `None` where that belief
+/// decides. `present` holds the indices into [`WALK_FILE_NAMES`] of the
+/// spellings NuGet takes for a config file there, at least one, and
+/// `identities` answers with the identity of each in that order, or `None`
+/// where one cannot be had. It is asked only where the answer needs it.
+fn walk_spelling(
+    macos: bool,
+    present: &[usize],
+    identities: impl FnOnce() -> Option<Vec<(u64, u64)>>,
+) -> Option<&'static str> {
+    if macos {
+        // NuGet believes a macOS volume case-insensitive and looks for
+        // `NuGet.Config` alone; that agrees with every belief only where all
+        // three spellings name one file.
+        if present.len() != WALK_FILE_NAMES.len() {
+            return None;
+        }
+        let identities = identities()?;
+        identities
+            .windows(2)
+            .all(|pair| pair[0] == pair[1])
+            .then_some(DEFAULT_FILE_NAME)
+    } else {
+        // NuGet believes a Linux volume case-sensitive and takes the first
+        // spelling present; on a case-insensitive one every spelling is
+        // present and names one file, and the belief may differ. Two
+        // spellings of one file are outside the domain however many are
+        // present: a third that is another file does not say which of the
+        // two a NuGet of another belief opens.
+        if present.len() > 1 {
+            let identities = identities()?;
+            let repeated = identities
+                .iter()
+                .enumerate()
+                .any(|(at, identity)| identities[at + 1..].contains(identity));
+            if repeated {
+                return None;
+            }
+        }
+        Some(WALK_FILE_NAMES[*present.first()?])
     }
-    let identities = present
-        .iter()
-        .map(|index| fs.identity(&folder.join(WALK_FILE_NAMES[*index])).ok())
-        .collect::<Option<Vec<_>>>()?;
-    Some(identities.windows(2).all(|pair| pair[0] == pair[1]))
 }
 
 /// The names of the config files NuGet loads from a folder it lists (the
@@ -1112,6 +1134,57 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod walk_spelling_tests {
+    use super::*;
+
+    /// Every folder of the walk, as the spellings present in it and which of
+    /// them name one file, on both platforms. The model commits to a spelling
+    /// only inside its stated domain: on macOS all three spellings name one
+    /// file, and it is `NuGet.Config`; on Linux no two spellings present name
+    /// one file, and it is the first present.
+    #[test]
+    fn the_walk_commits_to_a_spelling_only_in_its_domain() {
+        // Each spelling is absent (0) or one of three files.
+        for code in 0..4usize.pow(3) {
+            let files = [code % 4, code / 4 % 4, code / 16];
+            let present: Vec<usize> = (0..3).filter(|index| files[*index] != 0).collect();
+            if present.is_empty() {
+                continue;
+            }
+            let identities: Vec<(u64, u64)> = present
+                .iter()
+                .map(|index| (0, files[*index] as u64))
+                .collect();
+            let distinct = present.iter().enumerate().all(|(at, index)| {
+                present[at + 1..]
+                    .iter()
+                    .all(|other| files[*other] != files[*index])
+            });
+            let one_file =
+                present.len() == 3 && present.iter().all(|index| files[*index] == files[0]);
+            for macos in [false, true] {
+                let expected = if macos {
+                    one_file.then_some(DEFAULT_FILE_NAME)
+                } else {
+                    distinct.then(|| WALK_FILE_NAMES[present[0]])
+                };
+                assert_eq!(
+                    walk_spelling(macos, &present, || Some(identities.clone())),
+                    expected,
+                    "macos {macos}, spellings {files:?}"
+                );
+                // With no identity to be had, a commit is one that needed none.
+                let blind = walk_spelling(macos, &present, || None);
+                assert!(
+                    blind.is_none() || (blind == expected && !macos && present.len() == 1),
+                    "macos {macos}, spellings {files:?}: {blind:?} with no identity"
+                );
+            }
+        }
+    }
+}
+
 #[cfg(all(test, unix))]
 mod fifo_tests {
     use super::*;
@@ -1139,29 +1212,13 @@ mod fifo_tests {
     /// that resolves to nothing included, and then loads the file: it waits
     /// on a FIFO for a writer, and throws on a loop of links. So a folder
     /// whose config file is such a thing is not a folder with no config
-    /// file, and the model declines it, naming that folder or its file.
+    /// file: the walk declines the folder, or names the file, whose read
+    /// then declines. Asked of the walk alone, so that no config file of the
+    /// host's, above the temporary directory or machine-wide, has a say.
     #[test]
     fn a_walk_config_file_that_exists_and_is_no_regular_file_declines() {
         let tmp = tempfile::TempDir::new().unwrap();
         let base = std::fs::canonicalize(tmp.path()).unwrap();
-        let home = base.join("home");
-        // A user config, so that nothing but the walk can decline.
-        std::fs::create_dir_all(home.join(".nuget").join("NuGet")).unwrap();
-        std::fs::write(
-            home.join(".nuget").join("NuGet").join(DEFAULT_FILE_NAME),
-            "<configuration />\n",
-        )
-        .unwrap();
-        let environment: BTreeMap<OsString, OsString> = [
-            ("HOME", home.as_os_str()),
-            (
-                "NUGET_COMMON_APPLICATION_DATA",
-                base.join("common").as_os_str(),
-            ),
-        ]
-        .into_iter()
-        .map(|(name, value)| (OsString::from(name), value.to_owned()))
-        .collect();
         let mut folders = Vec::new();
         for kind in ["fifo", "linked-fifo", "dangling", "loop"] {
             let folder = base.join(kind).join("project");
@@ -1182,7 +1239,11 @@ mod fifo_tests {
         }
         within_deadline("loading settings beside a FIFO", move || {
             for (kind, folder) in folders {
-                match global_packages_folder(&folder, &environment) {
+                let loaded = walk_config_file(&folder, &HostFs).and_then(|file| {
+                    file.map(|file| read_config_file(&file, &HostFs))
+                        .transpose()
+                });
+                match loaded {
                     Err(GlobalPackagesFolderDecline::Folder { folder: declined })
                         if declined == folder => {}
                     Err(GlobalPackagesFolderDecline::ConfigFile { file, .. })
