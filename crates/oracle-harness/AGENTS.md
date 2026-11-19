@@ -34,14 +34,15 @@ option behind an escaped line break) and the reason the value is hostile.
 its tree however a path is spelt, and reports, never skips, a state the
 platform cannot make.
 
-A harness enumerates the alphabet and mixes it into its own values at
-`hostile::RATE`, and records each drawn value where it reaches the subject in
+A harness enumerates the alphabet and mixes it into its own values in one
+case in `hostile::RATE`, and records each drawn value where it reaches the subject in
 a `Census`, opened through `hostile::coverage::open(file!(), …)`. A declared
 dimension that never reaches the subject fails the test, as does an excluded
 one that does and a census dropped without `finish`. Only a refusal that shows
 the platform makes no value of a dimension excuses it
-(`Unmakeable::excuses`). What became of each dimension is pinned in
-`crates/<crate>/tests/manifests/hostile/<census>.txt`.
+(`Unmakeable::excuses`). What each census owes, and what it excludes with the
+reason, is pinned in `crates/<crate>/tests/manifests/hostile/<census>.txt`, the
+same on every platform.
 
 `src/hostile/boundaries.tsv` lists the generative differentials and
 perturbation sweeps under `crates/` with the kinds each draws or the reason
