@@ -82,7 +82,7 @@ summary), never listed.
 - Editing the parser or lex-filter and want to see the whole worklist of what
   FCS accepts that we don't → **this sweep** (`we_reject_fcs_accepts.txt`).
 - Just checking the ratchet still holds before pushing → the gate
-  `parser_corpus_diff::` (see AGENTS.md), not this.
+  `bash tools/ci/corpus-sweeps.sh parser-corpus-diff`, not this.
 
 ## Related
 

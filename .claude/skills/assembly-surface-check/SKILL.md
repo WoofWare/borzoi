@@ -36,7 +36,7 @@ Don't keep a list here; it goes stale. Two gates measure it:
   per refusal and its reason. `grep -v 'members=[0-9]*$'` on it is the
   current census.
 - `projection_skip_sweep` (ignored, `BORZOI_DLL_SWEEP_ROOT`) classifies the
-  losses in a NuGet cache by cause; see `AGENTS.md`.
+  losses in a NuGet cache by cause; see `crates/assembly/AGENTS.md`.
 
 Structural corruption (cyclic nesting) stays fatal, via
 `ImportError::CyclicTypeNesting`.

@@ -8,7 +8,7 @@
 //! when an input is not a keyed manifest — one from before the manifest was
 //! keyed, say — it leaves `OURS` alone and exits 2; Git reports either as a
 //! conflict. Run through `tools/manifest-merge.sh`, which
-//! `.gitattributes` and AGENTS.md describe.
+//! `.gitattributes` and `docs/continuous-measurements.md` describe.
 
 use std::process::ExitCode;
 
