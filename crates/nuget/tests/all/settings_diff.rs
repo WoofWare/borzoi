@@ -348,11 +348,12 @@ fn grade(harness: &mut Harness, case: &Case) -> (Verdict, bool) {
     // NuGet writes a user config where there is none, and answers. The model
     // does not know that NuGet can write one, so no agreement with NuGet's
     // answer makes a commit there sound. Asked of the tree as it is laid
-    // out, since which spelling is the file depends on the file system, and
-    // of a case of no hostile value, whose home is where the case put it.
+    // out, since which spelling is the file depends on the file system. A
+    // case that moves the home is one NuGet has no answer for, and must
+    // decline for that.
     let user_config = harness.base.join(&case.user_config).is_file();
     assert!(
-        user_config || ours.is_err() || !case.hostile.is_empty(),
+        user_config || ours.is_err(),
         "the model committed where there is no user config: {ours:?}\n{}",
         case.describe()
     );
@@ -844,45 +845,61 @@ fn gen_case(rng: &mut SplitMix64, base: &Path, cli_home: bool) -> Case {
             }
         }
     }
-    let mut listed = |folder: &str, rng: &mut SplitMix64, hostile: &mut BTreeSet<Dimension>| {
-        let mut names = BTreeSet::new();
-        // At most one hostile name per folder: two may be one file to a file
-        // system that folds case.
-        let mut hostile_name = None;
-        for _ in 0..=rng.below(3) {
-            match name::alphabet().sample(draw(rng)) {
-                Some(entry) if hostile_name.is_none() && entry.value.varies("a", ".config") => {
-                    hostile_name = Some((entry.dimension, entry.value.render("a", ".config")));
-                }
-                _ => {
-                    names.insert(*rng.pick(LISTED_NAMES));
+    // `read` is whether NuGet lists the folder at all on this platform. Of
+    // its files NuGet loads those named `.config` in any case; the content of
+    // another is read by no one, so its spellings are no draw and a fault in
+    // it explains nothing NuGet throws.
+    let mut listed =
+        |folder: &str, read: bool, rng: &mut SplitMix64, hostile: &mut BTreeSet<Dimension>| {
+            let loaded = |name: &[u8]| read && name.to_ascii_lowercase().ends_with(b".config");
+            let mut names = BTreeSet::new();
+            // At most one hostile name per folder: two may be one file to a file
+            // system that folds case.
+            let mut hostile_name = None;
+            for _ in 0..=rng.below(3) {
+                match name::alphabet().sample(draw(rng)) {
+                    Some(entry) if hostile_name.is_none() && entry.value.varies("a", ".config") => {
+                        hostile_name = Some((entry.dimension, entry.value.render("a", ".config")));
+                    }
+                    _ => {
+                        names.insert(*rng.pick(LISTED_NAMES));
+                    }
                 }
             }
-        }
-        for name in names {
-            let (bytes, fault) = gen_config(rng, base, mix, hostile);
-            unread_fault |= fault;
-            files.push((format!("{folder}/{name}"), bytes));
-        }
-        if let Some((dimension, name)) = hostile_name {
-            // Its content holds no hostile spelling: on a volume that ignores
-            // case a listed name written after it may be the same file.
-            let (bytes, fault) = gen_config(rng, base, false, hostile);
-            unread_fault |= fault;
-            hostile.insert(dimension);
-            placements.push(Placement {
-                dir: folder.to_owned(),
-                name,
-                state: State::Regular,
-                content: bytes,
-            });
-        }
-    };
+            for name in names {
+                let mut spellings = BTreeSet::new();
+                let (bytes, fault) = gen_config(rng, base, mix, &mut spellings);
+                if loaded(name.as_bytes()) {
+                    unread_fault |= fault;
+                    hostile.extend(spellings);
+                }
+                files.push((format!("{folder}/{name}"), bytes));
+            }
+            if let Some((dimension, name)) = hostile_name {
+                // Its content holds no hostile spelling: on a volume that ignores
+                // case a listed name written after it may be the same file.
+                let (bytes, fault) = gen_config(rng, base, false, &mut BTreeSet::new());
+                unread_fault |= fault && loaded(name.bytes());
+                hostile.insert(dimension);
+                placements.push(Placement {
+                    dir: folder.to_owned(),
+                    name,
+                    state: State::Regular,
+                    content: bytes,
+                });
+            }
+        };
     if rng.below(4) == 0 {
-        listed(&listed_folder(home), rng, &mut hostile);
+        listed(&listed_folder(home), true, rng, &mut hostile);
     }
     if rng.below(5) == 0 {
-        listed("common/NuGet/Config", rng, &mut hostile);
+        // The machine-wide folder is here on Linux alone.
+        listed(
+            "common/NuGet/Config",
+            cfg!(target_os = "linux"),
+            rng,
+            &mut hostile,
+        );
     }
     let absolute = base.join("env-abs");
     let absolute = absolute.to_str().expect("UTF-8").to_owned();

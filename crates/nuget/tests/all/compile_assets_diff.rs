@@ -209,11 +209,17 @@ const PLAUSIBLE_TFMS: &[&str] = &[
 fn gen_package(rng: &mut SplitMix64) -> Package {
     let mut files: Vec<String> = Vec::new();
     let mut hostile = BTreeSet::new();
-    // One package in `RATE` takes hostile names, each of its names then
-    // hostile at `RATE` again.
+    // One package in `RATE` takes hostile names: the first of its names is
+    // hostile, so that the package is, and each later one at `RATE` again.
     let mix = rng.next().is_multiple_of(hostile::RATE);
+    let mut first = true;
     let mut pick_name = |rng: &mut SplitMix64, plain: &'static str| -> String {
-        match hostile::sample(asset_names(), if mix { rng.next() } else { 1 }) {
+        let entropy = match (mix, std::mem::take(&mut first)) {
+            (false, _) => 1,
+            (true, true) => rng.next() / hostile::RATE * hostile::RATE,
+            (true, false) => rng.next(),
+        };
+        match hostile::sample(asset_names(), entropy) {
             Some(entry) => {
                 hostile.insert(entry.dimension);
                 entry.value.clone()
