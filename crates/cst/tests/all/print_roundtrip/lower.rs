@@ -168,7 +168,10 @@ fn decls_lossy<V: Version>(decls: &[NormalisedDecl], tally: &mut Tally) -> Vec<M
                     tally.kept += inner.kept;
                     out.push(ModuleDecl::NestedModule(m));
                 }
-                Err(d) => tally.dropped.push(d),
+                // Each declaration the module would have kept is lost with it.
+                Err(d) => tally
+                    .dropped
+                    .extend(std::iter::repeat_n(d, inner.kept.max(1))),
             }
             tally.dropped.extend(inner.dropped);
             continue;
@@ -299,6 +302,8 @@ fn refused(r: DeclRefusal) -> Decline {
         DeclRefusal::DuplicateCase(_) => "type: a union case twice",
         DeclRefusal::CaseNamedTags => "type: a union case named Tags",
         DeclRefusal::FieldNamedAsGenerated(_) => "type: a field named as an unnamed one",
+        DeclRefusal::AnonymousType => "type: `_` in a declaration",
+        DeclRefusal::CaseNamedAsTester(_) => "type: a union case named as a tester",
     })
 }
 
@@ -1240,10 +1245,17 @@ fn pat<V: Version>(p: &NormalisedPat) -> L<Pat<V>> {
             elements,
         } => Pat::Tuple(vec2(elements, pat)?),
         P::Tuple { .. } => return decline("pat: struct tuple"),
-        P::As { lhs, rhs } => Pat::As {
-            pat: b(lhs)?,
-            alias: as_alias(rhs)?,
-        },
+        P::As { lhs, rhs } => {
+            if is_parenthesised_type_test(lhs) {
+                // `(:? t) as x` binds `x` at the matched type, `:? t as x` at
+                // `t`; the tree's type test under `as` is the second.
+                return decline("pat: a parenthesised type test under `as`");
+            }
+            Pat::As {
+                pat: b(lhs)?,
+                alias: as_alias(rhs)?,
+            }
+        }
         P::ArrayOrList { is_array, elements } => {
             let items = elements.iter().map(pat).collect::<L<Vec<_>>>()?;
             if *is_array {
@@ -1267,6 +1279,18 @@ fn pat<V: Version>(p: &NormalisedPat) -> L<Pat<V>> {
         P::QuoteExpr(_) => return decline("pat: quotation"),
         P::FromParseError(_) => return decline("pat: error"),
     })
+}
+
+/// Whether `p` is `(:? t)`, `((:? t))`, ….
+fn is_parenthesised_type_test(p: &NormalisedPat) -> bool {
+    let NormalisedPat::Paren(first) = p else {
+        return false;
+    };
+    let mut inner: &NormalisedPat = first;
+    while let NormalisedPat::Paren(next) = inner {
+        inner = next;
+    }
+    matches!(inner, NormalisedPat::IsInst { .. })
 }
 
 /// What follows `as`: a variable, or from F# 6 another pattern.

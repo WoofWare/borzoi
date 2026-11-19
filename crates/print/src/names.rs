@@ -261,6 +261,16 @@ impl UnionCaseName {
     pub fn as_str(&self) -> &str {
         self.0.as_str()
     }
+
+    /// The name of the property F# 9 generates to test for the case:
+    /// `IsA` for `A`, and `IsEmpty` and `IsCons` for `[]` and `::`.
+    pub fn tester(&self) -> String {
+        match self.as_str() {
+            "op_Nil" => "IsEmpty".to_owned(),
+            "op_ColonColon" => "IsCons".to_owned(),
+            name => format!("Is{name}"),
+        }
+    }
 }
 
 /// The name of an exception: an [`EntityName`] that F# reads as starting with

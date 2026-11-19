@@ -246,14 +246,38 @@ pub fn prelude_scope() -> Scope {
 
 /// Binder names: plain, quoted, primed, and the prelude's own, shadowing it.
 const BINDERS: &[&str] = &[
-    "x", "y", "p", "q", "x'", "a b", "type", "c", "t", "rec'", "Item", "Item2", "Data0",
+    "x", "y", "p", "q", "x'", "a b", "val", "c", "t", "rec'", "Item", "Item2", "Data0",
 ];
 
 /// Names in the type namespace: types, exceptions, union cases, modules. Some
-/// start lower case, which F# refuses of a union case or an exception. Not
-/// `op_Nil` or `op_ColonColon`, which a union case may be named but which
-/// then shadow `[]` and `::`.
-const TYPE_NAMES: &[&str] = &["T", "U", "E", "N", "Q", "t1", "type", "Ä", "Tags", "A.B"];
+/// start lower case, which F# refuses of a union case or an exception; `IsT`
+/// is `T`'s tester from F# 9. Not `op_Nil` or `op_ColonColon`, which a union
+/// case may be named but which then shadow `[]` and `::`. None is a value's
+/// name ([`BINDERS`], [`prelude_scope`]), as a value shadows a module of its
+/// name in a dotted path, which the scope does not follow.
+const TYPE_NAMES: &[&str] = &[
+    "T", "U", "E", "N", "Q", "t1", "type", "Ä", "Tags", "A.B", "IsT", "IsQ",
+];
+
+#[test]
+fn value_and_type_names_are_disjoint() {
+    let values: Vec<String> = BINDERS
+        .iter()
+        .map(|s| (*s).to_owned())
+        .chain(
+            prelude_scope()
+                .vars
+                .iter()
+                .map(|v| v.path.segments()[0].as_str().to_owned()),
+        )
+        .collect();
+    for t in TYPE_NAMES {
+        assert!(
+            !values.iter().any(|v| v == t),
+            "{t:?} names a value and a module"
+        );
+    }
+}
 
 fn binder() -> BoxedStrategy<Ident> {
     prop::sample::select(BINDERS).prop_map(ident).boxed()
@@ -555,13 +579,23 @@ fn pat_raw<V: Version>(ty: &Ty, depth: u32, binds: bool) -> BoxedStrategy<(Pat<V
         alts.push((
             1,
             (pat::<V>(ty, d, binds), binder())
-                // `:? T as x` binds `x` at `T`, not at the matched type.
-                .prop_filter("a type test's alias", |((p, _), _)| {
-                    !matches!(p, Pat::IsInst(_))
-                })
                 // A name F# could read as a constructor's is a variable
                 // alias only from F# 6, as a pattern.
                 .prop_filter_map("an alias F# refuses", move |((p, b), n)| {
+                    // `:? T as x` binds `x` at `T`, not at the matched type;
+                    // `System.ArgumentException` is no type the scope has.
+                    let at = match &p {
+                        Pat::IsInst(Type::Name(path)) => match path.segments() {
+                            [only] => match only.as_str() {
+                                "int" => Ty::Int,
+                                "string" => Ty::Str,
+                                "R" => Ty::Record,
+                                _ => return None,
+                            },
+                            _ => return None,
+                        },
+                        _ => t.clone(),
+                    };
                     let alias = match VarName::new(n.clone()) {
                         Ok(v) => AsAlias::Var(v),
                         Err(n) => AsAlias::Pat(
@@ -573,7 +607,7 @@ fn pat_raw<V: Version>(ty: &Ty, depth: u32, binds: bool) -> BoxedStrategy<(Pat<V
                         ),
                     };
                     let mut bound = b;
-                    bound.push((n, t.clone()));
+                    bound.push((n, at));
                     Some((
                         Pat::As {
                             pat: Box::new(p),
@@ -2207,31 +2241,36 @@ fn decls<V: Version>(
     sc: &Sc,
     declared: &Declared,
     depth: u32,
-) -> BoxedStrategy<(Vec<ModuleDecl<V>>, Scope)> {
+) -> BoxedStrategy<(Vec<ModuleDecl<V>>, Scope, Vec<Var>)> {
     if n == 0 {
-        return Just((Vec::new(), (**sc).clone())).boxed();
+        return Just((Vec::new(), (**sc).clone(), Vec::new())).boxed();
     }
     let declared = declared.clone();
     decl::<V>(sc, &declared, depth)
-        .prop_flat_map(move |(decl, scope, names)| {
+        .prop_flat_map(move |(decl, scope, names, values)| {
             let mut all = (*declared).clone();
             all.extend(names);
             let d = Rc::new(all);
-            decls::<V>(n - 1, &Rc::new(scope), &d, depth).prop_map(move |(mut rest, scope)| {
-                rest.insert(0, decl.clone());
-                (rest, scope)
-            })
+            decls::<V>(n - 1, &Rc::new(scope), &d, depth).prop_map(
+                move |(mut rest, scope, mut later)| {
+                    rest.insert(0, decl.clone());
+                    let mut values = values.clone();
+                    values.append(&mut later);
+                    (rest, scope, values)
+                },
+            )
         })
         .boxed()
 }
 
-/// A declaration, the scope after it, and the type-namespace names it
-/// declares.
-fn decl<V: Version>(
-    sc: &Sc,
-    declared: &Declared,
-    depth: u32,
-) -> BoxedStrategy<(ModuleDecl<V>, Scope, Vec<String>)> {
+/// What one declaration draws: it, the scope after it, the type-namespace
+/// names it declares, and the values it declares, by their paths from the
+/// module it sits in.
+type DeclDraw<V> = (ModuleDecl<V>, Scope, Vec<String>, Vec<Var>);
+
+/// A declaration, the scope after it, and the type-namespace names and the
+/// values it declares.
+fn decl<V: Version>(sc: &Sc, declared: &Declared, depth: u32) -> BoxedStrategy<DeclDraw<V>> {
     let fresh = {
         let declared = declared.clone();
         move || {
@@ -2240,7 +2279,7 @@ fn decl<V: Version>(
         }
     };
     let s = sc.clone();
-    let mut alts: Alts<(ModuleDecl<V>, Scope, Vec<String>)> = Vec::new();
+    let mut alts: Alts<DeclDraw<V>> = Vec::new();
     {
         let s = s.clone();
         let declared = declared.clone();
@@ -2259,7 +2298,7 @@ fn decl<V: Version>(
                             return None;
                         }
                         let group = ModuleBindings::new(b).ok()?;
-                        Some((ModuleDecl::Let(group), s2.with(bound), names))
+                        Some((ModuleDecl::Let(group), s2.with(bound.clone()), names, bound))
                     })
                     .boxed()
             }),
@@ -2272,7 +2311,7 @@ fn decl<V: Version>(
             defer(move || {
                 let s2 = s.clone();
                 expr::<V>(&Ty::Unit, &s, 3)
-                    .prop_map(move |e| (ModuleDecl::Expr(e), (*s2).clone(), Vec::new()))
+                    .prop_map(move |e| (ModuleDecl::Expr(e), (*s2).clone(), Vec::new(), Vec::new()))
                     .boxed()
             }),
         ));
@@ -2305,7 +2344,7 @@ fn decl<V: Version>(
                             _ => None,
                         })
                         .collect();
-                    (ModuleDecl::Open(m), s.with(opened), Vec::new())
+                    (ModuleDecl::Open(m), s.with(opened), Vec::new(), Vec::new())
                 })
                 .boxed(),
         ));
@@ -2330,6 +2369,7 @@ fn decl<V: Version>(
                             },
                             (*s).clone(),
                             vec![name.as_str().to_owned()],
+                            Vec::new(),
                         )
                     })
                     .boxed()
@@ -2359,19 +2399,12 @@ fn decl<V: Version>(
                         });
                         decls::<V>(n, &inner, &Rc::new(BTreeSet::new()), depth - 1).prop_filter_map(
                             "F# refuses the module",
-                            move |(decls, inside)| {
+                            move |(decls, _, values)| {
                                 // The module's own values, by their path from
                                 // outside it; a private one is not visible.
-                                let exported: Vec<Var> = inside
-                                    .vars
+                                let exported: Vec<Var> = values
                                     .iter()
-                                    .filter(|v| {
-                                        !v.private
-                                            && !s
-                                                .vars
-                                                .iter()
-                                                .any(|w| w.path == v.path && w.ty == v.ty)
-                                    })
+                                    .filter(|v| !v.private)
                                     .map(|v| Var {
                                         path: LongIdent(Vec1::new(
                                             name.clone(),
@@ -2389,6 +2422,7 @@ fn decl<V: Version>(
                                     } else {
                                         exported
                                     };
+                                let exported_values = exported.clone();
                                 let mut scope = s.with(exported);
                                 scope.modules.push(name.clone());
                                 let body = if is_rec {
@@ -2408,6 +2442,7 @@ fn decl<V: Version>(
                                     }),
                                     scope,
                                     vec![name.as_str().to_owned()],
+                                    exported_values.clone(),
                                 ))
                             },
                         )
@@ -2441,6 +2476,7 @@ fn decl<V: Version>(
                             ModuleDecl::Types(Vec1::from_vec(defs).expect("non-empty")),
                             (*s).clone(),
                             names,
+                            Vec::new(),
                         ))
                     })
                     .boxed()
@@ -2461,7 +2497,7 @@ fn decl<V: Version>(
                         let names = vec![name.as_str().to_owned()];
                         let exn =
                             ExceptionDefn::new(ExceptionName::new(name).ok()?, fields).ok()?;
-                        Some((ModuleDecl::Exception(exn), (*s).clone(), names))
+                        Some((ModuleDecl::Exception(exn), (*s).clone(), names, Vec::new()))
                     })
                     .boxed()
             }),
@@ -2553,12 +2589,15 @@ fn pat_names<V: Version>(p: &Pat<V>, out: &mut Vec<String>) {
 /// A field type: a drawn type, or one of `typars`.
 fn field_type(typars: Vec<borzoi_print::names::TyparName>) -> BoxedStrategy<Type> {
     let drawn = arb_ty(1).prop_map(|t| type_of(&t));
+    // `_`, alone or in a type, which a declaration refuses (FS0715).
+    let hole = prop_oneof![Just(Type::Anon), Just(app("list", Type::Anon)),];
     if typars.is_empty() {
-        drawn.boxed()
+        prop_oneof![8 => drawn, 1 => hole].boxed()
     } else {
         prop_oneof![
-            2 => drawn,
-            1 => prop::sample::select(typars).prop_map(Type::Var),
+            8 => drawn,
+            4 => prop::sample::select(typars).prop_map(Type::Var),
+            1 => hole,
         ]
         .boxed()
     }
@@ -2628,7 +2667,7 @@ pub fn impl_file<V: Version>() -> BoxedStrategy<ImplFile<V>> {
     let sc = Rc::new(prelude_scope());
     (1..=4u32)
         .prop_flat_map(move |n| decls::<V>(n, &sc, &Rc::new(BTreeSet::new()), 1))
-        .prop_map(|(decls, _)| ImplFile::AnonModule(decls))
+        .prop_map(|(decls, _, _)| ImplFile::AnonModule(decls))
         .boxed()
 }
 

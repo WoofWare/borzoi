@@ -11,6 +11,7 @@
 //! tree targets as a parameter ([`crate::version`]), so a tree holds only what
 //! its version has.
 
+use std::collections::HashSet;
 use std::fmt::Debug;
 use std::hash::Hash;
 use std::marker::PhantomData;
@@ -20,7 +21,7 @@ use crate::names::{
     UnionCaseName, ValueName, VarName,
 };
 use crate::vec::{Vec1, Vec2};
-use crate::version::{Available, Gate, Unavailable, Version};
+use crate::version::{Available, Gate, LanguageFeature, Unavailable, Version};
 
 /// An implementation file (`.fs`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -331,8 +332,9 @@ pub enum BindingHead<V: Version> {
 
 /// A type definition, one of a `type … and …` group. F#'s checker refuses a
 /// type parameter declared twice (FS0037), an abbreviation that does not use
-/// every one it declares (FS0035), and a record field or union case declared
-/// twice (FS0037), so [`TypeDefn::new`] refuses them.
+/// every one it declares (FS0035), a record field or union case declared
+/// twice (FS0037), a `_` in a type (FS0715), and from F# 9 a union case named
+/// as another's tester property (FS0023), so [`TypeDefn::new`] refuses them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeDefn<V: Version> {
     attributes: Vec<Attribute<V>>,
@@ -357,6 +359,11 @@ pub enum DeclRefusal {
     /// A union case is named `Tags`, the name of the type F# generates for
     /// the cases' tags (FS1219).
     CaseNamedTags,
+    /// A declaration's type holds `_` (FS0715).
+    AnonymousType,
+    /// A union case is named as F# 9 names another case's tester property,
+    /// `IsA` for `A` (FS0023).
+    CaseNamedAsTester(Ident),
     /// A field is named what F# names one of the case's unnamed fields:
     /// `Item`, `Item1`, … in a union case, `Data0`, … in an exception
     /// (FS3176).
@@ -377,6 +384,9 @@ impl<V: Version> TypeDefn<V> {
         }
         match &repr {
             TypeRepr::Abbrev(ty) => {
+                if ty.has_anon() {
+                    return Err(DeclRefusal::AnonymousType);
+                }
                 let mut used = Vec::new();
                 ty.typars(&mut used);
                 if let Some(t) = typars.iter().find(|t| !used.contains(t)) {
@@ -384,13 +394,24 @@ impl<V: Version> TypeDefn<V> {
                 }
             }
             TypeRepr::Record(fields) => {
+                if fields.as_slice().iter().any(|f| f.ty.has_anon()) {
+                    return Err(DeclRefusal::AnonymousType);
+                }
                 if let Some(f) = first_duplicate(fields.as_slice().iter().map(|f| &f.name)) {
                     return Err(DeclRefusal::DuplicateField(f.clone()));
                 }
             }
             TypeRepr::Union(cases) => {
-                if let Some(c) = first_duplicate(cases.as_slice().iter().map(|c| c.name.ident())) {
+                let cases = cases.as_slice();
+                if let Some(c) = first_duplicate(cases.iter().map(|c| c.name.ident())) {
                     return Err(DeclRefusal::DuplicateCase(c.clone()));
+                }
+                // From F# 9 each case has a tester property, `IsA` for `A`.
+                if V::LANGUAGE.supports(LanguageFeature::UnionIsPropertiesVisible) {
+                    let testers: HashSet<String> = cases.iter().map(|c| c.name.tester()).collect();
+                    if let Some(c) = cases.iter().find(|c| testers.contains(c.name.as_str())) {
+                        return Err(DeclRefusal::CaseNamedAsTester(c.name.ident().clone()));
+                    }
                 }
             }
         }
@@ -425,15 +446,9 @@ impl<V: Version> TypeDefn<V> {
 }
 
 /// The first item of `items` equal to an earlier one.
-fn first_duplicate<'a, T: PartialEq + 'a>(items: impl Iterator<Item = &'a T>) -> Option<&'a T> {
-    let mut seen: Vec<&T> = Vec::new();
-    for item in items {
-        if seen.contains(&item) {
-            return Some(item);
-        }
-        seen.push(item);
-    }
-    None
+fn first_duplicate<'a, T: Eq + Hash + 'a>(items: impl Iterator<Item = &'a T>) -> Option<&'a T> {
+    let mut seen: HashSet<&T> = HashSet::new();
+    items.into_iter().find(|item| !seen.insert(item))
 }
 
 /// What a type definition defines.
@@ -523,10 +538,13 @@ fn check_fields(
     fields: &[UnionField],
     generated: impl Fn(usize) -> String,
 ) -> Result<(), DeclRefusal> {
+    if fields.iter().any(|f| f.ty.has_anon()) {
+        return Err(DeclRefusal::AnonymousType);
+    }
     if let Some(f) = first_duplicate(fields.iter().filter_map(|f| f.name.as_ref())) {
         return Err(DeclRefusal::DuplicateField(f.clone()));
     }
-    let unnamed: Vec<String> = fields
+    let unnamed: HashSet<String> = fields
         .iter()
         .enumerate()
         .filter(|(_, f)| f.name.is_none())
@@ -535,7 +553,7 @@ fn check_fields(
     match fields
         .iter()
         .filter_map(|f| f.name.as_ref())
-        .find(|n| unnamed.iter().any(|u| u == n.as_str()))
+        .find(|n| unnamed.contains(n.as_str()))
     {
         Some(n) => Err(DeclRefusal::FieldNamedAsGenerated(n.clone())),
         None => Ok(()),
@@ -1229,7 +1247,8 @@ pub enum Pat<V: Version> {
         pat: Box<Pat<V>>,
         ty: Type,
     },
-    /// `p as q`
+    /// `p as q`. With `p` a type test, `:? t as x`, F# binds `x` at `t`, so
+    /// the type test is printed bare.
     As {
         pat: Box<Pat<V>>,
         alias: AsAlias<V>,
@@ -1314,6 +1333,18 @@ pub enum Type {
 }
 
 impl Type {
+    /// Whether `self` holds `_` anywhere.
+    fn has_anon(&self) -> bool {
+        match self {
+            Type::Anon => true,
+            Type::Name(_) | Type::Var(_) => false,
+            Type::App { args, .. } => args.as_slice().iter().any(Type::has_anon),
+            Type::Fun { arg, ret } => arg.has_anon() || ret.has_anon(),
+            Type::Tuple(ts) => ts.as_slice().iter().any(Type::has_anon),
+            Type::Array { elem, .. } => elem.has_anon(),
+        }
+    }
+
     /// Push the type variables `self` uses onto `out`.
     fn typars(&self, out: &mut Vec<TyparName>) {
         match self {

@@ -5308,7 +5308,7 @@ tests/fsharp/typecheck/sigs/neg92.fs	kept=1 dropped=4
 tests/fsharp/typecheck/sigs/neg93.fs	kept=1 dropped=2
 tests/fsharp/typecheck/sigs/neg94-pre.fs	kept=1 dropped=4
 tests/fsharp/typecheck/sigs/neg94.fs	kept=2 dropped=0
-tests/fsharp/typecheck/sigs/neg95.fs	kept=4 dropped=5
+tests/fsharp/typecheck/sigs/neg95.fs	kept=4 dropped=10
 tests/fsharp/typecheck/sigs/neg96.fs	kept=3 dropped=2
 tests/fsharp/typecheck/sigs/neg97.fs	kept=5 dropped=4
 tests/fsharp/typecheck/sigs/neg98.fs	kept=0 dropped=2

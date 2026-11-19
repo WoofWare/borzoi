@@ -914,7 +914,14 @@ impl Printer {
                 self.ty(ty);
             }
             Pat::As { pat, alias } => {
-                self.pat(pat);
+                // `:? t as x` bare: F# binds `x` at `t` only then, and at the
+                // matched type after `(:? t)`.
+                if let Pat::IsInst(ty) = &**pat {
+                    self.out.push_str(":? ");
+                    self.ty(ty);
+                } else {
+                    self.pat(pat);
+                }
                 self.out.push_str(" as ");
                 match alias {
                     // Bare: before F# 6, FCS's checker refuses `p as (x)`.
