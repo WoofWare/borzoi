@@ -690,6 +690,35 @@ fn a_value_written_before_a_possible_first_import_is_not_named() {
     }
 }
 
+/// An SDK the walk cannot resolve imports `Sdk.targets` after the body, unseen,
+/// and that may rewrite what the body wrote (here `OutputPath`, which the
+/// common targets extend with the target framework): the channel names nothing.
+/// The walk's own read of it is the subject of #1048.
+#[test]
+fn an_unresolved_sdk_withdraws_the_channel() {
+    let tmp = TempDir::new().unwrap();
+    let dir = borzoi_msbuild::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    let path = dir.join("Demo.fsproj");
+    let xml = "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup>\
+               <TargetFramework>net8.0</TargetFramework><OutputPath>base</OutputPath>\
+               </PropertyGroup></Project>";
+    std::fs::write(&path, xml).unwrap();
+    let probe = ReadProbe {
+        properties: vec!["OutputPath".to_owned()],
+        ..ReadProbe::default()
+    };
+    let mut oracle = Oracle::spawn();
+    let (theirs, reads) =
+        evaluate(&mut oracle, xml, &path, &probe, "x").expect("MSBuild evaluates it");
+    assert_ne!(
+        theirs.get("OutputPath").map(String::as_str),
+        Some("base"),
+        "the SDK's targets rewrite the body's OutputPath"
+    );
+    assert!(reads.candidates_withdrawn);
+    assert_eq!(reads.candidates["OutputPath"], None);
+}
+
 /// Each `<Choose>` the walk cannot decide widens what its branches write
 /// once: four optional appends name the five strings they can make.
 #[test]

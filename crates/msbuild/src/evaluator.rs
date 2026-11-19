@@ -488,7 +488,11 @@ fn item_full_path(path: &Path) -> PathBuf {
 fn resolve_project_sdk(root: Node<'_, '_>, state: &mut State<'_>) -> Option<SdkPaths> {
     let sdk = attribute(root, "Sdk")?;
     let sdk: &str = &sdk;
+    // The SDK's `Sdk.targets` runs after the body, unseen wherever the SDK
+    // does not resolve, and may rewrite what the body writes: the candidate
+    // channel names nothing past such a root (#1048).
     let Some(resolver) = state.sdk_resolver else {
+        state.candidates_withdrawn = true;
         state.push(
             DiagnosticKind::SdkResolverAbsent {
                 name: sdk.to_string(),
@@ -519,6 +523,7 @@ fn resolve_project_sdk(root: Node<'_, '_>, state: &mut State<'_>) -> Option<SdkP
             Some(paths)
         }
         Ok(SdkResolution::Roots(_)) => {
+            state.candidates_withdrawn = true;
             // A locator-style resolution has no Sdk.props/Sdk.targets entry
             // points, so it cannot back the `<Project Sdk="…">` shorthand.
             // No real project names a locator here; degrade like an
@@ -538,6 +543,7 @@ fn resolve_project_sdk(root: Node<'_, '_>, state: &mut State<'_>) -> Option<SdkP
             None
         }
         Err(err) => {
+            state.candidates_withdrawn = true;
             state.push(sdk_error_to_diagnostic(sdk, err), root.range());
             None
         }
@@ -750,6 +756,8 @@ fn walk_doc_body(root: Node<'_, '_>, current_file_dir: &Path, state: &mut State<
     // exactly-undefined by properties earlier in the document.
     for child in root.children().filter(Node::is_element) {
         if child.tag_name().name() == "Sdk" {
+            // Its `Sdk.targets`, after the body, goes unseen too (#1048).
+            state.candidates_withdrawn = true;
             let sdk = attribute(child, "Name").unwrap_or_default().to_string();
             state.push(
                 DiagnosticKind::UnsupportedConstruct {
@@ -4176,7 +4184,7 @@ fn handle_choose(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State<
             for name in written {
                 state.mark_skipped_write_stale(&name, &cause);
             }
-        } else if let Some(first) = first_unsure {
+        } else if let Some(first) = first_unsure.filter(|_| state.track_candidates) {
             // The branches before the undecided gate, from the first the walk
             // did not decide from certain inputs for a reason that leaves no
             // mark, may be the one MSBuild takes ([`candidates`]); the later
@@ -4235,7 +4243,7 @@ fn handle_choose(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State<
     // From the first gate the walk did not decide from certain inputs for a
     // reason that leaves no mark, MSBuild may take another branch than the
     // walk's: what each writes, the real build may hold ([`candidates`]).
-    if let (Some(first), None) = (first_unsure, &choice_stale) {
+    if let (Some(first), None, true) = (first_unsure, &choice_stale, state.track_candidates) {
         for branch in state.choose_branches_from(node, first, Some(walked), false) {
             state.widen_branch_candidates(branch);
         }
@@ -4552,7 +4560,15 @@ fn walk_property_child_inner(
                     stale,
                 },
             );
-            state.record_candidates(&name, widened.unwrap_or(kept));
+            // A name the walk still holds exactly reads as its value, so it
+            // needs no record.
+            match widened {
+                Some(widened) => state.record_candidates(&name, widened),
+                None if !state.held_exactly_for_candidates(&name) => {
+                    state.record_candidates(&name, kept);
+                }
+                None => {}
+            }
             return;
         }
         CondGate::Unsupported => {
