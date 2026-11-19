@@ -1295,10 +1295,14 @@ mod tests {
         /// and through a link. The generated trees combine them.
         #[test]
         fn every_single_setting_tree_s_read_set_is_sound() {
+            // Each setting is varied on its own over a user config naming no
+            // folder: with none, the settings model declines before it reads
+            // the setting. The tree with no user config at all is a row of
+            // its own.
             let none = Tree {
                 project_config: None,
                 repo_config: None,
-                user_config: None,
+                user_config: Some(Folder::Unset),
                 environment: None,
                 lock: false,
                 linked: false,
@@ -1310,7 +1314,13 @@ mod tests {
                 Folder::Inside,
                 Folder::Linked,
             ];
-            let mut trees = vec![none.clone()];
+            let mut trees = vec![
+                none.clone(),
+                Tree {
+                    user_config: None,
+                    ..none.clone()
+                },
+            ];
             for folder in folders {
                 trees.push(Tree {
                     user_config: Some(folder),
@@ -1438,7 +1448,9 @@ mod tests {
             let tree = Tree {
                 project_config: None,
                 repo_config: None,
-                user_config: None,
+                // NuGet writes a user config where there is none, which the
+                // settings model declines.
+                user_config: Some(Folder::Unset),
                 environment: None,
                 lock: false,
                 linked: false,

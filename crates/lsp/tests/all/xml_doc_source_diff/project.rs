@@ -102,7 +102,9 @@ fn load(project: &Path, workspace: &mut Workspace, sema: &mut SemanticState) -> 
 }
 
 /// FCS's records for `loaded`, reading `refs` as the whole reference set when
-/// `exclusive`, else alongside the SDK's own.
+/// `exclusive`, else alongside the SDK's own. An exclusive set is a pinned
+/// real project's, whose files may change during a run; the other is the
+/// staged fixture's.
 fn oracle(loaded: &Loaded, exclusive: bool) -> Vec<OracleFile> {
     let defines: Vec<&str> = loaded.symbols.iter().map(String::as_str).collect();
     let refs: Vec<&Path> = if exclusive {
@@ -116,6 +118,7 @@ fn oracle(loaded: &Loaded, exclusive: bool) -> Vec<OracleFile> {
         &refs,
         exclusive,
         loaded.lang_version.as_deref(),
+        exclusive,
     )
 }
 

@@ -459,17 +459,22 @@ fn legacy_file_batch_pool() -> &'static BatchPool {
 /// wedging the resident child that a thrown exception would have killed. A normal
 /// projection payload has no `BatchError` key, so this is a no-op for it.
 fn reject_batch_error(line: &str, subcommand: &str) {
+    if let Some(msg) = batch_error(line) {
+        panic!("fcs-dump resident batch ({subcommand}) failed: {msg}");
+    }
+}
+
+/// A resident batch handler's `{ "BatchError": <msg> }` refusal message, or
+/// `None` for a normal payload.
+fn batch_error(line: &str) -> Option<String> {
     #[derive(Deserialize)]
     struct Probe {
         #[serde(rename = "BatchError")]
         batch_error: Option<String>,
     }
-    if let Ok(Probe {
-        batch_error: Some(msg),
-    }) = serde_json::from_str::<Probe>(line)
-    {
-        panic!("fcs-dump resident batch ({subcommand}) failed: {msg}");
-    }
+    serde_json::from_str::<Probe>(line)
+        .ok()
+        .and_then(|probe| probe.batch_error)
 }
 
 /// Run `fcs-dump uses-project`, feeding `paths` (Compile order) on stdin one per
@@ -498,6 +503,15 @@ pub fn invoke_fcs_dump_project(paths: &[&Path]) -> String {
 /// caller that sets them (the corpus-diff / LSP consumers do — this sema harness
 /// does not, but the helper must not silently drop them).
 pub fn invoke_fcs_dump_project_with_refs(paths: &[&Path], refs: &[&Path]) -> String {
+    try_invoke_fcs_dump_project_with_refs(paths, refs)
+        .unwrap_or_else(|msg| panic!("fcs-dump resident batch (uses-project) failed: {msg}"))
+}
+
+/// [`invoke_fcs_dump_project_with_refs`], with the oracle's refusal as `Err`.
+pub fn try_invoke_fcs_dump_project_with_refs(
+    paths: &[&Path],
+    refs: &[&Path],
+) -> Result<String, String> {
     let mut request = serde_json::json!({
         "paths": paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
         "refs": refs.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
@@ -518,8 +532,10 @@ pub fn invoke_fcs_dump_project_with_refs(paths: &[&Path], refs: &[&Path]) -> Str
         }
     }
     let line = fcs_project_batch_pool().request(&request.to_string());
-    reject_batch_error(&line, "uses-project");
-    line
+    match batch_error(&line) {
+        Some(msg) => Err(msg),
+        None => Ok(line),
+    }
 }
 
 /// The resident project oracle pool (`fcs-dump uses-project-batch`): each request
@@ -1660,6 +1676,27 @@ pub fn ensure_assembly_fixture_built() -> &'static Path {
                 .join("Release")
                 .join("net10.0")
                 .join("SemaAssemblyEnvFixture.dll")
+        })
+        .as_path()
+}
+
+/// Build the **type-provider** fixture (`tests/fixtures/type_provider_env`,
+/// `SemaTypeProviderFixture.dll`, an assembly that declares itself a type
+/// provider's runtime assembly) once per test binary and return its `.dll`
+/// path.
+pub fn ensure_type_provider_fixture_built() -> &'static Path {
+    static BUILT: OnceLock<PathBuf> = OnceLock::new();
+    BUILT
+        .get_or_init(|| {
+            let project =
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/type_provider_env");
+            let _guard = BUILD_LOCK.lock().expect("BUILD_LOCK poisoned");
+            dotnet_build(&project, "dotnet build type-provider fixture");
+            project
+                .join("bin")
+                .join("Release")
+                .join("net10.0")
+                .join("SemaTypeProviderFixture.dll")
         })
         .as_path()
 }
