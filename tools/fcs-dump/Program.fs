@@ -353,10 +353,12 @@ let private boolField (fields: Map<string, JsonElement>) (name: string) : bool =
     | Some v when v.ValueKind = JsonValueKind.False -> false
     | Some v -> failwithf "the field %s is a JSON %O, not a boolean" name v.ValueKind
 
-/// Whether the FCS this tool runs recognises `version` as a language version:
-/// FCS's own `LanguageVersion.ContainsVersion`, which is internal and so read
-/// by reflection. A version FCS does not recognise is not one it checks at:
-/// it reports an option error that no projection carries, and checks at its
+/// Whether the FCS this tool runs recognises `version` as a language version,
+/// as its option parser (`setLanguageVersion`) does: `preview` in any case,
+/// and otherwise FCS's own `LanguageVersion.ContainsVersion`, which is
+/// internal and so read by reflection (and which answers `false` for
+/// `preview`). A version FCS does not recognise is not one it checks at: it
+/// reports an option error that no projection carries, and checks at its
 /// default.
 let private fcsRecognisesLanguageVersion : string -> bool =
     let languageVersion =
@@ -368,7 +370,9 @@ let private fcsRecognisesLanguageVersion : string -> bool =
                 BindingFlags.Static ||| BindingFlags.Public ||| BindingFlags.NonPublic
             )
         )
-    fun version -> containsVersion.Invoke(null, [| box version |]) |> unbox<bool>
+    fun version ->
+        String.Equals(version, "preview", StringComparison.OrdinalIgnoreCase)
+        || (containsVersion.Invoke(null, [| box version |]) |> unbox<bool>)
 
 /// The `langversion` field: a version, or `null` or absent for FCS's
 /// default. A version is letters, digits and dots (`8.0`, `latest`,
@@ -7617,13 +7621,7 @@ let private usesProjectGraphBatchCore () =
             | other -> failwithf "request: unknown op %s" other
         with ex ->
             JsonSerializer.Serialize({| BatchError = ex.Message |}, compact)
-    let mutable line = Console.In.ReadLine()
-    while not (isNull line) do
-        let trimmed = (Option.ofObj line |> Option.defaultValue "").Trim()
-        if trimmed <> "" then
-            Console.Out.WriteLine(respond trimmed)
-            Console.Out.Flush()
-        line <- Console.In.ReadLine()
+    answerEachLine respond
 
 /// [`usesProjectGraphBatchCore`] on a large-stack thread, as
 /// [`usesProjectBatch`] runs its core.
