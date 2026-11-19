@@ -24,9 +24,14 @@
 //!   source-text mutation; and, to `file-batch`, a script whose `#r` names
 //!   a file in each state (FCS resolves a script's references itself). The
 //!   resident child must answer the same request twice alike (a check it
-//!   made around a refusal is no answer the second time), exactly as a fresh
-//!   child answers the same world, and a successful project answer must
-//!   describe the files as they are ([`check_records`]).
+//!   made around a refusal is no answer the second time), and exactly as a
+//!   fresh child answers the same world, except that a reference rewritten
+//!   under a path the child has read is refused by the oracle's fixture
+//!   precondition (fcs-dump's module doc); and a successful project answer
+//!   must describe the files as they are ([`check_records`]). The requests
+//!   are fixture requests: a request whose inputs may change
+//!   (`inputsMayChange`) is served only as a fresh child's first, so a warm
+//!   child refuses it by design.
 //!
 //! Both are `#[ignore]`d because they drive FCS, as this crate's other FCS
 //! tests are; the whole-project gate runs them.
@@ -1188,7 +1193,21 @@ fn run_case(residents: &mut Residents, case: Case) -> Result<Verdict, String> {
         ));
     }
     let fresh = fresh_answer(op, &world.request).map_err(|e| format!("a fresh child: {e}"))?;
-    if resident_answer != fresh {
+    // The fixture precondition of the project-check oracles (fcs-dump's
+    // module doc): a reference that holds other bytes under a path the child
+    // has read is refused, naming the path, rather than answered from what
+    // FCS kept of the old bytes. Only the cases that rewrite the reference
+    // after the first request may meet it.
+    let reference_rewritten = matches!(
+        case,
+        Case::ReferenceChange(
+            Change::SameStampReplace | Change::SameStampRewrite | Change::SameStampResize
+        ) | Case::ReferenceSpelling(_)
+    );
+    let refused_by_precondition = refusal(&resident_answer).is_some_and(|why| {
+        why.contains("refs/Ref.dll holds other bytes than when this oracle last read it")
+    });
+    if resident_answer != fresh && !(reference_rewritten && refused_by_precondition) {
         return Err(format!(
             "the resident child answered\n    {}\n  and a fresh child\n    {}",
             resident_answer.trim_end(),
