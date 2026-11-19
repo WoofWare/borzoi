@@ -198,10 +198,10 @@ pub struct Case {
     /// Each line of [`Self::uses`]'s coverage tag: the kind of the item it
     /// uses, and whether that item's name collides with FSharp.Core's.
     pub use_tags: Vec<String>,
-    /// Each line of [`Self::uses`]'s intended symbol: the name of A's item
-    /// the line names last (a union's or enum's first case, an optional
-    /// extension's static member).
-    pub use_names: Vec<String>,
+    /// Each line of [`Self::uses`]'s intended symbol: the path of the module
+    /// or namespace declaring A's item, and the name the line names last (a
+    /// union's or enum's first case, an extension's member).
+    pub use_names: Vec<(String, String)>,
 }
 
 const NAMESPACES: &[&str] = &[
@@ -582,7 +582,7 @@ fn open_targets(case: &Case) -> Vec<String> {
 
 /// B's body: for every item of A, its uses, qualified and bare, and each
 /// line's coverage tag.
-fn consumer_uses(case: &Case, rng: &mut Rng) -> (Vec<String>, Vec<String>, Vec<String>) {
+fn consumer_uses(case: &Case, rng: &mut Rng) -> (Vec<String>, Vec<String>, Vec<(String, String)>) {
     let mut out = Vec::new();
     let mut tags = Vec::new();
     let mut k = 0usize;
@@ -595,7 +595,7 @@ fn consumer_uses(case: &Case, rng: &mut Rng) -> (Vec<String>, Vec<String>, Vec<S
         decls: &[Decl],
         rng: &mut Rng,
         out: &mut Vec<String>,
-        tags: &mut Vec<(String, String)>,
+        tags: &mut Vec<(String, (String, String))>,
         next: &mut dyn FnMut() -> String,
     ) {
         for d in decls {
@@ -608,7 +608,7 @@ fn consumer_uses(case: &Case, rng: &mut Rng) -> (Vec<String>, Vec<String>, Vec<S
                 } else {
                     tag
                 };
-                (tag, item_use_name(&d.item))
+                (tag, (prefix.to_owned(), item_use_name(&d.item)))
             }));
             if let Item::Module { name, items, .. } = &d.item {
                 walk(&format!("{prefix}.{name}"), items, rng, out, tags, next);
@@ -658,10 +658,12 @@ fn uses_of(
     next: &mut dyn FnMut() -> String,
 ) {
     let bare = rng.chance(60);
-    // A bare use, and an extension member called on a receiver, is marked in
-    // a trailing comment, so its coverage tag can tell it from a qualified
-    // use: either may rightly bind elsewhere (FSharp.Core's `id` when A's
-    // module is not opened; `String.Trim` over an extension named `Trim`).
+    // A bare use, and an extension member called through its target (on a
+    // receiver, or as `System.Int32.M`), is marked in a trailing comment, so
+    // its coverage tag can tell it from a qualified use: each may rightly
+    // bind elsewhere (FSharp.Core's `id` when A's module is not opened;
+    // `String.Trim` over an extension named `Trim`; another module's
+    // extension of the same name).
     let mark = |text: String| format!("{text} {BARE_MARK}");
     let mut push = |text: String| out.push(text);
     match item {
@@ -777,7 +779,7 @@ fn uses_of(
                 "(1)"
             };
             push(mark(format!("let {} = {receiver}.{member}", next())));
-            push(format!("let {} = {target}.{member}S", next()));
+            push(mark(format!("let {} = {target}.{member}S", next())));
         }
         Item::CsExtension { holder, member, .. } => {
             push(mark(format!("let {} = \"s\".{member} ()", next())));

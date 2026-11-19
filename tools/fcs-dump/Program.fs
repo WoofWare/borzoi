@@ -7237,15 +7237,26 @@ let private respondGraphCheck (checker: FSharpChecker) (root: JsonElement) =
                 | ProjectRef q -> Some graph.ById.[q].AssemblyName
                 | Dll _ -> None)
             |> set
+        let mutable seenDlls = Set.empty
+        let mutable seenProjects = Set.empty
         for a in results.ProjectContext.GetReferencedAssemblies() do
-            let ok =
-                match a.FileName with
-                | Some file when dlls.Contains(Path.GetFullPath file) -> true
-                | _ -> fromSource.Contains a.SimpleName
-            if not ok then
+            match a.FileName with
+            | Some file when dlls.Contains(Path.GetFullPath file) -> seenDlls <- seenDlls.Add(Path.GetFullPath file)
+            | Some file when File.Exists file ->
+                failwithf
+                    "project %s: FCS resolved assembly %s (%s), which the request does not name"
+                    p.Id a.SimpleName file
+            | _ when fromSource.Contains a.SimpleName -> seenProjects <- seenProjects.Add a.SimpleName
+            | _ ->
                 failwithf
                     "project %s: FCS resolved assembly %s (%A), which the request does not name"
                     p.Id a.SimpleName a.FileName
+        // And every reference the request names is one FCS imported: a
+        // project reference as the in-memory assembly it reads from source,
+        // a DLL by its file.
+        let missing = Set.union (dlls - seenDlls) (fromSource - seenProjects)
+        if not missing.IsEmpty then
+            failwithf "project %s: FCS did not import %A" p.Id (Set.toList missing)
     let referenced =
         referenced
         |> List.map (fun p ->
@@ -7277,7 +7288,12 @@ let private respondGraphCompile (checker: FSharpChecker) (root: JsonElement) =
     if p.References |> List.exists (function ProjectRef _ -> true | Dll _ -> false) then
         failwithf "project %s: a compiled project references DLLs only" p.Id
     Directory.CreateDirectory outDir |> ignore
-    let argv = graphArgv p outDir (fun q -> failwithf "unreachable project reference %s" q)
+    // Compiled into a staging directory and moved into place only once
+    // validated, so a refused compile never replaces an earlier good DLL.
+    let staging = Path.Combine(outDir, ".staging-" + Guid.NewGuid().ToString("N"))
+    Directory.CreateDirectory staging |> ignore
+    try
+    let argv = graphArgv p staging (fun q -> failwithf "unreachable project reference %s" q)
     let diagnostics, failure =
         checker.Compile(Array.append [| "fsc.exe" |] argv, userOpName = "fcs-dump-graph-compile")
         |> Async.RunSynchronously
@@ -7290,12 +7306,12 @@ let private respondGraphCompile (checker: FSharpChecker) (root: JsonElement) =
     | _ -> ()
     // The DLL only when this compile wrote it: a failed compile leaves any
     // earlier one in place, which is not this request's artefact.
-    let output: string | null =
-        if errors || failure.IsSome then null else Path.Combine(outDir, p.AssemblyName + ".dll")
+    let staged: string | null =
+        if errors || failure.IsSome then null else Path.Combine(staging, p.AssemblyName + ".dll")
     // The DLL references exactly assemblies the request names: one the
     // compiler found by itself would make an incomplete reference set look
     // complete. Read from the DLL it wrote.
-    match output with
+    match staged with
     | null -> ()
     | dll ->
         let named =
@@ -7311,8 +7327,17 @@ let private respondGraphCompile (checker: FSharpChecker) (root: JsonElement) =
             let name = md.GetString(md.GetAssemblyReference(h).Name)
             if not (named.Contains name) then
                 failwithf "project %s: the compile referenced assembly %s, which the request does not name" p.Id name
+    let output: string | null =
+        match staged with
+        | null -> null
+        | dll ->
+            let final = Path.Combine(outDir, p.AssemblyName + ".dll")
+            File.Move(dll, final, true)
+            final
     {| Diagnostics = diagnostics |> Array.map projectDiagnostic
        Output = output |}
+    finally
+        Directory.Delete(staging, true)
 
 /// `uses-project-graph-batch`: one JSON request per stdin line, one compact
 /// response per stdout line.
@@ -7371,6 +7396,12 @@ let private usesProjectGraphBatchCore () =
 /// [`usesProjectGraphBatchCore`] on a large-stack thread, as
 /// [`usesProjectBatch`] runs its core.
 let private usesProjectGraphBatch () =
+    // FCS keeps the assemblies it read in a small strong cache and a weak
+    // one, so whether a later request meets an earlier one's reader would
+    // depend on the collector. Holding every reader strongly makes the
+    // oracle's answers depend only on its own clearing (`InvalidateAll` per
+    // request). Read when FCS's binary reader first loads, so set first.
+    Environment.SetEnvironmentVariable("FSharp_StronglyHeldBinaryReaderCacheSize", "1000000")
     let mutable captured: exn option = None
     let worker =
         System.Threading.Thread(

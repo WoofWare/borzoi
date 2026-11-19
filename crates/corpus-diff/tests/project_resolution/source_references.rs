@@ -231,7 +231,6 @@ const DEFAULT_BOUND_KINDS: &[&str] = &[
     "interface (colliding)",
     "literal",
     "measure",
-    "optional extension",
     "record",
     "record (colliding)",
     "struct",
@@ -307,18 +306,21 @@ fn use_coverage(case: &Case, source: &GraphResponse) -> UseCoverage {
     // Whether a record on `line` of B's Use.fs is A's symbol `name`: the
     // symbol the generator wrote there, not merely any record of A (a
     // qualifier such as `N.M` would do).
-    let binds_at = |line: u64, name: &str| {
+    // A record of the intended declaration: in A, on `line` of B's Use.fs,
+    // declared under `path`, and named `name`. The path tells apart two
+    // declarations of one name in different modules.
+    let binds_at = |line: u64, path: &str, name: &str| {
         uses(source).any(|u| {
+            let full = u["FullName"].as_str().unwrap_or("");
             u["Assembly"] == case.library.as_str()
                 && u["Range"]["Start"]["Line"].as_u64() == Some(line)
                 && u["Range"]["File"]
                     .as_str()
                     .is_some_and(|f| f.ends_with("/Use.fs"))
+                && full.starts_with(&format!("{path}."))
                 && (u["SymbolName"] == name
                     || u["LogicalName"] == name
-                    || u["FullName"]
-                        .as_str()
-                        .is_some_and(|f| f.ends_with(&format!(".{name}"))))
+                    || full.ends_with(&format!(".{name}")))
         })
     };
     let mut coverage = UseCoverage {
@@ -326,7 +328,7 @@ fn use_coverage(case: &Case, source: &GraphResponse) -> UseCoverage {
         bound: BTreeSet::new(),
         unbound: Vec::new(),
     };
-    for ((u, tag), symbol) in case.uses.iter().zip(&case.use_tags).zip(&case.use_names) {
+    for ((u, tag), (path, symbol)) in case.uses.iter().zip(&case.use_tags).zip(&case.use_names) {
         if tag.ends_with("(bare)") {
             continue;
         }
@@ -335,10 +337,12 @@ fn use_coverage(case: &Case, source: &GraphResponse) -> UseCoverage {
         if bad.contains(&line) {
             continue;
         }
-        if binds_at(line, symbol) {
+        if binds_at(line, path, symbol) {
             coverage.bound.insert(tag.clone());
         } else if !tag.ends_with("(colliding)") {
-            coverage.unbound.push(format!("`{u}` ({tag}, {symbol})"));
+            coverage
+                .unbound
+                .push(format!("`{u}` ({tag}, {path}.{symbol})"));
         }
     }
     coverage
@@ -429,7 +433,9 @@ fn d1_over_generated_cases(cases: &[(u64, usize)], pinned_kinds: Option<&[&str]>
         }
     }
     let never: Vec<&String> = made.difference(&bound).collect();
-    if !never.is_empty() {
+    // Only the pinned run owes coverage: a short replay of a prefix may
+    // rightly hold no accepted use of some kind.
+    if pinned_kinds.is_some() && !never.is_empty() {
         failures.push(format!(
             "no qualified use of these kinds binds into the library in the run: {never:?}"
         ));
@@ -951,6 +957,31 @@ fn the_oracle_refuses_references_it_cannot_identify() {
     }
 }
 
+/// A project reference the consumer never uses is still imported, and the
+/// oracle verifies that it was: every reference the request names must be
+/// one FCS imported.
+#[test]
+#[ignore = "drives FCS; use --ignored for oracle smoke"]
+fn an_unused_reference_is_imported_from_source() {
+    let fixture = ProjectGraphFixture::materialise(vec![
+        project(
+            "Lib",
+            vec![("Lib.fs".into(), "module Lib\n\nlet x = 1\n".into())],
+            &[],
+        ),
+        project(
+            "App",
+            vec![("Use.fs".into(), "module Use\n\nlet y = 2\n".into())],
+            &["Lib"],
+        ),
+    ])
+    .expect("a graph");
+    let mut oracle = ProjectGraphOracle::default();
+    let D1 { source, problems } = d1(&mut oracle, &fixture, &name("App"));
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+    assert_eq!(source.referenced.len(), 1, "{source:#?}");
+}
+
 /// An executable compiles under the same template a library does.
 #[test]
 #[ignore = "drives FCS; use --ignored for oracle smoke"]
@@ -998,16 +1029,25 @@ fn a_compile_refuses_an_assembly_the_request_does_not_name() {
         short.len() < framework_references().len(),
         "System.Runtime is in the reference set"
     );
-    match ProjectGraphOracle::default().compile(&fixture.compile_request(
-        &name("Lib"),
-        &short,
-        &BTreeMap::new(),
-    )) {
+    // A good compile first, whose DLL the refused one must leave in place.
+    let mut oracle = ProjectGraphOracle::default();
+    let good = oracle
+        .compile(&fixture.compile_request(&name("Lib"), framework_references(), &BTreeMap::new()))
+        .expect("the compiler answers")
+        .output
+        .expect("a DLL");
+    let before = std::fs::read(&good).expect("read the DLL");
+    match oracle.compile(&fixture.compile_request(&name("Lib"), &short, &BTreeMap::new())) {
         Err(FcsInvokeError::Refused(why)) if why.contains("does not name") => {}
         other => panic!(
             "a compile against an assembly the request leaves out must be refused: {other:?}"
         ),
     }
+    assert_eq!(
+        std::fs::read(&good).expect("read the DLL"),
+        before,
+        "a refused compile leaves the earlier DLL in place"
+    );
 }
 
 /// A failed compile names no output, even where an earlier compile left a
