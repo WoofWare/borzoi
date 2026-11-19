@@ -1675,11 +1675,20 @@ impl FileWalk<'_> {
                             self.out.approximations.insert(Approximation::RejectedShape);
                         }
                         // An optional extension: compiled `T.name[.Static]`,
-                        // or the name a `[<CompiledName>]` gives.
+                        // or the name a `[<CompiledName>]` gives. A signature's
+                        // getter reading may be a method (`'T -> bool when
+                        // 'T: equality`), compiled under its bare name.
+                        let mut logicals = vec![v.logical.clone()];
+                        if signature
+                            && let Some(bare) = v.accessor.and_then(|p| v.logical.strip_prefix(p))
+                        {
+                            logicals.push(bare.to_owned());
+                        }
                         let mut compiled: BTreeSet<String> = type_names
                             .iter()
-                            .map(|t| {
-                                let mut c = format!("{t}.{}", v.logical);
+                            .flat_map(|t| logicals.iter().map(move |l| (t, l)))
+                            .map(|(t, logical)| {
+                                let mut c = format!("{t}.{logical}");
                                 // A constructor (rejected, and recovered as
                                 // static) takes no suffix.
                                 if v.is_static && role != MemberRole::Constructor {
@@ -1838,6 +1847,8 @@ impl FileWalk<'_> {
             }
             names.sort();
             names.dedup();
+            // Its `let`s, which FCS rejects here, kept in the container.
+            self.type_bodies(scope, None, &members)?;
             return self.members(scope, &members, Some(&names));
         };
         let last = head.last().expect("not empty").clone();
@@ -1862,23 +1873,13 @@ impl FileWalk<'_> {
                 .approximations
                 .insert(Approximation::AugmentationKind);
         }
-        // A marked `let` compiles into the type only where the augmentation
-        // is intrinsic (FCS rejects one elsewhere, with no recovery the walk
-        // knows).
-        let marked_let = members.iter().any(|m| {
-            let MemberDefn::LetBindings(l) = m else {
-                return false;
-            };
-            let mut lists: Vec<AttributeList> = l.attributes().collect();
-            for b in l.bindings() {
-                lists.extend(b.attributes());
-            }
-            self.routes.marks(&lists).may(Marker::Extension)
-        });
-        if marked_let && intrinsic != Maybe::Yes {
-            return Err(ExistenceUnread::UnnamedDeclaration(self.index));
-        }
+        // A `let` compiles into the type where the augmentation is
+        // intrinsic; elsewhere FCS rejects it, and its recovery keeps the
+        // val in the augmentation's own container.
         self.type_bodies(&scope.inner(&last), None, &members)?;
+        if intrinsic != Maybe::Yes {
+            self.type_bodies(scope, None, &members)?;
+        }
         if intrinsic != Maybe::No {
             self.members(&scope.inner(&last), &members, None)?;
             if intrinsic == Maybe::Yes {
