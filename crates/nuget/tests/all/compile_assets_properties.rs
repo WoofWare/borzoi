@@ -138,6 +138,7 @@ fn select(files: &[String], project: &NuGetFramework) -> Outcome {
             AssetSelectionDecline::LibContract { .. } => "lib-contract",
             AssetSelectionDecline::UndecidableReferenceName { .. } => "undecidable-reference",
             AssetSelectionDecline::NonUtf8PackageFile { .. } => "non-utf8",
+            AssetSelectionDecline::NulInPackageFile { .. } => "nul",
             AssetSelectionDecline::SymlinkCycle { .. } => "symlink-cycle",
             AssetSelectionDecline::Io { .. } => "io",
         }),
