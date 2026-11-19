@@ -249,10 +249,39 @@ impl Gen {
                 }
             }
             Kind::StaticHolder => format!(" =\n{indent}    static member S = 1"),
-            Kind::CSharpHolder => format!(
-                " =\n{indent}    [<System.Runtime.CompilerServices.Extension>]\n{indent}    static member {}(s: string) = s",
-                self.rng.pick(MEMBER_NAMES)
-            ),
+            Kind::CSharpHolder => {
+                // Every member shape a type declares, `[<Extension>]` on it
+                // or on one of its parts.
+                let ext = "[<System.Runtime.CompilerServices.Extension>]";
+                let type_name = name.clone();
+                let name = *self.rng.pick(MEMBER_NAMES);
+                let n = self.rng.below(1000);
+                let mut body = format!("() =\n{indent}    static let helper{n} (s: string) = s\n");
+                for _ in 0..1 + self.rng.below(3) {
+                    let member = match self.rng.below(9) {
+                        0 => format!("{ext}\n{indent}    static member {name}(s: string) = s"),
+                        1 => format!("{ext}\n{indent}    static member {name} = 1"),
+                        2 => format!(
+                            "static member {name} with {ext} get () = 1 and set (v: int) = ()"
+                        ),
+                        3 => format!("{ext}\n{indent}    new(s: string) = {type_name}()"),
+                        4 => format!("{ext}\n{indent}    static let f{n} (s: string) = s"),
+                        5 => format!(
+                            "{ext}\n{indent}    [<CompiledName(\"Renamed{n}\")>]\n{indent}    static member {name}X(s: string) = s"
+                        ),
+                        6 => format!(
+                            "[<CLIEvent>]\n{indent}    member _.Ev{n} = Event<int>().Publish"
+                        ),
+                        7 => format!("{ext}\n{indent}    member _.{name}Y(s: string) = s"),
+                        _ => format!(
+                            "{ext}\n{indent}    static member {name}Z (s: string) (t: string) = s + t"
+                        ),
+                    };
+                    body.push_str(&format!("{indent}    {member}\n"));
+                }
+                body.push_str(&format!("{indent}    member _.Use{n} = helper{n} \"x\""));
+                body
+            }
             Kind::Measure => {
                 return format!("{indent}[<Measure>]\n{indent}type {access}{name}\n");
             }
@@ -283,7 +312,11 @@ impl Gen {
         let members = 1 + self.rng.below(3);
         for _ in 0..members {
             let name = *self.rng.pick(MEMBER_NAMES);
-            let line = match self.rng.below(7) {
+            let line = match self.rng.below(8) {
+                7 => format!(
+                    "[<CLIEvent>]\n{indent}    member x.Ev{} = Event<int>().Publish",
+                    self.rng.below(1000)
+                ),
                 0 => format!("member x.{name}() = 1"),
                 1 => format!("member x.{name} = 1"),
                 2 => format!("static member {name}() = 1"),

@@ -158,10 +158,13 @@ type RowNames<'a> = (&'a [String], Option<bool>);
 /// and FCS's extension members, both ways: each member FCS reads must be a
 /// row of the index at its place answering to its logical and compiled
 /// names (and, for an F# extension, of its instance-ness), and each row must
-/// answer to a member FCS reads there.
+/// answer to a member FCS reads there (when `every_row_read`: FCS's
+/// `MembersFunctionsAndValues` lists no class `let`, whose val the pickle
+/// holds, so a producer with a marked one has rows FCS's view lacks).
 pub(crate) fn pickle_extension_failures(
     index: &ExistenceIndex,
     members: &[crate::common::assembly_entities::FcsExtensionMember],
+    every_row_read: bool,
 ) -> Vec<String> {
     let place = |ns: &str, enclosing: &[String]| format!("{ns} | {}", enclosing.join("+"));
     let mut ours: BTreeMap<String, Vec<RowNames<'_>>> = BTreeMap::new();
@@ -197,7 +200,7 @@ pub(crate) fn pickle_extension_failures(
         names.insert(&m.logical_name);
         names.insert(&m.compiled_name);
     }
-    for (at, rows) in &ours {
+    for (at, rows) in ours.iter().filter(|_| every_row_read) {
         for (names, _) in rows {
             let read = theirs
                 .get(at)
@@ -315,7 +318,8 @@ fn compare(graded: &[PathBuf], support: &[PathBuf]) -> (Vec<String>, usize, usiz
                 let theirs = pickle_theirs(entities);
                 pickle_rows += theirs.len();
                 extension_rows += entities.fcs.extension_members.len();
-                let moved = pickle_extension_failures(&index, &entities.fcs.extension_members);
+                let moved =
+                    pickle_extension_failures(&index, &entities.fcs.extension_members, true);
                 if !moved.is_empty() {
                     failures.push(format!(
                         "{file}: the pickle layer's extension members differ\n{}",

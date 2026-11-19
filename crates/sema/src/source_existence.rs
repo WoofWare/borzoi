@@ -52,7 +52,7 @@ use borzoi_cst::syntax::{
 use crate::def::id_text;
 use crate::recovery::SyntaxRecovery;
 use crate::resolve::extension_names::{
-    MemberShape, MemberVal, active_pattern_name, member_shape, val_sig_name,
+    MemberRole, MemberShape, MemberVal, active_pattern_name, member_shape, val_sig_name,
 };
 use crate::resolve::{ProjectFile, SourceFile, signature_partners};
 
@@ -100,17 +100,20 @@ pub enum Marker {
     CompilationRepresentation,
     /// `Microsoft.FSharp.Core.CompilerServices.TypeProviderAssemblyAttribute`.
     TypeProviderAssembly,
+    /// `Microsoft.FSharp.Core.CLIEventAttribute`.
+    CliEvent,
 }
 
 impl Marker {
     /// Every marker.
-    pub const ALL: [Marker; 6] = [
+    pub const ALL: [Marker; 7] = [
         Marker::AutoOpen,
         Marker::Extension,
         Marker::Measure,
         Marker::CompiledName,
         Marker::CompilationRepresentation,
         Marker::TypeProviderAssembly,
+        Marker::CliEvent,
     ];
 
     /// The marker's full name, its namespace's segments then its type name.
@@ -138,6 +141,7 @@ impl Marker {
                 "CompilerServices",
                 "TypeProviderAssemblyAttribute",
             ],
+            Marker::CliEvent => &["Microsoft", "FSharp", "Core", "CLIEventAttribute"],
         }
     }
 }
@@ -198,6 +202,9 @@ pub enum ExistenceUnread {
     UnnamedDeclaration(usize),
     /// A headerless file whose implicit module name the walk cannot spell.
     AnonymousModuleName(usize),
+    /// The readings the walk must cover exceed [`MAX_ROWS`] rows: each
+    /// uncertain module suffix doubles the paths under it.
+    TooManyReadings,
 }
 
 /// A place the walk emitted more than one reading, or a superset.
@@ -360,6 +367,8 @@ channels! {
     UnnamedDeclaration,
     /// A member FCS rejects in an augmentation.
     RejectedShape,
+    /// More readings than the walk will emit.
+    ReadingsBudget,
 }
 
 impl Channel {
@@ -377,7 +386,8 @@ impl Channel {
             | Channel::UnreadableCompiledName
             | Channel::AssemblyAutoOpenUnreadable
             | Channel::TypeProviderAssembly
-            | Channel::UnnamedDeclaration => Treatment::Declined,
+            | Channel::UnnamedDeclaration
+            | Channel::ReadingsBudget => Treatment::Declined,
             Channel::Defines | Channel::LanguageVersion | Channel::GeneratedItems => {
                 Treatment::Caller
             }
@@ -427,6 +437,10 @@ pub enum Treatment {
     /// The caller's: the input carries it, already applied.
     Caller,
 }
+
+/// The most rows one file's walk emits before it declines
+/// ([`ExistenceUnread::TooManyReadings`]).
+pub const MAX_ROWS: usize = 200_000;
 
 /// A's existence surface, read from its source. See the module docs.
 pub fn source_existence(producer: Producer<'_>) -> SourceExistence {
@@ -755,10 +769,20 @@ impl MarkerRoutes {
 }
 
 /// Whether a `[<CompilationRepresentation(…)>]` argument includes
-/// `ModuleSuffix`: `Yes` for a path ending `ModuleSuffix` (or an `|||` of
-/// paths, one of which ends so), `No` for paths none of which does, and
-/// `Possibly` for anything else.
+/// `ModuleSuffix`. Its value is read only where it is spelled as flags:
+/// `CompilationRepresentationFlags.<flag>` paths (however qualified), joined
+/// by `|||`. `Yes` when one of them is `ModuleSuffix`, `No` when none is,
+/// and `Possibly` for anything else (a literal constant, an `enum`, a
+/// computation), whose value the walk does not read.
 fn module_suffix_arg(attr: &Attribute) -> Maybe {
+    const FLAGS: [&str; 6] = [
+        "None",
+        "Static",
+        "Instance",
+        "ModuleSuffix",
+        "UseNullAsTrueValue",
+        "Event",
+    ];
     let Some(arg) = attr.arg() else {
         return Maybe::No;
     };
@@ -768,19 +792,27 @@ fn module_suffix_arg(attr: &Attribute) -> Maybe {
         .filter_map(|el| el.into_token())
         .filter(|t| !t.kind().is_trivia())
         .collect();
-    let mut suffix = false;
-    for (i, t) in tokens.iter().enumerate() {
+    // The dotted paths, split at `|||`; parentheses are transparent.
+    let mut paths: Vec<Vec<String>> = vec![Vec::new()];
+    for t in &tokens {
         match t.kind() {
-            SyntaxKind::IDENT_TOK if t.text() == "|||" => {}
-            SyntaxKind::IDENT_TOK => {
-                // The last segment of a dotted path names the flag.
-                let last = tokens
-                    .get(i + 1)
-                    .is_none_or(|n| n.kind() != SyntaxKind::DOT_TOK);
-                suffix |= last && id_text(t) == "ModuleSuffix";
+            SyntaxKind::LPAREN_TOK | SyntaxKind::RPAREN_TOK | SyntaxKind::DOT_TOK => {}
+            _ if t.text() == "|||" => paths.push(Vec::new()),
+            SyntaxKind::IDENT_TOK => paths
+                .last_mut()
+                .expect("paths is never empty")
+                .push(id_text(t).into_owned()),
+            _ => return Maybe::Possibly,
+        }
+    }
+    let mut suffix = false;
+    for path in &paths {
+        match path.as_slice() {
+            [.., ty, flag]
+                if ty == "CompilationRepresentationFlags" && FLAGS.contains(&flag.as_str()) =>
+            {
+                suffix |= flag == "ModuleSuffix";
             }
-            SyntaxKind::DOT_TOK | SyntaxKind::LPAREN_TOK | SyntaxKind::RPAREN_TOK => {}
-            _ if t.text() == "|||" => {}
             _ => return Maybe::Possibly,
         }
     }
@@ -827,10 +859,37 @@ impl Scope {
 struct LocalType {
     /// The name as written (no arity).
     name: String,
+    /// Its declared type parameters' count.
     arity: usize,
+    /// The arities its logical name may carry: the count of its parameters
+    /// that are not units of measure (one per reading).
+    logical_arities: BTreeSet<usize>,
     /// Its position in the declaration list.
     position: usize,
     kind: LocalKind,
+    /// An exception: the target of an intrinsic augmentation, but neither a
+    /// name a module's suffix meets in a non-recursive list nor a type an
+    /// abbreviation names.
+    is_exception: bool,
+}
+
+impl LocalType {
+    /// The logical names it may have.
+    fn logicals(&self) -> Vec<String> {
+        self.logical_arities
+            .iter()
+            .map(|&n| arity_name(&self.name, n))
+            .collect()
+    }
+}
+
+/// `name` with a generic arity suffix of `n`, none when `n` is 0.
+fn arity_name(name: &str, n: usize) -> String {
+    if n == 0 {
+        name.to_owned()
+    } else {
+        format!("{name}`{n}")
+    }
 }
 
 /// What an augmentation of a local type needs to know of it.
@@ -922,6 +981,17 @@ impl FileWalk<'_> {
         Ok(())
     }
 
+    /// Whether the rows so far are within [`MAX_ROWS`]: uncertain module
+    /// suffixes multiply the paths under them, and a walk past the bound
+    /// declines rather than emit an unbounded or truncated surface.
+    fn within_budget(&self) -> Result<(), ExistenceUnread> {
+        if self.out.entities.len() + self.out.extensions.len() > MAX_ROWS {
+            Err(ExistenceUnread::TooManyReadings)
+        } else {
+            Ok(())
+        }
+    }
+
     /// Record namespace `ns` and its prefixes.
     fn namespace(&mut self, ns: &[String]) {
         for k in 1..=ns.len() {
@@ -994,32 +1064,60 @@ impl FileWalk<'_> {
                     _ => Maybe::Possibly,
                 };
             }
+            let (logical_arities, _) = self.logical_arities(defn);
             out.push((
                 LocalType {
                     name,
                     arity: typars.len(),
+                    logical_arities,
                     position,
                     kind: local_kind(defn),
+                    is_exception: false,
                 },
                 all_measure,
             ));
         };
+        let exception = |position: usize,
+                         e: &borzoi_cst::syntax::ExceptionDefnDecl,
+                         out: &mut Vec<(LocalType, Maybe)>| {
+            if let Some(t) = e.union_case().and_then(|c| c.ident()) {
+                out.push((
+                    LocalType {
+                        name: id_text(&t).into_owned(),
+                        arity: 0,
+                        logical_arities: BTreeSet::from([0]),
+                        position,
+                        kind: LocalKind::ClassLike,
+                        is_exception: true,
+                    },
+                    Maybe::No,
+                ));
+            }
+        };
         match decls {
             Decls::Impl(ds) => {
                 for (i, d) in ds.iter().enumerate() {
-                    if let ModuleDecl::Types(t) = d {
-                        for defn in t.defns() {
-                            push(i, &defn, &mut out);
+                    match d {
+                        ModuleDecl::Types(t) => {
+                            for defn in t.defns() {
+                                push(i, &defn, &mut out);
+                            }
                         }
+                        ModuleDecl::Exception(e) => exception(i, e, &mut out),
+                        _ => {}
                     }
                 }
             }
             Decls::Sig(ds) => {
                 for (i, d) in ds.iter().enumerate() {
-                    if let SigDecl::Types(t) = d {
-                        for defn in t.defns() {
-                            push(i, &defn, &mut out);
+                    match d {
+                        SigDecl::Types(t) => {
+                            for defn in t.defns() {
+                                push(i, &defn, &mut out);
+                            }
                         }
+                        SigDecl::Exception(e) => exception(i, e, &mut out),
+                        _ => {}
                     }
                 }
             }
@@ -1032,7 +1130,7 @@ impl FileWalk<'_> {
     fn meets_type(locals: &[(LocalType, Maybe)], name: &str, is_sig: bool) -> Maybe {
         let mut meets = Maybe::No;
         for (t, all_measure) in locals {
-            if t.name != name {
+            if t.name != name || t.is_exception {
                 continue;
             }
             // A signature counts a type only with no type parameters.
@@ -1055,7 +1153,7 @@ impl FileWalk<'_> {
         decls: &Decls,
         is_rec: bool,
         in_module: bool,
-        outer: &[String],
+        outer: &[LocalType],
     ) -> Result<(), ExistenceUnread> {
         let locals = self.local_types(decls);
         // Every `open`'s position, which may move what a later augmentation's
@@ -1249,13 +1347,15 @@ impl FileWalk<'_> {
                 let attrs: Vec<AttributeList> = e.attributes().collect();
                 let marks = self.routes.marks(&attrs);
                 let public = !exception_access_restricts(e.syntax());
+                let members: Vec<MemberDefn> = e.members().collect();
+                let implied = self.members(&scope.inner(&name, public), &members, None)?;
                 self.entity(
                     scope,
                     std::slice::from_ref(&name),
                     &[PickledEntityKind::Exception],
                     public,
                     &marks,
-                    Maybe::No,
+                    implied,
                     false,
                 )
             }
@@ -1286,7 +1386,7 @@ impl FileWalk<'_> {
         meets_type: Maybe,
         decls: &Decls,
         is_rec: bool,
-        outer: &[String],
+        outer: &[LocalType],
     ) -> Result<(), ExistenceUnread> {
         let marks = self.routes.marks(attrs);
         if marks.uncertain && marks.module_suffix != Maybe::No {
@@ -1310,6 +1410,7 @@ impl FileWalk<'_> {
         // The suffix is part of the module's logical name, and so of every
         // path under it: each reading walks the contents once.
         for &suffixed in suffix.readings() {
+            self.within_budget()?;
             let logical = if suffixed {
                 format!("{name}Module")
             } else {
@@ -1418,31 +1519,45 @@ impl FileWalk<'_> {
     /// as an arity suffix when there are any. A parameter that may be a
     /// measure gives both readings.
     fn type_logicals(&mut self, name: &str, defn: &TypeDefn) -> Vec<String> {
+        let (counts, uncertain) = self.logical_arities(defn);
+        if uncertain {
+            self.out
+                .approximations
+                .insert(Approximation::UncertainAttribute);
+        }
+        counts.into_iter().map(|n| arity_name(name, n)).collect()
+    }
+
+    /// The arities the logical name of a type whose parameters are `typars`
+    /// may carry: one per reading of which of them are units of measure,
+    /// which the name does not count. Whether an uncertain attribute made
+    /// more than one reading.
+    fn typar_arities<'t>(
+        &self,
+        typars: impl Iterator<Item = borzoi_cst::syntax::TyparDecl> + 't,
+    ) -> (BTreeSet<usize>, bool) {
         let mut counts: BTreeSet<usize> = BTreeSet::from([0]);
-        for t in defn.typar_decls().iter().flat_map(|d| d.typars()) {
+        let mut uncertain = false;
+        for t in typars {
             let lists: Vec<AttributeList> = t.attributes().collect();
             let marks = self.routes.marks(&lists);
             let measure = marks.get(Marker::Measure);
-            if measure == Maybe::Possibly && marks.uncertain {
-                self.out
-                    .approximations
-                    .insert(Approximation::UncertainAttribute);
-            }
+            uncertain |= measure == Maybe::Possibly && marks.uncertain;
             counts = counts
                 .into_iter()
                 .flat_map(|n| measure.readings().iter().map(move |&m| n + usize::from(!m)))
                 .collect();
         }
-        counts
-            .into_iter()
-            .map(|n| {
-                if n == 0 {
-                    name.to_owned()
-                } else {
-                    format!("{name}`{n}")
-                }
-            })
-            .collect()
+        (counts, uncertain)
+    }
+
+    /// [`Self::typar_arities`] of `defn`'s type parameters.
+    fn logical_arities(&self, defn: &TypeDefn) -> (BTreeSet<usize>, bool) {
+        self.typar_arities(
+            defn.typar_decls()
+                .into_iter()
+                .flat_map(|d| d.typars().collect::<Vec<_>>()),
+        )
     }
 
     fn type_defn(
@@ -1477,7 +1592,10 @@ impl FileWalk<'_> {
                 // every file) or a type of this file declares it where it is
                 // visible. For any other `B` FCS may take the union reading,
                 // a check that then fails included, so both readings stand.
-                let visible = ctx.visible_at(position);
+                let names_visible_type = |t: &str| {
+                    ctx.visible(position)
+                        .any(|v| !v.is_exception && v.name == t)
+                };
                 // A unit of measure is never the union reading.
                 let both = |walk: &mut Self| {
                     if marks.uncertain && measure == Maybe::Possibly {
@@ -1494,7 +1612,8 @@ impl FileWalk<'_> {
                         Maybe::Possibly => both(self),
                     },
                     Some(t)
-                        if FSHARP_CORE_TYPE_NAMES.contains(&t.as_str()) || visible.contains(&t) =>
+                        if FSHARP_CORE_TYPE_NAMES.contains(&t.as_str())
+                            || names_visible_type(&t) =>
                     {
                         vec![PickledEntityKind::Abbreviation]
                     }
@@ -1527,9 +1646,54 @@ impl FileWalk<'_> {
         }
         let mut implied = Maybe::No;
         for logical in &logicals {
-            implied = implied.or(self.members(&scope.inner(logical, public), &members, None)?);
+            let inner = scope.inner(logical, public);
+            implied = implied.or(self.members(&inner, &members, None)?);
+            self.type_bodies(&inner, defn, &members)?;
         }
         self.entity(scope, &logicals, &kinds, public, &marks, implied, true)
+    }
+
+    /// The rows of what a type declares beside its members: a primary
+    /// constructor and class `let`s under `[<Extension>]` are pickled as
+    /// C#-style rows; a marked interface implementation's member has an
+    /// interface-qualified compiled name the walk does not spell.
+    fn type_bodies(
+        &mut self,
+        inner: &Scope,
+        defn: &TypeDefn,
+        members: &[MemberDefn],
+    ) -> Result<(), ExistenceUnread> {
+        if let Some(ctor) = defn.implicit_ctor() {
+            let lists: Vec<AttributeList> = ctor.attributes().collect();
+            let marks = self.routes.marks(&lists);
+            if marks.get(Marker::Extension) != Maybe::No {
+                self.csharp_row(inner, ".ctor", &marks)?;
+            }
+        }
+        for m in members {
+            match m {
+                MemberDefn::LetBindings(l) => {
+                    let lists: Vec<AttributeList> = l.attributes().collect();
+                    for (k, b) in l.bindings().enumerate() {
+                        let mut own: Vec<AttributeList> = b.attributes().collect();
+                        if k == 0 {
+                            own.extend(lists.iter().cloned());
+                        }
+                        self.binding_extension(inner, &own, b.pat())?;
+                    }
+                }
+                MemberDefn::Interface(i) => {
+                    for im in i.members() {
+                        let (lists, _) = member_shape(&im);
+                        if self.routes.marks(&lists).get(Marker::Extension) != Maybe::No {
+                            return Err(ExistenceUnread::UnnamedDeclaration(self.index));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
     }
     /// The extension rows of members `members` of a type (or of an
     /// augmentation, `augmented`: the extended type's logical-name
@@ -1545,21 +1709,7 @@ impl FileWalk<'_> {
         let mut implied = Maybe::No;
         for m in members {
             let (lists, shape) = member_shape(m);
-            let marks = self.routes.marks(&lists);
-            let marked = marks.get(Marker::Extension);
-            implied = implied.or(marked);
-            if augmented.is_none() && marked == Maybe::No {
-                continue;
-            }
-            if marks.uncertain && marked == Maybe::Possibly && augmented.is_none() {
-                self.out
-                    .approximations
-                    .insert(Approximation::UncertainAttribute);
-            }
-            if marks.compiled_name_unreadable {
-                return Err(ExistenceUnread::UnreadableCompiledName(self.index));
-            }
-            let vals = match shape {
+            let (vals, role) = match shape {
                 MemberShape::NoVal => continue,
                 MemberShape::Inherit => {
                     if augmented.is_some() {
@@ -1568,20 +1718,93 @@ impl FileWalk<'_> {
                     continue;
                 }
                 MemberShape::Unnamed => {
+                    // A member no attribute marks, outside an augmentation,
+                    // has no row whatever its name.
+                    if augmented.is_none()
+                        && self.routes.marks(&lists).get(Marker::Extension) == Maybe::No
+                    {
+                        continue;
+                    }
                     return Err(ExistenceUnread::UnnamedDeclaration(self.index));
                 }
-                MemberShape::Named { vals, rejected, .. } => {
-                    // An abstract slot or a `val` field FCS rejects in an
-                    // augmentation: its rows are read as written.
+                // A `val` field is no method: `[<Extension>]` on it makes no
+                // row, and does not mark its type.
+                MemberShape::Named {
+                    role: MemberRole::Field,
+                    ..
+                } => {
+                    if augmented.is_some() {
+                        self.out.approximations.insert(Approximation::RejectedShape);
+                    }
+                    continue;
+                }
+                MemberShape::Named {
+                    vals,
+                    rejected,
+                    role,
+                    ..
+                } => {
+                    // An abstract slot FCS rejects in an augmentation: its
+                    // rows are read as written.
                     if rejected && augmented.is_some() {
                         self.out.approximations.insert(Approximation::RejectedShape);
                     }
-                    vals
+                    (vals, role)
                 }
             };
+            let member_marks = self.routes.marks(&lists);
+            // A `[<CLIEvent>]` property compiles to its event's accessors
+            // too.
+            let event = member_marks.get(Marker::CliEvent);
+            let mut vals = vals;
+            if event != Maybe::No && role == MemberRole::Member {
+                if event == Maybe::Possibly && member_marks.uncertain {
+                    self.out
+                        .approximations
+                        .insert(Approximation::UncertainAttribute);
+                }
+                let getters: Vec<MemberVal> = vals
+                    .iter()
+                    .filter(|v| v.accessor == Some("get_"))
+                    .cloned()
+                    .collect();
+                for g in getters {
+                    let bare = g.logical.trim_start_matches("get_").to_owned();
+                    for prefix in ["add_", "remove_"] {
+                        vals.push(MemberVal {
+                            logical: format!("{prefix}{bare}"),
+                            accessor: None,
+                            is_static: g.is_static,
+                            own_lists: Vec::new(),
+                        });
+                    }
+                }
+            }
             for v in vals {
+                let mut all = lists.clone();
+                all.extend(v.own_lists.iter().cloned());
+                let marks = self.routes.marks(&all);
+                let marked = marks.get(Marker::Extension);
+                implied = implied.or(marked);
+                if augmented.is_none() && marked == Maybe::No {
+                    continue;
+                }
+                if marks.uncertain && marked == Maybe::Possibly && augmented.is_none() {
+                    self.out
+                        .approximations
+                        .insert(Approximation::UncertainAttribute);
+                }
+                if marks.compiled_name_unreadable && v.accessor.is_none() {
+                    return Err(ExistenceUnread::UnreadableCompiledName(self.index));
+                }
                 match augmented {
                     Some(type_names) => {
+                        if role == MemberRole::Constructor {
+                            // FCS rejects a constructor in an optional
+                            // augmentation.
+                            self.out.approximations.insert(Approximation::RejectedShape);
+                            continue;
+                        }
                         // An optional extension: compiled `T.name[.Static]`. A
                         // `[<CompiledName>]` renames a method, never a
                         // property's accessor.
@@ -1634,6 +1857,11 @@ impl FileWalk<'_> {
                     .chain(marks.compiled_names.iter().map(Some))
                     .collect()
             };
+        if compiled.len() > 1 {
+            self.out
+                .approximations
+                .insert(Approximation::UncertainAttribute);
+        }
         for c in compiled {
             self.out.extensions.push(ExtensionRow {
                 layer: IndexLayer::Pickle,
@@ -1645,7 +1873,7 @@ impl FileWalk<'_> {
         }
     }
 
-    /// A C#-style extension row for a module value `name`.
+    /// A C#-style extension row for a value `name` bound by a `let`.
     fn csharp_row(
         &mut self,
         scope: &Scope,
@@ -1664,6 +1892,7 @@ impl FileWalk<'_> {
             logical: name.to_owned(),
             accessor: None,
             is_static: true,
+            own_lists: Vec::new(),
         };
         self.csharp_val(scope, &v, marks);
         Ok(())
@@ -1752,51 +1981,63 @@ impl FileWalk<'_> {
                 .approximations
                 .insert(Approximation::AugmentationKind);
         }
-        if intrinsic == Maybe::Yes {
+        // The extended type's logical names: a type of this file the head
+        // names where the augmentation sits has its own (units of measure
+        // uncounted); any other is the head's name with the count of the
+        // head's parameters that are not units of measure, as every compiler
+        // writes a generic type's name (the certificate's to vouch for;
+        // without one, the bare name too).
+        let local: Option<LocalType> = if qualifier.is_empty() {
+            ctx.visible(position)
+                .filter(|t| t.name == last && t.arity == arity)
+                .last()
+                .cloned()
+        } else {
+            None
+        };
+        let type_names: Vec<String> = match &local {
+            Some(t) => t.logicals(),
+            None => {
+                let (counts, uncertain) = self.typar_arities(
+                    defn.typar_decls()
+                        .into_iter()
+                        .flat_map(|d| d.typars().collect::<Vec<_>>()),
+                );
+                let mut names: Vec<String> = counts.iter().map(|&n| arity_name(&last, n)).collect();
+                if counts.iter().any(|&n| n > 0) && matches!(self.routes, MarkerRoutes::Unknown) {
+                    names.push(last.clone());
+                }
+                if uncertain || names.len() > 1 {
+                    self.out
+                        .approximations
+                        .insert(Approximation::UncertainAttribute);
+                }
+                names.sort();
+                names.dedup();
+                names
+            }
+        };
+        if intrinsic != Maybe::No {
             // An intrinsic augmentation's members are the type's own: only a
             // marked one is an extension, as a C#-style member of the type.
-            let local = if arity == 0 {
-                last.clone()
-            } else {
-                format!("{last}`{arity}")
-            };
-            self.members(&scope.inner(&local, true), &members, None)?;
-            return Ok(());
-        }
-        if intrinsic == Maybe::Possibly {
-            let local = if arity == 0 {
-                last.clone()
-            } else {
-                format!("{last}`{arity}")
-            };
-            self.members(&scope.inner(&local, true), &members, None)?;
-        }
-        // The extended type's logical name: its written name with its
-        // arity, as every compiler writes it (the certificate's to vouch
-        // for); without one, the bare name too.
-        let mut type_names = vec![if arity == 0 {
-            last.clone()
-        } else {
-            format!("{last}`{arity}")
-        }];
-        if arity > 0 && matches!(self.routes, MarkerRoutes::Unknown) {
-            type_names.push(last.clone());
-            self.out
-                .approximations
-                .insert(Approximation::UncertainAttribute);
+            for t in &type_names {
+                self.members(&scope.inner(t, true), &members, None)?;
+            }
+            if intrinsic == Maybe::Yes {
+                return Ok(());
+            }
         }
         self.members(scope, &members, Some(&type_names))?;
         Ok(())
     }
 }
-
 /// The declaration list an augmentation sits in.
 struct ListCtx<'a> {
     locals: &'a [(LocalType, Maybe)],
     opens: &'a [usize],
     is_rec: bool,
     /// The types the enclosing lists declare before this one.
-    outer: &'a [String],
+    outer: &'a [LocalType],
     /// The exceptions a module's suffix meets in this list.
     exceptions: &'a [String],
 }
@@ -1811,21 +2052,21 @@ impl ListCtx<'_> {
         }
     }
 
-    /// The names of the types visible, by the lexical scope alone, at
-    /// `position` of the list: the enclosing lists' earlier ones, and this
-    /// list's up to and including `position`'s own group (all of them, in a
-    /// recursive list).
-    fn visible_at(&self, position: usize) -> Vec<String> {
-        self.outer
-            .iter()
-            .cloned()
-            .chain(
-                self.locals
-                    .iter()
-                    .filter(|(t, _)| self.is_rec || t.position <= position)
-                    .map(|(t, _)| t.name.clone()),
-            )
-            .collect()
+    /// The types visible, by the lexical scope alone, at `position` of the
+    /// list: the enclosing lists' earlier ones, and this list's up to and
+    /// including `position`'s own group (all of them, in a recursive list).
+    fn visible(&self, position: usize) -> impl Iterator<Item = &LocalType> + '_ {
+        self.outer.iter().chain(
+            self.locals
+                .iter()
+                .map(|(t, _)| t)
+                .filter(move |t| self.is_rec || t.position <= position),
+        )
+    }
+
+    /// [`Self::visible`], collected for a nested list.
+    fn visible_at(&self, position: usize) -> Vec<LocalType> {
+        self.visible(position).cloned().collect()
     }
 }
 
@@ -1865,9 +2106,14 @@ fn intrinsic_in(ctx: &ListCtx<'_>, name: &str, arity: usize, position: usize) ->
 fn local_kind(defn: &TypeDefn) -> LocalKind {
     match defn.repr() {
         Some(TypeDefnRepr::Record(_)) | Some(TypeDefnRepr::Union(_)) => LocalKind::ClassLike,
-        Some(TypeDefnRepr::Enum(_))
-        | Some(TypeDefnRepr::Delegate(_))
-        | Some(TypeDefnRepr::Abbrev(_)) => LocalKind::NotClassLike,
+        Some(TypeDefnRepr::Enum(_)) | Some(TypeDefnRepr::Delegate(_)) => LocalKind::NotClassLike,
+        // `type T = Case` may be FCS's single-case union.
+        Some(TypeDefnRepr::Abbrev(a))
+            if a.ty().as_ref().and_then(abbrev_single_ident).is_some() =>
+        {
+            LocalKind::Unknown
+        }
+        Some(TypeDefnRepr::Abbrev(_)) => LocalKind::NotClassLike,
         Some(TypeDefnRepr::ObjectModel(om)) => {
             if om.is_interface() {
                 LocalKind::NotClassLike
@@ -1881,7 +2127,13 @@ fn local_kind(defn: &TypeDefn) -> LocalKind {
                     .iter()
                     .all(|m| matches!(m, MemberDefn::AbstractSlot(s) if !s.is_static()))
                 {
-                    LocalKind::NotClassLike
+                    // An interface, unless an attribute makes it an abstract
+                    // class (`[<AbstractClass>]`, under whatever name).
+                    if defn.attributes().next().is_some() {
+                        LocalKind::Unknown
+                    } else {
+                        LocalKind::NotClassLike
+                    }
                 } else if members
                     .iter()
                     .any(|m| matches!(m, MemberDefn::AbstractSlot(_) | MemberDefn::Inherit(_)))
@@ -1922,8 +2174,14 @@ fn header_access_restricts(node: &SyntaxNode) -> bool {
 /// Whether an exception definition's case carries an access modifier other
 /// than `public` (`exception internal E`).
 fn exception_access_restricts(node: &SyntaxNode) -> bool {
+    // The modifier sits before the case's name, outside every attribute
+    // list (whose own identifiers would otherwise end the search early).
     node.descendants_with_tokens()
         .filter_map(|el| el.into_token())
+        .filter(|t| {
+            !t.parent_ancestors()
+                .any(|a| a.kind() == SyntaxKind::ATTRIBUTE_LIST)
+        })
         .take_while(|t| t.kind() != SyntaxKind::IDENT_TOK)
         .find(|t| t.kind() == SyntaxKind::ACCESS_TOK)
         .is_some_and(|t| t.text() != "public")
@@ -2004,6 +2262,14 @@ fn has_static_argument(ty: &Type) -> bool {
 /// A module `let` binding's single name: `let f …`, `let x`, `let (|A|_|) …`,
 /// an operator, under parentheses or a type annotation.
 fn binding_name(pat: &Pat) -> Option<String> {
+    binding_name_at(pat, true)
+}
+
+/// [`binding_name`], `top` when `pat` is the binding's whole pattern. A
+/// long-ident head names a value only when spelled as no union case can be
+/// (lower case first), and, with arguments, only at the top, where it is a
+/// function: `let Some x = …`, `let None = …` and `let (f x) = …` do not.
+fn binding_name_at(pat: &Pat, top: bool) -> Option<String> {
     match pat {
         Pat::Named(n) => n.ident().map(|t| id_text(&t).into_owned()),
         Pat::LongIdent(l) => {
@@ -2013,14 +2279,17 @@ fn binding_name(pat: &Pat) -> Option<String> {
             let li = l.head()?;
             let mut idents = li.idents();
             let first = idents.next()?;
-            idents
-                .next()
-                .is_none()
-                .then(|| id_text(&first).into_owned())
+            if idents.next().is_some() {
+                return None;
+            }
+            let name = id_text(&first).into_owned();
+            let function_like = name.chars().next().is_some_and(char::is_lowercase);
+            // An upper-case head may be a union case binding nothing.
+            (function_like && (l.args().next().is_none() || top)).then_some(name)
         }
-        Pat::Paren(p) => p.inner().as_ref().and_then(binding_name),
-        Pat::Typed(t) => t.pat().as_ref().and_then(binding_name),
-        Pat::Attrib(a) => a.pat().as_ref().and_then(binding_name),
+        Pat::Paren(p) => p.inner().as_ref().and_then(|p| binding_name_at(p, false)),
+        Pat::Typed(t) => t.pat().as_ref().and_then(|p| binding_name_at(p, top)),
+        Pat::Attrib(a) => a.pat().as_ref().and_then(|p| binding_name_at(p, top)),
         _ => None,
     }
 }
@@ -2082,6 +2351,12 @@ pub fn certify_by_spelling(files: &[&ProjectFile]) -> MarkerRoutes {
     let mut map = BTreeMap::new();
     for name in written {
         let (last, qualifier) = name.split_last().expect("written names are not empty");
+        // `global.` roots a fully qualified name: its qualifier must then be
+        // the whole namespace.
+        let (qualifier, rooted) = match qualifier.split_first() {
+            Some((first, rest)) if first == "global" => (rest, true),
+            _ => (qualifier, false),
+        };
         let stem = last.strip_suffix("Attribute").unwrap_or(last);
         if declared.contains(stem) || declared.contains(&format!("{stem}Attribute")) {
             continue;
@@ -2092,6 +2367,7 @@ pub fn certify_by_spelling(files: &[&ProjectFile]) -> MarkerRoutes {
             let (type_name, ns) = full.split_last().expect("a full name is not empty");
             let spelled = last == type_name || format!("{last}Attribute") == *type_name;
             let qualified = qualifier.len() <= ns.len()
+                && (!rooted || qualifier.len() == ns.len())
                 && ns[ns.len() - qualifier.len()..]
                     .iter()
                     .zip(qualifier)

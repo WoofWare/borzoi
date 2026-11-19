@@ -160,6 +160,89 @@ pub fn cells() -> Vec<Cell> {
             "attribute_target_module",
             "namespace TargetsModule\n[<module: AutoOpen>]\nmodule M =\n    let x = 1\n",
         ),
+        // Codex round 1's shapes.
+        one(
+            "module_suffix_literal_flags",
+            "namespace SuffixLit\nmodule C =\n    [<Literal>]\n    let flags = CompilationRepresentationFlags.ModuleSuffix\n[<CompilationRepresentation(C.flags)>]\nmodule Foo =\n    type Inner = { X: int }\n",
+        ),
+        one(
+            "extension_cli_event",
+            "namespace ExtEvent\nmodule M =\n    let ev = Event<int>()\n    type System.String with\n        [<CLIEvent>]\n        member s.Something = ev.Publish\n",
+        ),
+        one(
+            "extension_measure_arity",
+            "namespace ExtMeasure\ntype T<'a, [<Measure>] 'u> = { V: 'a }\nmodule M =\n    type T<'a, [<Measure>] 'u> with\n        member t.Info = 1\n",
+        ),
+        one(
+            "auto_open_global_qualified",
+            "namespace AOGlobal\n[<global.Microsoft.FSharp.Core.AutoOpen>]\nmodule M =\n    let x = 1\n",
+        ),
+        one(
+            "augmentation_of_single_case_abbreviation",
+            "module AugCase\nopen System.Runtime.CompilerServices\ntype T = Case\ntype T with\n    [<Extension>]\n    static member M(s: string) = s\n",
+        ),
+        one(
+            "augmentation_of_local_exception",
+            "module AugExn\nopen System.Runtime.CompilerServices\nexception E of string\ntype E with\n    [<Extension>]\n    static member M(s: string) = s\n",
+        ),
+        one(
+            "extension_on_accessor",
+            "module AccExt\nopen System.Runtime.CompilerServices\ntype T =\n    static member Foo with [<Extension>] get (x: string) = 1\n",
+        ),
+        Cell::new(
+            "fsi_member_signature_getter",
+            &[
+                (
+                    "Lib.fsi",
+                    "namespace SigGet\nopen System.Runtime.CompilerServices\n[<Class>]\ntype T =\n    [<Extension>]\n    static member P: int\n",
+                ),
+                (
+                    "Lib.fs",
+                    "namespace SigGet\ntype T =\n    static member P = 1\n",
+                ),
+            ],
+        ),
+        Cell::new(
+            "fsi_exception_members",
+            &[
+                (
+                    "Lib.fsi",
+                    "namespace SigExn\nopen System.Runtime.CompilerServices\nexception E of string\n    with\n        [<Extension>]\n        static member M: string -> string\n",
+                ),
+                (
+                    "Lib.fs",
+                    "namespace SigExn\nexception E of string\n    with\n        static member M(s: string) = s\n",
+                ),
+            ],
+        ),
+        one(
+            "extension_constructors",
+            "module CtorExt\nopen System.Runtime.CompilerServices\ntype T() =\n    [<Extension>]\n    new(s: string) = T()\n",
+        ),
+        one(
+            "extension_class_let_and_interface",
+            "module LetExt\nopen System.Runtime.CompilerServices\ntype T() =\n    [<Extension>]\n    static let f (s: string) = s\n    member _.G = f \"x\"\n",
+        ),
+        one(
+            "extension_interface_implementation",
+            "module IfaceExt\nopen System.Runtime.CompilerServices\ntype I =\n    abstract M: string -> string\ntype T() =\n    interface I with\n        [<Extension>]\n        member _.M(s) = s\n",
+        ),
+        one(
+            "extension_val_field",
+            "module FieldExt\nopen System.Runtime.CompilerServices\n[<Struct>]\ntype S =\n    [<Extension>]\n    val Field: int\n",
+        ),
+        one(
+            "extension_destructuring_let",
+            "module DestructExt\nopen System.Runtime.CompilerServices\n[<Extension>]\nlet (Some x) = Some 1\n",
+        ),
+        one(
+            "exception_access_after_attribute",
+            "namespace ExnAccess\n[<System.Obsolete>]\nexception internal Oops of string\n",
+        ),
+        one(
+            "compiled_symbol",
+            "namespace Compiled\n#if COMPILED\ntype Shown = { X: int }\n#else\ntype Hidden = { Y: int }\n#endif\n",
+        ),
         // The module suffix.
         one(
             "module_suffix",

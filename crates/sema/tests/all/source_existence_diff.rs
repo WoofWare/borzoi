@@ -34,7 +34,9 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 
-use borzoi_assembly::existence::{ExtensionRow, IndexLayer, PickleLayer, PickledEntityRow};
+use borzoi_assembly::existence::{
+    ExtensionRow, IndexLayer, PickleLayer, PickledEntityKind, PickledEntityRow,
+};
 use borzoi_assembly::{Ecma335Assembly, EcmaView};
 use borzoi_cst::parser::{FileKind, ParseOptions, parse_with_options};
 use borzoi_cst::syntax::{AstNode, ImplFile, SigFile};
@@ -336,8 +338,9 @@ pub fn fcs(cell: &Cell) -> Fcs {
         cell.name,
         response.read_errors
     );
-    // And the same extension members, held as `assembly_entities_diff`
-    // holds a DLL's.
+    // And every extension member FCS reads is a decoded row, as
+    // `assembly_entities_diff` holds a DLL's (one way only: FCS's view lists
+    // no class `let`, whose val the pickle holds).
     if response.imported && !undecodable {
         let index = borzoi_assembly::existence::ExistenceIndex {
             il: Vec::new(),
@@ -347,6 +350,7 @@ pub fn fcs(cell: &Cell) -> Fcs {
         let failures = crate::assembly_entities_diff::pickle_extension_failures(
             &index,
             &response.extension_members,
+            false,
         );
         assert!(
             failures.is_empty(),
@@ -423,7 +427,13 @@ pub fn fcs(cell: &Cell) -> Fcs {
 
 /// Our reading of `cell` under `routes`, or how it declines.
 pub fn ours(cell: &Cell, routes: Option<&MarkerRoutes>) -> (SourceExistence, MarkerRoutes) {
-    let symbols: HashSet<String> = cell.defines.iter().cloned().collect();
+    // FCS defines `COMPILED` in every compiled project (the LSP does too).
+    let symbols: HashSet<String> = cell
+        .defines
+        .iter()
+        .cloned()
+        .chain(std::iter::once("COMPILED".to_owned()))
+        .collect();
     let dir = PathBuf::from("/fixture");
     let mut files = Vec::new();
     let mut recoveries = Vec::new();
@@ -523,38 +533,49 @@ pub fn grade(cell: &Cell, fcs: &Fcs, ours: &SourceExistence) -> Result<String, S
     .sorted();
     let theirs = &fcs.memory;
     // A producer FCS rejects: its imported surface is FCS's recovery, whose
-    // kinds and flags the walk does not model. What an existence question
-    // reads of it is its paths, so those are what ours must cover: every
-    // entity's place and both its names, every extension's place and names,
-    // every auto-open path.
+    // kinds and flags the walk does not model exactly. Ours must still cover
+    // every fact an existence question reads of it, in the direction that
+    // answers "something may be there" more often: every entity's place and
+    // names, with its `[<AutoOpen>]` and `[<Extension>]` flags and its being
+    // an abbreviation (what `ExistenceSet` lends names by) where FCS's has
+    // them; every extension's place and names, of either staticness where
+    // FCS's says; every auto-open path.
     if !fcs.clean {
-        let entity = |r: &PickledEntityRow| {
-            (
-                r.namespace.clone(),
-                r.enclosing.clone(),
-                r.logical_name.clone(),
-                r.compiled_name.clone(),
-            )
+        let covers_entity = |f: &PickledEntityRow| {
+            mine.entities.iter().any(|r| {
+                (
+                    &r.namespace,
+                    &r.enclosing,
+                    &r.logical_name,
+                    &r.compiled_name,
+                ) == (
+                    &f.namespace,
+                    &f.enclosing,
+                    &f.logical_name,
+                    &f.compiled_name,
+                ) && (r.auto_open || !f.auto_open)
+                    && (r.extension || !f.extension)
+                    && (f.kind != PickledEntityKind::Abbreviation
+                        || r.kind == PickledEntityKind::Abbreviation)
+            })
         };
-        let extension =
-            |r: &ExtensionRow| (r.namespace.clone(), r.enclosing.clone(), r.names.clone());
-        let ours_entities: std::collections::BTreeSet<_> =
-            mine.entities.iter().map(entity).collect();
-        let ours_extensions: std::collections::BTreeSet<_> =
-            mine.extensions.iter().map(extension).collect();
+        let covers_extension = |f: &ExtensionRow| {
+            mine.extensions.iter().any(|r| {
+                (&r.namespace, &r.enclosing, &r.names) == (&f.namespace, &f.enclosing, &f.names)
+                    && (r.instance.is_none() || r.instance == f.instance)
+            })
+        };
         let lacking: Vec<String> = theirs
             .entities
             .iter()
-            .map(entity)
-            .filter(|k| !ours_entities.contains(k))
-            .map(|k| format!("{k:?}"))
+            .filter(|f| !covers_entity(f))
+            .map(|f| format!("{f:?}"))
             .chain(
                 theirs
                     .extensions
                     .iter()
-                    .map(extension)
-                    .filter(|k| !ours_extensions.contains(k))
-                    .map(|k| format!("{k:?}")),
+                    .filter(|f| !covers_extension(f))
+                    .map(|f| format!("{f:?}")),
             )
             .chain(
                 theirs
@@ -566,7 +587,7 @@ pub fn grade(cell: &Cell, fcs: &Fcs, ours: &SourceExistence) -> Result<String, S
             .collect();
         if !lacking.is_empty() {
             return Err(format!(
-                "{}: FCS rejects it, and ours does not cover the paths of its recovered surface\n{}",
+                "{}: FCS rejects it, and ours does not cover the facts of its recovered surface\n{}",
                 cell.name,
                 lines(&lacking)
             ));
@@ -577,7 +598,7 @@ pub fn grade(cell: &Cell, fcs: &Fcs, ours: &SourceExistence) -> Result<String, S
             ""
         };
         return Ok(format!(
-            "covers paths, FCS rejects{undecodable} ({:?})",
+            "covers recovered facts, FCS rejects{undecodable} ({:?})",
             surface.approximations
         ));
     }

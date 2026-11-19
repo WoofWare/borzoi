@@ -396,6 +396,20 @@ fn witness(channel: Channel) -> Observed {
             one("module M\n[<System.Runtime.CompilerServices.Extension>]\nlet _ = 1\n"),
             |_| true,
         ),
+        Channel::ReadingsBudget => {
+            // Twenty nested modules under an attribute that may be
+            // `[<CompilationRepresentation>]` with an unread argument: each
+            // doubles the paths under it.
+            let mut src = String::from("namespace N\n");
+            for depth in 0..20 {
+                let indent = "    ".repeat(depth);
+                src.push_str(&format!(
+                    "{indent}[<CompilationRepresentation(flags)>]\n{indent}module M{depth} =\n"
+                ));
+            }
+            src.push_str(&format!("{}let x = 1\n", "    ".repeat(20)));
+            observe(read(&[("Lib.fs", &src)]), |_| true)
+        }
         Channel::RejectedShape => observe(
             one("module M\ntype System.String with\n    abstract M: int\n"),
             |_| true,
@@ -497,6 +511,7 @@ fn every_decline_and_approximation_is_a_channel() {
             ExistenceUnread::AnonymousModuleName(0),
             Channel::AnonymousModuleName,
         ),
+        (ExistenceUnread::TooManyReadings, Channel::ReadingsBudget),
     ];
     for (why, channel) in &declines {
         match why {
@@ -509,7 +524,8 @@ fn every_decline_and_approximation_is_a_channel() {
             | ExistenceUnread::UnreadableAutoOpen(_)
             | ExistenceUnread::UnreadableCompiledName(_)
             | ExistenceUnread::UnnamedDeclaration(_)
-            | ExistenceUnread::AnonymousModuleName(_) => {}
+            | ExistenceUnread::AnonymousModuleName(_)
+            | ExistenceUnread::TooManyReadings => {}
         }
         assert_eq!(channel.treatment(), Treatment::Declined, "{why:?}");
         match witness(*channel) {
@@ -582,5 +598,39 @@ fn a_certified_shadow_is_no_marker() {
             .iter()
             .any(|row| row.logical_name == "M" && !row.auto_open),
         "{r:?}"
+    );
+}
+
+/// A certificate that vouches for `[<Extension>]` but omits another
+/// attribute of the same binding: the other may be `[<CompiledName>]`, so
+/// the walk emits both names and says it approximated.
+#[test]
+fn a_partial_certificate_loses_exactness() {
+    let src = [(
+        "Lib.fs",
+        "module M\n[<System.Runtime.CompilerServices.Extension; System.Obsolete(\"Old\")>]\nlet f (x: string) = x\n",
+    )];
+    let mut map = BTreeMap::new();
+    map.insert(
+        ["System", "Runtime", "CompilerServices", "Extension"]
+            .map(str::to_owned)
+            .to_vec(),
+        BTreeSet::from([Marker::Extension]),
+    );
+    let r = read_with(&src, Some(MarkerRoutes::Certified(map)));
+    let SourceExistence::Read(s) = &r else {
+        panic!("{r:?}")
+    };
+    assert!(
+        s.approximations
+            .contains(&Approximation::UncertainAttribute),
+        "{:?}",
+        s.approximations
+    );
+    let names = extension_names(&r);
+    assert!(names.contains(&vec!["f".to_owned()]), "{names:?}");
+    assert!(
+        names.contains(&vec!["Old".to_owned(), "f".to_owned()]),
+        "{names:?}"
     );
 }
