@@ -226,3 +226,98 @@ fn a_path_batch_answers_a_fifo_with_an_error_and_goes_on() {
         assert!(lines[1].get("Error").is_none(), "{op}: {:?}", lines[1]);
     }
 }
+
+/// Whether `record`, one line of a path batch, says the file was not checked
+/// as asked: `Ok` false, or an `Error` of its own.
+fn declined(record: &Value) -> bool {
+    record["Ok"] == Value::Bool(false)
+        || record["Error"]
+            .as_str()
+            .is_some_and(|error| !error.is_empty())
+}
+
+/// A check FCS was refused a file for (a script's `#r` of a device) is no
+/// answer: every mode that checks a file refuses it, and a resident child
+/// refuses it again when asked again, since FCS would serve the second
+/// request from the check it made around the refusal without opening the
+/// file again.
+#[test]
+fn a_check_fcs_was_refused_a_file_for_is_refused_every_time_in_every_mode() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    symlink("/dev/null", dir.path().join("Device.dll")).expect("link to a device");
+    let script = dir.path().join("References.fsx");
+    std::fs::write(&script, "#r \"Device.dll\"\nlet z = 1\n").expect("write");
+    let path = script.display().to_string();
+
+    let mut oracle = child("file-batch");
+    for attempt in ["first", "second"] {
+        let answer = oracle
+            .try_request(&json!({"kind": "uses", "path": path, "refs": []}).to_string())
+            .unwrap_or_else(|e| panic!("file-batch, {attempt} request: {e}"));
+        let why = refusal("file-batch", &answer);
+        assert!(
+            why.contains("refused a file"),
+            "file-batch, {attempt} request: {why}"
+        );
+    }
+
+    // `script-options-batch` reports script options, for which FCS opens no
+    // reference, so it is not among these.
+    for op in ["attrs-batch", "uses-census-batch", "types-census-batch"] {
+        let out = BoundedCommand::new(fcs_dump_command(op))
+            .stdin_bytes(format!("{path}\n{path}\n").into_bytes())
+            .timeout(Duration::from_secs(120))
+            .run_ok(format_args!("fcs-dump {op}"));
+        let lines: Vec<Value> = String::from_utf8(out.stdout)
+            .expect("UTF-8")
+            .lines()
+            .map(|l| serde_json::from_str(l).expect("JSON"))
+            .collect();
+        assert_eq!(lines.len(), 2, "{op}: one line per path: {lines:?}");
+        for (i, record) in lines.iter().enumerate() {
+            assert!(declined(record), "{op}, request {i}: {record}");
+        }
+    }
+
+    for op in ["uses", "attrs", "types"] {
+        let mut cmd = fcs_dump_command(op);
+        cmd.arg(&script);
+        let out = BoundedCommand::new(cmd)
+            .timeout(Duration::from_secs(120))
+            .run()
+            .unwrap_or_else(|e| panic!("fcs-dump {op}: {e:?}"));
+        assert!(
+            !out.status.success(),
+            "fcs-dump {op} must fail, and printed {}",
+            String::from_utf8_lossy(&out.stdout)
+                .chars()
+                .take(200)
+                .collect::<String>()
+        );
+    }
+}
+
+/// The binary reads outside FCS refuse a FIFO too: the parse benchmark counts
+/// it as unreadable, and `entities` passes over a FIFO beside its target.
+#[test]
+fn binary_reads_pass_over_a_fifo() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let fifo = dir.path().join("Fifo.fs");
+    mkfifo(&fifo);
+    let out = BoundedCommand::new(fcs_dump_command("parse-bench"))
+        .stdin_bytes(format!("{}\n", fifo.display()).into_bytes())
+        .timeout(Duration::from_secs(120))
+        .run_ok("fcs-dump parse-bench");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("1 io-err"), "{stderr}");
+
+    let target = dir.path().join("Target.dll");
+    std::fs::copy(crate::common::ensure_system_runtime_dll(), &target).expect("copy");
+    mkfifo(&dir.path().join("Sibling.dll"));
+    let mut cmd = fcs_dump_command("entities");
+    cmd.arg(&target);
+    BoundedCommand::new(cmd)
+        .timeout(Duration::from_secs(120))
+        .run()
+        .expect("entities finishes");
+}
