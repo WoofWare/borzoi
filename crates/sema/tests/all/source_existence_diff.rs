@@ -327,6 +327,25 @@ pub fn fcs(cell: &Cell) -> Fcs {
         cell.name,
         response.read_errors
     );
+    // And the same extension members, held as `assembly_entities_diff`
+    // holds a DLL's.
+    if response.imported && !undecodable {
+        let index = borzoi_assembly::existence::ExistenceIndex {
+            il: Vec::new(),
+            pickle: PickleLayer::Read(memory.entities.clone()),
+            extensions: memory.extensions.clone(),
+        };
+        let failures = crate::assembly_entities_diff::pickle_extension_failures(
+            &index,
+            &response.extension_members,
+        );
+        assert!(
+            failures.is_empty(),
+            "{}: the decoded extension rows are not FCS's view of them\n{}",
+            cell.name,
+            failures.join("\n")
+        );
+    }
     // D1 in rows: the DLL FCS compiles from the same arguments reads the same.
     // A check can pass where the compile fails (two types given one
     // compiled name): there is then no DLL to hold the signature to.
@@ -708,4 +727,39 @@ fn show_generated_cell() {
     }
     let fcs = fcs(&cell);
     eprintln!("FCS errors: {:?}", fcs.errors);
+}
+
+/// Every name the walk takes as a type FSharp.Core declares in a namespace
+/// every file has open is one: an abbreviation or a type of
+/// `Microsoft.FSharp.Core`, by FSharp.Core's own pickle.
+#[test]
+fn the_fsharp_core_type_names_are_fsharp_core_types() {
+    let core = crate::common::ensure_fsharp_core_dll();
+    let bytes = std::fs::read(core).expect("read FSharp.Core.dll");
+    let index = Ecma335Assembly::parse(&bytes)
+        .and_then(|a| a.existence_index())
+        .expect("FSharp.Core's existence index");
+    let PickleLayer::Read(rows) = index.pickle else {
+        panic!("FSharp.Core's pickle is {:?}", index.pickle);
+    };
+    let declared: Vec<&str> = rows
+        .iter()
+        .filter(|r| {
+            r.namespace == ["Microsoft", "FSharp", "Core"]
+                && r.enclosing.is_empty()
+                && r.public
+                && matches!(
+                    r.kind,
+                    borzoi_assembly::existence::PickledEntityKind::Abbreviation
+                        | borzoi_assembly::existence::PickledEntityKind::Type
+                )
+        })
+        .map(|r| r.logical_name.as_str())
+        .collect();
+    for name in borzoi_sema::test_support::fsharp_core_type_names() {
+        assert!(
+            declared.contains(name),
+            "{name} is no public type of Microsoft.FSharp.Core"
+        );
+    }
 }

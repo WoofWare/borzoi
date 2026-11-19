@@ -14,6 +14,13 @@
 
 use crate::{AssemblyEnv, EntityHandle, GateInput, Resolution, ResolvedFile};
 
+/// The names `source_existence` takes, as an abbreviation's target, to name
+/// a type FSharp.Core declares in a namespace every file has open, so a test
+/// can hold them to FSharp.Core's own pickle.
+pub fn fsharp_core_type_names() -> &'static [&'static str] {
+    crate::source_existence::FSHARP_CORE_TYPE_NAMES
+}
+
 /// Which input of the extension-scope gate declines a call of a method named
 /// `name` in the file `resolved` (`is_static`: a type-qualified call), or
 /// `None` when the gate lets the

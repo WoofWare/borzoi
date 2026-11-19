@@ -2,7 +2,8 @@
 # Regenerate with:
 #   BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-sema --test all source_existence_diff::source_rows_are_fcs_rows_over_the_grid
 abbreviation_or_union	certified: covers [AbbreviationOrUnion]; unknown: covers [AbbreviationOrUnion]
-abbreviation_targets	certified: covers, FCS rejects ({AbbreviationOrUnion}); unknown: covers, FCS rejects ({AbbreviationOrUnion}) [FCS: FS53]
+abbreviation_targets	certified: covers [AbbreviationOrUnion]; unknown: covers [AbbreviationOrUnion]
+abbreviation_to_unknown_lower_case	certified: covers, FCS rejects ({AbbreviationOrUnion}); unknown: covers, FCS rejects ({AbbreviationOrUnion}) [FCS: FS53]
 abbreviations	certified: exact; unknown: exact
 access	certified: exact; unknown: exact
 access_inherited	certified: exact; unknown: exact

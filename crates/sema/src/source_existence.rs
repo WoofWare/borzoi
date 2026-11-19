@@ -1916,7 +1916,7 @@ fn long_id_segments(li: Option<LongIdent>) -> Option<Vec<String>> {
 /// (`Microsoft.FSharp.Core`, `Microsoft.FSharp.Collections`,
 /// `Microsoft.FSharp.Control`): an abbreviation's single-identifier target
 /// spelled as one of these names a type in scope.
-const FSHARP_CORE_TYPE_NAMES: &[&str] = &[
+pub(crate) const FSHARP_CORE_TYPE_NAMES: &[&str] = &[
     "obj",
     "exn",
     "string",

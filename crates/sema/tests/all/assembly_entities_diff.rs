@@ -159,7 +159,10 @@ type RowNames<'a> = (&'a [String], Option<bool>);
 /// row of the index at its place answering to its logical and compiled
 /// names (and, for an F# extension, of its instance-ness), and each row must
 /// answer to a member FCS reads there.
-fn pickle_extension_failures(index: &ExistenceIndex, entities: &AssemblyEntities) -> Vec<String> {
+pub(crate) fn pickle_extension_failures(
+    index: &ExistenceIndex,
+    members: &[crate::common::assembly_entities::FcsExtensionMember],
+) -> Vec<String> {
     let place = |ns: &str, enclosing: &[String]| format!("{ns} | {}", enclosing.join("+"));
     let mut ours: BTreeMap<String, Vec<RowNames<'_>>> = BTreeMap::new();
     for row in index
@@ -172,7 +175,7 @@ fn pickle_extension_failures(index: &ExistenceIndex, entities: &AssemblyEntities
             .push((&row.names, row.instance));
     }
     let mut failures = Vec::new();
-    for m in &entities.fcs.extension_members {
+    for m in members {
         let at = place(&m.namespace, &m.enclosing);
         let found = ours.get(&at).is_some_and(|rows| {
             rows.iter().any(|(names, instance)| {
@@ -189,7 +192,7 @@ fn pickle_extension_failures(index: &ExistenceIndex, entities: &AssemblyEntities
         }
     }
     let mut theirs: BTreeMap<String, BTreeSet<&str>> = BTreeMap::new();
-    for m in &entities.fcs.extension_members {
+    for m in members {
         let names = theirs.entry(place(&m.namespace, &m.enclosing)).or_default();
         names.insert(&m.logical_name);
         names.insert(&m.compiled_name);
@@ -312,7 +315,7 @@ fn compare(graded: &[PathBuf], support: &[PathBuf]) -> (Vec<String>, usize, usiz
                 let theirs = pickle_theirs(entities);
                 pickle_rows += theirs.len();
                 extension_rows += entities.fcs.extension_members.len();
-                let moved = pickle_extension_failures(&index, entities);
+                let moved = pickle_extension_failures(&index, &entities.fcs.extension_members);
                 if !moved.is_empty() {
                     failures.push(format!(
                         "{file}: the pickle layer's extension members differ\n{}",
