@@ -8430,7 +8430,6 @@ let private fileBatchCore () =
                     |> Seq.choose (fun e -> Option.ofObj (e.GetString()))
                     |> Seq.toList
                 | _ -> []
-            // As `extraRefArgsOf` will name each to FCS.
             // As `extraRefArgsOf` names each to FCS, once, for every reader.
             let refs = refs |> List.map (fun r -> r.Trim()) |> List.filter (fun r -> r <> "")
             for reference in refs do
