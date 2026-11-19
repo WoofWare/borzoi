@@ -91,6 +91,11 @@ pub enum BatchFailure {
     Stdin(std::io::Error),
     /// The oracle could not be started.
     Spawn(std::io::Error),
+    /// The request is not one line: it is blank, or holds a line break. A
+    /// line-based oracle would read it as no request, leaving the driver to
+    /// wait out its deadline, or as several, matching every later answer to
+    /// the wrong request. Nothing was sent, and the child is still in step.
+    NotOneLine,
 }
 
 impl std::fmt::Display for BatchFailure {
@@ -107,6 +112,11 @@ impl std::fmt::Display for BatchFailure {
             }
             BatchFailure::Stdin(e) => write!(f, "writing the request to the oracle failed: {e}"),
             BatchFailure::Spawn(e) => write!(f, "starting the oracle failed: {e}"),
+            BatchFailure::NotOneLine => write!(
+                f,
+                "the request is blank or holds a line break, so it is not one request line; \
+                 nothing was sent"
+            ),
         }
     }
 }
@@ -274,19 +284,33 @@ impl BatchChild {
     ///
     /// A wedged or crashed oracle is killed, reaped, and respawned, and the request
     /// retried on the fresh child, up to `attempts` times; only then does it panic.
+    /// A request that is not one line ([`BatchFailure::NotOneLine`]) panics
+    /// without being sent.
     pub fn request(&mut self, request: &str) -> String {
-        self.try_request(request).unwrap_or_else(|why| {
-            panic!(
+        match self.try_request(request) {
+            Ok(answer) => answer,
+            Err(why @ BatchFailure::NotOneLine) => {
+                panic!("{} was not asked {request:?}: {why}", self.what)
+            }
+            Err(why) => panic!(
                 "{} failed {} time(s) answering {request:?}: {why} (see the child's stderr above)",
                 self.what, self.attempts,
-            )
-        })
+            ),
+        }
     }
 
     /// [`request`](Self::request), with the failure of the last attempt
     /// returned rather than panicked on. The child that failed it is gone, so
     /// the next request is put to a fresh one.
+    ///
+    /// A request that is blank (as `str::trim`, and .NET's `String.Trim`,
+    /// see it) or holds a line feed or a carriage return (each a line end to
+    /// .NET's line reader) is refused with [`BatchFailure::NotOneLine`], and
+    /// the child, which saw nothing, is kept.
     pub fn try_request(&mut self, request: &str) -> Result<String, BatchFailure> {
+        if request.trim().is_empty() || request.contains(['\n', '\r']) {
+            return Err(BatchFailure::NotOneLine);
+        }
         let mut last = None;
         for _ in 0..self.attempts {
             if self.io.is_none() {
