@@ -286,12 +286,16 @@ impl BatchChild {
     /// A request that is not one line ([`BatchFailure::NotOneLine`]) panics
     /// without being sent.
     pub fn request(&mut self, request: &str) -> String {
-        self.try_request(request).unwrap_or_else(|why| {
-            panic!(
+        match self.try_request(request) {
+            Ok(answer) => answer,
+            Err(why @ BatchFailure::NotOneLine) => {
+                panic!("{} was not asked {request:?}: {why}", self.what)
+            }
+            Err(why) => panic!(
                 "{} failed {} time(s) answering {request:?}: {why} (see the child's stderr above)",
                 self.what, self.attempts,
-            )
-        })
+            ),
+        }
     }
 
     /// [`request`](Self::request), with the failure of the last attempt

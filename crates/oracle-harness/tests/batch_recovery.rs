@@ -246,7 +246,7 @@ fn batch_try_request_reports_a_spawn_failure() {
 /// A request that is not one line, being blank or holding a line break, is
 /// refused before anything reaches the child: a line-based oracle reads it as
 /// no request (so the driver waits out its deadline) or as several (so every
-/// later answer is matched to the request before it). The child stays in
+/// later answer is matched to the request before it). The child is kept, in
 /// step, and saw only the requests that were lines.
 #[test]
 fn a_request_that_is_not_one_line_is_refused_before_it_reaches_the_child() {
@@ -257,7 +257,8 @@ fn a_request_that_is_not_one_line_is_refused_before_it_reaches_the_child() {
         let mut c = Command::new("sh");
         c.arg("-c")
             .arg(
-                r#"while IFS= read -r line; do
+                r#"printf 'started\n' >> "$L"
+                   while IFS= read -r line; do
                        printf '%s\n' "$line" >> "$L"
                        printf 'ok:%s\n' "$line"
                    done"#,
@@ -283,5 +284,23 @@ fn a_request_that_is_not_one_line_is_refused_before_it_reaches_the_child() {
         );
     }
     assert_eq!(child.request("second").trim_end(), "ok:second");
-    assert_eq!(std::fs::read_to_string(&seen).unwrap(), "first\nsecond\n");
+    // One child, started once, saw exactly the two lines.
+    assert_eq!(
+        std::fs::read_to_string(&seen).unwrap(),
+        "started\nfirst\nsecond\n"
+    );
+}
+
+/// `request` panics on a request that is not one line saying so, not as an
+/// oracle that failed its attempts.
+#[test]
+#[should_panic(expected = "was not asked")]
+fn request_panics_on_a_request_that_is_not_one_line_without_blaming_the_oracle() {
+    let mut child = BatchChild::with_factory(
+        Box::new(responder),
+        "fake-oracle",
+        Duration::from_secs(5),
+        2,
+    );
+    child.request("a\nb");
 }
