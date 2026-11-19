@@ -368,7 +368,7 @@ let private langVersionField (fields: Map<string, JsonElement>) : string option 
 
 /// `path`, which a request field `name` names, if it means one file whatever
 /// the oracle's working directory.
-let private absolutePath (name: string) (path: string) : string =
+let private absoluteField (name: string) (path: string) : string =
     // `IsPathFullyQualified`, not `IsPathRooted`: see [`refArg`].
     if not (Path.IsPathFullyQualified path) then
         failwithf "the field %s names %s, which is not an absolute path" name path
@@ -376,7 +376,7 @@ let private absolutePath (name: string) (path: string) : string =
 
 /// The `refs` field: absolute paths, each passed to FCS exactly as written.
 let private refsField (fields: Map<string, JsonElement>) : string list =
-    stringsField fields "refs" |> Array.map (absolutePath "refs") |> Array.toList
+    stringsField fields "refs" |> Array.map (absoluteField "refs") |> Array.toList
 
 /// The `paths` field: at least one path, each read against the oracle's
 /// working directory, which is its caller's.
