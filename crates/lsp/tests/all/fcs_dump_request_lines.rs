@@ -103,6 +103,14 @@ fn hostile_lines(good: &Value, path_field: &str) -> Vec<(&'static str, String)> 
         "a language version FCS would read as a switch",
         with_field(good, "langversion", json!("?")),
     ));
+    lines.push((
+        "a language version FCS does not know",
+        with_field(good, "langversion", json!("99.0")),
+    ));
+    lines.push((
+        "a misspelt language version",
+        with_field(good, "langversion", json!("latestt")),
+    ));
     if good.get("defines").is_some() {
         lines.push((
             "a padded symbol",
@@ -228,19 +236,37 @@ fn types_project_refuses_a_language_version_pin() {
     assert!(!is_refusal(&got[1]), "{}", got[1]);
 }
 
-/// A `file-batch` reference is read exactly as written, so one that names no
-/// file (a trailing blank, say) is refused: FCS drops a reference it cannot
-/// find and checks without it.
+/// A `file-batch` reference is held to what the project checks hold theirs
+/// to: one that names no file (a trailing blank, say) or a file that is no
+/// assembly is refused, since FCS drops a reference it cannot read and checks
+/// without it. A recognised older language version is still taken.
 #[test]
-fn file_batch_refuses_a_reference_that_is_not_a_file() {
+fn file_batch_refuses_a_reference_that_is_not_an_assembly() {
     let (dir, a) = fixture();
-    let reference = dir.path().join("Ref.dll");
-    std::fs::write(&reference, "").expect("write");
+    let empty = dir.path().join("Empty.dll");
+    std::fs::write(&empty, "").expect("write");
+    let text = dir.path().join("Text.dll");
+    std::fs::write(&text, "not an assembly").expect("write");
+    let request = |refs: Vec<String>| {
+        json!({"kind": "uses", "path": a, "refs": refs})
+            .to_string()
+            .into_bytes()
+    };
     let lines = vec![
-        json!({"kind": "uses", "path": a, "refs": [format!("{} ", reference.display())]})
+        request(vec![format!("{} ", empty.display())]),
+        request(vec![dir.path().join("Missing.dll").display().to_string()]),
+        request(vec![text.display().to_string()]),
+        json!({"kind": "uses", "path": a, "refs": [], "langversion": "7.0"})
             .to_string()
             .into_bytes(),
     ];
     let got = answers("file-batch", &lines);
-    assert!(is_refusal(&got[0]), "{}", got[0]);
+    for (i, what) in ["padded", "missing", "not an assembly"].iter().enumerate() {
+        assert!(is_refusal(&got[i]), "{what}: {}", got[i]);
+    }
+    assert!(
+        !is_refusal(&got[3]),
+        "a recognised older version: {}",
+        got[3]
+    );
 }
