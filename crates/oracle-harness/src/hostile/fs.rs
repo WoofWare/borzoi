@@ -16,7 +16,7 @@
 
 use std::ffi::OsStr;
 use std::fs::{self, File, Permissions};
-use std::io;
+use std::io::{self, Read, Seek, Write};
 use std::os::unix::fs::{FileTypeExt, PermissionsExt, symlink};
 use std::os::unix::net::UnixListener;
 use std::path::{Component, Path, PathBuf};
@@ -663,7 +663,24 @@ impl HostileFs {
                 fs::remove_file(path).expect("remove the file that disappears");
             }
             Change::SameStampRewrite | Change::SameStampResize | Change::SameStampReplace => {
-                let before = fs::symlink_metadata(path).expect("stat the file to change");
+                // One handle on the file, opened without following a link:
+                // what is checked is then what is read and rewritten,
+                // whatever becomes of the path meanwhile.
+                assert!(
+                    fs::symlink_metadata(path).is_ok_and(|entry| entry.is_file()),
+                    "{} is no regular file",
+                    path.display()
+                );
+                let mut file = {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    File::options()
+                        .read(true)
+                        .write(change != Change::SameStampReplace)
+                        .custom_flags(libc::O_NOFOLLOW)
+                        .open(path)
+                        .expect("open the file to change")
+                };
+                let before = file.metadata().expect("stat the file to change");
                 assert!(before.is_file(), "{} is no regular file", path.display());
                 if change != Change::SameStampReplace {
                     use std::os::unix::fs::MetadataExt;
@@ -676,7 +693,8 @@ impl HostileFs {
                         path.display()
                     );
                 }
-                let old = fs::read(path).expect("read the file to change");
+                let mut old = Vec::new();
+                file.read_to_end(&mut old).expect("read the file to change");
                 assert_ne!(old, new, "the change must change the bytes");
                 match change {
                     Change::SameStampRewrite => assert_eq!(
@@ -696,11 +714,17 @@ impl HostileFs {
                     let staged = self.target_dir(&self.aside).join("staged");
                     fs::write(&staged, new).expect("write the replacement");
                     set_modified(&staged, stamp);
+                    // A rename replaces the entry at the path, link or file,
+                    // and writes through neither.
                     fs::rename(&staged, path).expect("rename the replacement into place");
                 } else {
-                    fs::write(path, new).expect("rewrite the file");
-                    set_modified(path, stamp);
+                    file.set_len(0).expect("empty the file");
+                    file.rewind().expect("return to the file's start");
+                    file.write_all(new).expect("rewrite the file");
+                    file.set_modified(stamp)
+                        .expect("set the file's modification time");
                 }
+                drop(file);
                 let after = fs::symlink_metadata(path).expect("stat the changed file");
                 let kept = after.modified().expect("the file's modification time");
                 if kept != stamp {
