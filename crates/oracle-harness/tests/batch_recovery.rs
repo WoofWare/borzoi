@@ -242,3 +242,26 @@ fn batch_try_request_reports_a_spawn_failure() {
         Err(BatchFailure::Spawn(_))
     ));
 }
+
+/// Requests are matched to responses by position, one line each, so a request
+/// that is not exactly one line is refused before it is written: a blank one
+/// draws no answer from an oracle that skips blank lines (the caller would
+/// wait out the whole budget), and one holding a line break draws several
+/// answers, the surplus handed to the next request. The child stays in step
+/// afterwards.
+#[test]
+fn a_request_that_is_not_one_line_is_refused_before_it_is_sent() {
+    let mut child = BatchChild::with_factory(
+        Box::new(responder),
+        "fake-oracle",
+        Duration::from_secs(5),
+        2,
+    );
+    for bad in ["", "   ", "a\nb", "a\rb", "a\r\n", "\n"] {
+        match child.try_request(bad) {
+            Err(BatchFailure::NotOneLine) => {}
+            other => panic!("{bad:?} must be refused as not one line, got {other:?}"),
+        }
+    }
+    assert_eq!(child.request("req").trim_end(), "ok:req");
+}

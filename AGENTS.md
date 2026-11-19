@@ -81,7 +81,9 @@ Two things the single binary made sharp, both handled in
 - **A resident oracle child cannot serve concurrent callers**: its requests and
   responses are matched positionally. One `BatchChild` behind a mutex serialises
   the whole crate's suite, so `cst` drives a pool of them. The cap is a
-  process-wide budget, not per-pool.
+  process-wide budget, not per-pool. For the same reason `try_request` refuses,
+  unsent, a request that is blank or holds a line break
+  (`BatchFailure::NotOneLine`).
 
 Don't switch the runner to cargo-nextest: separate test binaries defeat the
 batching.
