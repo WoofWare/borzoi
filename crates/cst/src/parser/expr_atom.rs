@@ -2283,11 +2283,11 @@ impl<'src> Parser<'src> {
             i += 2;
         }
         // A record's `=` or copy-update `with` must belong to *this* brace.
-        // LexFilter swallows the brace's `}` and the closers around it (`)`,
-        // `]`, `|]`, `end`), so in the filtered stream the token after the head
-        // longident of a closed ident body (`{ x }`) may be an enclosing
-        // expression's: the `=` of `(builder { a }) = b`, or the `with` of
-        // `{ f { x } with … }` / `{ f (seq { x }) with … }`. FCS shifts the
+        // LexFilter swallows the brace's `}` and any `)` around it, so in the
+        // filtered stream the token after the head longident of a closed ident
+        // body (`{ x }`) may be an enclosing expression's: the `=` of
+        // `(builder { a }) = b`, or the `with` of `{ f { x } with … }` /
+        // `{ f (seq { x }) with … }`. FCS shifts the
         // `=`/`with` into `recdExprCore` only when it is the next token of this
         // brace, so confirm on the **raw** stream that it is the next
         // significant token after the head longident (no swallowed closer sits

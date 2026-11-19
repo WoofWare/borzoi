@@ -4,21 +4,28 @@
 //! FCS's `braceExprBody` is a record when its leading long identifier is
 //! followed by `=` (a field binding) or `with` (a copy-and-update), and a
 //! computation expression otherwise. LexFilter swallows the `}` of the brace
-//! and the closers around it (`)`, `]`, `|]`, `end`), so in the filtered stream
-//! the token after `{ a` may be an `=` or `with` that belongs to an enclosing
-//! expression: `((builder { a }) = b)` is an equality whose left operand is a
+//! and any `)` around it, so in the filtered stream the token after `{ a` may
+//! be an `=` or `with` that belongs to an enclosing expression:
+//! `((builder { a }) = b)` is an equality whose left operand is a
 //! computation expression, not a record with a field `a`. The grid puts brace
-//! bodies of each shape into contexts where such a token follows each kind of
-//! closer, and FCS decides every cell.
+//! bodies of each shape into contexts where such a token follows their closer,
+//! swallowed or emitted, and FCS decides every cell.
 //!
 //! Each cell goes to [`grade_cell`]: a cell we wrongly reject, wrongly accept
 //! or accept with a divergent tree fails. A cell both reject is followed by a
-//! declaration that FCS keeps; the recovered trees are graded
-//! ([`assert_recovered_trees_agree`]) and that declaration must survive ours.
+//! declaration that FCS keeps; the recovered trees are graded and that
+//! declaration must survive ours.
+//!
+//! The `seq { @ = b }` context ([`KNOWN_CONTEXT`]) is a known divergence:
+//! FCS shifts an `=` directly after the brace body's first `appExpr` into a
+//! record field binding, which is FS0609 when that `appExpr` is not a long
+//! identifier, and we parse an equality (WoofWare/borzoi#1054).
 
-use crate::common::recovery::{assert_recovered_trees_agree, fcs_units, our_units};
-use crate::common::{assert_parse_verdicts_match, fcs_ast_batch, fcs_parse_had_errors};
+use crate::common::normalised_ast::{normalise_fcs_dump, normalise_parse};
+use crate::common::recovery::{Relation, fcs_units, grade, our_units};
+use crate::common::{fcs_ast_batch, fcs_parse_had_errors};
 use borzoi_oracle_harness::panic_silence::{catch_unwind_silent, take_silenced_panic};
+use std::collections::HashSet;
 use std::io::Write;
 
 /// The hole each template's shape fills.
@@ -27,21 +34,27 @@ const HOLE: &str = "@";
 /// A declaration after every cell, outside any damage a cell's shape causes.
 const AFTER: &str = "let after = 1\n";
 
-/// How a cell's two parses relate, when they do not diverge in any other way.
+/// How a cell's parse relates to FCS's.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Outcome {
     /// Both parse cleanly, to the same normalised tree.
-    BothAccept,
-    /// Both report errors, the recovered trees agree, and every declaration
-    /// FCS keeps from [`AFTER`] on is one of ours.
-    BothReject,
+    Accepted,
+    /// Both report errors, and the recovered trees agree.
+    Rejected,
     /// We parse cleanly and FCS reports errors: the one divergence a known
     /// cell may show.
     OnlyFcsRejects,
 }
 
-/// Grade one cell against FCS, panicking on any divergence other than
-/// [`Outcome::OnlyFcsRejects`].
+/// Grade one cell against FCS, panicking on a divergence no cell may show.
+///
+/// We must not reject what FCS accepts. When both parsers reject, the
+/// recovered trees must agree outside the damage ([`grade`]). And whatever
+/// the verdicts, every declaration FCS keeps from [`AFTER`] on must be one of
+/// ours: the recovery grade compares only declarations outside both sides'
+/// damage, so a recovery that swallowed `after` under a wider error span would
+/// otherwise still agree, and the divergence a known cell is excused for is
+/// about its brace, not about the declaration after it.
 fn grade_cell(source: &str) -> Outcome {
     let json = {
         let mut tmp = tempfile::NamedTempFile::with_suffix(".fs").expect("create tempfile");
@@ -49,16 +62,13 @@ fn grade_cell(source: &str) -> Outcome {
         fcs_ast_batch(tmp.path())
     };
     let parse = borzoi_cst::parser::parse(source);
-    if fcs_parse_had_errors(&json) && parse.errors.is_empty() {
-        return Outcome::OnlyFcsRejects;
-    }
-    if assert_parse_verdicts_match(source) {
-        return Outcome::BothAccept;
-    }
-    assert_recovered_trees_agree(source, 0);
-    // The recovery oracle grades only declarations outside both sides'
-    // damage, so a recovery that swallowed `after` under a wider error span
-    // would still agree; hold the declarations FCS keeps there to ours.
+    let fcs_rejects = fcs_parse_had_errors(&json);
+    let we_reject = !parse.errors.is_empty();
+    assert!(
+        !we_reject || fcs_rejects,
+        "parse-verdict divergence for {source:?}: we reject, FCS accepts; our errors: {:?}",
+        parse.errors,
+    );
     let after = source.rfind(AFTER).expect("every cell ends with AFTER");
     let ours = our_units(&parse);
     for unit in fcs_units(&json, source)
@@ -67,33 +77,53 @@ fn grade_cell(source: &str) -> Outcome {
     {
         assert!(
             ours.iter().any(|o| o.key == unit.key),
-            "recovery loses `{}`, which FCS keeps, in {source:?}",
+            "we lose `{}`, which FCS keeps, in {source:?}",
             source[unit.key.start..].lines().next().unwrap_or(""),
         );
     }
-    Outcome::BothReject
+    match (we_reject, fcs_rejects) {
+        (false, false) => {
+            let (ours, theirs) = (normalise_parse(&parse), normalise_fcs_dump(&json));
+            assert_eq!(
+                ours, theirs,
+                "AST divergence for {source:?}\n  rust: {ours:#?}\n  fcs:  {theirs:#?}",
+            );
+            Outcome::Accepted
+        }
+        (false, true) => Outcome::OnlyFcsRejects,
+        (true, true) => {
+            let verdict = grade(&parse, &HashSet::new(), &json, source);
+            assert!(
+                verdict.relation != Relation::Divergent,
+                "recovered trees diverge for {source:?}: {}\n{}\n  our errors: {:?}",
+                verdict.token(),
+                verdict.first_divergence.as_deref().unwrap_or(""),
+                parse.errors,
+            );
+            Outcome::Rejected
+        }
+        (true, false) => unreachable!("asserted above"),
+    }
 }
 
 /// Grade every cell, collecting (rather than stopping at) divergences, and
 /// assert both shared verdicts were exercised.
 ///
 /// `known` lists cells (the declaration, without the module header and the
-/// trailing [`AFTER`]) that diverge for reasons outside this grid's subject,
-/// as [`Outcome::OnlyFcsRejects`] and in no other way. Each must still
-/// diverge, so the list cannot outlive the defect it records.
+/// trailing [`AFTER`]) that diverge for a reason outside this grid's subject,
+/// as [`Outcome::OnlyFcsRejects`] and in no other way. Each must still diverge, so
+/// the list cannot outlive the defect it records.
 fn sweep(what: &str, cells: impl IntoIterator<Item = String>, known: &[String]) {
     let mut total = 0;
     let mut accepted = 0;
     let mut rejected = 0;
+    let mut known_seen = 0;
     let mut failures = Vec::new();
     let mut known_now_agreeing = Vec::new();
-    let mut known_seen = 0;
     for body in cells {
         total += 1;
         let is_known = known.contains(&body);
-        if is_known {
-            known_seen += 1;
-        }
+        known_seen += usize::from(is_known);
         let source = format!("module M\n{body}{AFTER}");
         match catch_unwind_silent(|| grade_cell(&source)) {
             Ok(Outcome::OnlyFcsRejects) => {
@@ -101,11 +131,11 @@ fn sweep(what: &str, cells: impl IntoIterator<Item = String>, known: &[String]) 
                     failures.push(format!("we accept, FCS rejects: {source:?}"));
                 }
             }
-            Ok(outcome) => {
-                match outcome {
-                    Outcome::BothAccept => accepted += 1,
-                    Outcome::BothReject => rejected += 1,
-                    Outcome::OnlyFcsRejects => unreachable!("matched above"),
+            Ok(agrees) => {
+                if agrees == Outcome::Accepted {
+                    accepted += 1;
+                } else {
+                    rejected += 1;
                 }
                 if is_known {
                     known_now_agreeing.push(body);
@@ -176,10 +206,11 @@ const BRACE_SHAPES: &[&str] = &[
     "{ }",
 ];
 
-/// Where a brace shape sits: followed by an `=` past each closer LexFilter
-/// swallows (`}`, `)`, `]`, `|]`, `end`, and two of them), by a `with` that
-/// belongs to an enclosing copy-and-update, and by an `=` of the next
-/// declaration, with a few controls whose operator is not `=`.
+/// Where a brace shape sits: followed by an `=` past the closers LexFilter
+/// swallows (`}`, and one or two `)`), and, as controls, past the ones it
+/// emits (`]`, `|]`, `end`); by a member access before the `=` or `with`; by
+/// a `with` that belongs to an enclosing copy-and-update; and by an `=` of
+/// the next declaration, with a few controls whose operator is not `=`.
 const CONTEXTS: &[&str] = &[
     "let x = @\n",
     "let x = @ = b\n",
