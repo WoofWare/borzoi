@@ -92,6 +92,7 @@ pub enum Producer<'a> {
     Evaluated {
         items: &'a [CompileItem<'a>],
         routes: &'a MarkerRoutes,
+        providers: ProviderReferences,
     },
     /// A's fold is refused (an untrusted Compile set, untrusted defines, an
     /// untrusted language version on a file whose parse it decides).
@@ -99,6 +100,21 @@ pub enum Producer<'a> {
     /// The producer TFM the dependant is paired with is not the one A was
     /// evaluated at.
     UnservedTfm(&'a str),
+}
+
+/// Whether one of A's references may be a type provider: the caller's to
+/// state, as it states [`MarkerRoutes`]. A generative provider applied to a
+/// literal-bound identifier (`type T = Gen<N>`) parses as an ordinary type
+/// application, and FCS then reads A from its DLL, never its source; only
+/// A's references tell the two apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderReferences {
+    /// No reference is a type provider (none carries
+    /// `[<TypeProviderAssembly>]`): a type application is never one.
+    None,
+    /// One may be: an abbreviation of a prefix type application may be a
+    /// generative provider's.
+    Possible,
 }
 
 /// One item of A's Compile list.
@@ -199,8 +215,10 @@ pub enum ExistenceUnread {
     /// A `#r`, `#reference`, `#load`, `#I` or `#include` directive.
     HashReference(usize),
     /// A type provider may be in use (a static argument in an abbreviation's
-    /// target), or A may be one (an assembly attribute that may be
-    /// `[<TypeProviderAssembly>]`): FCS then reads A's DLL, not its source.
+    /// target, or with [`ProviderReferences::Possible`] any prefix type
+    /// application there), or A may be one (an assembly attribute that may
+    /// be `[<TypeProviderAssembly>]`): FCS then reads A's DLL, not its
+    /// source.
     TypeProvider(usize),
     /// An assembly-level attribute that may be `[<AutoOpen>]` has an argument
     /// the walk cannot read as a string.
@@ -214,7 +232,7 @@ pub enum ExistenceUnread {
     UnnamedDeclaration(usize),
     /// A headerless file whose implicit module name the walk cannot spell.
     AnonymousModuleName(usize),
-    /// The rows exceed [`MAX_ROWS`]: each module whose name ends in `Module`
+    /// The rows exceed `MAX_ROWS`: each module whose name ends in `Module`
     /// doubles the paths under it.
     TooManyReadings,
     /// A type's `[<Extension>]` `let`, whose compiled name may carry its
@@ -483,7 +501,11 @@ pub fn source_existence(producer: Producer<'_>) -> SourceExistence {
         Producer::UnservedTfm(why) => {
             SourceExistence::Unread(ExistenceUnread::UnservedTfm(why.to_owned()))
         }
-        Producer::Evaluated { items, routes } => match walk_project(items, routes) {
+        Producer::Evaluated {
+            items,
+            routes,
+            providers,
+        } => match walk_project(items, routes, providers) {
             Ok(surface) => SourceExistence::Read(surface),
             Err(why) => SourceExistence::Unread(why),
         },
@@ -493,6 +515,7 @@ pub fn source_existence(producer: Producer<'_>) -> SourceExistence {
 fn walk_project(
     items: &[CompileItem<'_>],
     routes: &MarkerRoutes,
+    providers: ProviderReferences,
 ) -> Result<SourceSurface, ExistenceUnread> {
     let mut files = Vec::with_capacity(items.len());
     for item in items {
@@ -525,6 +548,7 @@ fn walk_project(
         let mut file = FileWalk {
             index: i,
             routes,
+            providers,
             out: std::mem::take(&mut out),
             lines: Lines::of(root).map(std::rc::Rc::new),
         };
@@ -814,6 +838,7 @@ struct ListCtx {
 struct FileWalk<'r> {
     index: usize,
     routes: &'r MarkerRoutes,
+    providers: ProviderReferences,
     out: Out,
     /// The file's lines, or `None` when a `#line` directive may move them.
     lines: Option<std::rc::Rc<Lines>>,
@@ -847,7 +872,7 @@ impl FileWalk<'_> {
                 ModuleOrNamespaceKind::DeclaredNamespace => {
                     let ns = long_id_segments(m.long_id())
                         .ok_or(ExistenceUnread::UnnamedDeclaration(self.index))?;
-                    self.namespace(&ns);
+                    self.namespace(&ns)?;
                     self.decls(&Scope::root(ns), &decls, m.is_rec())?;
                 }
                 ModuleOrNamespaceKind::NamedModule | ModuleOrNamespaceKind::Anon => {
@@ -866,7 +891,7 @@ impl FileWalk<'_> {
                             )
                         };
                     let (name, ns) = segments.split_last().expect("segments are not empty");
-                    self.namespace(ns);
+                    self.namespace(ns)?;
                     self.module(&Scope::root(ns.to_vec()), name, &attrs, &decls, m.is_rec())?;
                 }
             }
@@ -878,18 +903,24 @@ impl FileWalk<'_> {
     /// ends in `Module` doubles the paths under it, and a walk past the bound
     /// declines rather than emit an unbounded or truncated surface.
     fn within_budget(&self) -> Result<(), ExistenceUnread> {
-        if self.out.entities.len() + self.out.extensions.len() > MAX_ROWS {
+        let rows = self.out.entities.len() + self.out.extensions.len() + self.out.namespaces.len();
+        if rows > MAX_ROWS {
             Err(ExistenceUnread::TooManyReadings)
         } else {
             Ok(())
         }
     }
 
-    /// Record namespace `ns` and its prefixes.
-    fn namespace(&mut self, ns: &[String]) {
+    /// Record namespace `ns` and its prefixes: quadratic in its segments,
+    /// so charged to the budget before they are made.
+    fn namespace(&mut self, ns: &[String]) -> Result<(), ExistenceUnread> {
+        if self.out.namespaces.len() + ns.len() * (ns.len() + 1) / 2 > MAX_ROWS {
+            return Err(ExistenceUnread::TooManyReadings);
+        }
         for k in 1..=ns.len() {
             self.out.namespaces.insert(ns[..k].to_vec());
         }
+        Ok(())
     }
 
     /// Every attribute of the file FCS may read as assembly-level: one with
@@ -1253,13 +1284,21 @@ impl FileWalk<'_> {
             .ok_or(ExistenceUnread::UnnamedDeclaration(self.index))?;
         let attrs: Vec<AttributeList> = defn.attributes().collect();
         let marks = self.routes.entity_marks(&attrs);
+        let generic = defn
+            .typar_decls()
+            .is_some_and(|d| d.typars().next().is_some());
         let kinds: Vec<PickledEntityKind> = match defn.repr() {
             Some(TypeDefnRepr::Abbrev(a)) => {
                 let target = a.ty();
-                if target.as_ref().is_some_and(has_static_argument) {
+                let provided = |t: &Type| {
+                    has_static_argument(t)
+                        || (self.providers == ProviderReferences::Possible
+                            && has_prefix_application(t))
+                };
+                if target.as_ref().is_some_and(provided) {
                     return Err(ExistenceUnread::TypeProvider(self.index));
                 }
-                self.abbreviation_kinds(&name, target.as_ref(), &marks)
+                self.abbreviation_kinds(&name, generic, target.as_ref(), &marks)
             }
             _ => vec![PickledEntityKind::Type],
         };
@@ -1284,12 +1323,14 @@ impl FileWalk<'_> {
     fn abbreviation_kinds(
         &mut self,
         name: &str,
+        generic: bool,
         target: Option<&Type>,
         marks: &Marks,
     ) -> Vec<PickledEntityKind> {
         let measure = marks.get(Marker::Measure);
         match target.and_then(abbrev_single_ident) {
-            Some(t) if t == name => match measure {
+            // `type Foo<'a> = Foo` may abbreviate another `Foo` of no arity.
+            Some(t) if t == name && !generic => match measure {
                 Maybe::No => vec![PickledEntityKind::Type],
                 Maybe::Yes => vec![PickledEntityKind::Abbreviation],
                 Maybe::Possibly => {
@@ -1440,6 +1481,11 @@ impl FileWalk<'_> {
                 return Err(ExistenceUnread::UnnamedDeclaration(self.index));
             }
             self.out.approximations.insert(Approximation::ClassLetName);
+            // Each name is a row per compiled name: charged before expanding.
+            let rows = named.len() * (binders + 1) * (marks.compiled_names.len() + 1);
+            if self.out.entities.len() + self.out.extensions.len() + rows > MAX_ROWS {
+                return Err(ExistenceUnread::TooManyReadings);
+            }
             for (name, at) in named {
                 let line = lines.line(at);
                 let basic = match name.find('@') {
@@ -1521,13 +1567,20 @@ impl FileWalk<'_> {
             };
             // A signature keeps its `return:` attributes.
             let signature = matches!(m, MemberDefn::AbstractSlot(_) | MemberDefn::MemberSig(_));
-            let member_marks = self.routes.marks_on(&lists, !signature);
             // A `[<CLIEvent>]` property compiles to its event's accessors
             // too, which `[<CompiledName>]` does not rename.
             let mut vals = vals;
             let mut event_vals: BTreeSet<String> = BTreeSet::new();
-            if member_marks.may(Marker::CliEvent) && role == MemberRole::Member {
-                if member_marks.get(Marker::CliEvent) == Maybe::Possibly && member_marks.uncertain {
+            // `[<CLIEvent>]` on the member, or on an accessor's own list.
+            let event_marks = {
+                let mut all = lists.clone();
+                for v in &vals {
+                    all.extend(v.own_lists.iter().cloned());
+                }
+                self.routes.marks_on(&all, !signature)
+            };
+            if event_marks.may(Marker::CliEvent) && role == MemberRole::Member {
+                if event_marks.get(Marker::CliEvent) == Maybe::Possibly && event_marks.uncertain {
                     self.out
                         .approximations
                         .insert(Approximation::UncertainAttribute);
@@ -1573,15 +1626,18 @@ impl FileWalk<'_> {
                     return Err(ExistenceUnread::UnreadableCompiledName(self.index));
                 }
                 // A `[<CompiledName>]` renames a method, never a property's
-                // or an event's accessor.
-                let renames = v.accessor.is_none() && !event_vals.contains(&v.logical);
+                // or an event's accessor. A signature's getter reading may be
+                // a method whose type the walk does not classify (`'T -> bool
+                // when 'T: equality`), so its rename applies too.
+                let renames =
+                    (v.accessor.is_none() || signature) && !event_vals.contains(&v.logical);
                 match augmented {
                     Some(type_names) => {
                         if role == MemberRole::Constructor {
                             // FCS rejects a constructor in an optional
-                            // augmentation.
+                            // augmentation, and keeps it in its recovery
+                            // (`String..ctor`).
                             self.out.approximations.insert(Approximation::RejectedShape);
-                            continue;
                         }
                         // An optional extension: compiled `T.name[.Static]`,
                         // or the name a `[<CompiledName>]` gives.
@@ -1589,7 +1645,9 @@ impl FileWalk<'_> {
                             .iter()
                             .map(|t| {
                                 let mut c = format!("{t}.{}", v.logical);
-                                if v.is_static {
+                                // A constructor (rejected, and recovered as
+                                // static) takes no suffix.
+                                if v.is_static && role != MemberRole::Constructor {
                                     c.push_str(".Static");
                                 }
                                 c
@@ -1605,7 +1663,7 @@ impl FileWalk<'_> {
                                 namespace: scope.namespace.clone(),
                                 enclosing: scope.enclosing.clone(),
                                 names: val_names(&v.logical, v.accessor, Some(&c)),
-                                instance: Some(!v.is_static),
+                                instance: (role != MemberRole::Constructor).then_some(!v.is_static),
                             });
                         }
                     }
@@ -1723,9 +1781,24 @@ impl FileWalk<'_> {
             .long_id()
             .map(|li| li.idents().map(|t| id_text(&t).into_owned()).collect());
         let Some(head) = head.filter(|h| !h.is_empty()) else {
-            // A tuple type extension (`type (int * int) with`).
+            // A tuple type extension (`type (int * int) with`), which FCS
+            // rejects and recovers as an extension of its tuple type:
+            // ``Tuple`n``, or ``ValueTuple`n`` for a struct tuple, `n` its
+            // elements' count (one beyond seven nest, so ``Tuple`8`` too).
             self.out.approximations.insert(Approximation::RejectedShape);
-            return self.members(scope, &members, Some(&["Tuple".to_owned()]));
+            let n = defn.tuple_type_head().map_or(0, |t| tuple_arity(&t));
+            let mut names = Vec::new();
+            for family in ["Tuple", "ValueTuple"] {
+                names.push(family.to_owned());
+                for k in [n, 8] {
+                    if k > 0 {
+                        names.push(format!("{family}`{k}"));
+                    }
+                }
+            }
+            names.sort();
+            names.dedup();
+            return self.members(scope, &members, Some(&names));
         };
         let last = head.last().expect("not empty").clone();
         // A qualified head names a type of this list only through a path to
@@ -1890,6 +1963,33 @@ fn has_static_argument(ty: &Type) -> bool {
     })
 }
 
+/// The element count of a tuple augmentation's head (`(int * int)`: 2).
+fn tuple_arity(head: &borzoi_cst::syntax::TupleTypeExtensionHead) -> usize {
+    match head.ty() {
+        Some(Type::Tuple(t)) => t
+            .segments()
+            .iter()
+            .filter(|s| matches!(s, borzoi_cst::syntax::TupleSegment::Type(_)))
+            .count(),
+        Some(_) => 1,
+        None => 0,
+    }
+}
+
+/// Whether a type applies a head to arguments in angle brackets (`Foo<N>`):
+/// a provider's static arguments may be among them.
+fn has_prefix_application(ty: &Type) -> bool {
+    std::iter::once(ty.syntax().clone())
+        .chain(ty.syntax().descendants())
+        .any(|n| match n.kind() {
+            SyntaxKind::LONG_IDENT_APP_TYPE => true,
+            SyntaxKind::APP_TYPE => {
+                borzoi_cst::syntax::AppType::cast(n).is_some_and(|a| !a.is_postfix())
+            }
+            _ => false,
+        })
+}
+
 /// The 1-based line of each offset of one file, in FCS's sense: a line
 /// starts after every `\n` (`newline = '\n' | '\r' '\n'`), wherever it
 /// sits.
@@ -2031,8 +2131,18 @@ pub fn certify_by_spelling(files: &[&ProjectFile]) -> MarkerRoutes {
             Some((first, rest)) if first == "global" => (rest, true),
             _ => (qualifier, false),
         };
+        // `[<X>]` denotes a type named `X` or `XAttribute`: a type of A's own
+        // of either name may be any marker's abbreviation.
         let stem = last.strip_suffix("Attribute").unwrap_or(last);
-        if declared.contains(stem) || declared.contains(&format!("{stem}Attribute")) {
+        if [
+            stem.to_owned(),
+            format!("{stem}Attribute"),
+            last.clone(),
+            format!("{last}Attribute"),
+        ]
+        .iter()
+        .any(|n| declared.contains(n))
+        {
             continue;
         }
         let mut set = BTreeSet::new();

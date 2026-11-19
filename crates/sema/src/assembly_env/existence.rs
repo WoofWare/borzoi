@@ -449,7 +449,7 @@ impl ExistenceSet {
     }
 }
 
-/// The facts an [`ExistenceSet`] holds ([`ExistenceSet::facts`]), each a set
+/// The facts an `ExistenceSet` holds (`ExistenceSet::facts`), each a set
 /// whose every element only ever makes a question answer "something may be
 /// there": one set's facts holding another's means it answers every question
 /// at least as permissively.

@@ -100,7 +100,8 @@ pub use resolve::{
 // it is an inference-internal handle that never surfaces in `infer_file` output.
 pub use source_existence::{
     Approximation, Channel, CompileItem, ExistenceUnread, Marker, MarkerRoutes, Producer,
-    SourceExistence, SourceSurface, Treatment, certify_by_spelling, source_existence,
+    ProviderReferences, SourceExistence, SourceSurface, Treatment, certify_by_spelling,
+    source_existence,
 };
 pub use ty::{
     MAX_TYPE_DEPTH, MAX_TYPE_NODES, Ty, TyKind, TyPath, TySize, TyVid, TypeBudgetExceeded,

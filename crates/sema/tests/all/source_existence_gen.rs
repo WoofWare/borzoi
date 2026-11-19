@@ -110,6 +110,8 @@ const LET_NAMES: &[&str] = &[
 
 /// What an augmentation may extend.
 const EXTENDED: &[&str] = &[
+    "(int * int)",
+    "struct (int * string * bool)",
     "System.String",
     "System.Int32",
     "List<'T>",
@@ -274,9 +276,15 @@ impl Gen {
                     .filter(|(_, g, k)| !g && *k != Kind::Measure)
                     .map(|(n, _, _)| n.clone())
                     .collect();
-                match self.rng.below(3) {
+                // A target naming itself (a union, a measure, or with type
+                // parameters another type of its name) among the others.
+                match self.rng.below(5) {
                     0 if !earlier.is_empty() => format!(" = {}", self.rng.pick(&earlier)),
                     1 => " = string list".to_owned(),
+                    2 => format!(" = {name}"),
+                    3 if typars.is_empty() && !earlier.is_empty() => {
+                        format!("<'z> = {}", self.rng.pick(&earlier))
+                    }
                     _ => " = int".to_owned(),
                 }
             }
@@ -387,9 +395,13 @@ impl Gen {
         let members = 1 + self.rng.below(3);
         for _ in 0..members {
             let name = *self.rng.pick(MEMBER_NAMES);
-            let line = match self.rng.below(8) {
+            let line = match self.rng.below(9) {
                 7 => format!(
                     "[<CLIEvent>]\n{indent}    member x.Ev{} = Event<int>().Publish",
+                    self.rng.below(1000)
+                ),
+                8 => format!(
+                    "member x.Ev{} with [<CLIEvent>] get () = Event<int>().Publish",
                     self.rng.below(1000)
                 ),
                 0 => format!("member x.{name}() = 1"),
@@ -446,7 +458,8 @@ impl Gen {
                         String::new()
                     };
                     let rec = if self.rng.chance(20) { "rec " } else { "" };
-                    let name = self.rng.below(1000);
+                    // A few names, so one recurs in a list.
+                    let name = self.rng.below(3);
                     out.push_str(&format!("{attr}{indent}let {rec}f{name} (s: string) = s\n"));
                 }
                 8 if in_module => {
@@ -620,7 +633,8 @@ fn source_rows_are_fcs_rows_over_generated_projects() {
 
 /// The generator over more seeds: `BORZOI_SOURCE_EXISTENCE_SEED` (default
 /// 1000) and `BORZOI_SOURCE_EXISTENCE_CASES` (default 400). Pins nothing:
-/// every property must hold.
+/// every property must hold. It runs no census, so a slice of one seed
+/// replays: the pinned run is the one that owes every dimension.
 #[test]
 #[ignore = "hundreds of FCS checks; the default run is the gate"]
 fn deep_source_rows_are_fcs_rows_over_generated_projects() {
@@ -633,10 +647,8 @@ fn deep_source_rows_are_fcs_rows_over_generated_projects() {
     let first = var("BORZOI_SOURCE_EXISTENCE_SEED", 1000);
     let count = var("BORZOI_SOURCE_EXISTENCE_CASES", 400);
     eprintln!("seeds {first}..{}", first + count);
-    let census = open_census();
     let cells = generated(first, count);
     let (entries, failures) = grade_cells(&cells);
-    record(&census, &cells, &entries);
     let exact = entries
         .iter()
         .filter(|(_, v)| v.starts_with("certified: exact"))
@@ -651,9 +663,6 @@ fn deep_source_rows_are_fcs_rows_over_generated_projects() {
         failures.len(),
         failures.join("\n")
     );
-    census.finish(&regenerate(
-        "source_existence_gen::deep_source_rows_are_fcs_rows_over_generated_projects",
-    ));
 }
 
 /// Print the generated cell `BORZOI_SOURCE_EXISTENCE_SEED`, our reading of

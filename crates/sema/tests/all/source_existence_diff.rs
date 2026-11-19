@@ -45,11 +45,11 @@ use borzoi_oracle_harness::project_graph::{
     CompileResponse, FixtureFile, FixtureProject, PlainName, ProjectGraphFixture,
     ReferencedResponse, Target, framework_references, parse_response,
 };
-use borzoi_sema::test_support::{ExistenceFacts, ExtensionFact, existence_facts};
+use borzoi_sema::test_support::{ExistenceFacts, existence_facts};
 use borzoi_sema::{
     Approximation, CompileItem, ExistenceUnread, Marker, MarkerRoutes, Producer, ProjectFile,
-    SourceExistence, SourceFile, SyntaxRecovery, certify_by_spelling, qualified_names,
-    source_existence,
+    ProviderReferences, SourceExistence, SourceFile, SyntaxRecovery, certify_by_spelling,
+    qualified_names, source_existence,
 };
 
 use crate::common::corpus_manifest::{check_manifest, regenerate};
@@ -538,6 +538,17 @@ pub fn ours(cell: &Cell, routes: Option<&MarkerRoutes>) -> (SourceExistence, Mar
         source_existence(Producer::Evaluated {
             items: &items,
             routes: &routes,
+            // A reference that may be a type provider is one whose source
+            // names the attribute that makes it one.
+            providers: if cell.refs.iter().any(|r| {
+                r.files
+                    .iter()
+                    .any(|(_, t)| t.contains("TypeProviderAssembly"))
+            }) {
+                ProviderReferences::Possible
+            } else {
+                ProviderReferences::None
+            },
         }),
         routes,
     )
@@ -594,19 +605,7 @@ pub fn grade(cell: &Cell, fcs: &Fcs, ours: &SourceExistence) -> Result<String, S
         },
         &fcs.memory.auto_opens,
     );
-    // FCS's recovery of a producer it rejects renames a duplicate val
-    // (`f@13`): a source-named val there is covered by ours of its name.
-    let recovered_rename = |f: &ExtensionFact| {
-        !fcs.clean
-            && f.key.find('@').is_some_and(|at| {
-                at > 0
-                    && mine.extensions.contains(&ExtensionFact {
-                        key: f.key[..at].to_owned(),
-                        ..f.clone()
-                    })
-            })
-    };
-    let lacking: Vec<String> = facts_lacking(&mine, &theirs, &recovered_rename);
+    let lacking: Vec<String> = facts_lacking(&mine, &theirs);
     if !lacking.is_empty() {
         let state = if fcs.clean {
             "FCS accepts it"
@@ -663,12 +662,8 @@ pub fn grade(cell: &Cell, fcs: &Fcs, ours: &SourceExistence) -> Result<String, S
     }
 }
 
-/// Every fact of `theirs` that `mine` lacks, but for an extension `excused`.
-fn facts_lacking(
-    mine: &ExistenceFacts,
-    theirs: &ExistenceFacts,
-    excused: &dyn Fn(&ExtensionFact) -> bool,
-) -> Vec<String> {
+/// Every fact of `theirs` that `mine` lacks.
+fn facts_lacking(mine: &ExistenceFacts, theirs: &ExistenceFacts) -> Vec<String> {
     fn paths(
         kind: &str,
         ours: &BTreeSet<Vec<String>>,
@@ -715,7 +710,6 @@ fn facts_lacking(
         theirs
             .extensions
             .difference(&mine.extensions)
-            .filter(|f| !excused(f))
             .map(|f| format!("extension {f:?}")),
     );
     lacking
@@ -851,7 +845,8 @@ fn source_rows_are_fcs_rows_over_the_grid() {
     );
 }
 
-/// The grid's cells whose names start with `BORZOI_SOURCE_EXISTENCE_CELL`,
+/// The grid's cells whose names start with one of `BORZOI_SOURCE_EXISTENCE_CELL`'s
+/// comma-separated prefixes,
 /// graded without the manifest: the inner loop on a handful of cells.
 #[test]
 #[ignore = "an inner-loop aid; set BORZOI_SOURCE_EXISTENCE_CELL"]
@@ -859,7 +854,7 @@ fn grid_cells_by_name() {
     let prefix = std::env::var("BORZOI_SOURCE_EXISTENCE_CELL").unwrap_or_default();
     let cells: Vec<Cell> = grid()
         .into_iter()
-        .filter(|c| c.name.starts_with(&prefix))
+        .filter(|c| prefix.split(",").any(|p| c.name.starts_with(p)))
         .collect();
     let (entries, failures) = grade_cells(&cells);
     for e in &entries {

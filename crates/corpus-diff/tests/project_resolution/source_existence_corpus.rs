@@ -40,8 +40,8 @@ use borzoi_oracle_harness::project_graph::{
 };
 use borzoi_sema::test_support::existence_facts;
 use borzoi_sema::{
-    CompileItem, MarkerRoutes, Producer, ProjectFile, SourceExistence, certify_by_spelling,
-    source_existence,
+    CompileItem, MarkerRoutes, Producer, ProjectFile, ProviderReferences, SourceExistence,
+    certify_by_spelling, source_existence,
 };
 
 /// The language versions the oracle's template checks at, by the spellings a
@@ -67,6 +67,26 @@ fn checkout_key(path: &Path) -> String {
     format!("{name}/{}", rel.join("/"))
 }
 
+/// Whether one of `loaded`'s references may be a type provider: one whose
+/// bytes name the attribute that makes it one, anywhere (FSharp.Core
+/// declares it, and is none).
+fn may_reference_provider(loaded: &LoadedProject) -> Result<bool, String> {
+    for dll in &loaded.fcs_extra_refs {
+        let is_core = dll
+            .file_name()
+            .is_some_and(|n| n.eq_ignore_ascii_case("FSharp.Core.dll"));
+        let bytes = std::fs::read(dll).map_err(|e| e.to_string())?;
+        if !is_core
+            && bytes
+                .windows(b"TypeProviderAssemblyAttribute".len())
+                .any(|w| w == b"TypeProviderAssemblyAttribute")
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Our reading of `loaded` under `routes` (or certified by spelling).
 fn ours(loaded: &LoadedProject, routes: Option<&MarkerRoutes>) -> SourceExistence {
     let parsed: BTreeMap<&Path, &ProjectFile> = loaded
@@ -88,9 +108,15 @@ fn ours(loaded: &LoadedProject, routes: Option<&MarkerRoutes>) -> SourceExistenc
         .collect();
     let files: Vec<&ProjectFile> = loaded.parses.files.iter().collect();
     let by_spelling = certify_by_spelling(&files);
+    // A reference unread is one that may be a provider.
+    let providers = match may_reference_provider(loaded) {
+        Ok(false) => ProviderReferences::None,
+        Ok(true) | Err(_) => ProviderReferences::Possible,
+    };
     source_existence(Producer::Evaluated {
         items: &items,
         routes: routes.unwrap_or(&by_spelling),
+        providers,
     })
 }
 
@@ -104,20 +130,9 @@ fn fcs(loaded: &LoadedProject, oracle: &mut ProjectGraphOracle) -> Result<FcsRow
     }
     // A type provider's design-time assembly outlives the oracle's
     // per-request clearing (#1086): a project referencing one would need the
-    // process isolation of #1085. A reference whose bytes name the attribute
-    // anywhere (FSharp.Core declares it, and is none) may be one.
-    for dll in &loaded.fcs_extra_refs {
-        let is_core = dll
-            .file_name()
-            .is_some_and(|n| n.eq_ignore_ascii_case("FSharp.Core.dll"));
-        let bytes = std::fs::read(dll).map_err(|e| e.to_string())?;
-        if !is_core
-            && bytes
-                .windows(b"TypeProviderAssemblyAttribute".len())
-                .any(|w| w == b"TypeProviderAssemblyAttribute")
-        {
-            return Err("a reference may be a type provider (#1086)".to_owned());
-        }
+    // process isolation of #1085.
+    if may_reference_provider(loaded)? {
+        return Err("a reference may be a type provider (#1086)".to_owned());
     }
     let name = |s: &str| PlainName::new(s).expect("a plain name");
     let defines: Vec<String> = loaded
@@ -163,11 +178,8 @@ fn fcs(loaded: &LoadedProject, oracle: &mut ProjectGraphOracle) -> Result<FcsRow
     };
     let request = GraphRequest::new(vec![producer, consumer], name("Consumer"))
         .map_err(|e| format!("no graph request: {e}"))?;
-    let line = request
-        .referenced_line(&name("Producer"))
-        .expect("the consumer references the producer");
     let response: ReferencedResponse = oracle
-        .referenced(&line)
+        .referenced(&request, &name("Producer"))
         .map_err(|e| format!("the oracle answered no rows: {e}"))?;
     // A project FCS rejects is imported, if at all, as FCS's recovery, which
     // the walk does not model; `source_existence_diff` grades that case on

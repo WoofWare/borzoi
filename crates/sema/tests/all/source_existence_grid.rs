@@ -475,6 +475,44 @@ pub fn cells() -> Vec<Cell> {
                 ("Lib.fs", "module RetSig\nlet f (s: string) = s\n"),
             ],
         ),
+        // Codex round 3's shapes, each now a generator dimension too.
+        one(
+            "module_let_duplicate_names",
+            "module DupLet\nopen System.Runtime.CompilerServices\n[<Extension>]\nlet f (s: string) = s\n[<Extension>]\nlet f (s: string) = s\n",
+        ),
+        one(
+            "event_on_accessor_in_augmentation",
+            "module EvAcc\ntype System.String with\n    member x.Foo with [<CLIEvent>] get () = Event<int>().Publish\n",
+        ),
+        Cell::new(
+            "constrained_member_signature",
+            &[
+                (
+                    "Lib.fsi",
+                    "module Constrained\ntype T =\n    new: unit -> T\n    [<System.Runtime.CompilerServices.Extension; CompiledName(\"Renamed\")>]\n    static member M: s: 'T -> bool when 'T: equality\n",
+                ),
+                (
+                    "Lib.fs",
+                    "module Constrained\ntype T() =\n    [<CompiledName(\"Renamed\")>]\n    static member M(s: 'T) = s = s\n",
+                ),
+            ],
+        ),
+        one(
+            "local_attribute_attribute_alias",
+            "namespace AttrAttr\ntype FooAttributeAttribute = Microsoft.FSharp.Core.AutoOpenAttribute\n[<FooAttribute>]\nmodule M =\n    let x = 1\n",
+        ),
+        one(
+            "tuple_augmentation",
+            "module TupleAug\ntype (int * int) with\n    member x.Prop = 5\ntype struct (int * string * bool) with\n    member x.Other = 6\n",
+        ),
+        one(
+            "augmentation_constructor",
+            "module AugCtor\ntype System.String with\n    new(x: string) = \"\"\n",
+        ),
+        one(
+            "self_named_generic_abbreviation",
+            "namespace SelfGeneric\ntype Foo = { X: int }\n[<System.Runtime.CompilerServices.Extension>]\ntype Foo<'a> = Foo\n",
+        ),
         // A standalone attribute with no target is the assembly's when the
         // attribute allows it, as `[<AutoOpen>]` does.
         one(
@@ -571,5 +609,38 @@ pub fn cells() -> Vec<Cell> {
         "namespace RefShadow\ntype AutoOpenAttribute() =\n    inherit System.Attribute()\n",
         Certificate::Override(vec![("AutoOpen", vec![])]),
     ));
+    cells.extend(local_marker_aliases());
+    cells
+}
+
+/// A marker abbreviated by a type of A's own, under every name `[<X>]` may
+/// denote (`X`, `XAttribute`, and an `Attribute` the name already ends in
+/// doubled), written every way: the certificate by spelling must leave each
+/// such name to `Unknown`.
+fn local_marker_aliases() -> Vec<Cell> {
+    let mut cells = Vec::new();
+    for (marker, full, carrier) in [
+        (
+            "auto_open",
+            "Microsoft.FSharp.Core.AutoOpenAttribute",
+            "module M =\n    let x = 1\n",
+        ),
+        (
+            "extension",
+            "System.Runtime.CompilerServices.ExtensionAttribute",
+            "type S = string\n",
+        ),
+    ] {
+        for alias in ["Foo", "FooAttribute", "FooAttributeAttribute"] {
+            for written in ["Foo", "FooAttribute"] {
+                cells.push(one(
+                    &format!("local_alias_{marker}_{alias}_{written}"),
+                    &format!(
+                        "namespace LocalAlias\ntype {alias} = {full}\n[<{written}>]\n{carrier}"
+                    ),
+                ));
+            }
+        }
+    }
     cells
 }

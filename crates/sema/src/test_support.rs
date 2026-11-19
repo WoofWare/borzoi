@@ -25,7 +25,7 @@ pub use crate::assembly_env::existence::{ExistenceFacts, ExtensionFact};
 
 /// What the existence questions hold of one assembly whose index is `index`
 /// and whose assembly-level `[<AutoOpen("…")>]` arguments are
-/// `auto_opens`: the facts of the [`crate::assembly_env::existence`] set
+/// `auto_opens`: the facts of the `assembly_env::existence` set
 /// built from them alone, by the code every question reads.
 pub fn existence_facts(
     index: &borzoi_assembly::ExistenceIndex,

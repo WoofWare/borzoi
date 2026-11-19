@@ -21,6 +21,7 @@ fn read_with(files: &[(&str, &str)], routes: Option<MarkerRoutes>) -> SourceExis
     source_existence(Producer::Evaluated {
         items: &items,
         routes: &routes,
+        providers: ProviderReferences::None,
     })
 }
 
@@ -157,6 +158,7 @@ fn witness(channel: Channel) -> Observed {
                 source_existence(Producer::Evaluated {
                     items: &items,
                     routes: &routes,
+                    providers: ProviderReferences::None,
                 }),
                 |_| true,
             )
@@ -177,6 +179,7 @@ fn witness(channel: Channel) -> Observed {
                 source_existence(Producer::Evaluated {
                     items: &items,
                     routes: &routes,
+                    providers: ProviderReferences::None,
                 })
             };
             let (a, b) = (read_under(&["A_ONLY"]), read_under(&[]));
@@ -646,5 +649,38 @@ fn a_partial_certificate_loses_exactness() {
     assert!(
         names.contains(&vec!["Old".to_owned(), "f".to_owned()]),
         "{names:?}"
+    );
+}
+
+/// A provider applied to a literal-bound identifier parses as an ordinary
+/// type application: with a reference that may be a provider, the walk
+/// cannot tell it from one and declines; with none, it is no provider.
+#[test]
+fn a_type_application_may_be_a_provider_only_where_a_reference_may_be_one() {
+    let src = [(
+        "Lib.fs",
+        "namespace N\nmodule C =\n    [<Literal>]\n    let N = 2\ntype T = Gen<C.N>\ntype L = int list\n",
+    )];
+    let project = project(&src);
+    let refs: Vec<&ProjectFile> = project.iter().collect();
+    let routes = certify_by_spelling(&refs);
+    let items: Vec<CompileItem<'_>> = project.iter().map(CompileItem::Parsed).collect();
+    let read = |providers| {
+        source_existence(Producer::Evaluated {
+            items: &items,
+            routes: &routes,
+            providers,
+        })
+    };
+    assert!(
+        matches!(
+            read(ProviderReferences::Possible),
+            SourceExistence::Unread(ExistenceUnread::TypeProvider(0))
+        ),
+        "a possible provider's application declines"
+    );
+    assert!(
+        matches!(read(ProviderReferences::None), SourceExistence::Read(_)),
+        "with no provider referenced, an application is a type"
     );
 }

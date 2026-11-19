@@ -967,13 +967,19 @@ impl ProjectGraphOracle {
         parse_response(&response).map_err(FcsInvokeError::from)
     }
 
-    /// FCS's answer to a `referenced` request line
-    /// ([`GraphRequest::referenced_line`](borzoi_oracle_harness::project_graph::GraphRequest::referenced_line)).
+    /// FCS's answer to `request`'s `referenced` op for `target`, a project
+    /// reference of its checked project
+    /// ([`GraphRequest::referenced_line`](borzoi_oracle_harness::project_graph::GraphRequest::referenced_line)):
+    /// built here, so no other op crosses this call.
     pub fn referenced(
         &mut self,
-        line: &str,
+        request: &borzoi_oracle_harness::project_graph::GraphRequest,
+        target: &borzoi_oracle_harness::project_graph::PlainName,
     ) -> Result<borzoi_oracle_harness::project_graph::ReferencedResponse, FcsInvokeError> {
-        let response = self.round_trip(line)?;
+        let line = request
+            .referenced_line(target)
+            .map_err(FcsInvokeError::Refused)?;
+        let response = self.round_trip(&line)?;
         parse_response(&response).map_err(FcsInvokeError::from)
     }
 
