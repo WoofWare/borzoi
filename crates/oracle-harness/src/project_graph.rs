@@ -478,7 +478,7 @@ pub fn framework_references() -> &'static [PathBuf] {
             .parent()
             .expect("the SDK directory has a parent")
             .join("packs/Microsoft.NETCore.App.Ref");
-        let newest = |dir: &Path, key: &dyn Fn(&str) -> (Vec<u64>, bool)| {
+        let newest = |dir: &Path, key: &dyn Fn(&str) -> Precedence| {
             std::fs::read_dir(dir)
                 .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
                 .flatten()
@@ -488,7 +488,9 @@ pub fn framework_references() -> &'static [PathBuf] {
                 .unwrap_or_else(|| panic!("nothing under {}", dir.display()))
         };
         let pack = newest(&packs, &release_precedence);
-        let tfm_dir = newest(&pack.join("ref"), &|tfm| (version_key(tfm), true));
+        let tfm_dir = newest(&pack.join("ref"), &|tfm| {
+            (version_key(tfm), true, Vec::new())
+        });
         let mut refs: Vec<PathBuf> = std::fs::read_dir(&tfm_dir)
             .unwrap_or_else(|e| panic!("read {}: {e}", tfm_dir.display()))
             .flatten()
@@ -501,16 +503,31 @@ pub fn framework_references() -> &'static [PathBuf] {
     })
 }
 
+/// What [`release_precedence`] orders versions by.
+type Precedence = (Vec<u64>, bool, Vec<(bool, u64, String)>);
+
 /// A version's precedence: its numeric release segments, then whether it
-/// is a release, so `10.0.100` ranks above `10.0.100-rc.2` (a prerelease
-/// precedes its release) and `10.0.8` above `9.0.10`. Prereleases of one
-/// release tie with each other, which the newest-pick does not need apart.
-fn release_precedence(version: &str) -> (Vec<u64>, bool) {
-    let (release, prerelease) = match version.split_once('-') {
-        Some((r, _)) => (r, true),
-        None => (version, false),
-    };
-    (version_key(release), !prerelease)
+/// is a release, then its prerelease identifiers, so `10.0.100` ranks above
+/// `10.0.100-rc.2`, `11.0.0-rc.1` above `11.0.0-preview.7`, and `10.0.8`
+/// above `9.0.10`: a total order, so the newest pick never depends on the
+/// order a directory lists its entries in.
+fn release_precedence(version: &str) -> Precedence {
+    match version.split_once('-') {
+        // SemVer precedence for the prerelease: identifier by identifier, a
+        // numeric one below an alphanumeric one, numerically among numbers.
+        Some((release, prerelease)) => (
+            version_key(release),
+            false,
+            prerelease
+                .split('.')
+                .map(|id| match id.parse::<u64>() {
+                    Ok(n) => (false, n, String::new()),
+                    Err(_) => (true, 0, id.to_owned()),
+                })
+                .collect(),
+        ),
+        None => (version_key(version), true, Vec::new()),
+    }
 }
 
 /// The numeric value of each dot-separated segment of a version or TFM
@@ -547,6 +564,7 @@ pub struct FixtureProject {
     /// the SDK hands a build.
     pub project_refs: Vec<PlainName>,
     pub defines: Vec<String>,
+    pub target: Target,
 }
 
 impl FixtureProject {
@@ -559,6 +577,7 @@ impl FixtureProject {
             files,
             project_refs: Vec::new(),
             defines: Vec::new(),
+            target: Target::Library,
         }
     }
 }
@@ -700,7 +719,7 @@ impl ProjectGraphFixture {
         GraphProject {
             id: p.name.clone(),
             assembly_name: p.assembly_name.clone(),
-            target: Target::Library,
+            target: p.target,
             sources: self.paths(name),
             defines: p.defines.clone(),
             references,
@@ -778,7 +797,12 @@ mod tests {
     fn a_release_ranks_above_its_prereleases() {
         let mut versions = ["10.0.100-rc.2", "10.0.100", "9.0.300", "10.0.100-preview.7"];
         versions.sort_by_key(|v| release_precedence(v));
-        assert_eq!(versions.last(), Some(&"10.0.100"));
+        assert_eq!(
+            versions,
+            ["9.0.300", "10.0.100-preview.7", "10.0.100-rc.2", "10.0.100"]
+        );
+        assert!(release_precedence("11.0.0-rc.1") > release_precedence("11.0.0-preview.7"));
+        assert!(release_precedence("11.0.0-rc.10") > release_precedence("11.0.0-rc.2"));
         assert!(release_precedence("10.0.8") > release_precedence("9.0.10"));
     }
 

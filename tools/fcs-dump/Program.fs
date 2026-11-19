@@ -6376,15 +6376,32 @@ let private withFullReferencePaths (projOpts: FSharpProjectOptions) : FSharpProj
 /// Refuse `path` unless it is a regular, non-empty file, links followed,
 /// before anything opens it: opening a FIFO or a device blocks or reads
 /// forever, and an assembly is never empty.
+[<System.Runtime.InteropServices.DllImport("libSystem.Native", EntryPoint = "SystemNative_Stat")>]
+extern int private systemNativeStat(
+    [<System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.LPUTF8Str)>] string path,
+    byte[] output)
+
+/// Whether `path` is a regular file, links followed: by the runtime's own
+/// `stat` (`SystemNative_Stat`, whose `FileStatus` starts `Flags`, `Mode`,
+/// with the file type normalised to `S_IFREG = 0x8000`), so nothing has to
+/// open it to find out. Opening a FIFO or a device blocks or reads forever.
+let private isRegularFile (path: string) =
+    let status = Array.zeroCreate<byte> 512
+    systemNativeStat (path, status) = 0 && (BitConverter.ToInt32(status, 4) &&& 0xF000) = 0x8000
+
+/// Refuse a reference `path` unless it is a regular, non-empty file
+/// ([`isRegularFile`]); an assembly is never empty.
 let private requireRegularFile (path: string) =
     if not (File.Exists path) then
         failwithf "reference %s is not a file" path
-    let target =
-        match File.ResolveLinkTarget(path, true) with
-        | null -> FileInfo(path)
-        | t -> FileInfo(t.FullName)
-    if not (target.Exists && target.Length > 0L) then
+    if not (isRegularFile path) || FileInfo(path).Length = 0L then
         failwithf "reference %s is not a regular file" path
+
+/// Refuse a source `path` unless it is a regular file ([`isRegularFile`]),
+/// which may be empty.
+let private requireRegularSource (path: string) =
+    if not (isRegularFile path) then
+        failwithf "source %s is not a regular file" path
 
 /// The references `projOpts` names (`-r:`), each refused if fsc would reject
 /// it: one that is not a regular file ([`requireRegularFile`]), or not an
@@ -6480,14 +6497,18 @@ let private checkProjectNow (checker: FSharpChecker) (projOpts: FSharpProjectOpt
         requestSources.Clear()
     // `opts` and every project it hands FCS from source (`FSharpReference`),
     // whose sources FCS reads through the same document source.
-    let rec reached (o: FSharpProjectOptions) : FSharpProjectOptions list =
-        o
-        :: (o.ReferencedProjects
-            |> Array.toList
-            |> List.collect (function
-                | FSharpReferencedProject.FSharpReference(_, q) -> reached q
-                | _ -> []))
-    let projects = reached opts |> List.distinctBy (fun o -> o.ProjectFileName)
+    let projects =
+        let seen = System.Collections.Generic.HashSet<string>()
+        let found = ResizeArray<FSharpProjectOptions>()
+        let rec visit (o: FSharpProjectOptions) =
+            if seen.Add o.ProjectFileName then
+                found.Add o
+                for r in o.ReferencedProjects do
+                    match r with
+                    | FSharpReferencedProject.FSharpReference(_, q) -> visit q
+                    | _ -> ()
+        visit opts
+        List.ofSeq found
     for o in projects do
         refuseConflatedSources o.SourceFiles
     if referencesChanged (projects |> List.collect readableReferences |> List.distinct) then
@@ -6496,6 +6517,7 @@ let private checkProjectNow (checker: FSharpChecker) (projOpts: FSharpProjectOpt
         requestSources.Clear()
         for o in projects do
             for path in o.SourceFiles do
+                requireRegularSource path
                 requestSources[path] <- File.ReadAllText path
         let results = checker.ParseAndCheckProject(opts, userOpName = userOpName) |> Async.RunSynchronously
         let parsed (path: string) =
@@ -6982,6 +7004,7 @@ let private parseGraphProject (e: JsonElement) : GraphProject =
     for s in sources do
         if not (s.EndsWith ".fs" || s.EndsWith ".fsi") then
             failwithf "%s: source %s is not a .fs or .fsi file" where s
+        requireRegularSource s
     if List.length (List.distinct sources) <> List.length sources then
         failwithf "%s: a source is given twice" where
     let defines =
@@ -7102,6 +7125,9 @@ let private unwrittenRoot =
 let private graphArgv (p: GraphProject) (outDir: string) (outputOf: string -> string) : string[] =
     [| "--noframework"
        "--targetprofile:netcore"
+       // An executable would otherwise embed `default.win32manifest`, which
+       // a framework-dependent runtime does not ship.
+       "--nowin32manifest"
        yield! pinnedLangVersionArgs (Some graphLangVersion)
        "--target:" + p.Target
        "-o:" + Path.Combine(outDir, p.AssemblyName + ".dll")
@@ -7168,13 +7194,42 @@ let private respondGraphCheck (checker: FSharpChecker) (root: JsonElement) =
         | Ok true -> ()
         | Ok false -> failwithf "invariant: FCS reads project %s from its DLL, not from source" p.Id
         | Error why -> failwithf "invariant: cannot tell whether FCS reads project %s from source: %s" p.Id why
+    // FCS resolves exactly the references the request names: an assembly it
+    // found by itself (one the request left out) would make an incomplete
+    // reference set look complete, on both sides of a comparison.
+    let requested (p: GraphProject) (results: FSharpCheckProjectResults) =
+        let dlls =
+            p.References
+            |> List.choose (function
+                | Dll path -> Some(Path.GetFullPath path)
+                | ProjectRef _ -> None)
+            |> set
+        let fromSource =
+            p.References
+            |> List.choose (function
+                | ProjectRef q -> Some graph.ById.[q].AssemblyName
+                | Dll _ -> None)
+            |> set
+        for a in results.ProjectContext.GetReferencedAssemblies() do
+            let ok =
+                match a.FileName with
+                | Some file when dlls.Contains(Path.GetFullPath file) -> true
+                | _ -> fromSource.Contains a.SimpleName
+            if not ok then
+                failwithf
+                    "project %s: FCS resolved assembly %s (%A), which the request does not name"
+                    p.Id a.SimpleName a.FileName
     let referenced =
         referenced
         |> List.map (fun p ->
             {| Id = p.Id
                AssemblyName = p.AssemblyName
-               Diagnostics = (projectResults built.[p.Id]).Diagnostics |> Array.map projectDiagnostic |})
+               Diagnostics =
+                let results = projectResults built.[p.Id]
+                requested p results
+                results.Diagnostics |> Array.map projectDiagnostic |})
         |> List.toArray
+    requested graph.Check checkedResults
     // The records come from the whole-project check ([`projectCheckRecords`]),
     // the check FCS's compile agrees with; `Diagnostics` is every diagnostic
     // of that check, those in no file included.

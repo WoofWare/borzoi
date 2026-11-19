@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use borzoi_corpus_diff::{FcsInvokeError, ProjectGraphOracle};
 use borzoi_oracle_harness::project_graph::{
-    FixtureFile, FixtureProject, GraphResponse, PlainName, ProjectGraphFixture,
+    FixtureFile, FixtureProject, GraphResponse, PlainName, ProjectGraphFixture, Target,
     framework_references,
 };
 use serde_json::Value;
@@ -505,7 +505,11 @@ fn a_friend_binds_an_internal_only_under_its_assembly_name() {
         "{:#?}",
         named.source
     );
-    assert!(errors(&named.source).is_empty(), "{:#?}", named.source);
+    assert!(
+        errors(&named.source).is_empty() && named.source.errors().next().is_none(),
+        "{:#?}",
+        named.source
+    );
 
     let other = d1(&mut oracle, &friend("NotBee"), &name("Bee"));
     assert!(other.problems.is_empty(), "{}", other.problems.join("\n"));
@@ -606,8 +610,8 @@ fn file_records_read_the_branch_the_build_compiled() {
     } = d1(&mut oracle, &fixture, &name("App"));
     assert!(problems.is_empty(), "{}", problems.join("\n"));
     assert!(
-        errors(&source).is_empty(),
-        "no file record holds an error: {source:#?}"
+        errors(&source).is_empty() && source.errors().next().is_none(),
+        "no record holds an error: {source:#?}"
     );
     let named = |n: &str| uses(&source).any(|u| u["FullName"] == format!("App.{n}"));
     assert!(
@@ -835,6 +839,7 @@ fn the_oracle_refuses_references_it_cannot_identify() {
     // Two sources FCS takes for one file (they differ by a soft hyphen).
     let use_fs = fixture.paths(&name("App")).remove(0);
     let conflated = use_fs.with_file_name("U\u{ad}se.fs");
+    std::fs::write(&conflated, "module Use2\n").expect("write the second source");
     let mut twice = valid.clone();
     twice["projects"][1]["sources"]
         .as_array_mut()
@@ -844,12 +849,83 @@ fn the_oracle_refuses_references_it_cannot_identify() {
         Err(FcsInvokeError::Refused(why)) if why.contains("one file to FCS") => {}
         other => panic!("sources FCS conflates must be refused: {other:?}"),
     }
+    // A reference set missing the primary assembly: FCS would find one by
+    // itself, so the oracle refuses what it resolved beyond the request.
+    let mut short = valid.clone();
+    short["projects"][1]["references"]
+        .as_array_mut()
+        .expect("references")
+        .retain(|r| {
+            !r["dll"]
+                .as_str()
+                .is_some_and(|p| p.ends_with("/System.Runtime.dll"))
+        });
+    for p in short["projects"].as_array_mut().expect("projects") {
+        p["references"]
+            .as_array_mut()
+            .expect("references")
+            .retain(|r| {
+                !r["dll"]
+                    .as_str()
+                    .is_some_and(|p| p.ends_with("/System.Runtime.dll"))
+            });
+    }
+    match oracle.check_value(&short) {
+        Err(FcsInvokeError::Refused(why)) if why.contains("does not name") => {}
+        other => panic!("an assembly FCS resolved by itself must be refused: {other:?}"),
+    }
+    // A FIFO named like a source.
+    let fifo_fs = fixture.root().join("Fifo.fs");
+    let mut mkfifo = std::process::Command::new("mkfifo");
+    mkfifo.arg(&fifo_fs);
+    let made = borzoi_spawn::BoundedCommand::new(mkfifo)
+        .run()
+        .expect("run mkfifo");
+    assert!(made.status.success(), "mkfifo: {made:?}");
+    let mut piped_source = valid.clone();
+    piped_source["projects"][1]["sources"]
+        .as_array_mut()
+        .expect("sources")
+        .insert(
+            0,
+            Value::String(fifo_fs.to_str().expect("UTF-8").to_owned()),
+        );
+    match oracle.check_value(&piped_source) {
+        Err(FcsInvokeError::Refused(why)) if why.contains("not a regular file") => {}
+        other => panic!("a FIFO source must be refused unopened: {other:?}"),
+    }
     // A line directive, which moves the ranges the check reports elsewhere.
     std::fs::write(&use_fs, "module Use\n\n# 1 \"Other.fs\"\nlet y = Lib.x\n").expect("rewrite");
     match oracle.check_value(&valid) {
         Err(FcsInvokeError::Refused(why)) if why.contains("line directive") => {}
         other => panic!("a line directive must be refused: {other:?}"),
     }
+}
+
+/// An executable compiles under the same template a library does.
+#[test]
+#[ignore = "drives FCS; use --ignored for oracle smoke"]
+fn an_executable_compiles() {
+    let fixture = ProjectGraphFixture::materialise(vec![FixtureProject {
+        target: Target::Exe,
+        ..project(
+            "Tool",
+            vec![(
+                "Main.fs".into(),
+                "module Main\n\n[<EntryPoint>]\nlet main _ = 0\n".into(),
+            )],
+            &[],
+        )
+    }])
+    .expect("a graph");
+    let answer = ProjectGraphOracle::default()
+        .compile(&fixture.compile_request(&name("Tool"), framework_references(), &BTreeMap::new()))
+        .expect("the compiler answers");
+    assert_eq!(answer.errors().count(), 0, "{answer:#?}");
+    assert!(
+        answer.output.as_ref().is_some_and(|o| o.is_file()),
+        "{answer:#?}"
+    );
 }
 
 /// A failed compile names no output, even where an earlier compile left a
@@ -915,7 +991,10 @@ fn a_referenced_projects_own_list_module_binds_beside_fsharp_core() {
         source, problems, ..
     } = d1(&mut oracle, &fixture, &name("App"));
     assert!(problems.is_empty(), "{}", problems.join("\n"));
-    assert!(errors(&source).is_empty(), "{source:#?}");
+    assert!(
+        errors(&source).is_empty() && source.errors().next().is_none(),
+        "{source:#?}"
+    );
     assert!(binds(&source, "Lib.List.mine", "Lib"), "{source:#?}");
     assert!(binds(&source, "Lib.Seq.ours", "Lib"), "{source:#?}");
     assert!(
