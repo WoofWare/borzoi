@@ -133,8 +133,7 @@ fn file<V: Version>(root: &NormalisedRoot, tally: &mut Tally) -> L<ImplFile<V>> 
                 tally
                     .dropped
                     .extend(values.iter().map(|_| Decline("namespace: a value")));
-                let taken: Vec<NormalisedDecl> = taken.into_iter().cloned().collect();
-                let decls = decls_lossy(&taken, tally, m.is_rec);
+                let decls = decls_lossy(taken, tally, m.is_rec);
                 namespaces
                     .push(Namespace::new(name, module_body(m.is_rec, decls)?).map_err(refused)?);
             }
@@ -147,8 +146,8 @@ fn file<V: Version>(root: &NormalisedRoot, tally: &mut Tally) -> L<ImplFile<V>> 
 
 /// `decls` as a module's declarations, dropping each that does not lower;
 /// `in_rec` if the module is recursive, itself or in a recursive group.
-fn decls_lossy<V: Version>(
-    decls: &[NormalisedDecl],
+fn decls_lossy<'a, V: Version>(
+    decls: impl IntoIterator<Item = &'a NormalisedDecl>,
     tally: &mut Tally,
     in_rec: bool,
 ) -> Vec<ModuleDecl<V>> {
