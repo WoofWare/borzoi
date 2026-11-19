@@ -47,8 +47,9 @@ use borzoi_oracle_harness::project_graph::{
 };
 use borzoi_sema::test_support::{ExistenceFacts, ExtensionFact, existence_facts};
 use borzoi_sema::{
-    Approximation, CompileItem, Marker, MarkerRoutes, Producer, ProjectFile, SourceExistence,
-    SourceFile, SyntaxRecovery, certify_by_spelling, qualified_names, source_existence,
+    Approximation, CompileItem, ExistenceUnread, Marker, MarkerRoutes, Producer, ProjectFile,
+    SourceExistence, SourceFile, SyntaxRecovery, certify_by_spelling, qualified_names,
+    source_existence,
 };
 
 use crate::common::corpus_manifest::{check_manifest, regenerate};
@@ -130,6 +131,8 @@ pub struct Fcs {
     pub compile_errors: Vec<String>,
     /// The entities of a clean A whose members FCS's view could not read.
     pub view_unread: Vec<String>,
+    /// FCS reads A from its DLL (a type provider), not from source.
+    pub reads_dll: bool,
 }
 
 fn plain(s: &str) -> PlainName {
@@ -232,8 +235,27 @@ pub fn fcs(cell: &Cell) -> Fcs {
     let line = graph
         .referenced_line(&plain(PRODUCER))
         .expect("the consumer references the producer");
-    let response: ReferencedResponse =
-        request(&line).unwrap_or_else(|e| panic!("{}: referenced: {e}", cell.name));
+    let response: ReferencedResponse = match request(&line) {
+        Ok(r) => r,
+        // FCS reads a type-provider assembly from its DLL, never from its
+        // source: the walk must decline it.
+        Err(e) if e.contains("FCS reads it from its DLL") => {
+            return Fcs {
+                memory: Rows {
+                    entities: Vec::new(),
+                    extensions: Vec::new(),
+                    auto_opens: Vec::new(),
+                },
+                undecodable: false,
+                clean: true,
+                errors: Vec::new(),
+                compile_errors: Vec::new(),
+                view_unread: Vec::new(),
+                reads_dll: true,
+            };
+        }
+        Err(e) => panic!("{}: referenced: {e}", cell.name),
+    };
     let errors: Vec<String> = response
         .errors()
         .map(|d| format!("FS{}", d["ErrorNumber"]))
@@ -431,6 +453,7 @@ pub fn fcs(cell: &Cell) -> Fcs {
         errors,
         compile_errors,
         view_unread,
+        reads_dll: false,
     }
 }
 
@@ -509,6 +532,17 @@ fn lines<T: std::fmt::Debug>(rows: &[T]) -> String {
 
 /// Grade `ours` against FCS's rows: the verdict, or why a property fails.
 pub fn grade(cell: &Cell, fcs: &Fcs, ours: &SourceExistence) -> Result<String, String> {
+    if fcs.reads_dll {
+        return match ours {
+            SourceExistence::Unread(ExistenceUnread::TypeProvider(_)) => {
+                Ok("unread TypeProvider, FCS reads the DLL".to_owned())
+            }
+            other => Err(format!(
+                "{}: FCS reads A from its DLL (a type provider), and ours is {other:?}",
+                cell.name
+            )),
+        };
+    }
     let surface = match ours {
         SourceExistence::Unread(why) => return Ok(format!("unread {why:?}")),
         SourceExistence::Read(s) => s,

@@ -50,8 +50,9 @@ rows of it, and its raw signature streams with the assembly-level
 `InternalsVisibleTo` and `AutoOpen` strings, for the caller to decode.
 `tests/project_resolution/source_existence_corpus.rs` holds
 `borzoi_sema::source_existence` to it over every pinned project (the gate's
-`source-existence` step): under `MarkerRoutes::Unknown` our rows must cover
-FCS's or decline, and each project's verdict is pinned in
+`source-existence` step): under `MarkerRoutes::Unknown` the existence set our
+rows build must hold every fact of the one FCS's build, or decline, and each
+project's verdict, with ours' surplus per kind, is pinned in
 `manifests/source_existence_projects.txt`.
 
 ## Working here

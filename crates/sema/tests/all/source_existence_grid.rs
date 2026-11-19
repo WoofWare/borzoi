@@ -455,6 +455,11 @@ pub fn cells() -> Vec<Cell> {
             "assembly_auto_open",
             "namespace AsmAO\nmodule M =\n    let x = 1\n[<assembly: AutoOpen(\"AsmAO\")>]\n[<assembly: AutoOpen(@\"AsmAO.M\")>]\n[<assembly: AutoOpen(\"AsmAO\")>]\ndo ()\n",
         ),
+        // An entity has no return value: a `return:` attribute is its own.
+        one(
+            "attribute_target_return_on_entities",
+            "namespace RetEnt\n[<return: AutoOpen>]\nmodule M =\n    let x = 1\n[<return: CompiledName(\"Renamed\")>]\ntype T = { X: int }\n",
+        ),
         // A standalone attribute with no target is the assembly's when the
         // attribute allows it, as `[<AutoOpen>]` does.
         one(

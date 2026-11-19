@@ -692,7 +692,23 @@ impl MarkerRoutes {
         }
     }
 
+    /// What `lists` on a member, a binding or a value say: a `return:`
+    /// attribute is the return value's.
     fn marks<'l>(&self, lists: impl IntoIterator<Item = &'l AttributeList>) -> Marks {
+        self.marks_on(lists, true)
+    }
+
+    /// What `lists` on a module, a type or an exception say: one with no
+    /// return value keeps a `return:` attribute too.
+    fn entity_marks<'l>(&self, lists: impl IntoIterator<Item = &'l AttributeList>) -> Marks {
+        self.marks_on(lists, false)
+    }
+
+    fn marks_on<'l>(
+        &self,
+        lists: impl IntoIterator<Item = &'l AttributeList>,
+        has_return_value: bool,
+    ) -> Marks {
         let mut marks = Marks {
             markers: BTreeMap::new(),
             compiled_names: Vec::new(),
@@ -703,9 +719,9 @@ impl MarkerRoutes {
             // Every attribute of the list FCS keeps on the carrier
             // (`TcAttributes`), whatever its target, an `assembly:` one too
             // (which the assembly's own list also gets); but a `return:` one
-            // is the return value's.
+            // is a return value's, where the carrier has one.
             for attr in list.attributes() {
-                if attr.target().is_some_and(|t| t.text() == "return") {
+                if has_return_value && attr.target().is_some_and(|t| t.text() == "return") {
                     continue;
                 }
                 let name = written_name(&attr);
@@ -1050,7 +1066,7 @@ impl FileWalk<'_> {
                     .map(|t| id_text(&t).into_owned())
                     .ok_or(ExistenceUnread::UnnamedDeclaration(self.index))?;
                 let attrs: Vec<AttributeList> = e.attributes().collect();
-                let marks = self.routes.marks(&attrs);
+                let marks = self.routes.entity_marks(&attrs);
                 let members: Vec<MemberDefn> = e.members().collect();
                 self.members(&scope.inner(&name), &members, None)?;
                 self.entity(scope, &name, &[PickledEntityKind::Exception], &marks, false)
@@ -1122,7 +1138,7 @@ impl FileWalk<'_> {
                     .map(|t| id_text(&t).into_owned())
                     .ok_or(ExistenceUnread::UnnamedDeclaration(self.index))?;
                 let attrs: Vec<AttributeList> = e.attributes().collect();
-                let marks = self.routes.marks(&attrs);
+                let marks = self.routes.entity_marks(&attrs);
                 let members: Vec<MemberDefn> = e.members().collect();
                 self.members(&scope.inner(&name), &members, None)?;
                 self.entity(scope, &name, &[PickledEntityKind::Exception], &marks, false)
@@ -1156,7 +1172,7 @@ impl FileWalk<'_> {
         decls: &Decls,
         is_rec: bool,
     ) -> Result<(), ExistenceUnread> {
-        let marks = self.routes.marks(attrs);
+        let marks = self.routes.entity_marks(attrs);
         let mut readings = vec![name.to_owned()];
         if name.len() > "Module".len() && name.ends_with("Module") {
             self.out.approximations.insert(Approximation::ModuleSuffix);
@@ -1235,7 +1251,7 @@ impl FileWalk<'_> {
             .map(|t| id_text(&t).into_owned())
             .ok_or(ExistenceUnread::UnnamedDeclaration(self.index))?;
         let attrs: Vec<AttributeList> = defn.attributes().collect();
-        let marks = self.routes.marks(&attrs);
+        let marks = self.routes.entity_marks(&attrs);
         let kinds: Vec<PickledEntityKind> = match defn.repr() {
             Some(TypeDefnRepr::Abbrev(a)) => {
                 let target = a.ty();
@@ -1440,6 +1456,8 @@ impl FileWalk<'_> {
                 for n in taken {
                     self.csharp_row(inner, &n, &marks)?;
                 }
+                // Marked `let`s by binders is quadratic in the type.
+                self.within_budget()?;
             }
         }
         Ok(())
@@ -1456,6 +1474,8 @@ impl FileWalk<'_> {
         augmented: Option<&[String]>,
     ) -> Result<(), ExistenceUnread> {
         for m in members {
+            // A member's rows multiply its compiled names by the type's.
+            self.within_budget()?;
             let (lists, shape) = member_shape(m);
             let (vals, role) = match shape {
                 MemberShape::NoVal => continue,
@@ -1509,13 +1529,18 @@ impl FileWalk<'_> {
                         .approximations
                         .insert(Approximation::UncertainAttribute);
                 }
-                let getters: Vec<MemberVal> = vals
+                // Every val: FCS's recovery of an event on a method (which it
+                // rejects) names its accessors after the method.
+                let carriers: Vec<MemberVal> = vals
                     .iter()
-                    .filter(|v| v.accessor == Some("get_"))
+                    .filter(|v| v.accessor != Some("set_"))
                     .cloned()
                     .collect();
-                for g in getters {
-                    let bare = g.logical.strip_prefix("get_").unwrap_or(&g.logical);
+                for g in carriers {
+                    let bare = match g.accessor {
+                        Some(prefix) => g.logical.strip_prefix(prefix).unwrap_or(&g.logical),
+                        None => &g.logical,
+                    };
                     for prefix in ["add_", "remove_"] {
                         let logical = format!("{prefix}{bare}");
                         event_vals.insert(logical.clone());

@@ -30,11 +30,11 @@ impl Rng {
         x.wrapping_mul(0x2545_F491_4F6C_DD1D)
     }
 
-    fn below(&mut self, n: usize) -> usize {
+    pub fn below(&mut self, n: usize) -> usize {
         (self.next() % n as u64) as usize
     }
 
-    fn chance(&mut self, percent: u64) -> bool {
+    pub fn chance(&mut self, percent: u64) -> bool {
         self.next() % 100 < percent
     }
 
@@ -187,6 +187,12 @@ impl Gen {
             ],
             Kind::Interface | Kind::Delegate | Kind::Measure => &[],
         };
+        // Any attribute at any target, now and then: the placement grid's
+        // product, combined with everything else here.
+        if self.rng.chance(15) {
+            let attr = crate::source_existence_placement::random_attribute(&mut self.rng);
+            return format!("{indent}{attr}\n");
+        }
         if choices.is_empty() || self.rng.chance(50) {
             return String::new();
         }
@@ -200,6 +206,10 @@ impl Gen {
     }
 
     fn module_attributes(&mut self, indent: &str) -> String {
+        if self.rng.chance(15) {
+            let attr = crate::source_existence_placement::random_attribute(&mut self.rng);
+            return format!("{indent}{attr}\n");
+        }
         match self.rng.below(8) {
             0 => format!("{indent}[<AutoOpen>]\n"),
             1 => format!("{indent}[<Microsoft.FSharp.Core.AutoOpenAttribute>]\n"),

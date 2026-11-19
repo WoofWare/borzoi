@@ -8,10 +8,13 @@
 //! `borzoi_assembly::unpickle_signature`, and the assembly-level `AutoOpen`
 //! strings beside it: what a dependant reads.
 //!
+//! Both are graded as the existence questions read them: the facts of the
+//! existence set each index builds (`test_support::existence_facts`).
+//!
 //! The walk is run under `MarkerRoutes::Unknown`, the only certificate a
 //! caller without A's environment may give: every attribute may denote every
-//! marker. It must then **cover** FCS's rows (every FCS row one of ours) or
-//! decline. Under `Unknown` an assembly-level attribute may be
+//! marker. It must then **cover** FCS's facts (every one of them one of
+//! ours) or decline; its surplus per kind is pinned. Under `Unknown` an assembly-level attribute may be
 //! `[<TypeProviderAssembly>]`, so a project with one (most: an
 //! `AssemblyInfo.fs` granting `InternalsVisibleTo`) declines whole; the
 //! census counts how many, and Stage 1b's certificate, built from A's own
@@ -26,15 +29,16 @@
 //! Each project's verdicts are pinned in
 //! `crates/corpus-diff/manifests/source_existence_projects.txt`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use borzoi_assembly::existence::{ExtensionRow, PickleLayer, PickledEntityRow};
+use borzoi_assembly::existence::{ExistenceIndex, ExtensionRow, PickleLayer, PickledEntityRow};
 use borzoi_corpus_diff::{LoadedProject, ProjectGraphOracle, load_lsp_project};
 use borzoi_oracle_harness::manifest::{Manifest, UPDATE_ENV, check};
 use borzoi_oracle_harness::project_graph::{
     GraphProject, GraphRequest, PlainName, Reference, ReferencedResponse, Target,
 };
+use borzoi_sema::test_support::existence_facts;
 use borzoi_sema::{
     CompileItem, MarkerRoutes, Producer, ProjectFile, SourceExistence, certify_by_spelling,
     source_existence,
@@ -200,54 +204,97 @@ fn skip_kind(skip: &borzoi_corpus_diff::LoadSkip) -> &'static str {
     }
 }
 
-/// The rows of `theirs` that `ours` lacks, as multisets.
-fn lacking<T: Ord + Clone>(ours: &[T], theirs: &[T]) -> Vec<T> {
-    let mut count: BTreeMap<&T, i64> = BTreeMap::new();
-    for r in ours {
-        *count.entry(r).or_default() += 1;
-    }
-    let mut out = Vec::new();
-    for r in theirs {
-        let n = count.entry(r).or_default();
-        *n -= 1;
-        if *n < 0 {
-            out.push(r.clone());
-        }
-    }
-    out
-}
-
-/// The verdict of `ours` against `fcs`: `Ok` a census line, `Err` a failure
-/// of the covers property.
+/// The verdict of `ours` against `fcs`, on the facts the existence set
+/// holds of each (`test_support::existence_facts`): `Ok` a census line with
+/// ours' surplus per kind, `Err` a fact FCS's holds that ours lacks.
 fn grade(ours: &SourceExistence, fcs: &FcsRows) -> Result<String, String> {
     let surface = match ours {
         SourceExistence::Unread(why) => return Ok(format!("unread {why:?}")),
         SourceExistence::Read(s) => s,
     };
-    let PickleLayer::Read(rows) = &surface.index.pickle else {
-        return Err("a Read surface has no read pickle".to_owned());
-    };
-    let missing_entities = lacking(rows, &fcs.entities);
-    let missing_extensions = lacking(&surface.index.extensions, &fcs.extensions);
-    let missing_opens = lacking(&surface.assembly_auto_opens, &fcs.auto_opens);
-    if !missing_entities.is_empty() || !missing_extensions.is_empty() || !missing_opens.is_empty() {
-        return Err(format!(
-            "ours does not cover FCS's rows: entities {missing_entities:?}, extensions {missing_extensions:?}, auto-opens {missing_opens:?}"
-        ));
+    let mine = existence_facts(&surface.index, &surface.assembly_auto_opens);
+    let theirs = existence_facts(
+        &ExistenceIndex {
+            il: Vec::new(),
+            pickle: PickleLayer::Read(fcs.entities.clone()),
+            extensions: fcs.extensions.clone(),
+        },
+        &fcs.auto_opens,
+    );
+    let lends_children: BTreeSet<Vec<String>> = mine
+        .lends_children
+        .union(&mine.lends_anything)
+        .cloned()
+        .collect();
+    let paths = [
+        ("prefix", &mine.prefixes, &theirs.prefixes),
+        ("entity", &mine.entities, &theirs.entities),
+        ("lends-children", &lends_children, &theirs.lends_children),
+        (
+            "lends-anything",
+            &mine.lends_anything,
+            &theirs.lends_anything,
+        ),
+        (
+            "abbreviation-lender",
+            &mine.abbreviation_lenders,
+            &theirs.abbreviation_lenders,
+        ),
+        ("auto-open", &mine.auto_open_bases, &theirs.auto_open_bases),
+    ];
+    let mut lacking: Vec<String> = Vec::new();
+    for (kind, ours, fcs) in paths {
+        lacking.extend(
+            fcs.difference(ours)
+                .map(|p| format!("{kind} {}", p.join("."))),
+        );
     }
-    let exact = lacking(&fcs.entities, rows).is_empty()
-        && lacking(&fcs.extensions, &surface.index.extensions).is_empty()
-        && surface.assembly_auto_opens == fcs.auto_opens;
+    lacking.extend(
+        theirs
+            .extensions
+            .difference(&mine.extensions)
+            .map(|f| format!("extension {f:?}")),
+    );
+    if !lacking.is_empty() {
+        return Err(format!("ours lacks facts FCS's holds: {lacking:?}"));
+    }
+    let n = |a: &BTreeSet<Vec<String>>, b: &BTreeSet<Vec<String>>| a.difference(b).count();
+    let surplus = [
+        ("prefix", n(&mine.prefixes, &theirs.prefixes)),
+        ("entity", n(&mine.entities, &theirs.entities)),
+        (
+            "lends",
+            n(&mine.lends_children, &theirs.lends_children)
+                + n(&mine.lends_anything, &theirs.lends_anything),
+        ),
+        (
+            "lender",
+            n(&mine.abbreviation_lenders, &theirs.abbreviation_lenders),
+        ),
+        (
+            "auto-open",
+            n(&mine.auto_open_bases, &theirs.auto_open_bases),
+        ),
+        (
+            "extension",
+            mine.extensions.difference(&theirs.extensions).count(),
+        ),
+    ];
     let approximations: Vec<String> = surface
         .approximations
         .iter()
         .map(|a| format!("{a:?}"))
         .collect();
-    Ok(format!(
-        "covers{} [{}]",
-        if exact { " exactly" } else { "" },
-        approximations.join(",")
-    ))
+    if surplus.iter().all(|(_, k)| *k == 0) {
+        Ok(format!("exact [{}]", approximations.join(",")))
+    } else {
+        let counts: Vec<String> = surplus.iter().map(|(k, c)| format!("{k} {c}")).collect();
+        Ok(format!(
+            "covers surplus({}) [{}]",
+            counts.join(", "),
+            approximations.join(",")
+        ))
+    }
 }
 
 #[test]
@@ -297,7 +344,7 @@ fn source_existence_covers_fcs_over_the_pinned_projects() {
                 }
                 let show = |g: &Result<String, String>| match g {
                     Ok(v) => v.clone(),
-                    Err(_) => "does not cover".to_owned(),
+                    Err(_) => "lacks facts".to_owned(),
                 };
                 format!(
                     "unknown: {}; by spelling: {}",

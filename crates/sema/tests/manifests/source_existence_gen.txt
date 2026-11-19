@@ -1,63 +1,63 @@
 # Generated; do not edit by hand. One line per graded item, sorted.
 # Regenerate with:
 #   BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-sema --test all source_existence_diff::source_rows_are_fcs_rows_over_generated_projects
-gen_0	certified: exact; unknown: exact
-gen_1	certified: exact; unknown: covers [UncertainAttribute]
-gen_10	certified: exact; unknown: unread TypeProvider(0)
-gen_11	certified: exact; unknown: covers [UncertainAttribute]
-gen_12	certified: covers recovered facts, FCS rejects ({}); unknown: covers recovered facts, FCS rejects ({UncertainAttribute}) [FCS: FS37]
-gen_13	certified: exact; unknown: covers [UncertainAttribute]
-gen_14	certified: covers recovered facts, FCS rejects ({UncertainAttribute}); unknown: covers recovered facts, FCS rejects ({UncertainAttribute}) [FCS: FS1133]
-gen_15	certified: exact; unknown: covers [UncertainAttribute]
+gen_0	certified: exact []; unknown: exact []
+gen_1	certified: exact []; unknown: exact [UncertainAttribute]
+gen_10	certified: exact []; unknown: unread TypeProvider(0)
+gen_11	certified: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 64) [ClassLetName]; unknown: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 64) [UncertainAttribute,ClassLetName]
+gen_12	certified: exact, FCS rejects []; unknown: covers, FCS rejects surplus(prefix 0, entity 0, lends 3, lender 0, auto-open 0, extension 0) [UncertainAttribute] [FCS: FS37]
+gen_13	certified: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 120) [ClassLetName]; unknown: covers surplus(prefix 0, entity 0, lends 4, lender 0, auto-open 0, extension 128) [UncertainAttribute,ClassLetName]
+gen_14	certified: covers, FCS rejects surplus(prefix 0, entity 0, lends 1, lender 0, auto-open 0, extension 1) [UncertainAttribute]; unknown: covers, FCS rejects surplus(prefix 0, entity 0, lends 10, lender 1, auto-open 0, extension 1) [UncertainAttribute] [FCS: FS1133]
+gen_15	certified: exact []; unknown: covers surplus(prefix 0, entity 0, lends 6, lender 0, auto-open 0, extension 0) [UncertainAttribute]
 gen_16	certified: unread TypeProvider(2); unknown: unread TypeProvider(2)
-gen_17	certified: exact; unknown: unread TypeProvider(0)
-gen_18	certified: exact; unknown: exact
-gen_19	certified: covers recovered facts, FCS rejects ({}); unknown: covers recovered facts, FCS rejects ({UncertainAttribute}) [FCS: FS438,FS439,FS438,FS439]
-gen_2	certified: covers recovered facts, FCS rejects ({AbbreviationOrUnion}); unknown: covers recovered facts, FCS rejects ({UncertainAttribute, AbbreviationOrUnion}) [FCS: FS37]
-gen_20	certified: covers [ClassLetName]; unknown: covers [UncertainAttribute,ClassLetName]
-gen_21	certified: exact; unknown: exact
-gen_22	certified: exact; unknown: covers [UncertainAttribute]
-gen_23	certified: exact; unknown: covers [UncertainAttribute]
-gen_24	certified: exact; unknown: covers [UncertainAttribute]
-gen_25	certified: covers [BindingPattern]; unknown: covers [UncertainAttribute,BindingPattern]
-gen_26	certified: exact; unknown: covers [UncertainAttribute]
-gen_27	certified: exact; unknown: exact
-gen_28	certified: exact; unknown: unread TypeProvider(1)
-gen_29	certified: covers FCS's entities, the signature undecodable (#1081) ({}); unknown: unread TypeProvider(0) [FCS: compile FS438,compile FS438,compile FS438,compile FS438,compile FS438,compile FS438]
-gen_3	certified: exact; unknown: unread TypeProvider(0)
-gen_30	certified: covers [UncertainAttribute]; unknown: covers [UncertainAttribute]
-gen_31	certified: exact; unknown: covers [UncertainAttribute]
-gen_32	certified: exact; unknown: covers [UncertainAttribute]
-gen_33	certified: exact; unknown: covers [UncertainAttribute]
-gen_34	certified: covers recovered facts, FCS rejects ({}); unknown: unread TypeProvider(2) [FCS: FS37,FS37]
-gen_35	certified: covers recovered facts, FCS rejects ({ClassLetName}); unknown: unread TypeProvider(1) [FCS: FS38]
-gen_36	certified: exact; unknown: covers [UncertainAttribute]
-gen_37	certified: exact; unknown: exact
-gen_38	certified: exact; unknown: unread TypeProvider(0)
-gen_39	certified: exact; unknown: covers [UncertainAttribute]
-gen_4	certified: covers recovered facts, FCS rejects ({}); unknown: covers recovered facts, FCS rejects ({UncertainAttribute}) [FCS: FS37,FS37,FS37,FS37]
-gen_40	certified: covers recovered facts, FCS rejects, its signature undecodable ({BindingPattern}); unknown: covers recovered facts, FCS rejects, its signature undecodable ({UncertainAttribute, BindingPattern}) [FCS: FS250]
-gen_41	certified: exact; unknown: covers [UncertainAttribute]
-gen_42	certified: exact; unknown: covers [UncertainAttribute]
-gen_43	certified: covers [UncertainAttribute]; unknown: covers [UncertainAttribute]
-gen_44	certified: exact; unknown: unread TypeProvider(0)
-gen_45	certified: exact; unknown: unread TypeProvider(1)
-gen_46	certified: exact; unknown: unread TypeProvider(0)
-gen_47	certified: covers recovered facts, FCS rejects ({}); unknown: covers recovered facts, FCS rejects ({UncertainAttribute}) [FCS: FS37]
+gen_17	certified: exact []; unknown: unread TypeProvider(0)
+gen_18	certified: exact []; unknown: exact []
+gen_19	certified: covers, FCS rejects surplus(prefix 0, entity 0, lends 1, lender 0, auto-open 0, extension 34) [AbbreviationOrUnion,ClassLetName]; unknown: covers, FCS rejects surplus(prefix 0, entity 0, lends 11, lender 0, auto-open 0, extension 42) [UncertainAttribute,AbbreviationOrUnion,ClassLetName] [FCS: FS438,FS439,FS438,FS439]
+gen_2	certified: covers, FCS rejects surplus(prefix 0, entity 0, lends 1, lender 0, auto-open 0, extension 4) [AbbreviationOrUnion]; unknown: covers, FCS rejects surplus(prefix 0, entity 0, lends 5, lender 0, auto-open 0, extension 4) [UncertainAttribute,AbbreviationOrUnion] [FCS: FS37]
+gen_20	certified: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 70) [ClassLetName]; unknown: covers surplus(prefix 0, entity 0, lends 1, lender 0, auto-open 0, extension 70) [UncertainAttribute,ClassLetName]
+gen_21	certified: exact []; unknown: exact []
+gen_22	certified: exact []; unknown: covers surplus(prefix 0, entity 0, lends 2, lender 0, auto-open 0, extension 0) [UncertainAttribute]
+gen_23	certified: exact []; unknown: covers surplus(prefix 0, entity 0, lends 4, lender 0, auto-open 0, extension 0) [UncertainAttribute]
+gen_24	certified: exact []; unknown: covers surplus(prefix 0, entity 0, lends 2, lender 0, auto-open 0, extension 0) [UncertainAttribute]
+gen_25	certified: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 20) [AbbreviationOrUnion,BindingPattern,ClassLetName]; unknown: covers surplus(prefix 0, entity 0, lends 4, lender 0, auto-open 0, extension 28) [UncertainAttribute,AbbreviationOrUnion,BindingPattern,ClassLetName]
+gen_26	certified: exact []; unknown: covers surplus(prefix 0, entity 0, lends 3, lender 0, auto-open 0, extension 0) [UncertainAttribute]
+gen_27	certified: exact []; unknown: exact []
+gen_28	certified: exact []; unknown: unread TypeProvider(1)
+gen_29	certified: covers, FCS's signature undecodable (#1081) surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 16) []; unknown: unread TypeProvider(0) [FCS: compile FS438,compile FS438,compile FS438,compile FS438,compile FS438,compile FS438]
+gen_3	certified: exact []; unknown: unread TypeProvider(0)
+gen_30	certified: covers surplus(prefix 0, entity 0, lends 1, lender 0, auto-open 0, extension 0) [UncertainAttribute,AbbreviationOrUnion]; unknown: covers surplus(prefix 0, entity 0, lends 6, lender 0, auto-open 0, extension 0) [UncertainAttribute,AbbreviationOrUnion]
+gen_31	certified: exact []; unknown: covers surplus(prefix 0, entity 0, lends 1, lender 0, auto-open 0, extension 0) [UncertainAttribute]
+gen_32	certified: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 4) []; unknown: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 4) [UncertainAttribute]
+gen_33	certified: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 34) [ClassLetName]; unknown: covers surplus(prefix 0, entity 0, lends 3, lender 0, auto-open 0, extension 34) [UncertainAttribute,ClassLetName]
+gen_34	certified: exact, FCS rejects []; unknown: unread TypeProvider(2) [FCS: FS37,FS37]
+gen_35	certified: covers, FCS rejects surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 68) [AbbreviationOrUnion,ClassLetName]; unknown: unread TypeProvider(1) [FCS: FS38]
+gen_36	certified: exact []; unknown: covers surplus(prefix 0, entity 0, lends 2, lender 0, auto-open 0, extension 0) [UncertainAttribute]
+gen_37	certified: exact []; unknown: exact []
+gen_38	certified: exact [AbbreviationOrUnion]; unknown: unread TypeProvider(0)
+gen_39	certified: exact []; unknown: covers surplus(prefix 0, entity 0, lends 1, lender 0, auto-open 0, extension 0) [UncertainAttribute]
+gen_4	certified: exact, FCS rejects []; unknown: covers, FCS rejects surplus(prefix 0, entity 0, lends 4, lender 0, auto-open 0, extension 0) [UncertainAttribute] [FCS: FS37,FS37,FS37,FS37]
+gen_40	certified: covers, FCS rejects, its signature undecodable surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 80) [BindingPattern,ClassLetName]; unknown: covers, FCS rejects, its signature undecodable surplus(prefix 0, entity 0, lends 5, lender 0, auto-open 0, extension 80) [UncertainAttribute,BindingPattern,ClassLetName] [FCS: FS250]
+gen_41	certified: exact [AbbreviationOrUnion]; unknown: exact [UncertainAttribute,AbbreviationOrUnion]
+gen_42	certified: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 1) []; unknown: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 1) [UncertainAttribute]
+gen_43	certified: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 2) [UncertainAttribute]; unknown: covers surplus(prefix 0, entity 0, lends 5, lender 0, auto-open 0, extension 2) [UncertainAttribute]
+gen_44	certified: exact []; unknown: unread TypeProvider(0)
+gen_45	certified: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 4) []; unknown: unread TypeProvider(1)
+gen_46	certified: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 5) []; unknown: unread TypeProvider(0)
+gen_47	certified: covers, FCS rejects surplus(prefix 7, entity 6, lends 1, lender 0, auto-open 0, extension 22) [ClassLetName]; unknown: covers, FCS rejects surplus(prefix 7, entity 6, lends 3, lender 0, auto-open 0, extension 22) [UncertainAttribute,ClassLetName] [FCS: FS37]
 gen_48	certified: unread TypeProvider(0); unknown: unread TypeProvider(0) [FCS: FS53,FS501]
-gen_49	certified: exact; unknown: unread TypeProvider(0)
-gen_5	certified: exact; unknown: unread TypeProvider(0)
-gen_50	certified: exact; unknown: unread TypeProvider(0)
-gen_51	certified: exact; unknown: unread TypeProvider(0)
-gen_52	certified: covers recovered facts, FCS rejects ({}); unknown: covers recovered facts, FCS rejects ({UncertainAttribute}) [FCS: FS37]
-gen_53	certified: exact; unknown: covers [UncertainAttribute]
-gen_54	certified: exact; unknown: unread TypeProvider(0)
-gen_55	certified: covers [UncertainAttribute]; unknown: covers [UncertainAttribute]
-gen_56	certified: covers recovered facts, FCS rejects ({}); unknown: covers recovered facts, FCS rejects ({UncertainAttribute}) [FCS: FS37]
-gen_57	certified: covers [AbbreviationOrUnion]; unknown: covers [UncertainAttribute,AbbreviationOrUnion]
-gen_58	certified: exact; unknown: unread TypeProvider(0)
-gen_59	certified: exact; unknown: covers [UncertainAttribute]
-gen_6	certified: exact; unknown: unread TypeProvider(0)
-gen_7	certified: covers recovered facts, FCS rejects ({AbbreviationOrUnion}); unknown: unread TypeProvider(0) [FCS: FS37,FS37,FS37,FS37,FS53]
-gen_8	certified: covers FCS's entities, the signature undecodable (#1081) ({}); unknown: unread TypeProvider(2)
-gen_9	certified: covers recovered facts, FCS rejects ({}); unknown: covers recovered facts, FCS rejects ({UncertainAttribute}) [FCS: FS37]
+gen_49	certified: exact []; unknown: unread TypeProvider(0)
+gen_5	certified: exact []; unknown: unread TypeProvider(0)
+gen_50	certified: exact []; unknown: unread TypeProvider(0)
+gen_51	certified: exact []; unknown: unread TypeProvider(0)
+gen_52	certified: exact, FCS rejects []; unknown: covers, FCS rejects surplus(prefix 0, entity 0, lends 1, lender 0, auto-open 0, extension 0) [UncertainAttribute] [FCS: FS37]
+gen_53	certified: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 18) [ClassLetName]; unknown: covers surplus(prefix 0, entity 0, lends 7, lender 0, auto-open 0, extension 18) [UncertainAttribute,ClassLetName]
+gen_54	certified: exact []; unknown: unread TypeProvider(0)
+gen_55	certified: exact [UncertainAttribute]; unknown: covers surplus(prefix 0, entity 0, lends 2, lender 0, auto-open 0, extension 0) [UncertainAttribute]
+gen_56	certified: covers, FCS rejects surplus(prefix 0, entity 0, lends 1, lender 0, auto-open 0, extension 0) [AbbreviationOrUnion]; unknown: covers, FCS rejects surplus(prefix 0, entity 0, lends 3, lender 0, auto-open 0, extension 0) [UncertainAttribute,AbbreviationOrUnion] [FCS: FS37]
+gen_57	certified: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 4) [AbbreviationOrUnion]; unknown: covers surplus(prefix 0, entity 0, lends 1, lender 0, auto-open 0, extension 12) [UncertainAttribute,AbbreviationOrUnion]
+gen_58	certified: exact []; unknown: unread TypeProvider(0)
+gen_59	certified: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 6) []; unknown: covers surplus(prefix 0, entity 0, lends 1, lender 0, auto-open 0, extension 6) [UncertainAttribute]
+gen_6	certified: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 8) []; unknown: unread TypeProvider(0)
+gen_7	certified: covers, FCS rejects surplus(prefix 0, entity 0, lends 1, lender 3, auto-open 0, extension 11) [AbbreviationOrUnion]; unknown: unread TypeProvider(0) [FCS: FS37,FS37,FS37,FS37,FS53]
+gen_8	certified: covers, FCS's signature undecodable (#1081) surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 2) []; unknown: unread TypeProvider(2)
+gen_9	certified: covers, FCS rejects surplus(prefix 2, entity 2, lends 0, lender 0, auto-open 0, extension 3) []; unknown: covers, FCS rejects surplus(prefix 2, entity 2, lends 6, lender 0, auto-open 0, extension 3) [UncertainAttribute] [FCS: FS37]
