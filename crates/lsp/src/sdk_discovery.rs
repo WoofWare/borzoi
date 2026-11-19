@@ -92,6 +92,15 @@ impl SettingsFs for ObservedSettings<'_> {
         })
     }
 
+    fn link_metadata(&self, path: &Path) -> std::io::Result<borzoi_nuget::settings::Metadata> {
+        use borzoi_msbuild::observed::{self as observed, EntryKind};
+        let kind = observed::link_kind(self.0, path).map_err(io_error)?;
+        Ok(borzoi_nuget::settings::Metadata {
+            is_file: kind == EntryKind::File,
+            is_dir: kind == EntryKind::Dir,
+        })
+    }
+
     /// Recorded as the file's stamp, which holds only while its device and
     /// inode do (and, being taken with no read, never while it is racy: an
     /// identity has no contents to confirm it by).
