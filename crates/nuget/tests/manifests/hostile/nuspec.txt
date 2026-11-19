@@ -1,0 +1,8 @@
+# Generated; do not edit by hand. One line per graded item, sorted.
+# Regenerate with:
+#   BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-nuget --test all nuspec_diff::nuspec_dependency_projection_agrees_with_oracle
+plain	reached
+xml.cdata	reached
+xml.char-ref	reached
+xml.comment-split	reached
+xml.literal-whitespace	reached

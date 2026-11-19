@@ -27,3 +27,4 @@ crates/cst/tests/manifests/decl_sequence_grid_streams.txt merge=borzoi-manifest
 crates/cst/tests/manifests/version_dependence_census.txt merge=borzoi-manifest
 crates/cst/tests/manifests/print_roundtrip_corpus.txt merge=borzoi-manifest
 crates/nuget/tests/manifests/hostile/settings.txt merge=borzoi-manifest
+crates/nuget/tests/manifests/hostile/nuspec.txt merge=borzoi-manifest

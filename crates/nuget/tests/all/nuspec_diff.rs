@@ -6,9 +6,74 @@
 //! the Rust side preserves raw strings, while NuGet.Packaging normalises them
 //! into ordered asset-type lists. Exact asset-list interpretation belongs with
 //! the resolver/asset-selection slices that consume it.
+//!
+//! Every fixture is also respelt in each of the hostile XML spellings of
+//! `borzoi_oracle_harness::hostile::xml` (the census `nuspec`): its attribute
+//! values as character references or with literal whitespace, and the
+//! whitespace between its elements as references, a CDATA section, or around
+//! comments. The generated fixtures draw one at [`hostile::RATE`]. A document
+//! read the same however it is spelt must project the same on both sides.
+
+use std::collections::BTreeSet;
 
 use crate::common::{FRAMEWORK_ZOO, Oracle, SplitMix64};
 use borzoi_nuget::{NuGetFramework, parse_nuspec};
+use borzoi_oracle_harness::hostile::{self, Dimension, xml};
+
+/// The census of hostile values the dependency projection runs.
+const CENSUS: &str = "nuspec";
+
+/// `input` with every attribute value and every run of whitespace between
+/// elements written `how`, or `None` where the spelling writes nothing the
+/// plain one does not. A value holding a reference already is left as it is:
+/// its text is not the value.
+fn respell(input: &str, how: xml::How) -> Option<String> {
+    let mut out = String::with_capacity(input.len() * 2);
+    let mut changed = false;
+    let mut rest = input;
+    // Text before the root element is outside any element, where XML allows
+    // whitespace alone; the text after the root's end is never reached here.
+    let mut in_root = false;
+    while let Some(open) = rest.find('<') {
+        let (text, tag_and_rest) = rest.split_at(open);
+        let spelt = (in_root && !text.is_empty() && text.trim().is_empty())
+            .then(|| xml::spell(text, how, xml::Place::Element))
+            .flatten();
+        match spelt {
+            Some(spelt) => {
+                changed = true;
+                out.push_str(&spelt.xml);
+            }
+            None => out.push_str(text),
+        }
+        let close = tag_and_rest.find('>').expect("a tag ends") + 1;
+        let (tag, after) = tag_and_rest.split_at(close);
+        if tag.starts_with("<?") || tag.starts_with("<!") {
+            out.push_str(tag);
+        } else {
+            in_root = true;
+            let mut pieces = tag.split('"');
+            out.push_str(pieces.next().expect("a tag's start"));
+            for (index, piece) in pieces.enumerate() {
+                out.push('"');
+                // Every other piece is between quotes: a value.
+                let spelt = (index % 2 == 0 && !piece.contains('&'))
+                    .then(|| xml::spell(piece, how, xml::Place::Attribute))
+                    .flatten();
+                match spelt {
+                    Some(spelt) => {
+                        changed = true;
+                        out.push_str(&spelt.xml);
+                    }
+                    None => out.push_str(piece),
+                }
+            }
+        }
+        rest = after;
+    }
+    out.push_str(rest);
+    changed.then_some(out)
+}
 
 const NUSPECS: &[&str] = &[
     r#"
@@ -200,6 +265,8 @@ struct NuspecCase {
     name: String,
     input: String,
     has_duplicate_equivalent_groups: bool,
+    /// The hostile spellings the input is written in.
+    hostile: BTreeSet<Dimension>,
 }
 
 fn nuspec_cases() -> Vec<NuspecCase> {
@@ -210,8 +277,22 @@ fn nuspec_cases() -> Vec<NuspecCase> {
             name: format!("corner-{i}"),
             input: (*input).to_owned(),
             has_duplicate_equivalent_groups: false,
+            hostile: BTreeSet::new(),
         })
         .collect::<Vec<_>>();
+    // Every corner in every hostile spelling.
+    for entry in xml::alphabet().entries() {
+        for (i, input) in NUSPECS.iter().enumerate() {
+            if let Some(input) = respell(input, entry.value) {
+                cases.push(NuspecCase {
+                    name: format!("corner-{i}-{}", entry.dimension),
+                    input,
+                    has_duplicate_equivalent_groups: false,
+                    hostile: BTreeSet::from([entry.dimension]),
+                });
+            }
+        }
+    }
     cases.extend(generated_duplicate_group_nuspecs());
     cases.extend(generated_heterogeneous_group_nuspecs());
     cases
@@ -272,6 +353,7 @@ fn generated_duplicate_group_nuspecs() -> Vec<NuspecCase> {
 "#
                     ),
                     has_duplicate_equivalent_groups: true,
+                    hostile: BTreeSet::new(),
                 });
             }
         }
@@ -311,7 +393,7 @@ fn generated_heterogeneous_group_nuspecs() -> Vec<NuspecCase> {
             .collect::<Vec<_>>()
             .join("\n");
         let name = format!("heterogeneous-{case_index}");
-        cases.push(NuspecCase {
+        let mut case = NuspecCase {
             name: name.clone(),
             input: format!(
                 r#"
@@ -329,7 +411,15 @@ fn generated_heterogeneous_group_nuspecs() -> Vec<NuspecCase> {
 "#
             ),
             has_duplicate_equivalent_groups: false,
-        });
+            hostile: BTreeSet::new(),
+        };
+        if let Some(entry) = xml::alphabet().sample(rng.next())
+            && let Some(input) = respell(&case.input, entry.value)
+        {
+            case.input = input;
+            case.hostile.insert(entry.dimension);
+        }
+        cases.push(case);
     }
 
     cases
@@ -370,6 +460,7 @@ fn oracle_i64(v: &serde_json::Value, field: &str) -> i64 {
 
 #[test]
 fn nuspec_dependency_projection_agrees_with_oracle() {
+    let census = hostile::coverage::open(file!(), CENSUS, &[]);
     let mut oracle = Oracle::spawn();
     let mut mismatches = Vec::new();
     let cases = nuspec_cases();
@@ -389,6 +480,8 @@ fn nuspec_dependency_projection_agrees_with_oracle() {
             "input": case.input,
         }));
         assert!(oracle_bool(&resp, "ok"), "oracle rejected fixture: {resp}");
+        // Both sides read it, and each divergence below is collected.
+        census.reached(&case.hostile, "compared");
 
         let oracle_groups = resp["groups"]
             .as_array()
@@ -480,6 +573,10 @@ fn nuspec_dependency_projection_agrees_with_oracle() {
             mismatches.join("\n")
         );
     }
+    census.finish(
+        "BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-nuget --test all \
+         nuspec_diff::nuspec_dependency_projection_agrees_with_oracle",
+    );
 }
 
 #[test]

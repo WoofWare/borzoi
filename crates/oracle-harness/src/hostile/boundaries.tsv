@@ -221,7 +221,7 @@ crates/nuget/tests/all/dgspec_resolve_diff.rs	pending	2
 crates/nuget/tests/all/framework_diff.rs	pending	2
 crates/nuget/tests/all/framework_exhaustive.rs	pending	2
 crates/nuget/tests/all/framework_properties.rs	pending	2
-crates/nuget/tests/all/nuspec_diff.rs	pending	2
+crates/nuget/tests/all/nuspec_diff.rs	draws	nuspec=xml
 crates/nuget/tests/all/range_diff.rs	pending	2
 crates/nuget/tests/all/range_properties.rs	pending	2
 crates/nuget/tests/all/resolver.rs	pending	2
