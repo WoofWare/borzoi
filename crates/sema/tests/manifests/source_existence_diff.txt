@@ -3,7 +3,7 @@
 #   BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-sema --test all source_existence_diff::source_rows_are_fcs_rows_over_the_grid
 abbreviation_or_union	certified: covers [AbbreviationOrUnion]; unknown: covers [AbbreviationOrUnion]
 abbreviation_targets	certified: covers [AbbreviationOrUnion]; unknown: covers [AbbreviationOrUnion]
-abbreviation_to_unknown_lower_case	certified: covers, FCS rejects ({AbbreviationOrUnion}); unknown: covers, FCS rejects ({AbbreviationOrUnion}) [FCS: FS53]
+abbreviation_to_unknown_lower_case	certified: covers paths, FCS rejects ({AbbreviationOrUnion}); unknown: covers paths, FCS rejects ({AbbreviationOrUnion}) [FCS: FS53]
 abbreviations	certified: exact; unknown: exact
 access	certified: exact; unknown: exact
 access_inherited	certified: exact; unknown: exact
@@ -11,6 +11,9 @@ assembly_auto_open	certified: exact; unknown: unread TypeProvider(0)
 assembly_auto_open_constant	certified: unread UnreadableAutoOpen(0); unknown: unread TypeProvider(0)
 assembly_auto_open_no_argument	certified: exact; unknown: unread TypeProvider(0)
 assembly_other_attribute	certified: exact; unknown: unread TypeProvider(0)
+attribute_target_assembly_on_type	certified: covers paths, FCS rejects ({}); unknown: unread TypeProvider(0) [FCS: FS841,FS841,FS841]
+attribute_target_module	certified: unread Recovered(0); unknown: unread Recovered(0) [FCS: FS10]
+attribute_targets	certified: exact; unknown: covers [UncertainAttribute]
 auto_open_header	certified: exact; unknown: covers [UncertainAttribute]
 auto_open_spellings	certified: exact; unknown: covers [UncertainAttribute]
 auto_open_type_and_abbreviation	certified: exact; unknown: covers [UncertainAttribute]
@@ -26,8 +29,8 @@ extension_extern	certified: exact; unknown: covers [UncertainAttribute]
 extension_forms	certified: exact; unknown: exact
 extension_generic	certified: exact; unknown: covers [UncertainAttribute]
 extension_intrinsic	certified: exact; unknown: exact
-extension_namespace_level	certified: covers, FCS rejects ({}); unknown: covers, FCS rejects ({}) [FCS: FS644,FS73]
-extension_of_abbreviation	certified: covers, FCS rejects ({}); unknown: covers, FCS rejects ({UncertainAttribute}) [FCS: FS964,FS895]
+extension_namespace_level	certified: covers paths, FCS rejects ({}); unknown: covers paths, FCS rejects ({}) [FCS: FS644,FS73]
+extension_of_abbreviation	certified: covers paths, FCS rejects ({}); unknown: covers paths, FCS rejects ({UncertainAttribute}) [FCS: FS964,FS895]
 fsi_pair_access	certified: covers [SignaturePair]; unknown: covers [SignaturePair]
 fsi_pair_auto_open	certified: covers [SignaturePair]; unknown: covers [SignaturePair,UncertainAttribute]
 fsi_pair_hiding	certified: covers [SignaturePair]; unknown: covers [SignaturePair]
@@ -41,17 +44,17 @@ module_nested_deep	certified: exact; unknown: exact
 module_rec	certified: exact; unknown: exact
 module_suffix	certified: exact; unknown: covers [UncertainAttribute]
 module_suffix_augmentation_only	certified: exact; unknown: exact
-module_suffix_exception	certified: covers, FCS rejects ({}); unknown: covers, FCS rejects ({}) [FCS: FS37]
+module_suffix_exception	certified: covers paths, FCS rejects ({}); unknown: covers paths, FCS rejects ({}) [FCS: FS37]
 module_suffix_later_type	certified: exact; unknown: exact
 module_suffix_rec_exception	certified: exact; unknown: exact
-module_suffix_rec_namespace	certified: covers, FCS rejects ({}); unknown: covers, FCS rejects ({}) [FCS: FS37]
+module_suffix_rec_namespace	certified: covers paths, FCS rejects ({}); unknown: covers paths, FCS rejects ({}) [FCS: FS37]
 names_backticked	certified: exact; unknown: exact
 names_backticked_namespace	certified: exact; unknown: exact
 names_colliding	certified: exact; unknown: exact
 names_fsharp_core	certified: exact; unknown: exact
 names_operators_and_keywords	certified: exact; unknown: exact
 names_unicode	certified: exact; unknown: exact
-names_with_dot	certified: covers, FCS rejects ({}); unknown: covers, FCS rejects ({}) [FCS: FS883]
+names_with_dot	certified: covers paths, FCS rejects ({}); unknown: covers paths, FCS rejects ({}) [FCS: FS883]
 namespace	certified: exact; unknown: exact
 namespace_dotted_and_fragments	certified: exact; unknown: exact
 namespace_empty	certified: exact; unknown: exact

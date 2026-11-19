@@ -36,6 +36,24 @@ through `borzoi_sema::FcsRange::fcs_range`, and `clippy.toml` bans
 glued `(*)`, which the tree spells as `(`, `*`, `)` (what every frozen
 facade's name accessors return) and FCS names over all three characters
 (`borzoi_cst::syntax::fcs_ident_range`).
+A referenced F# project's existence surface is read from its source by
+`source_existence` (Stage 1a of the source-references plan): the rows its
+compiled pickle would hold (`borzoi_assembly::existence`), or `Unread` with
+the reason. Its input enumerates what only the caller knows (an unreadable
+Compile item, a refused fold, an unserved producer TFM) and what A's
+references route each written attribute name to (`MarkerRoutes`: `Unknown`,
+or a `Certified` map in which an omitted name reads as `Unknown`). Every
+channel it reads is a `Channel` with a `Treatment`, and
+`the_inventory_is_what_the_walk_does` runs a witness of each. The claim is
+stated on `SourceSurface::approximations`: none named and FCS accepting A,
+the rows are exactly those of FCS's in-memory signature for A (and of the
+DLL FCS compiles); otherwise they cover them. `tests/all/source_existence_diff.rs`
+holds that over a hand-written grid (`source_existence_grid.rs`) and
+generated projects (`source_existence_gen.rs`, `deep_` for more seeds),
+reading FCS's signature through `fcs-dump`'s `referenced` op and
+`unpickle_signature`, each verdict pinned; the corpus twin is
+`borzoi-corpus-diff`'s `source_existence_corpus`. The member reader it
+shares with `resolve/extension_names.rs` is `member_shape`.
 Inferred types are not bounded by the tree (each line of `let gK x =
 g(K-1) (g(K-1) x)` doubles one), so every walk of the unification table
 counts against a type budget (`MAX_TYPE_NODES`, `MAX_TYPE_DEPTH`), and a

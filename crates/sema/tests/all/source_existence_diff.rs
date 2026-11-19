@@ -513,6 +513,65 @@ pub fn grade(cell: &Cell, fcs: &Fcs, ours: &SourceExistence) -> Result<String, S
     }
     .sorted();
     let theirs = &fcs.memory;
+    // A producer FCS rejects: its imported surface is FCS's recovery, whose
+    // kinds and flags the walk does not model. What an existence question
+    // reads of it is its paths, so those are what ours must cover: every
+    // entity's place and both its names, every extension's place and names,
+    // every auto-open path.
+    if !fcs.clean {
+        let entity = |r: &PickledEntityRow| {
+            (
+                r.namespace.clone(),
+                r.enclosing.clone(),
+                r.logical_name.clone(),
+                r.compiled_name.clone(),
+            )
+        };
+        let extension =
+            |r: &ExtensionRow| (r.namespace.clone(), r.enclosing.clone(), r.names.clone());
+        let ours_entities: std::collections::BTreeSet<_> =
+            mine.entities.iter().map(entity).collect();
+        let ours_extensions: std::collections::BTreeSet<_> =
+            mine.extensions.iter().map(extension).collect();
+        let lacking: Vec<String> = theirs
+            .entities
+            .iter()
+            .map(entity)
+            .filter(|k| !ours_entities.contains(k))
+            .map(|k| format!("{k:?}"))
+            .chain(
+                theirs
+                    .extensions
+                    .iter()
+                    .map(extension)
+                    .filter(|k| !ours_extensions.contains(k))
+                    .map(|k| format!("{k:?}")),
+            )
+            .chain(
+                theirs
+                    .auto_opens
+                    .iter()
+                    .filter(|p| !mine.auto_opens.contains(p))
+                    .map(|p| format!("auto-open {p}")),
+            )
+            .collect();
+        if !lacking.is_empty() {
+            return Err(format!(
+                "{}: FCS rejects it, and ours does not cover the paths of its recovered surface\n{}",
+                cell.name,
+                lines(&lacking)
+            ));
+        }
+        let undecodable = if fcs.undecodable {
+            ", its signature undecodable"
+        } else {
+            ""
+        };
+        return Ok(format!(
+            "covers paths, FCS rejects{undecodable} ({:?})",
+            surface.approximations
+        ));
+    }
     let lacking_entities = missing(&mine.entities, &theirs.entities);
     let lacking_extensions = missing(&mine.extensions, &theirs.extensions);
     let lacking_opens = missing(&mine.auto_opens, &theirs.auto_opens);
@@ -531,17 +590,6 @@ pub fn grade(cell: &Cell, fcs: &Fcs, ours: &SourceExistence) -> Result<String, S
     if fcs.clean && fcs.undecodable {
         return Ok(format!(
             "covers FCS's entities, the signature undecodable (#1081) ({:?})",
-            surface.approximations
-        ));
-    }
-    if !fcs.clean {
-        let undecodable = if fcs.undecodable {
-            ", its signature undecodable"
-        } else {
-            ""
-        };
-        return Ok(format!(
-            "covers, FCS rejects{undecodable} ({:?})",
             surface.approximations
         ));
     }

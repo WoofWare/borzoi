@@ -138,6 +138,19 @@ pub fn cells() -> Vec<Cell> {
             "auto_open_with_other_attributes",
             "namespace AOO\n[<AutoOpen; RequireQualifiedAccess>]\nmodule Both =\n    let x = 1\n[<RequireQualifiedAccess>]\n[<AutoOpen>]\nmodule Two =\n    let x = 1\n[<CompilationRepresentation(CompilationRepresentationFlags.ModuleSuffix)>]\nmodule Suffixed =\n    let x = 1\n",
         ),
+        // Attribute targets.
+        one(
+            "attribute_targets",
+            "namespace Targets\nopen System.Runtime.CompilerServices\n[<type: AutoOpen>]\ntype T() = static member M = 1\n[<type: CompiledName(\"Renamed\")>]\ntype U() = class end\ntype E =\n    [<return: Extension>]\n    static member R(s: string) = s\n    [<method: Extension>]\n    static member M(s: string) = s\nmodule Aug =\n    type System.String with\n        [<return: CompiledName(\"Q\")>]\n        member s.Orig() = 1\n",
+        ),
+        one(
+            "attribute_target_assembly_on_type",
+            "namespace TargetsAsm\n[<assembly: AutoOpen(\"TargetsAsm\")>]\ntype T() = static member M = 1\n[<assembly: AutoOpen(\"TargetsAsm\")>]\nmodule OnModule =\n    let x = 1\n",
+        ),
+        one(
+            "attribute_target_module",
+            "namespace TargetsModule\n[<module: AutoOpen>]\nmodule M =\n    let x = 1\n",
+        ),
         // The module suffix.
         one(
             "module_suffix",

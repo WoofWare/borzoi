@@ -292,6 +292,13 @@ fn witness(channel: Channel) -> Observed {
         Channel::CompiledNameAttribute => observe(one("namespace N\n[<CompiledName(\"R\")>]\ntype T() = class end\n"), |r| {
             has_entity(r, "T", "R", K::Type)
         }),
+        Channel::AttributeTarget => observe(
+            one("module M\ntype System.String with\n    [<return: CompiledName(\"Q\")>]\n    member s.Orig() = 1\n"),
+            |r| {
+                extension_names(r)
+                    == vec![vec!["Orig".to_owned(), "String.Orig".to_owned()]]
+            },
+        ),
         Channel::UnreadableCompiledName => {
             observe(one("namespace N\n[<CompiledName(Some.Constant)>]\ntype T() = class end\n"), |_| true)
         }

@@ -165,7 +165,13 @@ impl Gen {
         if choices.is_empty() || self.rng.chance(50) {
             return String::new();
         }
-        format!("{indent}{}\n", self.rng.pick(choices))
+        let attr = *self.rng.pick(choices);
+        // An explicit `type:` target, which FCS reads as no target.
+        if self.rng.chance(20) {
+            format!("{indent}[<type: {}\n", &attr[2..])
+        } else {
+            format!("{indent}{attr}\n")
+        }
     }
 
     fn module_attributes(&mut self, indent: &str) -> String {
@@ -269,6 +275,13 @@ impl Gen {
                 5 => format!("static member {name} = 2"),
                 _ => format!("member x.{name}(y: int) = y"),
             };
+            // A member attribute with a target: `method:` is the member's,
+            // `return:` its return value's.
+            match self.rng.below(10) {
+                0 => out.push_str(&format!("{indent}    [<return: CompiledName(\"Q\")>]\n")),
+                1 => out.push_str(&format!("{indent}    [<method: CompiledName(\"P{}\")>]\n", self.rng.below(100))),
+                _ => {}
+            }
             out.push_str(&format!("{indent}    {line}\n"));
         }
         out

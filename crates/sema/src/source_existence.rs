@@ -321,6 +321,9 @@ channels! {
     ExtensionAttribute,
     /// `[<CompiledName("…")>]` on a type (modules and exceptions ignore it).
     CompiledNameAttribute,
+    /// An attribute's explicit target: a `return:` one is the return
+    /// value's, any other the carrier's.
+    AttributeTarget,
     /// An attribute that may be `[<CompiledName>]` with an argument the walk
     /// cannot read.
     UnreadableCompiledName,
@@ -396,6 +399,7 @@ impl Channel {
             | Channel::AutoOpenAttribute
             | Channel::ExtensionAttribute
             | Channel::CompiledNameAttribute
+            | Channel::AttributeTarget
             | Channel::AssemblyAutoOpen
             | Channel::OptionalExtensionMember
             | Channel::IntrinsicAugmentation
@@ -697,13 +701,12 @@ impl MarkerRoutes {
             uncertain: false,
         };
         for list in lists {
+            // Every attribute of the list FCS keeps on the carrier
+            // (`TcAttributes`), whatever its target, an `assembly:` one too
+            // (which the assembly's own list also gets); but a `return:` one
+            // is the return value's.
             for attr in list.attributes() {
-                // An assembly- or module-targeted attribute marks nothing
-                // here: the assembly's are read on their own.
-                if attr
-                    .target()
-                    .is_some_and(|t| matches!(t.text(), "assembly" | "module"))
-                {
+                if attr.target().is_some_and(|t| t.text() == "return") {
                     continue;
                 }
                 let name = written_name(&attr);
@@ -1478,8 +1481,21 @@ impl FileWalk<'_> {
                 // visible. For any other `B` FCS may take the union reading,
                 // a check that then fails included, so both readings stand.
                 let visible = ctx.visible_at(position);
+                // A unit of measure is never the union reading.
+                let both = |walk: &mut Self| {
+                    if marks.uncertain && measure == Maybe::Possibly {
+                        walk.out
+                            .approximations
+                            .insert(Approximation::UncertainAttribute);
+                    }
+                    vec![PickledEntityKind::Abbreviation, PickledEntityKind::Type]
+                };
                 match target.as_ref().and_then(abbrev_single_ident) {
-                    Some(t) if measure == Maybe::No && t == name => vec![PickledEntityKind::Type],
+                    Some(t) if t == name => match measure {
+                        Maybe::No => vec![PickledEntityKind::Type],
+                        Maybe::Yes => vec![PickledEntityKind::Abbreviation],
+                        Maybe::Possibly => both(self),
+                    },
                     Some(t)
                         if FSHARP_CORE_TYPE_NAMES.contains(&t.as_str())
                             || visible.contains(&t) =>

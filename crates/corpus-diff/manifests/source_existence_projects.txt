@@ -1,0 +1,9 @@
+# Generated; do not edit by hand. One line per graded item, sorted.
+# Regenerate with:
+#   BORZOI_UPDATE_MANIFESTS=1 BORZOI_PROJECT_LIST=… nix develop -c cargo test -p borzoi-corpus-diff --test project_resolution source_existence_corpus:: -- --ignored
+TypeEquality/TypeEquality/TypeEquality.fsproj	unknown: covers [SignaturePair,UncertainAttribute]; by spelling: covers exactly [SignaturePair]; fcs errors=0
+WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj	unknown: unread TypeProvider(0); by spelling: covers exactly []; fcs errors=0
+WoofWare.Incremental/WoofWare.Incremental/WoofWare.Incremental.fsproj	unknown: unread TypeProvider(0); by spelling: covers [SignaturePair]; fcs errors=0
+WoofWare.LiangHyphenation/WoofWare.LiangHyphenation/WoofWare.LiangHyphenation.fsproj	unknown: covers [UncertainAttribute]; by spelling: covers exactly []; fcs errors=0
+WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj	unknown: covers [UncertainAttribute]; by spelling: covers exactly []; fcs errors=0
+WoofWare.WeakHashTable/WoofWare.WeakHashTable/WoofWare.WeakHashTable.fsproj	unknown: covers [UncertainAttribute]; by spelling: covers exactly []; fcs errors=0
