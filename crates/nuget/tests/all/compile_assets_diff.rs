@@ -14,11 +14,21 @@
 //!
 //! Fixed seeds, so a failure reproduces exactly; `soak.rs` owns fresh-seed
 //! exploration.
+//!
+//! The asset files also take the hostile file names of
+//! `borzoi_oracle_harness::hostile::name` (the census `compile_assets`):
+//! each once per run, as a `lib/` asset beside an ordinary one (and beside
+//! its twin, the name some comparison takes for it), and mixed into one
+//! generated package in [`hostile::RATE`].
+
+use std::collections::BTreeSet;
+use std::sync::OnceLock;
 
 use crate::common::{Oracle, SplitMix64};
 use borzoi_nuget::{
     AssetSelectionDecline, NuGetFramework, PackageNuspec, parse_nuspec, select_compile_assets,
 };
+use borzoi_oracle_harness::hostile::{self, Dimension, Entry, census::Census, name};
 
 /// The project frameworks we resolve for: the `.NETFramework` /`.NETCoreApp` /
 /// `.NETStandard` envelope, spread across the generations that actually differ
@@ -156,6 +166,21 @@ struct Package {
     files: Vec<String>,
     nuspec_xml: String,
     nuspec: PackageNuspec,
+    /// The hostile names among the files.
+    hostile: BTreeSet<Dimension>,
+}
+
+/// The hostile names an asset file can take: text, as the package's file
+/// list is (the subject reads `String`s and the oracle JSON), and holding no
+/// `/`, which would make it a path of several components.
+fn asset_names() -> &'static [Entry<String>] {
+    static NAMES: OnceLock<Vec<Entry<String>>> = OnceLock::new();
+    NAMES.get_or_init(|| {
+        name::as_text("Pkg", ".dll")
+            .into_iter()
+            .filter(|e| !e.value.contains('/'))
+            .collect()
+    })
 }
 
 /// TFM folders a package plausibly *multi-targets*. Drawing from these keeps
@@ -183,6 +208,25 @@ const PLAUSIBLE_TFMS: &[&str] = &[
 
 fn gen_package(rng: &mut SplitMix64) -> Package {
     let mut files: Vec<String> = Vec::new();
+    let mut hostile = BTreeSet::new();
+    // One package in `RATE` takes hostile names: the first of its names is
+    // hostile, so that the package is, and each later one at `RATE` again.
+    let mix = rng.next().is_multiple_of(hostile::RATE);
+    let mut first = true;
+    let mut pick_name = |rng: &mut SplitMix64, plain: &'static str| -> String {
+        let entropy = match (mix, std::mem::take(&mut first)) {
+            (false, _) => 1,
+            (true, true) => rng.next() / hostile::RATE * hostile::RATE,
+            (true, false) => rng.next(),
+        };
+        match hostile::sample(asset_names(), entropy) {
+            Some(entry) => {
+                hostile.insert(entry.dimension);
+                entry.value.clone()
+            }
+            None => plain.to_owned(),
+        }
+    };
 
     if rng.below(4) > 0 {
         files.push((*rng.pick(ROOT_FILES)).to_owned());
@@ -211,7 +255,8 @@ fn gen_package(rng: &mut SplitMix64) -> Package {
         for _ in 0..fan {
             let tfm = rng.pick(PLAUSIBLE_TFMS);
             for _ in 0..1 + rng.below(2) {
-                files.push(format!("lib/{tfm}/{}", rng.pick(CONTENTS)));
+                let plain = *rng.pick(CONTENTS);
+                files.push(format!("lib/{tfm}/{}", pick_name(rng, plain)));
             }
             if with_ref {
                 files.push(format!("ref/{tfm}/{}", rng.pick(CONTENTS)));
@@ -227,7 +272,8 @@ fn gen_package(rng: &mut SplitMix64) -> Package {
         let count = 1 + rng.below(6);
         for _ in 0..count {
             let root = rng.pick(ROOTS);
-            let name = rng.pick(FILE_NAMES);
+            let plain = *rng.pick(FILE_NAMES);
+            let name = pick_name(rng, plain);
             // A quarter of assets skip the framework folder entirely: the
             // pre-TFM `lib/Alpha.dll` shape.
             if rng.below(4) == 0 {
@@ -255,6 +301,7 @@ fn gen_package(rng: &mut SplitMix64) -> Package {
         files,
         nuspec_xml,
         nuspec,
+        hostile,
     }
 }
 
@@ -326,54 +373,136 @@ fn oracle_items(
     items
 }
 
+/// What grading packages found, for the floors.
+#[derive(Default)]
+struct Graded {
+    mismatches: Vec<String>,
+    declines: std::collections::BTreeMap<&'static str, usize>,
+    compared: usize,
+    selected_something: usize,
+}
+
+/// Grade `package` for `project`, record it in the census, and count it.
+fn grade(
+    oracle: &mut Oracle,
+    census: &Census,
+    graded: &mut Graded,
+    project: &str,
+    package: &Package,
+) {
+    let ours = match select_compile_assets(&package.files, &package.nuspec, &framework(project)) {
+        Ok(assets) => assets,
+        Err(decline) => {
+            *graded.declines.entry(decline_kind(&decline)).or_default() += 1;
+            census.reached(&package.hostile, "decline");
+            return;
+        }
+    };
+    graded.compared += 1;
+    if !ours.items.is_empty() {
+        graded.selected_something += 1;
+    }
+
+    let theirs = oracle_items(oracle, project, &package.files, &package.nuspec_xml);
+    census.reached(&package.hostile, "commit");
+    if ours.items != theirs {
+        graded.mismatches.push(format!(
+            "project={project} files={:?} nuspec={}\n  ours={:?}\n  nuget={theirs:?}",
+            package.files, package.nuspec_xml, ours.items
+        ));
+        return;
+    }
+
+    // Order-invariance: having answered, we are asserting NuGet has one
+    // answer to give. Ask it again with the files reversed.
+    let mut reversed = package.files.clone();
+    reversed.reverse();
+    let reordered = oracle_items(oracle, project, &reversed, &package.nuspec_xml);
+    if reordered != theirs {
+        graded.mismatches.push(format!(
+            "NuGet's own selection moved with file order, so we should have declined:\n  \
+             project={project} files={:?}\n  forward={theirs:?}\n  reversed={reordered:?}",
+            package.files
+        ));
+    }
+}
+
+/// Each hostile name once: as an asset of the nearest framework folder,
+/// beside an ordinary asset of a farther one, and beside its twin.
+fn cover(oracle: &mut Oracle, census: &Census, graded: &mut Graded) {
+    let nuspec_xml = gen_bare_nuspec();
+    let nuspec = parse_nuspec(&nuspec_xml).expect("nuspec parses");
+    for entry in name::alphabet().entries() {
+        if !entry.value.varies("Pkg", ".dll") {
+            continue;
+        }
+        let Some(text) = entry
+            .value
+            .render("Pkg", ".dll")
+            .to_str()
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+        if text.contains('/') {
+            continue;
+        }
+        let mut files = vec![
+            format!("lib/net8.0/{text}"),
+            "lib/netstandard2.0/Pkg.dll".to_owned(),
+        ];
+        if let Some(twin) = entry
+            .value
+            .twin("Pkg", ".dll")
+            .and_then(|t| t.to_str().map(str::to_owned))
+        {
+            files.push(format!("lib/net8.0/{twin}"));
+        }
+        files.sort();
+        files.dedup();
+        let package = Package {
+            files,
+            nuspec_xml: nuspec_xml.clone(),
+            nuspec: nuspec.clone(),
+            hostile: BTreeSet::from([entry.dimension]),
+        };
+        grade(oracle, census, graded, "net8.0", &package);
+    }
+}
+
 #[test]
 fn compile_asset_selection_matches_the_nuget_content_model() {
+    let census = hostile::coverage::open(
+        file!(),
+        "compile_assets",
+        &[(
+            Dimension::NonUtf8,
+            "a package's file list is text: the subject reads `String`s, and the oracle JSON",
+        )],
+    );
     let mut oracle = Oracle::spawn();
     let mut rng = SplitMix64(0x5eed_a55e_7000);
-    let mut mismatches: Vec<String> = Vec::new();
-    let mut declines: std::collections::BTreeMap<&'static str, usize> = Default::default();
-    let mut compared = 0usize;
-    let mut selected_something = 0usize;
+    let mut graded = Graded::default();
+    cover(&mut oracle, &census, &mut graded);
+    // The floors are the generator's, over its own packages.
+    let mut graded_cover = std::mem::take(&mut graded);
 
     for _ in 0..4000 {
         let package = gen_package(&mut rng);
         let project = rng.pick(PROJECT_FRAMEWORKS);
-
-        let ours = match select_compile_assets(&package.files, &package.nuspec, &framework(project))
-        {
-            Ok(assets) => assets,
-            Err(decline) => {
-                *declines.entry(decline_kind(&decline)).or_default() += 1;
-                continue;
-            }
-        };
-        compared += 1;
-        if !ours.items.is_empty() {
-            selected_something += 1;
-        }
-
-        let theirs = oracle_items(&mut oracle, project, &package.files, &package.nuspec_xml);
-        if ours.items != theirs {
-            mismatches.push(format!(
-                "project={project} files={:?} nuspec={}\n  ours={:?}\n  nuget={theirs:?}",
-                package.files, package.nuspec_xml, ours.items
-            ));
-            continue;
-        }
-
-        // Order-invariance: having answered, we are asserting NuGet has one
-        // answer to give. Ask it again with the files reversed.
-        let mut reversed = package.files.clone();
-        reversed.reverse();
-        let reordered = oracle_items(&mut oracle, project, &reversed, &package.nuspec_xml);
-        if reordered != theirs {
-            mismatches.push(format!(
-                "NuGet's own selection moved with file order, so we should have declined:\n  \
-                 project={project} files={:?}\n  forward={theirs:?}\n  reversed={reordered:?}",
-                package.files
-            ));
-        }
+        grade(&mut oracle, &census, &mut graded, project, &package);
     }
+    let Graded {
+        mut mismatches,
+        declines,
+        compared,
+        selected_something,
+    } = graded;
+    mismatches.append(&mut graded_cover.mismatches);
+    eprintln!(
+        "cover: compared={} declines={:?}",
+        graded_cover.compared, graded_cover.declines
+    );
 
     eprintln!("compared={compared} selected={selected_something} declines={declines:?}");
     assert!(
@@ -394,6 +523,10 @@ fn compile_asset_selection_matches_the_nuget_content_model() {
             shown.join("\n")
         );
     }
+    census.finish(
+        "BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-nuget --test all \
+         compile_assets_diff::compile_asset_selection_matches_the_nuget_content_model",
+    );
 }
 
 /// The ambiguity decline, proved *necessary* rather than merely safe.
@@ -510,6 +643,7 @@ fn realistic_package_layouts_never_decline() {
                 nuspec_xml: gen_bare_nuspec(),
                 nuspec: parse_nuspec(&gen_bare_nuspec()).expect("nuspec parses"),
                 files,
+                hostile: BTreeSet::new(),
             };
             let _ = &mut rng;
 
