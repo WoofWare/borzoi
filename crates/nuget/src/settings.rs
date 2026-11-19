@@ -132,8 +132,8 @@ pub trait SettingsFs {
     /// [`std::fs::metadata`]: what `path` names, following symlinks.
     fn metadata(&self, path: &Path) -> std::io::Result<Metadata>;
     /// [`std::fs::symlink_metadata`]: what `path` names, a symlink itself
-    /// rather than what it points at. Asked only where [`Self::metadata`]
-    /// failed, to tell a link that resolves to nothing from nothing at all.
+    /// rather than what it points at: whether anything at all is at a path,
+    /// a link that resolves to nothing included.
     fn link_metadata(&self, path: &Path) -> std::io::Result<Metadata>;
     /// The identity (device and inode) of the file `path` names, following
     /// symlinks, which tells two spellings of one file apart from two files.
@@ -868,10 +868,16 @@ fn config_files(
 /// path, following symlinks or, where that fails, the symlink itself, and it
 /// is not a directory. So a FIFO, a socket, a device, a link to nothing and a
 /// loop of links are each a config file to NuGet, which then opens it.
+///
+/// The entry's own type first, so that the common answers (nothing, a regular
+/// file, a directory) take one query; only something else (a link, a FIFO) is
+/// followed, since a link to a directory is not a file.
 fn file_exists(path: &Path, fs: &dyn SettingsFs) -> bool {
-    match fs.metadata(path) {
-        Ok(metadata) => !metadata.is_dir,
-        Err(_) => fs.link_metadata(path).is_ok(),
+    match fs.link_metadata(path) {
+        Err(_) => false,
+        Ok(entry) if entry.is_file => true,
+        Ok(entry) if entry.is_dir => false,
+        Ok(_) => !fs.metadata(path).is_ok_and(|target| target.is_dir),
     }
 }
 
