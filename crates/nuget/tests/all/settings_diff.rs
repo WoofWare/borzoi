@@ -577,12 +577,9 @@ fn gen_item(
     let spelt = drawn.and_then(|entry| {
         xml::spell(&value, entry.value, xml::Place::Attribute).map(|s| (entry.dimension, s.xml))
     });
-    let value = match spelt {
-        Some((dimension, spelt)) => {
-            hostile.insert(dimension);
-            spelt
-        }
-        None => value,
+    let (value, spelling) = match spelt {
+        Some((dimension, spelt)) => (spelt, Some(dimension)),
+        None => (value, None),
     };
     let item = match rng.below(80) {
         20..=21 => format!("<add value=\"{value}\" key=\"{key}\" />"),
@@ -600,10 +597,21 @@ fn gen_item(
         },
         // NuGet throws: its attribute names are exact, and an `add` needs a
         // key and a value.
-        36 => return (format!("<add Key=\"{key}\" value=\"{value}\" />"), true),
+        36 => {
+            if let Some(dimension) = spelling {
+                hostile.insert(dimension);
+            }
+            return (format!("<add Key=\"{key}\" value=\"{value}\" />"), true);
+        }
         37 => return (format!("<add key=\"{key}\" />"), true),
         _ => format!("<add key=\"{key}\" value=\"{value}\" />"),
     };
+    // A spelling counts where the item keeps the value it spelt.
+    if let Some(dimension) = spelling
+        && item.contains(&format!("value=\"{value}\""))
+    {
+        hostile.insert(dimension);
+    }
     (item, false)
 }
 
@@ -740,8 +748,12 @@ fn gen_case(rng: &mut SplitMix64, base: &Path, cli_home: bool) -> Case {
         if rng.below(5) < 2 {
             if let Some(entry) = hostile::fs::alphabet().sample(draw(rng)) {
                 // The folder's only file, under the spelling NuGet opens.
-                let (bytes, fault) = gen_config(rng, base, mix, &mut hostile);
-                unread_fault |= fault && content_is_read(entry.value);
+                let mut spellings = BTreeSet::new();
+                let (bytes, fault) = gen_config(rng, base, mix, &mut spellings);
+                if content_is_read(entry.value) {
+                    unread_fault |= fault;
+                    hostile.extend(spellings);
+                }
                 hostile.insert(entry.dimension);
                 if entry.value == State::Fifo {
                     unanswerable = Some(OPENS_A_FIFO);
@@ -770,17 +782,23 @@ fn gen_case(rng: &mut SplitMix64, base: &Path, cli_home: bool) -> Case {
     // Mostly present: the model declines where there is no user config,
     // which NuGet would write.
     if rng.below(8) != 0 {
-        let spelling = *rng.pick(&[
-            "NuGet.Config",
-            "NuGet.Config",
-            "NuGet.Config",
-            "nuget.config",
-        ]);
+        // Mostly the spelling NuGet loads on every platform: on Linux the
+        // other is no user config, which the model declines, and the
+        // generator's commits must stay above its floor there too.
+        let spelling = if rng.below(16) == 0 {
+            "nuget.config"
+        } else {
+            "NuGet.Config"
+        };
         let state = hostile::fs::alphabet().sample(draw(rng));
-        let (bytes, fault) = gen_config(rng, base, mix, &mut hostile);
+        let mut spellings = BTreeSet::new();
+        let (bytes, fault) = gen_config(rng, base, mix, &mut spellings);
         match state {
             Some(entry) => {
-                unread_fault |= fault && content_is_read(entry.value);
+                if content_is_read(entry.value) {
+                    unread_fault |= fault;
+                    hostile.extend(spellings);
+                }
                 hostile.insert(entry.dimension);
                 if entry.value == State::Fifo {
                     unanswerable = Some(OPENS_A_FIFO);
@@ -794,6 +812,7 @@ fn gen_case(rng: &mut SplitMix64, base: &Path, cli_home: bool) -> Case {
             }
             None => {
                 unread_fault |= fault;
+                hostile.extend(spellings);
                 files.push((format!("{home}/.nuget/NuGet/{spelling}"), bytes));
             }
         }
@@ -947,9 +966,16 @@ fn cover(census: &Census) {
                 state: State::Regular,
                 content: config_text("named", ""),
             }];
-            if let Some(twin) = entry.value.twin("a", ".config")
-                && harness.hostile.holds_apart(&rendered, &twin).is_ok()
-            {
+            let twin = entry.value.twin("a", ".config").filter(|twin| {
+                match harness.hostile.holds_apart(&rendered, twin) {
+                    Ok(()) => true,
+                    Err(refusal) => {
+                        census.unmakeable(&refusal);
+                        false
+                    }
+                }
+            });
+            if let Some(twin) = twin {
                 placements.push(Placement {
                     dir: listed_folder("home"),
                     name: twin,
@@ -1023,14 +1049,22 @@ fn cover(census: &Census) {
                 run_case(&mut harness, census, &mut tally, &case);
             }
             Some((fixed, process)) => {
-                // With no usable home of its own, .NET hands NuGet the empty
-                // string and NuGet works under the oracle's working folder.
-                let homeless = fixed.iter().any(|(name, _)| *name == "HOME");
-                if homeless {
-                    case.unanswerable = Some(
-                        "NuGet's home is then the oracle's working folder, which the test does \
-                         not own",
-                    );
+                // A hostile home is a path outside the test's tree: NuGet
+                // would write its user config there (or, given a home it
+                // cannot read, under the oracle's working folder), and the
+                // test owns neither. The path is nowhere, so there is no
+                // user config there for the model to read.
+                for (name, value) in &fixed {
+                    if matches!(*name, "HOME" | "DOTNET_CLI_HOME") {
+                        assert!(
+                            !Path::new(value).exists(),
+                            "{value}, which the hostile environments name as nowhere, exists"
+                        );
+                        case.unanswerable = Some(
+                            "NuGet's home is outside the test's tree, where the test owns \
+                             nothing NuGet writes",
+                        );
+                    }
                 }
                 let mut own = Harness::spawn_with(false, &fixed, &process);
                 run_case(&mut own, census, &mut tally, &case);
