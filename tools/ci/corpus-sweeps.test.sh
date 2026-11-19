@@ -8,6 +8,7 @@
 # here builds or tests anything.
 
 set -uo pipefail
+unset CDPATH
 
 here="$(cd "$(dirname "$0")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
@@ -97,7 +98,17 @@ assert_eq "a step name with a regex metacharacter is refused before any step run
   "$(out="$(PATH="$fake:$PATH" bash "$script" parser-corpus parser.corpus 2>/dev/null)"
     echo "$? $out")"
 
-# Every listed step has a command, and it is an ignored cargo test.
+# Every listed step has a command, and it is an ignored cargo test of its own
+# crate's package: one of another package would match no test there and pass.
+package_of() {
+  case "$1" in
+    cst) echo borzoi-cst ;;
+    msbuild) echo borzoi-msbuild ;;
+    nuget) echo borzoi-nuget ;;
+    sema) echo borzoi-sema ;;
+    lsp) echo borzoi ;;
+  esac
+}
 cat >"$fake/nix" <<'EOF'
 #!/usr/bin/env bash
 [ "$1 $2" = "develop --command" ] || { echo "fake nix: unexpected $*" >&2; exit 99; }
@@ -105,11 +116,14 @@ shift 2
 echo "$*"
 EOF
 chmod +x "$fake/nix"
-while read -r _ step; do
+while read -r crate step; do
   out="$(PATH="$fake:$PATH" bash "$script" "$step" 2>&1)"
   status=$?
   assert_eq "step $step runs an ignored cargo test" "0 yes" \
     "$status $([[ "$out" == "cargo test "*"-- --ignored --nocapture"* ]] && echo yes)"
+  packages="$(grep -oE -- '(^| )(-p|--package)( |=)[^ ]+' <<<"$out" | sed 's/^ //' | paste -sd' ' -)"
+  assert_eq "step $step tests $crate's package, and only it" \
+    "-p $(package_of "$crate")" "$packages"
 done < <(bash "$script" --list)
 
 # A crate argument selects exactly that crate's steps; more than one step keeps

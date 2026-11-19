@@ -22,6 +22,7 @@
 #
 # Run it outside `nix develop`: each step enters the devshell itself.
 set -euo pipefail
+unset CDPATH
 
 repo="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$repo"
@@ -63,50 +64,69 @@ steps=(
 
 crates=(cst msbuild nuget sema lsp)
 
-ignored() { # cargo-test arguments before `--`
-  nix develop --command cargo test "$@" -- --ignored --nocapture
+package_of() { # crate
+  case "$1" in
+    lsp) echo borzoi ;;
+    *) echo "borzoi-$1" ;;
+  esac
+}
+
+crate_of() { # step
+  local e
+  for e in "${steps[@]}"; do [[ "${e#* }" == "$1" ]] && { echo "${e%% *}"; return; }; done
+}
+
+# The package is the step's crate's, never the step's own choice: a step that
+# named another crate's package would match no test there and pass empty.
+pkg=
+ignored() { # cargo-test arguments before `--`, without `-p`
+  nix develop --command cargo test -p "$pkg" "$@" -- --ignored --nocapture
+}
+ignored_filters() { # test filters, which then follow `--`
+  nix develop --command cargo test -p "$pkg" --test all -- --ignored --nocapture "$@"
 }
 
 # Each step is a single command, so its status is the step's.
 run_step() { # name
+  pkg="$(package_of "$(crate_of "$1")")"
   case "$1" in
-    parser-corpus) ignored --profile gate -p borzoi-cst --test all parser_corpus:: ;;
-    parser-corpus-diff) ignored -p borzoi-cst --test all parser_corpus_diff:: ;;
-    feature-gates) ignored -p borzoi-cst --test all parser_diff_feature_gates:: ;;
-    version-dependence) ignored --profile gate -p borzoi-cst --test all version_dependence_census:: ;;
-    print-roundtrip) ignored -p borzoi-cst --test all print_roundtrip::corpus:: ;;
-    recovery) ignored --profile gate -p borzoi-cst --test all recovery_sweep:: ;;
+    parser-corpus) ignored --profile gate --test all parser_corpus:: ;;
+    parser-corpus-diff) ignored --test all parser_corpus_diff:: ;;
+    feature-gates) ignored --test all parser_diff_feature_gates:: ;;
+    version-dependence) ignored --profile gate --test all version_dependence_census:: ;;
+    print-roundtrip) ignored --test all print_roundtrip::corpus:: ;;
+    recovery) ignored --profile gate --test all recovery_sweep:: ;;
     decl-sequence-streams)
-      ignored -p borzoi-cst --test all \
+      ignored --test all \
         parser_diff_decl_sequence_grid::every_declaration_pair_streams
       ;;
-    flat-tree) ignored --profile gate -p borzoi-cst --test all flat_tree_reference::corpus ;;
-    facade-properties) ignored --profile gate -p borzoi-cst --test all facade_properties::corpus ;;
-    panic-fresh-seed) ignored --profile gate -p borzoi-cst --test all parser_panic_sweep::fresh_seed ;;
-    layout-perturbation) ignored --profile gate -p borzoi-cst --test all layout_perturbation_sweep:: ;;
-    utf16-width) ignored --profile gate -p borzoi-cst --test all utf16_width_invariance::corpus ;;
-    msbuild-corpus) ignored -p borzoi-msbuild --test fsproj_msbuild_corpus_diff ;;
-    sdk-chain-attribution) ignored -p borzoi-msbuild --test sdk_chain_decline_attribution ;;
-    nuget-soak) ignored -p borzoi-nuget --test all soak:: ;;
-    resolver-soak) ignored -p borzoi-nuget --test all resolver_diff::randomised_soundness_soak ;;
-    resolve-corpus) ignored -p borzoi-sema --test all resolve_corpus_diff:: ;;
-    attr-resolution) ignored -p borzoi-sema --test all attr_resolution_sweep:: ;;
-    silent-region) ignored -p borzoi-sema --test all silent_region_sweep:: ;;
-    auto-open-member) ignored -p borzoi-sema --test all auto_open_member_sweep:: ;;
-    infer-corpus-diff) ignored -p borzoi-sema --test all infer_corpus_diff:: ;;
-    infer-corpus-dump) ignored -p borzoi-sema --test all infer_corpus_dump:: ;;
+    flat-tree) ignored --profile gate --test all flat_tree_reference::corpus ;;
+    facade-properties) ignored --profile gate --test all facade_properties::corpus ;;
+    panic-fresh-seed) ignored --profile gate --test all parser_panic_sweep::fresh_seed ;;
+    layout-perturbation) ignored --profile gate --test all layout_perturbation_sweep:: ;;
+    utf16-width) ignored --profile gate --test all utf16_width_invariance::corpus ;;
+    msbuild-corpus) ignored --test fsproj_msbuild_corpus_diff ;;
+    sdk-chain-attribution) ignored --test sdk_chain_decline_attribution ;;
+    nuget-soak) ignored --test all soak:: ;;
+    resolver-soak) ignored --test all resolver_diff::randomised_soundness_soak ;;
+    resolve-corpus) ignored --test all resolve_corpus_diff:: ;;
+    attr-resolution) ignored --test all attr_resolution_sweep:: ;;
+    silent-region) ignored --test all silent_region_sweep:: ;;
+    auto-open-member) ignored --test all auto_open_member_sweep:: ;;
+    infer-corpus-diff) ignored --test all infer_corpus_diff:: ;;
+    infer-corpus-dump) ignored --test all infer_corpus_dump:: ;;
     infer-incremental)
-      ignored -p borzoi-sema --test all \
+      ignored --test all \
         infer_incremental_diff::incremental_equals_batch_over_a_corpus_sample
       ;;
-    infer-extension-damage) ignored -p borzoi-sema --test all infer_extension_damage_sweep::full_sweep ;;
-    lsp-parser-corpus) ignored -p borzoi --test all parser_corpus_sweep:: ;;
-    xml-doc-shipped) ignored -p borzoi --test all xml_doc_shipped_sweep:: ;;
-    xml-doc-source) ignored -p borzoi --test all xml_doc_source_diff::corpus:: ;;
+    infer-extension-damage) ignored --test all infer_extension_damage_sweep::full_sweep ;;
+    lsp-parser-corpus) ignored --test all parser_corpus_sweep:: ;;
+    xml-doc-shipped) ignored --test all xml_doc_shipped_sweep:: ;;
+    xml-doc-source) ignored --test all xml_doc_source_diff::corpus:: ;;
     inheritdoc)
       # The generated-program module's `deep_*` twins, in the module and its
       # families, are its only ignored tests, so its filter names the module.
-      nix develop --command cargo test -p borzoi --test all -- --ignored --nocapture \
+      ignored_filters \
         xml_doc_inheritdoc_sweep:: xml_doc_inheritdoc_cref_diff::deep_ \
         xml_doc_inheritdoc_generated_diff:: xml_doc_inheritdoc_metadata_diff::deep_ \
         xml_doc_type_id_diff::deep_
