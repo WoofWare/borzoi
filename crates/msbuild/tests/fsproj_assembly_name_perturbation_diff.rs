@@ -25,7 +25,7 @@
 
 mod common;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -38,6 +38,8 @@ use borzoi_msbuild::fsc::{
 };
 use borzoi_msbuild::observed::host_fs;
 use borzoi_oracle_harness::BoundedCommand;
+use borzoi_oracle_harness::hostile::value::{self, Write};
+use borzoi_oracle_harness::hostile::{Dimension, coverage};
 use borzoi_oracle_harness::msbuild_oracle::{
     BuildInputs, FscArgsDecline, FscArgsRequest, INPUT_NAMES, InputError, build_environment,
     fsc_args,
@@ -793,22 +795,6 @@ fn lay_out(case: &Case, dir: &Path) -> Option<(std::path::PathBuf, BuildInputs)>
          <TargetFramework>net10.0</TargetFramework>{body}</PropertyGroup>\
          {definitions}<ItemGroup>{items}<Compile Include=\"A.fs\"{compile_attributes}>{compile_children}</Compile></ItemGroup></Project>"
     );
-    // `fsc_args`'s domain: a build that does not read the process's command
-    // line, which a tree without property functions and build code cannot.
-    for spelling in ["$([", "<Target ", "<Target>", "<UsingTask ", "<Exec "] {
-        assert!(
-            !text.contains(spelling)
-                && ["Directory.Build.props", "Directory.Build.targets"]
-                    .iter()
-                    .all(|file| {
-                        !host_fs::read_to_string(dir.join(file))
-                            .unwrap_or_default()
-                            .contains(spelling)
-                    }),
-            "{}: a generated tree holds {spelling:?}, outside fsc_args' domain",
-            case.label()
-        );
-    }
     std::fs::write(&project, text).unwrap();
     if case.place == Place::UntrackedCompile {
         commit_ignoring_untracked(dir);
@@ -1077,6 +1063,31 @@ fn grade(case: &Case) -> Result<Outcome, String> {
             case.must_commit
         ));
     }
+    // `fsc_args`'s domain: a build that does not read the process's command
+    // line, which a tree without property functions and build code cannot.
+    // Only a committed case is built, so only one is held to it: a value
+    // that reads the build (`hostile::value`'s `ReadsTheBuild`) must have
+    // declined.
+    let dir = project.parent().unwrap();
+    let documents = [
+        project.to_path_buf(),
+        dir.join("Directory.Build.props"),
+        dir.join("Directory.Build.targets"),
+        borzoi_msbuild::fsc::restore_props(&project).unwrap(),
+    ];
+    for spelling in ["$([", "<Target ", "<Target>", "<UsingTask ", "<Exec "] {
+        if let Some(document) = documents.iter().find(|document| {
+            host_fs::read_to_string(document)
+                .unwrap_or_default()
+                .contains(spelling)
+        }) {
+            return Err(format!(
+                "{}: committed {name:?} for a tree whose {} holds {spelling:?}, outside fsc_args' domain",
+                case.label(),
+                document.display()
+            ));
+        }
+    }
     let request = FscArgsRequest {
         project: &project,
         inputs: &inputs,
@@ -1170,6 +1181,91 @@ fn grade_all(cases: &[Case]) -> (BTreeMap<(Place, Outcome), usize>, Vec<String>)
         }
     });
     results.into_inner().unwrap()
+}
+
+/// One case per hostile property value of the shared library
+/// (`hostile::value`), each at an allowed property and a place by turns: a
+/// value a later write puts back is written in the body and reset in
+/// `Directory.Build.targets`. Each with the dimension it stands for.
+fn hostile_value_cases() -> Vec<(Case, Dimension)> {
+    let places = [
+        Place::Body,
+        Place::DirectoryBuildProps,
+        Place::DirectoryBuildTargets,
+        Place::Global,
+        Place::Environment,
+    ];
+    value::alphabet()
+        .entries()
+        .iter()
+        .enumerate()
+        .map(|(i, entry)| {
+            let (name, grammar) = ALLOWED_PROPERTIES[i % ALLOWED_PROPERTIES.len()];
+            let plain = plain_value(name, grammar);
+            let (place, reset) = match entry.value.write {
+                Write::Final => (places[i % places.len()], ""),
+                Write::ThenPlain => (Place::BodyThenTargets, plain),
+            };
+            let case = Case {
+                place,
+                name,
+                value: entry.value.render(plain),
+                reset,
+                must_commit: None,
+                must_decline: false,
+            };
+            (case, entry.dimension)
+        })
+        .collect()
+}
+
+/// Every [`hostile_value_cases`] case graded, recording what became of each
+/// dimension in the census `assembly_name_values`. A value a global or a
+/// variable cannot carry (a line break) is written in the body instead, so
+/// every value reaches the derivation.
+#[test]
+#[ignore = "every hostile property value of the shared library: one build-backed case each"]
+fn deep_hostile_values() {
+    let census = coverage::open(file!(), "assembly_name_values", &[]);
+    let mut failures = Vec::new();
+    // The plain values beside them: each allowed property at its plain value.
+    for case in cases()
+        .into_iter()
+        .filter(|c| c.must_commit.is_some() && c.place == Place::Body)
+    {
+        match grade(&case) {
+            Ok(outcome) => {
+                let outcome = format!("{outcome:?}");
+                census.reached(
+                    &BTreeSet::new(),
+                    outcome.split('(').next().unwrap_or_default(),
+                );
+            }
+            Err(failure) => failures.push(failure),
+        }
+    }
+    for (case, dimension) in hostile_value_cases() {
+        let graded = match grade(&case) {
+            Ok(Outcome::Inexpressible) => grade(&Case {
+                place: Place::Body,
+                ..case.clone()
+            }),
+            other => other,
+        };
+        match graded {
+            Ok(outcome) => {
+                let outcome = format!("{outcome:?}");
+                let outcome = outcome.split('(').next().unwrap_or_default();
+                census.reached(&BTreeSet::from([dimension]), outcome);
+            }
+            Err(failure) => failures.push(failure),
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    census.finish(
+        "BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-msbuild \
+         --test fsproj_assembly_name_perturbation_diff deep_hostile_values -- --ignored",
+    );
 }
 
 /// `cases`, but for those `BORZOI_FSC_NAME_ONLY` (a name) leaves out.
