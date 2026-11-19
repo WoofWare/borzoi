@@ -117,9 +117,14 @@ pub struct Fcs {
     /// FCS's in-memory signature, decoded: what a dependant reads, so
     /// empty when FCS imports nothing of the producer.
     pub memory: Rows,
+    /// Whether A's check failed and FCS's recovered signature does not
+    /// decode, so `memory` holds FCS's view of its entities alone.
+    pub undecodable: bool,
     /// Whether A checked with no error.
     pub clean: bool,
     pub errors: Vec<String>,
+    /// The errors of FCS's compile of a clean A, which then wrote no DLL.
+    pub compile_errors: Vec<String>,
 }
 
 fn plain(s: &str) -> PlainName {
@@ -144,6 +149,32 @@ fn files_of(files: &[(String, String)]) -> Vec<FixtureFile> {
 fn decode(primary: &[u8], b: Option<&[u8]>) -> Result<(Vec<PickledEntityRow>, Vec<ExtensionRow>), String> {
     let ccu = borzoi_assembly::unpickle_signature(primary, b).map_err(|e| e.to_string())?;
     borzoi_assembly::existence::pickled_rows(&ccu)
+}
+
+/// FCS's view of one entity as an existence row.
+fn fcs_row(e: &borzoi_oracle_harness::assembly_entities::FcsEntity) -> PickledEntityRow {
+    use borzoi_assembly::existence::PickledEntityKind;
+    use borzoi_oracle_harness::assembly_entities::FcsEntityKind;
+    PickledEntityRow {
+        namespace: if e.namespace.is_empty() {
+            Vec::new()
+        } else {
+            e.namespace.split('.').map(str::to_owned).collect()
+        },
+        enclosing: e.enclosing.clone(),
+        logical_name: e.logical_name.clone(),
+        compiled_name: e.compiled_name.clone(),
+        kind: match e.kind {
+            FcsEntityKind::Module => PickledEntityKind::Module,
+            FcsEntityKind::Abbreviation => PickledEntityKind::Abbreviation,
+            FcsEntityKind::Exception => PickledEntityKind::Exception,
+            FcsEntityKind::Measure => PickledEntityKind::Measure,
+            FcsEntityKind::Type => PickledEntityKind::Type,
+        },
+        public: e.access == borzoi_oracle_harness::assembly_entities::FcsAccess::Public,
+        auto_open: e.auto_open,
+        extension: e.extension,
+    }
 }
 
 /// The producer's assembly name: fixed, so no generated name can collide
@@ -205,16 +236,34 @@ pub fn fcs(cell: &Cell) -> Fcs {
         cell.name,
         streams.len()
     );
-    // A producer FCS builds no assembly data for is one a dependant reads
-    // nothing of.
+    // A producer FCS builds no assembly data for, or does not import, is one
+    // a dependant reads nothing of: its signature (a check that failed) is
+    // not graded.
+    //
+    // A producer whose check fails may still be imported, with a recovered
+    // signature `unpickle_signature` need not read (no compiler writes one
+    // to a DLL). Its entities are then graded by FCS's own view of them, and
+    // its extension rows not at all. So are those of a clean producer whose
+    // signature the decoder cannot read, provided the DLL FCS compiles fails
+    // it identically (a decoder gap, #1081, not an in-memory layout).
+    let mut undecodable = false;
+    let mut decode_error: Option<String> = None;
     let (entities, extensions) = match streams.first() {
+        _ if !response.imported => (Vec::new(), Vec::new()),
         None => (Vec::new(), Vec::new()),
         Some(s) => {
             let primary = s.primary_bytes().expect("hex");
             let b = s.b_bytes().expect("hex");
-            decode(&primary, b.as_deref()).unwrap_or_else(|e| {
-                panic!("{}: the in-memory signature does not decode: {e}", cell.name)
-            })
+            match decode(&primary, b.as_deref()) {
+                Ok(rows) => rows,
+                Err(e) => {
+                    if errors.is_empty() {
+                        decode_error = Some(e);
+                    }
+                    undecodable = true;
+                    (response.entities.iter().map(fcs_row).collect(), Vec::new())
+                }
+            }
         }
     };
     let memory = Rows {
@@ -268,29 +317,46 @@ pub fn fcs(cell: &Cell) -> Fcs {
         cell.name
     );
     assert!(
-        !response.imported || decoded == theirs,
+        !response.imported || undecodable || decoded == theirs,
         "{}: the decoded in-memory signature is not FCS's view of it\n  decoded: {decoded:#?}\n  FCS: {theirs:#?}",
         cell.name
     );
     assert!(
-        response.read_errors.is_empty(),
+        response.read_errors.is_empty() || !errors.is_empty(),
         "{}: FCS could not read {:?}",
         cell.name,
         response.read_errors
     );
     // D1 in rows: the DLL FCS compiles from the same arguments reads the same.
+    // A check can pass where the compile fails (two types given one
+    // compiled name): there is then no DLL to hold the signature to.
+    let mut compile_errors = Vec::new();
+    let mut compile_output: Option<PathBuf> = None;
     if errors.is_empty() {
-        let line = fixture
-            .compile_request(&plain(PRODUCER), &framework, &BTreeMap::new());
+        let line = fixture.compile_request(&plain(PRODUCER), &framework, &BTreeMap::new());
         let out: CompileResponse = request(line.as_line()).expect("compile the producer");
-        let dll = out
-            .output
-            .unwrap_or_else(|| panic!("{}: compile failed: {:?}", cell.name, out.diagnostics));
+        compile_errors = out
+            .errors()
+            .map(|d| format!("FS{}", d["ErrorNumber"]))
+            .collect();
+        assert!(
+            out.output.is_some() || !compile_errors.is_empty(),
+            "{}: the compile wrote no DLL and reported no error",
+            cell.name
+        );
+        compile_output = out.output;
+    }
+    if let Some(dll) = compile_output.filter(|_| compile_errors.is_empty()) {
         let bytes = std::fs::read(&dll).expect("read the DLL");
         let assembly = Ecma335Assembly::parse(&bytes).expect("parse the DLL");
         let index = assembly.existence_index().expect("existence index");
-        let PickleLayer::Read(rows) = index.pickle else {
-            panic!("{}: the DLL's pickle is {:?}", cell.name, index.pickle);
+        let rows = match (index.pickle, &decode_error) {
+            (PickleLayer::Read(rows), None) => rows,
+            (PickleLayer::Unreadable(dll), Some(memory)) if dll == *memory => Vec::new(),
+            (pickle, _) => panic!(
+                "{}: the DLL's pickle is {pickle:?}, the in-memory one's decode {decode_error:?}",
+                cell.name
+            ),
         };
         let dll_rows = Rows {
             entities: rows,
@@ -302,9 +368,9 @@ pub fn fcs(cell: &Cell) -> Fcs {
             auto_opens: assembly.assembly_auto_opens().expect("auto-opens"),
         }
         .sorted();
-        assert_eq!(
-            dll_rows, memory,
-            "{}: D1 in rows: the compiled DLL and the in-memory signature differ",
+        assert!(
+            decode_error.is_some() || dll_rows == memory,
+            "{}: D1 in rows: the compiled DLL and the in-memory signature differ\n  DLL: {dll_rows:#?}\n  memory: {memory:#?}",
             cell.name
         );
     }
@@ -320,8 +386,10 @@ pub fn fcs(cell: &Cell) -> Fcs {
     };
     Fcs {
         memory,
+        undecodable,
         clean: errors.is_empty(),
         errors,
+        compile_errors,
     }
 }
 
@@ -441,8 +509,22 @@ pub fn grade(cell: &Cell, fcs: &Fcs, ours: &SourceExistence) -> Result<String, S
             lines(&mine.extensions),
         ));
     }
+    if fcs.clean && fcs.undecodable {
+        return Ok(format!(
+            "covers FCS's entities, the signature undecodable (#1081) ({:?})",
+            surface.approximations
+        ));
+    }
     if !fcs.clean {
-        return Ok(format!("covers, FCS rejects ({:?})", surface.approximations));
+        let undecodable = if fcs.undecodable {
+            ", its signature undecodable"
+        } else {
+            ""
+        };
+        return Ok(format!(
+            "covers, FCS rejects{undecodable} ({:?})",
+            surface.approximations
+        ));
     }
     if surface.approximations.is_empty() {
         if mine != *theirs {
@@ -479,7 +561,9 @@ pub fn grade_cells(cells: &[Cell]) -> (Vec<(String, String)>, Vec<String>) {
             let (unknown, _) = ours(cell, Some(&MarkerRoutes::Unknown));
             let c = grade(cell, &fcs, &certified);
             let u = grade(cell, &fcs, &unknown);
-            (c, u, fcs.errors.clone())
+            let mut errors = fcs.errors.clone();
+            errors.extend(fcs.compile_errors.iter().map(|e| format!("compile {e}")));
+            (c, u, errors)
         }));
         match graded {
             Ok((c, u, errors)) => (cell.name.clone(), c, u, errors),
@@ -536,4 +620,92 @@ fn source_rows_are_fcs_rows_over_the_grid() {
         &manifest,
         &regenerate("source_existence_diff::source_rows_are_fcs_rows_over_the_grid"),
     );
+}
+
+/// The cells the generator makes from seeds `first..first + count`.
+fn generated(first: u64, count: u64) -> Vec<Cell> {
+    (first..first + count)
+        .map(crate::source_existence_gen::cell)
+        .collect()
+}
+
+/// The pinned default run of the generator: its seeds are fixed, so each
+/// case's verdict is pinned in `source_existence_gen.txt`.
+#[test]
+fn source_rows_are_fcs_rows_over_generated_projects() {
+    let cells = generated(0, 60);
+    let (entries, failures) = grade_cells(&cells);
+    if !failures.is_empty() {
+        for c in &cells {
+            if failures.iter().any(|f| f.contains(&format!("{}:", c.name))) {
+                for (name, text) in &c.files {
+                    eprintln!("--- {} {name}\n{text}", c.name);
+                }
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} failures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+    let manifest = Manifest::from_keyed(entries).expect("well-formed entries");
+    check_manifest(
+        "source_existence_gen",
+        &manifest,
+        &regenerate("source_existence_diff::source_rows_are_fcs_rows_over_generated_projects"),
+    );
+}
+
+/// The generator over more seeds: `BORZOI_SOURCE_EXISTENCE_SEED` (default
+/// 1000) and `BORZOI_SOURCE_EXISTENCE_CASES` (default 400). Pins nothing:
+/// every property must hold.
+#[test]
+#[ignore = "hundreds of FCS checks; the default run is the gate"]
+fn deep_source_rows_are_fcs_rows_over_generated_projects() {
+    let var = |name: &str, default: u64| {
+        std::env::var(name)
+            .ok()
+            .map(|v| v.parse().expect("a count"))
+            .unwrap_or(default)
+    };
+    let first = var("BORZOI_SOURCE_EXISTENCE_SEED", 1000);
+    let count = var("BORZOI_SOURCE_EXISTENCE_CASES", 400);
+    eprintln!("seeds {first}..{}", first + count);
+    let cells = generated(first, count);
+    let (entries, failures) = grade_cells(&cells);
+    let exact = entries
+        .iter()
+        .filter(|(_, v)| v.starts_with("certified: exact"))
+        .count();
+    eprintln!("{} cases, {exact} exact under the certificate", entries.len());
+    assert!(
+        failures.is_empty(),
+        "{} failures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// Print the generated cell `BORZOI_SOURCE_EXISTENCE_SEED`, our reading of
+/// it, and FCS's diagnostics: the tool for reading a generated failure.
+#[test]
+#[ignore = "a debugging aid, run by hand"]
+fn show_generated_cell() {
+    let seed: u64 = std::env::var("BORZOI_SOURCE_EXISTENCE_SEED")
+        .expect("BORZOI_SOURCE_EXISTENCE_SEED")
+        .parse()
+        .expect("a seed");
+    let cell = crate::source_existence_gen::cell(seed);
+    for (name, text) in &cell.files {
+        eprintln!("--- {name}\n{text}");
+    }
+    let (ours, _) = ours(&cell, None);
+    match &ours {
+        SourceExistence::Unread(why) => eprintln!("ours: unread {why:?}"),
+        SourceExistence::Read(s) => eprintln!("ours: read, {:?}", s.approximations),
+    }
+    let fcs = fcs(&cell);
+    eprintln!("FCS errors: {:?}", fcs.errors);
 }

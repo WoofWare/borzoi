@@ -792,13 +792,13 @@ impl FileWalk<'_> {
             };
             match m.kind() {
                 ModuleOrNamespaceKind::GlobalNamespace => {
-                    self.decls(&Scope::root(Vec::new()), &decls, m.is_rec(), &[])?;
+                    self.decls(&Scope::root(Vec::new()), &decls, m.is_rec(), false, &[])?;
                 }
                 ModuleOrNamespaceKind::DeclaredNamespace => {
                     let ns = long_id_segments(m.long_id())
                         .ok_or(ExistenceUnread::UnnamedDeclaration(self.index))?;
                     self.namespace(&ns);
-                    self.decls(&Scope::root(ns), &decls, m.is_rec(), &[])?;
+                    self.decls(&Scope::root(ns), &decls, m.is_rec(), false, &[])?;
                 }
                 ModuleOrNamespaceKind::NamedModule | ModuleOrNamespaceKind::Anon => {
                     let (segments, attrs, header): (Vec<String>, Vec<AttributeList>, bool) =
@@ -963,13 +963,15 @@ impl FileWalk<'_> {
         meets
     }
 
-    /// The declaration list `decls` in `scope`; `outer` names every type
-    /// the enclosing lists declare before it.
+    /// The declaration list `decls` in `scope`, a module's when `in_module`
+    /// (else a namespace's); `outer` names every type the enclosing lists
+    /// declare before it.
     fn decls(
         &mut self,
         scope: &Scope,
         decls: &Decls,
         is_rec: bool,
+        in_module: bool,
         outer: &[String],
     ) -> Result<(), ExistenceUnread> {
         let locals = self.local_types(decls);
@@ -990,11 +992,35 @@ impl FileWalk<'_> {
                 .map(|(i, _)| i)
                 .collect(),
         };
+        // A module's list FCS checks as one recursive group counts its
+        // exceptions among the names a module's suffix meets
+        // (`TypeNamesInMutRecDecls`); a namespace's list never does, `rec`
+        // or not (`TypeNamesInNonMutRecDecls`).
+        let exceptions: Vec<String> = match decls {
+            Decls::Impl(ds) if is_rec && in_module => ds
+                .iter()
+                .filter_map(|d| match d {
+                    ModuleDecl::Exception(e) => e.union_case().and_then(|c| c.ident()),
+                    _ => None,
+                })
+                .map(|t| id_text(&t).into_owned())
+                .collect(),
+            Decls::Sig(ds) if is_rec && in_module => ds
+                .iter()
+                .filter_map(|d| match d {
+                    SigDecl::Exception(e) => e.union_case().and_then(|c| c.ident()),
+                    _ => None,
+                })
+                .map(|t| id_text(&t).into_owned())
+                .collect(),
+            _ => Vec::new(),
+        };
         let ctx = ListCtx {
             locals: &locals,
             opens: &opens,
             is_rec,
             outer,
+            exceptions: &exceptions,
         };
         match decls {
             Decls::Impl(ds) => {
@@ -1025,7 +1051,8 @@ impl FileWalk<'_> {
                     .and_then(|s| s.last().cloned())
                     .ok_or(ExistenceUnread::UnnamedDeclaration(self.index))?;
                 let attrs: Vec<AttributeList> = m.attributes().collect();
-                let meets = Self::meets_type(ctx.locals, &name, false);
+                let meets = Self::meets_type(ctx.locals, &name, false)
+                    .or(ctx.meets_exception(&name));
                 let public = !header_access_restricts(m.syntax());
                 self.module(
                     scope,
@@ -1112,7 +1139,8 @@ impl FileWalk<'_> {
                     .and_then(|s| s.last().cloned())
                     .ok_or(ExistenceUnread::UnnamedDeclaration(self.index))?;
                 let attrs: Vec<AttributeList> = m.attributes().collect();
-                let meets = Self::meets_type(ctx.locals, &name, true);
+                let meets = Self::meets_type(ctx.locals, &name, true)
+                    .or(ctx.meets_exception(&name));
                 let public = !header_access_restricts(m.syntax());
                 self.module(
                     scope,
@@ -1206,7 +1234,7 @@ impl FileWalk<'_> {
             } else {
                 name.to_owned()
             };
-            self.decls(&scope.inner(&logical, public), decls, is_rec, outer)?;
+            self.decls(&scope.inner(&logical, public), decls, is_rec, true, outer)?;
             // `[<CompiledName>]` does not rename a module.
             self.entity(
                 scope,
@@ -1363,14 +1391,16 @@ impl FileWalk<'_> {
                 }
                 // FCS reads `type A = B`, `B` one identifier, as a union with
                 // case `B` when `B` is `A` or names no type in scope (and `A`
-                // is no measure). A union case must start upper case, so a
-                // clean `B` that does not is a type; so is one a type of this
-                // file declares where it is visible.
+                // is no measure). `B` names a type in scope, whatever else
+                // is in scope, when FSharp.Core declares it (it is open in
+                // every file) or a type of this file declares it where it is
+                // visible. For any other `B` FCS may take the union reading,
+                // a check that then fails included, so both readings stand.
                 let visible = ctx.visible_at(position);
                 match target.as_ref().and_then(abbrev_single_ident) {
                     Some(t) if measure == Maybe::No && t == name => vec![PickledEntityKind::Type],
                     Some(t)
-                        if !t.chars().next().is_some_and(char::is_uppercase)
+                        if FSHARP_CORE_TYPE_NAMES.contains(&t.as_str())
                             || visible.contains(&t) =>
                     {
                         vec![PickledEntityKind::Abbreviation]
@@ -1654,9 +1684,20 @@ struct ListCtx<'a> {
     is_rec: bool,
     /// The types the enclosing lists declare before this one.
     outer: &'a [String],
+    /// The exceptions a module's suffix meets in this list.
+    exceptions: &'a [String],
 }
 
 impl ListCtx<'_> {
+    /// Whether a module named `name` meets an exception of this list.
+    fn meets_exception(&self, name: &str) -> Maybe {
+        if self.exceptions.iter().any(|e| e == name) {
+            Maybe::Yes
+        } else {
+            Maybe::No
+        }
+    }
+
     /// The names of the types visible, by the lexical scope alone, at
     /// `position` of the list: the enclosing lists' earlier ones, and this
     /// list's up to and including `position`'s own group (all of them, in a
@@ -1780,6 +1821,41 @@ fn long_id_segments(li: Option<LongIdent>) -> Option<Vec<String>> {
     (!segs.is_empty()).then_some(segs)
 }
 
+/// The type abbreviations and types FSharp.Core declares under a name with
+/// no arity suffix in the namespaces every F# file has open
+/// (`Microsoft.FSharp.Core`, `Microsoft.FSharp.Collections`,
+/// `Microsoft.FSharp.Control`): an abbreviation's single-identifier target
+/// spelled as one of these names a type in scope.
+const FSHARP_CORE_TYPE_NAMES: &[&str] = &[
+    "obj",
+    "exn",
+    "string",
+    "char",
+    "bool",
+    "unit",
+    "decimal",
+    "float",
+    "float32",
+    "single",
+    "double",
+    "int",
+    "uint",
+    "int8",
+    "uint8",
+    "sbyte",
+    "byte",
+    "int16",
+    "uint16",
+    "int32",
+    "uint32",
+    "int64",
+    "uint64",
+    "nativeint",
+    "unativeint",
+    "bigint",
+    "voidptr",
+];
+
 /// The single identifier an abbreviation's target names, parentheses
 /// stripped: the shape FCS may read as a union case.
 fn abbrev_single_ident(ty: &Type) -> Option<String> {
@@ -1887,19 +1963,27 @@ fn member_shape(m: &MemberDefn) -> (Vec<AttributeList>, MemberShape) {
                 return (lists, MemberShape::NoVal);
             }
             let is_static = mm.leading_keyword() == MemberLeading::StaticMember;
-            let Some(Pat::LongIdent(l)) = mm.binding().and_then(|b| b.pat()) else {
-                return (lists, MemberShape::Unnamed);
-            };
-            let name = if let Some(ap) = l.active_pat_name() {
-                active_pattern_name(&ap)
-            } else {
-                match l.head().and_then(|h| h.idents().last()) {
-                    Some(t) => id_text(&t).into_owned(),
-                    None => return (lists, MemberShape::Unnamed),
+            // The head: `this.Name args` (a long-ident pattern), or a bare
+            // name with no receiver (`static member Name = …`).
+            let (name, is_property) = match mm.binding().and_then(|b| b.pat()) {
+                Some(Pat::LongIdent(l)) => {
+                    let name = if let Some(ap) = l.active_pat_name() {
+                        active_pattern_name(&ap)
+                    } else {
+                        match l.head().and_then(|h| h.idents().last()) {
+                            Some(t) => id_text(&t).into_owned(),
+                            None => return (lists, MemberShape::Unnamed),
+                        }
+                    };
+                    // A member with no argument pattern is a property's getter.
+                    (name, l.args().next().is_none())
                 }
+                Some(Pat::Named(n)) => match n.ident() {
+                    Some(t) => (id_text(&t).into_owned(), true),
+                    None => return (lists, MemberShape::Unnamed),
+                },
+                _ => return (lists, MemberShape::Unnamed),
             };
-            // A member with no argument pattern is a property's getter.
-            let is_property = l.args().next().is_none();
             let val = if is_property {
                 MemberVal {
                     logical: format!("get_{name}"),
@@ -2095,3 +2179,6 @@ pub fn certify_by_spelling(files: &[&ProjectFile]) -> MarkerRoutes {
     }
     MarkerRoutes::Certified(map)
 }
+
+#[cfg(test)]
+mod tests;

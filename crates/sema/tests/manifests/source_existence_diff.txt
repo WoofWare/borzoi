@@ -2,6 +2,7 @@
 # Regenerate with:
 #   BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-sema --test all source_existence_diff::source_rows_are_fcs_rows_over_the_grid
 abbreviation_or_union	certified: covers [AbbreviationOrUnion]; unknown: covers [AbbreviationOrUnion]
+abbreviation_targets	certified: covers, FCS rejects ({AbbreviationOrUnion}); unknown: covers, FCS rejects ({AbbreviationOrUnion}) [FCS: FS53]
 abbreviations	certified: exact; unknown: exact
 access	certified: exact; unknown: exact
 access_inherited	certified: exact; unknown: exact
@@ -39,7 +40,10 @@ module_nested_deep	certified: exact; unknown: exact
 module_rec	certified: exact; unknown: exact
 module_suffix	certified: exact; unknown: covers [UncertainAttribute]
 module_suffix_augmentation_only	certified: exact; unknown: exact
+module_suffix_exception	certified: covers, FCS rejects ({}); unknown: covers, FCS rejects ({}) [FCS: FS37]
 module_suffix_later_type	certified: exact; unknown: exact
+module_suffix_rec_exception	certified: exact; unknown: exact
+module_suffix_rec_namespace	certified: covers, FCS rejects ({}); unknown: covers, FCS rejects ({}) [FCS: FS37]
 names_backticked	certified: exact; unknown: exact
 names_backticked_namespace	certified: exact; unknown: exact
 names_colliding	certified: exact; unknown: exact

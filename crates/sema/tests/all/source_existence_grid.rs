@@ -144,6 +144,26 @@ pub fn cells() -> Vec<Cell> {
             "namespace Suffix\ntype Same = { X: int }\nmodule Same =\n    let x = 1\ntype Generic<'a> = { V: 'a }\nmodule Generic =\n    let y = 1\ntype MeasureG<[<Measure>] 'u> = { V: float<'u> }\nmodule MeasureG =\n    let z = 1\nmodule Lone =\n    let w = 1\ntype Later = int\n",
         ),
         one(
+            "module_suffix_rec_exception",
+            "module rec SuffixRecExn\nexception B of string\nmodule B =\n    let x = 1\n",
+        ),
+        one(
+            "module_suffix_exception",
+            "module SuffixExn\nexception B of string\nmodule B =\n    let x = 1\n",
+        ),
+        one(
+            "module_suffix_rec_namespace",
+            "namespace rec SuffixRecNs\ntype T = { X: int }\nmodule T =\n    let x = 1\nexception E of string\nmodule E =\n    let y = 1\n",
+        ),
+        one(
+            "abbreviation_targets",
+            "namespace AbbrT\nopen System\ntype Local = { X: int }\ntype ToLocal = Local\ntype ToCore = int\ntype ToObj = obj\ntype ToBcl = DateTime\n",
+        ),
+        one(
+            "abbreviation_to_unknown_lower_case",
+            "namespace AbbrLower\ntype ToLower = notatype\n",
+        ),
+        one(
             "module_suffix_later_type",
             "namespace SuffixLater\nmodule Thing =\n    let x = 1\ntype Thing = { X: int }\n",
         ),
