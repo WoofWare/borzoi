@@ -73,14 +73,16 @@ run_step() { # name
       # rather than the server (sibling projects sharing a file, a byte-order
       # mark on line 1, the attribute and qualifier matrices). They are
       # `#[ignore]`d only because they drive FCS, so every ignored test runs
-      # except the two that take a project from the environment:
-      # `project_corpus_resolution_diff` is the `resolution` step in a debug
-      # build (and would read BORZOI_PROJECT_LIST), and
-      # `explain_token_at_position` is a hand-run trace.
+      # except the two that take a project from the environment and the
+      # hand-run sweeps: `project_corpus_resolution_diff` is the `resolution`
+      # step in a debug build (and would read BORZOI_PROJECT_LIST),
+      # `explain_token_at_position` is a hand-run trace, and each `deep_` test
+      # is a wider run of a differential whose default run is here.
       nix develop --command cargo test -p borzoi-corpus-diff --features surface-reference -- \
         --include-ignored \
         --skip project_corpus_resolution_diff \
-        --skip explain_token_at_position
+        --skip explain_token_at_position \
+        --skip deep_
       ;;
     assembly-projection)
       # This sweep wants a populated package cache rather than a fixture, and

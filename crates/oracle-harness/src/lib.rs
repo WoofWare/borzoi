@@ -41,6 +41,7 @@ pub mod module_tree;
 pub mod nuget_oracle;
 pub mod panic_silence;
 pub mod par_map;
+pub mod project_graph;
 pub mod repetition_shapes;
 pub mod restore_globals;
 pub mod stack_probe;

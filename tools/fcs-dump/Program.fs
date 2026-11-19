@@ -6373,23 +6373,70 @@ let private withFullReferencePaths (projOpts: FSharpProjectOptions) : FSharpProj
                 | Some prefix -> "-r:" + Path.GetFullPath(o.Substring prefix.Length)
                 | None -> o) }
 
+/// Refuse `path` unless it is a regular, non-empty file, links followed,
+/// before anything opens it: opening a FIFO or a device blocks or reads
+/// forever, and an assembly is never empty.
+[<System.Runtime.InteropServices.DllImport("libSystem.Native", EntryPoint = "SystemNative_Stat")>]
+extern int private systemNativeStat(
+    [<System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.LPUTF8Str)>] string path,
+    byte[] output)
+
+/// Whether `path` is a regular file, links followed, on Unix: by the
+/// runtime's own `stat` (`SystemNative_Stat`, whose `FileStatus` starts
+/// `Flags`, `Mode`, with the file type normalised to `S_IFREG = 0x8000`), so
+/// nothing has to open it to find out. Opening a FIFO or a device blocks or
+/// reads forever.
+let private isRegularFileOnUnix (path: string) =
+    let status = Array.zeroCreate<byte> 512
+    systemNativeStat (path, status) = 0 && (BitConverter.ToInt32(status, 4) &&& 0xF000) = 0x8000
+
+/// [`isRegularFile`] on Windows, where `libSystem.Native` does not exist and
+/// there are no FIFOs: a file that exists and is neither a directory nor a
+/// device. Not exercised by any CI lane (none runs Windows).
+let private isRegularFileOnWindows (path: string) =
+    File.Exists path
+    && (let attributes = File.GetAttributes path
+        not (attributes.HasFlag FileAttributes.Directory || attributes.HasFlag FileAttributes.Device))
+
+/// Whether `path` is a regular file, links followed, found out without
+/// opening it ([`isRegularFileOnUnix`], [`isRegularFileOnWindows`]).
+let private isRegularFile (path: string) =
+    if OperatingSystem.IsWindows() then isRegularFileOnWindows path else isRegularFileOnUnix path
+
+/// Refuse a reference `path` unless it is a regular, non-empty file
+/// ([`isRegularFile`]); an assembly is never empty.
+let private requireRegularFile (path: string) =
+    if not (File.Exists path) then
+        failwithf "reference %s is not a file" path
+    if not (isRegularFile path) || FileInfo(path).Length = 0L then
+        failwithf "reference %s is not a regular file" path
+
+/// Refuse a source `path` unless it is a regular file ([`isRegularFile`]),
+/// which may be empty.
+let private requireRegularSource (path: string) =
+    if not (isRegularFile path) then
+        failwithf "source %s is not a regular file" path
+
 /// The references `projOpts` names (`-r:`), each refused if fsc would reject
-/// it: one that is not a file, or not an assembly (FS0084). FCS's project
-/// check resolves its references without reporting these, so a project with
-/// one would otherwise look clean.
+/// it: one that is not a regular file ([`requireRegularFile`]), or not an
+/// assembly (FS0084). FCS's project check resolves its references without
+/// reporting these, so a project with one would otherwise look clean. A
+/// project reference's output (`FSharpReference`) is not read from disk, so
+/// it is not a reference here.
 let private readableReferences (projOpts: FSharpProjectOptions) : string list =
+    let fromSource =
+        projOpts.ReferencedProjects |> Array.map (fun r -> Path.GetFullPath r.OutputFile) |> set
     [ for o in projOpts.OtherOptions do
           match [ "-r:"; "/r:"; "--reference:" ] |> List.tryFind (fun prefix -> o.StartsWith prefix) with
-          | Some prefix ->
+          | Some prefix when not (fromSource.Contains(Path.GetFullPath(o.Substring prefix.Length))) ->
               let path = o.Substring prefix.Length
-              if not (File.Exists path) then
-                  failwithf "reference %s is not a file" path
+              requireRegularFile path
               try
                   System.Reflection.AssemblyName.GetAssemblyName path |> ignore
               with ex ->
                   failwithf "reference %s is not an assembly: %s" path ex.Message
               yield path
-          | None -> () ]
+          | _ -> () ]
 
 /// The content digest of each reference a project-check request has read.
 let private referenceDigests = System.Collections.Generic.Dictionary<string, string>()
@@ -6455,30 +6502,63 @@ let private refuseConflatedSources (paths: string[]) =
 /// caches ([`referencesChanged`]); and a stamp of its own gives each request
 /// a project FCS has not checked, dropped from FCS's caches once read (the
 /// returned release).
-let private checkProjectNow (checker: FSharpChecker) (projOpts: FSharpProjectOptions) (userOpName: string) =
+let private checkProjectNowWith
+    (trackDigests: bool)
+    (checker: FSharpChecker)
+    (projOpts: FSharpProjectOptions)
+    (userOpName: string)
+    =
     let opts =
         { withFullReferencePaths projOpts with
             Stamp = Some(System.Threading.Interlocked.Increment(&projectCheckRequests)) }
     let release () =
         checker.ClearCache([ opts ])
         requestSources.Clear()
-    refuseConflatedSources opts.SourceFiles
-    if referencesChanged (readableReferences opts) then
+    // `opts` and every project it hands FCS from source (`FSharpReference`),
+    // whose sources FCS reads through the same document source.
+    let projects =
+        let seen = System.Collections.Generic.HashSet<string>()
+        let found = ResizeArray<FSharpProjectOptions>()
+        let rec visit (o: FSharpProjectOptions) =
+            if seen.Add o.ProjectFileName then
+                found.Add o
+                for r in o.ReferencedProjects do
+                    match r with
+                    | FSharpReferencedProject.FSharpReference(_, q) -> visit q
+                    | _ -> ()
+        visit opts
+        List.ofSeq found
+    for o in projects do
+        refuseConflatedSources o.SourceFiles
+    let references = projects |> List.collect readableReferences |> List.distinct
+    if trackDigests && referencesChanged references then
         checker.InvalidateAll()
     try
         requestSources.Clear()
-        for path in opts.SourceFiles do
-            requestSources[path] <- File.ReadAllText path
+        for o in projects do
+            for path in o.SourceFiles do
+                requireRegularSource path
+                requestSources[path] <- File.ReadAllText path
         let results = checker.ParseAndCheckProject(opts, userOpName = userOpName) |> Async.RunSynchronously
         let parsed (path: string) =
             (checker.GetBackgroundParseResultsForFileInProject(path, opts, userOpName = userOpName)
              |> Async.RunSynchronously)
                 .ParseTree
-        refuseUndescribedSources opts.SourceFiles (fun path -> requestSources[path]) parsed
+        for o in projects do
+            let parsedIn (path: string) =
+                (checker.GetBackgroundParseResultsForFileInProject(path, o, userOpName = userOpName)
+                 |> Async.RunSynchronously)
+                    .ParseTree
+            refuseUndescribedSources o.SourceFiles (fun path -> requestSources[path]) (if obj.ReferenceEquals(o, opts) then parsed else parsedIn)
         results, release
     with _ ->
         release ()
         reraise ()
+
+/// [`checkProjectNowWith`], clearing FCS's caches when a reference's bytes
+/// changed ([`referencesChanged`]).
+let private checkProjectNow (checker: FSharpChecker) (projOpts: FSharpProjectOptions) (userOpName: string) =
+    checkProjectNowWith true checker projOpts userOpName
 
 /// A project-check oracle's payload, `{ Files, Diagnostics }`, taken from
 /// `results`, the whole-project check of `paths`: each file's record
@@ -6748,6 +6828,612 @@ let private usesProjectBatch () =
         System.Threading.Thread(
             (fun () ->
                 try usesProjectBatchCore ()
+                with ex -> captured <- Some ex),
+            512 * 1024 * 1024)
+    worker.Start()
+    worker.Join()
+    match captured with
+    | Some ex -> raise ex
+    | None -> ()
+
+/// The properties of JSON object `e`, refusing a value that is not an object,
+/// a property not in `allowed` and a property given twice: an unknown or
+/// repeated field is a request for something the parser does not do.
+let private strictObject (where: string) (allowed: string list) (e: JsonElement) =
+    if e.ValueKind <> JsonValueKind.Object then
+        failwithf "%s: expected an object" where
+    let seen = System.Collections.Generic.Dictionary<string, JsonElement>()
+    for p in e.EnumerateObject() do
+        if not (List.contains p.Name allowed) then
+            failwithf "%s: unknown field %s" where p.Name
+        if not (seen.TryAdd(p.Name, p.Value)) then
+            failwithf "%s: field %s given twice" where p.Name
+    seen
+
+let private strictString (where: string) (e: JsonElement) : string =
+    match e.ValueKind with
+    | JsonValueKind.String -> Option.ofObj (e.GetString()) |> Option.defaultValue ""
+    | _ -> failwithf "%s: expected a string" where
+
+let private strictArray (where: string) (e: JsonElement) : JsonElement list =
+    match e.ValueKind with
+    | JsonValueKind.Array -> e.EnumerateArray() |> Seq.toList
+    | _ -> failwithf "%s: expected an array" where
+
+let private required (where: string) (name: string) (fields: System.Collections.Generic.Dictionary<string, JsonElement>) =
+    match fields.TryGetValue name with
+    | true, v -> v
+    | _ -> failwithf "%s: missing field %s" where name
+
+/// Whether `s` is a non-empty run of ASCII letters, digits, `.`, `_` and `-`,
+/// other than `.` and `..`: a project id, or an assembly name that is a
+/// simple name rather than a path or a display name.
+let private isPlainName (s: string) =
+    s <> ""
+    && s <> "."
+    && s <> ".."
+    && s |> Seq.forall (fun c -> Char.IsAsciiLetterOrDigit c || c = '.' || c = '_' || c = '-')
+
+/// FCS's own verdict on whether a dependant gets `opts`' project from source:
+/// `Ok true` when its assembly data is `ProjectAssemblyDataResult.Available`
+/// (the in-memory signature), `Ok false` when it is `Unavailable` and
+/// `TcImports` would read the project's output DLL from disk instead
+/// (`CompilerImports.fs`, `OpenILBinaryModule`). FCS decides `Unavailable`
+/// for a type provider assembly, for a project that creates generated
+/// provided types, and when building the data fails (`IncrementalBuild.fs`,
+/// `tcAssemblyDataOpt`); the oracle reads the decision rather than guessing
+/// its causes. Read by reflection, since FCS exposes it only internally
+/// (`IBackgroundCompiler.GetAssemblyData`, the method a dependant's
+/// `FSharpReference` is evaluated through); `Error` when the reflection
+/// target is not there to read.
+let private assemblyDataAvailable
+    (checker: FSharpChecker)
+    (opts: FSharpProjectOptions)
+    (outputPath: string)
+    : Result<bool, string> =
+    try
+        let instance = BindingFlags.Instance ||| BindingFlags.NonPublic ||| BindingFlags.Public
+        match checker.GetType().GetField("backgroundCompiler", instance) with
+        | null -> Error "FSharpChecker has no backgroundCompiler field"
+        | field ->
+            match field.GetValue checker with
+            | null -> Error "FSharpChecker's backgroundCompiler is null"
+            | background ->
+            let getAssemblyData =
+                background.GetType().GetInterfaces()
+                |> Array.filter (fun i -> i.Name = "IBackgroundCompiler")
+                |> Array.collect (fun i -> i.GetMethods())
+                |> Array.tryFind (fun m ->
+                    let ps = m.GetParameters()
+                    m.Name = "GetAssemblyData"
+                    && ps.Length = 3
+                    && ps.[0].ParameterType = typeof<FSharpProjectOptions>)
+            match getAssemblyData, typeof<Async>.GetMethod("RunSynchronously") with
+            | None, _ -> Error "IBackgroundCompiler.GetAssemblyData(options, outputFileName, userOpName) not found"
+            | _, null -> Error "Async.RunSynchronously not found"
+            | Some m, runSynchronously ->
+                let computation =
+                    m.Invoke(background, [| box opts; box outputPath; box "fcs-dump-uses-project-graph" |])
+                let resultType = m.ReturnType.GetGenericArguments().[0]
+                let run = runSynchronously.MakeGenericMethod([| resultType |])
+                let result = run.Invoke(null, [| computation; null; null |])
+                let case, _ = FSharpValue.GetUnionFields(result, resultType, true)
+                match case.Name with
+                | "Available" -> Ok true
+                | "Unavailable" -> Ok false
+                | other -> Error(sprintf "unknown ProjectAssemblyDataResult case %s" other)
+    with ex ->
+        Error ex.Message
+
+// ---------------------------------------------------------------------------
+// The project-graph oracle (`uses-project-graph-batch`).
+//
+// A request describes each project as a value (sources, defines, references,
+// assembly name, target); the fsc argument vector is built here from one
+// template ([`graphArgv`]), so no raw switch crosses the wire. FCS checks a
+// project with each project reference handed to it as an `FSharpReference`,
+// the way an IDE does, and `compile` builds a project's DLL with FCS's own
+// compiler on the same argument vector.
+// ---------------------------------------------------------------------------
+
+/// The language version every graph project is checked and compiled under.
+let private graphLangVersion = "10.0"
+
+/// One reference of a graph project, in its place in the reference order.
+type private GraphReference =
+    /// A compiled assembly, by absolute path.
+    | Dll of string
+    /// A project of the same request, which FCS is handed from source.
+    | ProjectRef of string
+
+/// One project of a graph request.
+type private GraphProject =
+    { Id: string
+      AssemblyName: string
+      /// `library` or `exe`.
+      Target: string
+      /// Absolute, normalised, in Compile order.
+      Sources: string[]
+      Defines: string[]
+      References: GraphReference list }
+
+/// A check request [`parseGraphCheck`] accepted: ids and assembly names
+/// unique, every project reference naming a project of the request, no
+/// cycle. `Order` is `Check` and every project it reaches, each after the
+/// projects it references.
+type private ValidGraph =
+    { ById: Map<string, GraphProject>
+      Order: GraphProject list
+      Check: GraphProject }
+
+/// Whether `s` is a conditional-compilation symbol: an ASCII letter or `_`,
+/// then letters, digits and `_`.
+let private isSymbol (s: string) =
+    s <> ""
+    && (Char.IsAsciiLetter s.[0] || s.[0] = '_')
+    && s |> Seq.forall (fun c -> Char.IsAsciiLetterOrDigit c || c = '_')
+
+/// An absolute path, as given: refused unless fully qualified and already
+/// normalised, so the path FCS reads is the path the caller wrote.
+let private absolutePath (where: string) (e: JsonElement) =
+    let path = strictString where e
+    if not (Path.IsPathFullyQualified path) || Path.GetFullPath path <> path then
+        failwithf "%s: %s is not an absolute, normalised path" where path
+    path
+
+/// The assembly a DLL reference is, read from its manifest: a reference is
+/// an assembly, not a path, so a file that is not an assembly is refused, and
+/// so is one whose manifest name differs from its file's stem (FCS identifies
+/// it by the manifest, the request type by the stem).
+let private dllAssembly (where: string) (path: string) : string =
+    if not (File.Exists path) then
+        failwithf "%s: %s does not exist" where path
+    requireRegularFile path
+    let name =
+        try
+            use stream = File.OpenRead path
+            use pe = new System.Reflection.PortableExecutable.PEReader(stream)
+            let md = System.Reflection.Metadata.PEReaderExtensions.GetMetadataReader pe
+            if md.IsAssembly then Some(md.GetString(md.GetAssemblyDefinition().Name)) else None
+        with _ ->
+            None
+    match name with
+    | None -> failwithf "%s: %s is not an assembly" where path
+    | Some name when name <> (Path.GetFileNameWithoutExtension path |> Option.ofObj |> Option.defaultValue "") ->
+        failwithf "%s: %s is assembly %s, not the one its file name says" where path name
+    | Some name -> name
+
+/// Parse one graph project.
+let private parseGraphProject (e: JsonElement) : GraphProject =
+    let fields =
+        strictObject "project" [ "id"; "assemblyName"; "target"; "sources"; "defines"; "references" ] e
+    let id = strictString "id" (required "project" "id" fields)
+    if not (isPlainName id) then
+        failwithf "project id %A is not a plain name" id
+    let where = sprintf "project %s" id
+    let assemblyName = strictString (where + " assemblyName") (required where "assemblyName" fields)
+    if not (isPlainName assemblyName) then
+        failwithf "%s: assembly name %A is not a plain name" where assemblyName
+    // FCS hands a project named like FSharp.Core to a dependant from disk
+    // (`BackgroundCompiler.getProjectReferences`).
+    if String.Equals(assemblyName, "FSharp.Core", StringComparison.OrdinalIgnoreCase) then
+        failwithf "%s: a project may not be named FSharp.Core" where
+    let target = strictString (where + " target") (required where "target" fields)
+    if target <> "library" && target <> "exe" then
+        failwithf "%s: target %s is not library or exe" where target
+    let sources =
+        strictArray (where + " sources") (required where "sources" fields)
+        |> List.map (absolutePath (where + " source"))
+    if List.isEmpty sources then
+        failwithf "%s has no sources" where
+    for s in sources do
+        if not (s.EndsWith ".fs" || s.EndsWith ".fsi") then
+            failwithf "%s: source %s is not a .fs or .fsi file" where s
+        // fsc reads an argument that starts `/` with no other `/` as a switch.
+        // fsc reads an argument as a switch when it starts `/` with no other
+        // `/`, or has a `:` third (a short option, `-r:`, `/r:`).
+        if (s.StartsWith "/" && not (s.Substring(1).Contains '/')) || (s.Length > 2 && s.[2] = ':') then
+            failwithf "%s: source %s has the shape of a switch" where s
+        requireRegularSource s
+    if List.length (List.distinct sources) <> List.length sources then
+        failwithf "%s: a source is given twice" where
+    let defines =
+        strictArray (where + " defines") (required where "defines" fields)
+        |> List.map (strictString (where + " define"))
+    for d in defines do
+        if not (isSymbol d) then
+            failwithf "%s: define %A is not a symbol" where d
+    let references =
+        strictArray (where + " references") (required where "references" fields)
+        |> List.map (fun r ->
+            let rf = strictObject (where + " reference") [ "dll"; "project" ] r
+            match List.ofSeq rf.Keys with
+            | [ "dll" ] ->
+                let path = absolutePath (where + " dll") rf.["dll"]
+                dllAssembly (where + " dll") path |> ignore
+                Dll path
+            | [ "project" ] ->
+                let q = strictString (where + " project") rf.["project"]
+                if not (isPlainName q) then
+                    failwithf "%s: project reference %A is not a plain name" where q
+                ProjectRef q
+            | _ -> failwithf "%s: a reference is exactly one of dll or project" where)
+    if List.length (List.distinct references) <> List.length references then
+        failwithf "%s: a reference is given twice" where
+    // A DLL's identity is its file's stem; two references (or a reference and
+    // the project itself) of one assembly name leave FCS to choose one.
+    let dllNames =
+        references
+        |> List.choose (function
+            | Dll path -> Some(Path.GetFileNameWithoutExtension path |> Option.ofObj |> Option.defaultValue "")
+            | ProjectRef _ -> None)
+    (assemblyName :: dllNames)
+    |> List.countBy (fun n -> n.ToLowerInvariant())
+    |> List.tryFind (fun (_, n) -> n > 1)
+    |> Option.iter (fun (n, _) -> failwithf "%s: two references, or a reference and the project, are assembly %s" where n)
+    let cores =
+        references
+        |> List.filter (function
+            | Dll path -> Path.GetFileName path = "FSharp.Core.dll"
+            | ProjectRef _ -> false)
+    if List.length cores <> 1 then
+        failwithf "%s: expected exactly one dll reference to FSharp.Core.dll" where
+    { Id = id
+      AssemblyName = assemblyName
+      Target = target
+      Sources = List.toArray sources
+      Defines = List.toArray defines
+      References = references }
+
+/// Parse a `check` request: `{ op, projects, check }`.
+let private parseGraphCheck (root: JsonElement) : ValidGraph =
+    let fields = strictObject "request" [ "op"; "projects"; "check" ] root
+    let projects =
+        strictArray "projects" (required "request" "projects" fields) |> List.map parseGraphProject
+    let check = strictString "check" (required "request" "check" fields)
+    let unique (what: string) (key: GraphProject -> string) =
+        projects
+        |> List.countBy key
+        |> List.tryFind (fun (_, n) -> n > 1)
+        |> Option.iter (fun (k, _) -> failwithf "two projects have the %s %s" what k)
+    unique "id" (fun p -> p.Id)
+    unique "assembly name" (fun p -> p.AssemblyName.ToLowerInvariant())
+    let byId = projects |> List.map (fun p -> p.Id, p) |> Map.ofList
+    let projectRefs (p: GraphProject) =
+        p.References
+        |> List.choose (function
+            | ProjectRef q -> Some q
+            | Dll _ -> None)
+    for p in projects do
+        for q in projectRefs p do
+            if not (byId.ContainsKey q) then
+                failwithf "project %s references unknown project %s" p.Id q
+        // Unique by assembly identity across DLLs and projects too.
+        p.References
+        |> List.map (function
+            | Dll path -> Path.GetFileNameWithoutExtension path |> Option.ofObj |> Option.defaultValue ""
+            | ProjectRef q -> byId.[q].AssemblyName)
+        |> List.append [ p.AssemblyName ]
+        |> List.countBy (fun n -> n.ToLowerInvariant())
+        |> List.tryFind (fun (_, n) -> n > 1)
+        |> Option.iter (fun (n, _) ->
+            failwithf "project %s: two references, or a reference and the project, are assembly %s" p.Id n)
+    let finished = System.Collections.Generic.HashSet<string>()
+    let rec visit (onPath: Set<string>) (p: GraphProject) =
+        if onPath.Contains p.Id then
+            failwithf "project reference cycle through %s" p.Id
+        if finished.Add p.Id then
+            for q in projectRefs p do
+                visit (onPath.Add p.Id) byId.[q]
+    for p in projects do
+        visit Set.empty p
+    let checkedProject =
+        match Map.tryFind check byId with
+        | Some p -> p
+        | None -> failwithf "check names no project of the request: %s" check
+    let order = ResizeArray<GraphProject>()
+    let placed = System.Collections.Generic.HashSet<string>()
+    let rec place (p: GraphProject) =
+        if placed.Add p.Id then
+            for q in projectRefs p do
+                place byId.[q]
+            order.Add p
+    place checkedProject
+    { ById = byId; Order = List.ofSeq order; Check = checkedProject }
+
+/// The directory a checked project's output is named under. Nothing is ever
+/// written there, so a dependant's `-r:` to it names no file: FCS can only
+/// read the project from source.
+let private unwrittenRoot =
+    Path.Combine(Path.GetTempPath(), "fcs-dump-graph-unwritten-" + Guid.NewGuid().ToString("N"))
+
+/// The argument vector of `p`, from the one template every graph project is
+/// checked and compiled under: no framework but the references, the fixed
+/// language version, `p`'s target and assembly name (`-o:` under `outDir`),
+/// its defines, its references in order (each project reference as the
+/// `-r:` of `outputOf` that project), then its sources.
+let private graphArgv (p: GraphProject) (outDir: string) (outputOf: string -> string) : string[] =
+    [| "--noframework"
+       "--targetprofile:netcore"
+       // An executable would otherwise embed `default.win32manifest`, which
+       // a framework-dependent runtime does not ship.
+       "--nowin32manifest"
+       yield! pinnedLangVersionArgs (Some graphLangVersion)
+       "--target:" + p.Target
+       "-o:" + Path.Combine(outDir, p.AssemblyName + ".dll")
+       for d in p.Defines do
+           "--define:" + d
+       for r in p.References do
+           match r with
+           | Dll path -> "-r:" + path
+           | ProjectRef q -> "-r:" + outputOf q
+       yield! p.Sources |]
+
+/// FCS options for every project of `graph` that `Check` reaches, each with
+/// its project references as `FSharpReference`s whose output is under
+/// [`unwrittenRoot`].
+let private graphOptions (graph: ValidGraph) =
+    let dirOf id = Path.Combine(unwrittenRoot, id)
+    let outputOf id =
+        Path.Combine(dirOf id, graph.ById.[id].AssemblyName + ".dll")
+    let built = System.Collections.Generic.Dictionary<string, FSharpProjectOptions>()
+    for p in graph.Order do
+        let argv = graphArgv p (dirOf p.Id) outputOf
+        built.[p.Id] <-
+            { ProjectFileName = Path.Combine(dirOf p.Id, p.Id + ".fsproj")
+              ProjectId = None
+              SourceFiles = p.Sources
+              OtherOptions = argv |> Array.filter (fun a -> not (Array.contains a p.Sources))
+              ReferencedProjects =
+                p.References
+                |> List.choose (function
+                    | ProjectRef q -> Some(FSharpReferencedProject.FSharpReference(outputOf q, built.[q]))
+                    | Dll _ -> None)
+                |> List.toArray
+              IsIncompleteTypeCheckEnvironment = false
+              UseScriptResolutionRules = false
+              LoadTime = DateTime(2000, 1, 1)
+              UnresolvedReferences = None
+              OriginalLoadReferences = []
+              Stamp = None }
+    built, outputOf
+
+// FCS resolves exactly the references the request names: an assembly it
+// found by itself (one the request left out) would make an incomplete
+// reference set look complete, on both sides of a comparison.
+let private requireResolvedSet (graph: ValidGraph) (p: GraphProject) (results: FSharpCheckProjectResults) =
+    let dlls =
+        p.References
+        |> List.choose (function
+            | Dll path -> Some(Path.GetFullPath path)
+            | ProjectRef _ -> None)
+        |> set
+    let fromSource =
+        p.References
+        |> List.choose (function
+            | ProjectRef q -> Some graph.ById.[q].AssemblyName
+            | Dll _ -> None)
+        |> set
+    let mutable seenDlls = Set.empty
+    let mutable seenProjects = Set.empty
+    for a in results.ProjectContext.GetReferencedAssemblies() do
+        match a.FileName with
+        | Some file when dlls.Contains(Path.GetFullPath file) -> seenDlls <- seenDlls.Add(Path.GetFullPath file)
+        | Some file when File.Exists file ->
+            failwithf
+                "project %s: FCS resolved assembly %s (%s), which the request does not name"
+                p.Id a.SimpleName file
+        | _ when fromSource.Contains a.SimpleName -> seenProjects <- seenProjects.Add a.SimpleName
+        | _ ->
+            failwithf
+                "project %s: FCS resolved assembly %s (%A), which the request does not name"
+                p.Id a.SimpleName a.FileName
+    // And every reference the request names is one FCS imported: a
+    // project reference as the in-memory assembly it reads from source,
+    // a DLL by its file.
+    let missing = Set.union (dlls - seenDlls) (fromSource - seenProjects)
+    if not missing.IsEmpty then
+        failwithf "invariant: project %s: FCS did not import %A" p.Id (Set.toList missing)
+
+/// A `check` request's response.
+let private respondGraphCheck (checker: FSharpChecker) (root: JsonElement) =
+    let graph = parseGraphCheck root
+    if Directory.Exists unwrittenRoot then
+        failwithf "invariant: %s exists, so a project reference could be read from disk" unwrittenRoot
+    let built, outputOf = graphOptions graph
+    // Through the guarded project check every project-check oracle uses
+    // ([`checkProjectNow`]): its source text read once, sources FCS would
+    // conflate and line directives refused, unreadable references refused,
+    // for the checked project and every project it reaches from source.
+    let checkedResults, release =
+        // The dispatcher already cleared FCS's caches for this request, so
+        // no reference digest is needed to decide it.
+        checkProjectNowWith false checker built.[graph.Check.Id] "fcs-dump-uses-project-graph"
+    try
+    let projectResults (opts: FSharpProjectOptions) =
+        checker.ParseAndCheckProject(opts, userOpName = "fcs-dump-uses-project-graph")
+        |> Async.RunSynchronously
+    let referenced = graph.Order |> List.filter (fun p -> p.Id <> graph.Check.Id)
+    // Every producer is read from source: a reference FCS read from its DLL
+    // instead finds no file, and the answer would look clean. The request
+    // type cannot ask for a type provider, so anything else is an invariant
+    // violation, not a refusal.
+    for p in referenced do
+        match assemblyDataAvailable checker built.[p.Id] (outputOf p.Id) with
+        | Ok true -> ()
+        | Ok false -> failwithf "invariant: FCS reads project %s from its DLL, not from source" p.Id
+        | Error why -> failwithf "invariant: cannot tell whether FCS reads project %s from source: %s" p.Id why
+    let referenced =
+        referenced
+        |> List.map (fun p ->
+            {| Id = p.Id
+               AssemblyName = p.AssemblyName
+               Diagnostics =
+                let results = projectResults built.[p.Id]
+                requireResolvedSet graph p results
+                results.Diagnostics |> Array.map projectDiagnostic |})
+        |> List.toArray
+    requireResolvedSet graph graph.Check checkedResults
+    // The records come from the whole-project check ([`projectCheckRecords`]),
+    // the check FCS's compile agrees with; `Diagnostics` is every diagnostic
+    // of that check, those in no file included.
+    let records = projectCheckRecords projectSymbolUse checkedResults graph.Check.Sources
+    {| Files = records.Files
+       Diagnostics = checkedResults.Diagnostics |> Array.map projectDiagnostic
+       Referenced = referenced |}
+    finally
+        release ()
+
+/// A `compile` request's response: `{ op, project, outDir }`. The project's
+/// references must all be DLLs; FCS's compiler builds it on [`graphArgv`]'s
+/// argument vector, writing `<outDir>/<assemblyName>.dll`.
+let private respondGraphCompile (checker: FSharpChecker) (root: JsonElement) =
+    let fields = strictObject "request" [ "op"; "project"; "outDir" ] root
+    let p = parseGraphProject (required "request" "project" fields)
+    let outDir = absolutePath "outDir" (required "request" "outDir" fields)
+    if p.References |> List.exists (function ProjectRef _ -> true | Dll _ -> false) then
+        failwithf "project %s: a compiled project references DLLs only" p.Id
+    // The bytes of each source as the check reads them: a source saved
+    // between the check and the compile would give a DLL of text the check
+    // never saw, so the compile's result is refused then. A source edited and
+    // restored while the compiler runs is not seen: the oracle requires its
+    // inputs to hold still during a request.
+    let digestOf (path: string) =
+        Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes path))
+    let checkedText = p.Sources |> Array.map digestOf
+    // The check's verdict first: the project as a check request is refused
+    // exactly where a compile must be (an assembly the request does not
+    // name, a source the project check cannot describe), whether or not the
+    // compile would have written a DLL.
+    let alone = { ById = Map.ofList [ p.Id, p ]; Order = [ p ]; Check = p }
+    let built, _ = graphOptions alone
+    let results, release = checkProjectNowWith false checker built.[p.Id] "fcs-dump-graph-compile"
+    try
+        requireResolvedSet alone p results
+    finally
+        release ()
+    Directory.CreateDirectory outDir |> ignore
+    // Compiled into a staging directory and moved into place only once
+    // validated, so a refused compile never replaces an earlier good DLL.
+    let staging = Path.Combine(outDir, ".staging-" + Guid.NewGuid().ToString("N"))
+    Directory.CreateDirectory staging |> ignore
+    try
+    let argv = graphArgv p staging (fun q -> failwithf "unreachable project reference %s" q)
+    let diagnostics, failure =
+        checker.Compile(Array.append [| "fsc.exe" |] argv, userOpName = "fcs-dump-graph-compile")
+        |> Async.RunSynchronously
+    if p.Sources |> Array.map digestOf <> checkedText then
+        failwithf "project %s: a source changed between the check and the compile" p.Id
+    // A source error comes back as diagnostics *and* an exception; only an
+    // exception with no error diagnostic is a compiler failure.
+    let errors =
+        diagnostics |> Array.exists (fun d -> d.Severity = FSharp.Compiler.Diagnostics.FSharpDiagnosticSeverity.Error)
+    match failure with
+    | Some ex when not errors -> failwithf "project %s: the compiler failed: %s" p.Id ex.Message
+    | _ -> ()
+    // The DLL only when this compile wrote it: a failed compile leaves any
+    // earlier one in place, which is not this request's artefact.
+    let staged: string | null =
+        if errors || failure.IsSome then null else Path.Combine(staging, p.AssemblyName + ".dll")
+    // The DLL references exactly assemblies the request names: one the
+    // compiler found by itself would make an incomplete reference set look
+    // complete. Read from the DLL it wrote.
+    match staged with
+    | null -> ()
+    | dll ->
+        let named =
+            p.References
+            |> List.choose (function
+                | Dll path -> Some(dllAssembly "reference" path)
+                | ProjectRef _ -> None)
+            |> set
+        use stream = File.OpenRead dll
+        use pe = new System.Reflection.PortableExecutable.PEReader(stream)
+        let md = System.Reflection.Metadata.PEReaderExtensions.GetMetadataReader pe
+        for h in md.AssemblyReferences do
+            let name = md.GetString(md.GetAssemblyReference(h).Name)
+            if not (named.Contains name) then
+                failwithf "project %s: the compile referenced assembly %s, which the request does not name" p.Id name
+    let output: string | null =
+        match staged with
+        | null -> null
+        | dll ->
+            let final = Path.Combine(outDir, p.AssemblyName + ".dll")
+            File.Move(dll, final, true)
+            final
+    {| Diagnostics = diagnostics |> Array.map projectDiagnostic
+       Output = output |}
+    finally
+        Directory.Delete(staging, true)
+
+/// `uses-project-graph-batch`: one JSON request per stdin line, one compact
+/// response per stdout line.
+///
+/// ```text
+/// project = { "id", "assemblyName", "target": "library"|"exe",
+///             "sources": [<abs path>…], "defines": [<symbol>…],
+///             "references": [ {"dll": <abs path>} | {"project": <id>} … ] }
+/// { "op": "check", "projects": [project…], "check": <id> }
+///   → { Files: [{Path, Diagnostics, Uses}], Diagnostics, Referenced: [{Id, AssemblyName, Diagnostics}] }
+/// { "op": "compile", "project": project, "outDir": <abs path> }
+///   → { Diagnostics, Output: <the DLL>, or null when the compile failed }
+/// ```
+///
+/// Both ops build the argument vector from [`graphArgv`]'s template. `check`
+/// hands each project reference to FCS from source, its `-r:` naming a file
+/// that does not exist; the file records come from the whole-project check
+/// ([`projectCheckRecords`]). Anything outside the request type is a
+/// `BatchError`.
+let private usesProjectGraphBatchCore () =
+    let checker = projectChecker ()
+    let compact = buildOptionsCompact ()
+    let respond (line: string) : string =
+        try
+            use doc = JsonDocument.Parse(line: string)
+            let root = doc.RootElement
+            let op =
+                match root.ValueKind with
+                | JsonValueKind.Object ->
+                    match root.TryGetProperty "op" with
+                    | true, v -> strictString "op" v
+                    | _ -> failwith "request: missing field op"
+                | _ -> failwith "request: expected an object"
+            // Nothing an earlier request read is reused, whatever the op.
+            // FCS's caches are keyed by options and by a file's path and
+            // timestamp (the background compiler's builders, the
+            // process-wide assembly reader and imported CCU caches), so a
+            // source or DLL rewritten with its timestamp unchanged would
+            // otherwise be answered, or compiled against, from what was read
+            // before.
+            checker.InvalidateAll()
+            match op with
+            | "check" -> JsonSerializer.Serialize(respondGraphCheck checker root, compact)
+            | "compile" -> JsonSerializer.Serialize(respondGraphCompile checker root, compact)
+            | other -> failwithf "request: unknown op %s" other
+        with ex ->
+            JsonSerializer.Serialize({| BatchError = ex.Message |}, compact)
+    let mutable line = Console.In.ReadLine()
+    while not (isNull line) do
+        let trimmed = (Option.ofObj line |> Option.defaultValue "").Trim()
+        if trimmed <> "" then
+            Console.Out.WriteLine(respond trimmed)
+            Console.Out.Flush()
+        line <- Console.In.ReadLine()
+
+/// [`usesProjectGraphBatchCore`] on a large-stack thread, as
+/// [`usesProjectBatch`] runs its core.
+let private usesProjectGraphBatch () =
+    // FCS keeps the assemblies it read in a small strong cache and a weak
+    // one, so whether a later request meets an earlier one's reader would
+    // depend on the collector. Holding every reader strongly makes the
+    // oracle's answers depend only on its own clearing (`InvalidateAll` per
+    // request). Read when FCS's binary reader first loads, so set first.
+    Environment.SetEnvironmentVariable("FSharp_StronglyHeldBinaryReaderCacheSize", "1000000")
+    let mutable captured: exn option = None
+    let worker =
+        System.Threading.Thread(
+            (fun () ->
+                try usesProjectGraphBatchCore ()
                 with ex -> captured <- Some ex),
             512 * 1024 * 1024)
     worker.Start()
@@ -8793,6 +9479,7 @@ let private usage () =
     eprintfn "  overloads <source-path>  dump the chosen overload at each call node (overload-resolution oracle)"
     eprintfn "  file-batch               resident single-file oracle: one JSON request/line {kind,path,refs,langversion?}, one compact JSON response/line"
     eprintfn "  uses-project-batch       resident project oracle: one JSON request/line {paths,refs,defines,langversion}, one compact {Files,Diagnostics} response/line, from the whole-project check"
+    eprintfn "  uses-project-graph-batch resident project-graph oracle: one JSON request/line, {op:check,projects,check} (project refs as FSharpReference) or {op:compile,project,outDir}"
     eprintfn "  script-options-batch     test oracle: per path on stdin, the shared and the own-directory script resolution {ResolvedAs,Shared,Direct}"
     eprintfn "  xmldoc-batch             resident source-XML-doc oracle: one JSON request/line {paths,defines,langversion}, one compact {Files,Diagnostics} response/line, from the whole-project check"
     2
@@ -8894,6 +9581,9 @@ let main argv =
         0
     | [| "uses-project-batch" |] ->
         usesProjectBatch ()
+        0
+    | [| "uses-project-graph-batch" |] ->
+        usesProjectGraphBatch ()
         0
     | [| "script-options-batch" |] ->
         scriptOptionsBatch ()
