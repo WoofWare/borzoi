@@ -186,6 +186,7 @@ fn versioned_sdk_resolves_from_the_folder_nuget_settings_choose() {
         // NuGet joined, and the settings walk is lexical.
         let root = canon(tmp.path());
         let home = root.join("home");
+        crate::common::seed_user_nuget_config(&home);
         let configured = root.join("configured");
         let environment_folder = root.join("environment");
         let proj_dir = root.join("proj");

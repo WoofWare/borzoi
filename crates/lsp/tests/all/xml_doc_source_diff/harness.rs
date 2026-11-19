@@ -16,6 +16,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 use borzoi::workspace::implicit_symbols;
 use borzoi::xml_doc::source::{
@@ -137,15 +138,26 @@ fn oracle() -> &'static Mutex<BatchChild> {
 /// Type-check `paths` (Compile order) as one project under `defines`, with a
 /// reference set: `refs` beside the SDK's own, or — when `exclusive` — as the
 /// whole set (`--noframework`), and a pinned `<LangVersion>`.
+/// `inputs_may_change` marks a real project's inputs, which may change during
+/// a run, so the request goes to a fresh child of its own (the oracle's module
+/// doc); a fixture's goes to the resident one.
 pub fn fcs_check_with(
     paths: &[PathBuf],
     defines: &[&str],
     refs: &[&std::path::Path],
     exclusive: bool,
     lang_version: Option<&str>,
+    inputs_may_change: bool,
 ) -> Vec<OracleFile> {
-    fcs_check_or_refusal(paths, defines, refs, exclusive, lang_version)
-        .unwrap_or_else(|err| panic!("xmldoc-batch failed: {err}"))
+    fcs_check_or_refusal(
+        paths,
+        defines,
+        refs,
+        exclusive,
+        lang_version,
+        inputs_may_change,
+    )
+    .unwrap_or_else(|err| panic!("xmldoc-batch failed: {err}"))
 }
 
 /// [`fcs_check_with`], with the oracle's refusal (a project the project
@@ -156,6 +168,7 @@ pub fn fcs_check_or_refusal(
     refs: &[&std::path::Path],
     exclusive: bool,
     lang_version: Option<&str>,
+    inputs_may_change: bool,
 ) -> Result<Vec<OracleFile>, String> {
     let request = serde_json::json!({
         "paths": paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
@@ -163,12 +176,22 @@ pub fn fcs_check_or_refusal(
         "refs": refs.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
         "exclusiveRefs": exclusive,
         "langversion": lang_version,
+        "inputsMayChange": inputs_may_change,
     })
     .to_string();
-    let line = oracle()
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .request(&request);
+    let line = if inputs_may_change {
+        // A fresh child, ended once it answers: the oracle serves a request
+        // whose inputs may change only as a child's first, and nothing after it.
+        let mut child = fcs_dump_batch_child("xmldoc-batch");
+        let line = child.request(&request);
+        child.finish(Duration::from_secs(30));
+        line
+    } else {
+        oracle()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .request(&request)
+    };
     let response: OracleResponse = serde_json::from_str(&line)
         .unwrap_or_else(|e| panic!("unparseable xmldoc-batch response ({e}): {line}"));
     if let Some(err) = response.batch_error {
@@ -613,7 +636,7 @@ pub fn try_check_paths(
     defines: &[&str],
 ) -> Result<(Vec<Graded>, Vec<OracleFile>), String> {
     let lang = LanguageVersion::DEFAULT.to_string();
-    let fcs = fcs_check_or_refusal(paths, defines, &[], false, Some(&lang))?;
+    let fcs = fcs_check_or_refusal(paths, defines, &[], false, Some(&lang), false)?;
     assert_eq!(fcs.len(), paths.len(), "one oracle record per file");
     let ours = OurProject::new(paths, texts, defines);
     Ok((grade(&ours, &fcs), fcs))

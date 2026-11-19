@@ -265,3 +265,57 @@ fn a_request_that_is_not_one_line_is_refused_before_it_is_sent() {
     }
     assert_eq!(child.request("req").trim_end(), "ok:req");
 }
+
+/// `finish` closes the child's stdin and lets it exit on its own: an oracle
+/// that ends its batch loop at EOF exits, with its own status, rather than
+/// being killed (a .NET process killed outright leaves its debugger pipes in
+/// `TMPDIR`).
+#[test]
+fn finish_lets_a_child_exit_at_end_of_input() {
+    let mut child = BatchChild::with_factory(
+        Box::new(responder),
+        "fake-oracle",
+        Duration::from_secs(5),
+        1,
+    );
+    assert_eq!(child.request("a").trim_end(), "ok:a");
+    let status = child.finish(Duration::from_secs(5));
+    assert!(
+        status.is_some_and(|s| s.success()),
+        "the child exits at end of input, on its own: {status:?}"
+    );
+}
+
+/// A child that does not exit at end of input is killed once the grace runs
+/// out, so `finish` is bounded.
+#[test]
+fn finish_kills_a_child_that_outlives_its_grace() {
+    let factory = || {
+        let mut c = Command::new("sh");
+        c.arg("-c")
+            .arg(r#"IFS= read -r line; printf 'ok:%s\n' "$line"; exec sleep 60"#);
+        c
+    };
+    let mut child =
+        BatchChild::with_factory(Box::new(factory), "fake-oracle", Duration::from_secs(5), 1);
+    assert_eq!(child.request("a").trim_end(), "ok:a");
+    let start = std::time::Instant::now();
+    assert_eq!(child.finish(Duration::from_millis(300)), None);
+    assert!(
+        start.elapsed() < Duration::from_secs(30),
+        "finish is bounded by its grace: {:?}",
+        start.elapsed()
+    );
+}
+
+/// A child that was never spawned has nothing to finish.
+#[test]
+fn finish_of_an_unspawned_child_is_none() {
+    let child = BatchChild::with_factory(
+        Box::new(responder),
+        "fake-oracle",
+        Duration::from_secs(5),
+        1,
+    );
+    assert_eq!(child.finish(Duration::from_secs(1)), None);
+}

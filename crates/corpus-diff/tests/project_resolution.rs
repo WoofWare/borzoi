@@ -2342,6 +2342,124 @@ fn fcs_error(number: i32, message: &str, line: u32, col: u32) -> FcsDiagnostic {
     }
 }
 
+/// The oracle serves a real project's request only as a fresh child's first,
+/// so the runner's oracle puts each to a child of its own: one oracle answers
+/// a run's every project, and a project asked again (a perturbed copy is
+/// asked about the same paths) is answered as a fresh process would, a
+/// reference rewritten in place since read as it is now.
+#[test]
+#[ignore = "builds/runs FCS; use --ignored for oracle smoke"]
+fn one_oracle_answers_every_real_project_of_a_run() {
+    let (_tmp, project) = tiny_project();
+    let loaded = load_lsp_project(&project).expect("project should load");
+    let mut oracle = UsesProjectOracle::default();
+    let first = oracle.uses_project(&loaded).expect("the first project");
+    let second = oracle.uses_project(&loaded).expect("the next project");
+    assert_eq!(first, second, "one project, asked twice, answered alike");
+}
+
+/// A real project's reference rewritten in place, its modification time put
+/// back, between two of one oracle's requests is read as it is now, as a
+/// fresh process reads it: the type the first DLL declares resolves, and is
+/// unbound once the DLL holds another assembly's bytes. A resident child
+/// would answer the second request from the assembly it read for the first.
+///
+/// The reference set is the whole one (`exclusiveRefs`, as for any project
+/// with references), all from the .NET 10 SDK under `DOTNET_ROOT`: its
+/// reference pack, its F# compiler's FSharp.Core, and `Lib.dll`, which first
+/// holds that compiler's FSharp.Compiler.Service.
+#[test]
+#[ignore = "builds/runs FCS; use --ignored for oracle smoke"]
+fn a_real_projects_reference_rewritten_in_place_is_read() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project = tmp.path().join("Real.fsproj");
+    write(
+        &project,
+        "<Project>\n  <ItemGroup>\n    <Compile Include=\"A.fs\" />\n  </ItemGroup>\n</Project>\n",
+    );
+    write(
+        &tmp.path().join("A.fs"),
+        "module A\nlet z = FSharp.Compiler.Text.Range.Zero\n",
+    );
+    let mut loaded = load_lsp_project(&project).expect("project should load");
+    let mut oracle = UsesProjectOracle::default();
+    let dotnet_root = PathBuf::from(
+        std::env::var_os("DOTNET_ROOT").expect("DOTNET_ROOT (run under `nix develop`)"),
+    );
+    // The newest of `dir`'s entries for which `pick` names a directory.
+    let newest = |dir: PathBuf, pick: &dyn Fn(PathBuf) -> PathBuf| -> PathBuf {
+        fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
+            .map(|e| pick(e.expect("an entry").path()))
+            .filter(|p| p.is_dir())
+            .max()
+            .unwrap_or_else(|| panic!("no .NET 10 entry under {}", dir.display()))
+    };
+    let pack = newest(
+        dotnet_root.join("packs").join("Microsoft.NETCore.App.Ref"),
+        &|v| v.join("ref").join("net10.0"),
+    );
+    let fsharp = newest(dotnet_root.join("sdk"), &|v| {
+        if v.file_name()
+            .is_some_and(|n| n.to_string_lossy().starts_with("10."))
+        {
+            v.join("FSharp")
+        } else {
+            PathBuf::new()
+        }
+    });
+    let lib = tmp.path().join("lib").join("Lib.dll");
+    fs::create_dir_all(lib.parent().expect("a parent")).expect("mkdir");
+    // Bytes, not a copy: a copy keeps the SDK's read-only mode, and the file
+    // is rewritten below.
+    let put = |from: &str| {
+        fs::write(
+            &lib,
+            fs::read(fsharp.join(from)).expect("read an SDK assembly"),
+        )
+        .expect("write the referenced assembly");
+    };
+    put("FSharp.Compiler.Service.dll");
+    let stamp = fs::metadata(&lib)
+        .and_then(|m| m.modified())
+        .expect("modification time");
+    loaded.fcs_extra_refs = fs::read_dir(&pack)
+        .expect("read the reference pack")
+        .map(|e| e.expect("an entry").path())
+        .filter(|p| p.extension().is_some_and(|x| x == "dll"))
+        .chain([fsharp.join("FSharp.Core.dll"), lib.clone()])
+        .collect();
+    let errors = |json: &str| -> Vec<i64> {
+        let v: serde_json::Value = serde_json::from_str(json).expect("JSON");
+        v["Files"]
+            .as_array()
+            .expect("Files")
+            .iter()
+            .chain(std::iter::once(&v))
+            .flat_map(|f| f["Diagnostics"].as_array().cloned().unwrap_or_default())
+            .filter(|d| d["Severity"] == "Error")
+            .map(|d| d["ErrorNumber"].as_i64().expect("ErrorNumber"))
+            .collect()
+    };
+    let before = oracle.uses_project(&loaded).expect("the first check");
+    assert_eq!(
+        errors(&before),
+        Vec::<i64>::new(),
+        "the type resolves in the reference: {before}"
+    );
+    put("FSharp.Core.dll");
+    fs::File::options()
+        .write(true)
+        .open(&lib)
+        .and_then(|f| f.set_modified(stamp))
+        .expect("restore the modification time");
+    let after = oracle.uses_project(&loaded).expect("the second check");
+    assert!(
+        errors(&after).contains(&39),
+        "the rewritten reference does not hold the type: {after}"
+    );
+}
+
 #[test]
 #[ignore = "builds/runs FCS; use --ignored for oracle smoke"]
 fn tiny_project_matches_fcs() {
@@ -2968,7 +3086,9 @@ fn attribute_matrix() -> Vec<AttrCell> {
     cells
 }
 
-/// The corpus runner's own resident oracle, one for the whole matrix: a cell
+/// The corpus runner's own oracle, as a fixture oracle
+/// ([`UsesProjectOracle::for_fixtures`]) with one resident child for the whole
+/// matrix: its cells are fixtures this test writes, and a cell
 /// per process would pay a .NET start and an FCS load per cell, which is most
 /// of the sweep's wall clock and grows with every shape added.
 ///
@@ -2984,7 +3104,7 @@ fn attribute_matrix() -> Vec<AttrCell> {
 fn uses_project_batch(loaded: &LoadedProject) -> String {
     static ORACLE: OnceLock<Mutex<UsesProjectOracle>> = OnceLock::new();
     ORACLE
-        .get_or_init(Mutex::default)
+        .get_or_init(|| Mutex::new(UsesProjectOracle::for_fixtures()))
         .lock()
         .expect("batch oracle mutex")
         .uses_project(loaded)
