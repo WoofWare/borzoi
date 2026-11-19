@@ -520,8 +520,8 @@ const TWIN_FS: &[u8] = b"module Twin\nlet z = 0\n";
 /// moves the error out of the file's record or past its last line, which
 /// [`check_records`] sees.
 const SENTINEL: &[u8] = b"\nmodule HostileSentinel =\n    let sentinel : int = \"\"\n";
-/// What names [`SENTINEL`] in a source's text.
-const SENTINEL_NAME: &[u8] = b"HostileSentinel";
+/// The declaration in [`SENTINEL`] FCS reports its error (FS0001) on.
+const SENTINEL_LINE: &[u8] = b"let sentinel : int";
 
 /// The assembly the project references: `System.CommandLine`, which no
 /// framework reference holds, from the SDK's own directory.
@@ -949,10 +949,20 @@ fn plain_texts_owned() -> Vec<Option<Vec<u8>>> {
 }
 
 /// `entry`'s spelling of the file `name` in the directory `dir` of `fs`'s
-/// tree: relative where the dimension is a relative path, absolute otherwise.
+/// tree. A relative spelling is written relative to the working directory
+/// the children inherit (this process's), climbing to the root and down to
+/// the tree, so that it names the file; every other one is written after the
+/// tree's absolute path.
 fn spelt(fs: &HostileFs, entry: &Entry<Spelling>, dir: &str, name: &str) -> String {
     let spelt = if entry.dimension == Dimension::Relative {
-        entry.value.relative(dir, name)
+        let cwd = std::env::current_dir()
+            .and_then(|d| d.canonicalize())
+            .expect("the working directory");
+        let climb = "../".repeat(cwd.components().count() - 1);
+        let tree = fs.tree().strip_prefix("/").expect("an absolute tree");
+        let mut out = OsString::from(format!("{climb}{}/", text_of(tree)));
+        out.push(entry.value.relative(dir, name));
+        out
     } else {
         entry.value.absolute(fs.tree(), dir, name)
     };
@@ -992,8 +1002,9 @@ fn declared_module(text: &[u8]) -> Option<String> {
 
 /// Hold a successful answer to what the files hold: one record per source,
 /// each source's record holding the definition of the module it declares
-/// and, where the source ends in [`SENTINEL`], an error, and no range in a
-/// record starting past its file's last line.
+/// and, where the source ends in [`SENTINEL`], its error on the line it
+/// physically sits on, and no range in a record starting past its file's
+/// last line.
 fn check_records(answer: &Value, texts: &[Option<Vec<u8>>]) -> Result<(), String> {
     let files = answer["Files"]
         .as_array()
@@ -1028,14 +1039,29 @@ fn check_records(answer: &Value, texts: &[Option<Vec<u8>>]) -> Result<(), String
                 ));
             }
         }
-        let holds_sentinel = text
-            .windows(SENTINEL_NAME.len())
-            .any(|w| w == SENTINEL_NAME);
-        if holds_sentinel && !diagnostics.iter().any(|d| d["Severity"] == "Error") {
-            return Err(format!(
-                "source {i} ends in a declaration FCS reports an error in, and its record holds \
-                 no error: {file}"
-            ));
+        let sentinel = text
+            .windows(SENTINEL_LINE.len())
+            .position(|w| w == SENTINEL_LINE);
+        // A file FCS cannot parse (FS0010: bare carriage returns are no line
+        // ends to its lexer) is not type-checked, so its sentinel reports
+        // nothing; the range bound above still holds it.
+        let unparsed = diagnostics
+            .iter()
+            .any(|d| d["Severity"] == "Error" && d["ErrorNumber"] == 10);
+        if let (Some(at), false) = (sentinel, unparsed) {
+            // The line the declaration physically sits on.
+            let line = last_line(&text[..at]) as u64;
+            let reported = diagnostics.iter().any(|d| {
+                d["Severity"] == "Error"
+                    && d["ErrorNumber"] == 1
+                    && d["Range"]["Start"]["Line"].as_u64() == Some(line)
+            });
+            if !reported {
+                return Err(format!(
+                    "source {i} ends in a declaration FCS reports FS0001 in, on line {line}, and \
+                     its record holds no such error there: {file}"
+                ));
+            }
         }
         if let Some(module) = declared_module(text) {
             let defined = uses.iter().any(|u| {
@@ -1069,9 +1095,34 @@ fn run_case(resident: &mut BatchChild, case: Case) -> Result<Verdict, String> {
     let op = "uses-project-batch";
     let mut texts = world.texts;
     if let Some(prime) = &world.prime {
-        resident
+        let primed = resident
             .try_request(prime)
             .map_err(|e| format!("the resident child, asked the first request: {e}"))?;
+        // The first request is of the plain project, so that the change is
+        // made under a child that has read it; only a file that appears is
+        // missing from it, and refused.
+        let appears = matches!(
+            case,
+            Case::SourceChange(Change::Appears) | Case::ReferenceChange(Change::Appears)
+        );
+        match (refusal(&primed), appears) {
+            (Some(_), true) => {}
+            (None, false) => {
+                let value: Value = serde_json::from_str(&primed).expect("an answer is JSON");
+                check_records(&value, &plain_texts_owned())
+                    .map_err(|why| format!("the first request: {why}"))?;
+            }
+            (Some(why), false) => {
+                return Err(format!(
+                    "the first request, of the plain project, was refused: {why}"
+                ));
+            }
+            (None, true) => {
+                return Err(format!(
+                    "the first request names a file that is not there yet, and was answered: {primed}"
+                ));
+            }
+        }
     }
     if let Some(change) = change {
         match change(&world.fs) {
@@ -1090,7 +1141,25 @@ fn run_case(resident: &mut BatchChild, case: Case) -> Result<Verdict, String> {
             fresh.trim_end()
         ));
     }
-    if refusal(&fresh).is_some() {
+    // What must be answered: the plain project, and a spelling that names the
+    // source or the reference to the file system.
+    let names_the_file = match case {
+        Case::Plain => true,
+        // A reference is an absolute path by the oracle's contract.
+        Case::ReferenceSpelling(e) if e.dimension == Dimension::Relative => false,
+        Case::SourceSpelling(e) | Case::ReferenceSpelling(e) => match e.value.means {
+            spelling::Means::TheFile => true,
+            spelling::Means::TheFileIfCaseIsIgnored => spelling::ignores_case(world.fs.tree()),
+            _ => false,
+        },
+        _ => false,
+    };
+    if let Some(why) = refusal(&fresh) {
+        if names_the_file {
+            return Err(format!(
+                "refused a project whose files are all there: {why}"
+            ));
+        }
         return Ok(Verdict::Reached("refused"));
     }
     let value: Value = serde_json::from_str(&fresh).expect("an answer is JSON");
