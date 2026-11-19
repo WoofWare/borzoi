@@ -287,10 +287,11 @@ let private pinnedLangVersionArgs (requested: string option) : string[] =
 // own line. And a field read leniently (a mistyped one taken as absent, an
 // unknown one ignored, a duplicate resolved by whichever reader's rule) is a
 // request the oracle answers otherwise than its caller asked. So each line is
-// parsed into one typed request record, and anything else is refused: a blank
-// line, text around the JSON other than JSON whitespace, a value that is not
-// an object, a key that occurs twice, a field the op does not take, a field of
-// the wrong type, a path that is not absolute.
+// parsed into one typed request record, and anything else is refused: a line
+// that is not UTF-8, a blank line, text around the JSON other than JSON
+// whitespace, a value that is not an object, a key that occurs twice, a field
+// the op does not take, a field of the wrong type, a reference that is not an
+// absolute path, a symbol or version with blanks around it.
 // ============================================================================
 
 /// The fields of the request object on `line`, by name, read by `read` while
@@ -375,19 +376,22 @@ let private absolutePath (name: string) (path: string) : string =
 let private refsField (fields: Map<string, JsonElement>) : string list =
     stringsField fields "refs" |> Array.map (absolutePath "refs") |> Array.toList
 
-/// The `paths` field: absolute paths, at least one.
+/// The `paths` field: at least one path, each read against the oracle's
+/// working directory, which is its caller's.
 let private pathsField (fields: Map<string, JsonElement>) : string[] =
-    match stringsField fields "paths" |> Array.map (absolutePath "paths") with
+    match stringsField fields "paths" with
     | [||] -> failwith "the request names no paths"
     | paths -> paths
 
-/// The `defines` field: symbols, each a non-blank text.
+/// The `defines` field: symbols, each passed to FCS as written. A blank one,
+/// or one with blanks around it, is refused: fsc given `--define: A ` does not
+/// define `A`, and a reader that trimmed it would.
 let private definesField (fields: Map<string, JsonElement>) : string[] =
     stringsField fields "defines"
     |> Array.map (fun d ->
-        if String.IsNullOrWhiteSpace d then
-            failwith "the field defines holds a blank symbol"
-        d.Trim())
+        if String.IsNullOrWhiteSpace d || d.Trim() <> d then
+            failwithf "the field defines holds %A, which is no symbol" d
+        d)
 
 /// A request of a project-check op (`uses-project-batch`, `xmldoc-batch`):
 /// `{ "paths": [<abs>…], "refs": [<abs dll>…]?, "defines": [<sym>…]?,
@@ -427,9 +431,11 @@ let private fileRequest (line: string) : FileRequest =
         let kind = requiredString fields "kind"
         let target =
             match kind, Map.containsKey "path" fields, Map.containsKey "paths" fields with
+            | "types-project", false, true when langVersionField fields <> None ->
+                failwith "a types-project request checks at FCS's default language version, and takes no langversion"
             | "types-project", false, true -> Project(pathsField fields)
             | "types-project", _, _ -> failwith "a types-project request names its files in paths, and no path"
-            | _, true, false -> OneFile(absolutePath "path" (requiredString fields "path"))
+            | _, true, false -> OneFile(requiredString fields "path")
             | _, _, _ -> failwithf "a %s request names its file in path, and no paths" kind
         { Kind = kind
           Target = target
@@ -442,13 +448,38 @@ let private requestRefArgs (refs: string list) : string[] =
     refs |> List.map (fun p -> "-r:" + p) |> List.toArray
 
 /// Answer each line of standard input with `respond`'s one line, a blank line
-/// included, until the input ends.
+/// included, until the input ends. A line ends at a line feed (a carriage
+/// return before it is the line end's); a carriage return anywhere else is
+/// JSON whitespace, as it is to every JSON writer. A line that is not UTF-8
+/// is refused: decoded leniently, its bytes would become U+FFFD, and a path
+/// holding them another path.
 let private answerEachLine (respond: string -> string) =
-    let mutable line = Console.In.ReadLine()
-    while not (isNull line) do
-        Console.Out.WriteLine(respond (nonNull line))
+    let utf8 = System.Text.UTF8Encoding(false, true)
+    use input = new BufferedStream(Console.OpenStandardInput())
+    let line = ResizeArray<byte>()
+    let answer () =
+        let bytes = line.ToArray()
+        line.Clear()
+        let bytes =
+            if bytes.Length > 0 && bytes[bytes.Length - 1] = 13uy then
+                Array.sub bytes 0 (bytes.Length - 1)
+            else
+                bytes
+        let reply =
+            match (try Ok(utf8.GetString bytes) with ex -> Error ex.Message) with
+            | Ok text -> respond text
+            | Error why ->
+                JsonSerializer.Serialize(
+                    {| BatchError = sprintf "the line is not UTF-8: %s" why |},
+                    buildOptionsCompact ()
+                )
+        Console.Out.WriteLine(reply)
         Console.Out.Flush()
-        line <- Console.In.ReadLine()
+    let mutable next = input.ReadByte()
+    while next >= 0 do
+        if next = 10 then answer () else line.Add(byte next)
+        next <- input.ReadByte()
+    if line.Count > 0 then answer ()
 
 /// Apply the [`langVersionEnv`] pin to a parsing-options record's
 /// `LangVersionText`, leaving it untouched when unset.
@@ -9025,8 +9056,8 @@ let private dropScriptRefsNamedLike (kind: string) (refs: string list) (switches
     if kind <> "assembly-entities" then switches else
     let requested =
         refs
-        |> List.filter (fun r -> carriesFSharpSignature (r.Trim()))
-        |> List.map (fun r -> Path.GetFileName(r.Trim()))
+        |> List.filter carriesFSharpSignature
+        |> List.map Path.GetFileName
     let referencedFile (o: string) =
         if o.StartsWith("-r:") || o.StartsWith("/r:") then Some(o.Substring 3)
         elif o.StartsWith("--reference:") then Some(o.Substring "--reference:".Length)
