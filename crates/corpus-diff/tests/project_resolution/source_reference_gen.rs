@@ -195,13 +195,6 @@ pub struct Case {
     pub opens: Vec<String>,
     /// Lines of B's body.
     pub uses: Vec<String>,
-    /// Each line of [`Self::uses`]'s coverage tag: the kind of the item it
-    /// uses, and whether that item's name collides with FSharp.Core's.
-    pub use_tags: Vec<String>,
-    /// Each line of [`Self::uses`]'s intended symbol: the path of the module
-    /// or namespace declaring A's item, and the name the line names last (a
-    /// union's or enum's first case, an extension's member).
-    pub use_names: Vec<(String, String)>,
 }
 
 const NAMESPACES: &[&str] = &[
@@ -523,8 +516,6 @@ pub fn generate(seed: u64, index: usize) -> Case {
         middle: None,
         opens: Vec::new(),
         uses: Vec::new(),
-        use_tags: Vec::new(),
-        use_names: Vec::new(),
     };
     let targets = open_targets(&case);
     if rng.chance(30) && !targets.is_empty() {
@@ -536,7 +527,7 @@ pub fn generate(seed: u64, index: usize) -> Case {
         opens.swap(i, rng.below(i + 1));
     }
     case.opens = opens;
-    (case.uses, case.use_tags, case.use_names) = consumer_uses(&case, &mut rng);
+    case.uses = consumer_uses(&case, &mut rng);
     if rng.chance(40) {
         case.middle = Some(format!("Mid{index}"));
     }
@@ -580,11 +571,9 @@ fn open_targets(case: &Case) -> Vec<String> {
     out
 }
 
-/// B's body: for every item of A, its uses, qualified and bare, and each
-/// line's coverage tag.
-fn consumer_uses(case: &Case, rng: &mut Rng) -> (Vec<String>, Vec<String>, Vec<(String, String)>) {
+/// B's body: for every item of A, its uses, qualified and bare.
+fn consumer_uses(case: &Case, rng: &mut Rng) -> Vec<String> {
     let mut out = Vec::new();
-    let mut tags = Vec::new();
     let mut k = 0usize;
     let mut next = || {
         k += 1;
@@ -595,23 +584,12 @@ fn consumer_uses(case: &Case, rng: &mut Rng) -> (Vec<String>, Vec<String>, Vec<(
         decls: &[Decl],
         rng: &mut Rng,
         out: &mut Vec<String>,
-        tags: &mut Vec<(String, (String, String))>,
         next: &mut dyn FnMut() -> String,
     ) {
         for d in decls {
-            let before = out.len();
             uses_of(prefix, &d.item, rng, out, next);
-            tags.extend(out[before..].iter().map(|line| {
-                let tag = use_tag(&d.item);
-                let tag = if line.ends_with(BARE_MARK) {
-                    format!("{tag} (bare)")
-                } else {
-                    tag
-                };
-                (tag, (prefix.to_owned(), item_use_name(&d.item)))
-            }));
             if let Item::Module { name, items, .. } = &d.item {
-                walk(&format!("{prefix}.{name}"), items, rng, out, tags, next);
+                walk(&format!("{prefix}.{name}"), items, rng, out, next);
             }
         }
     }
@@ -619,35 +597,12 @@ fn consumer_uses(case: &Case, rng: &mut Rng) -> (Vec<String>, Vec<String>, Vec<(
         for b in &f.blocks {
             match b {
                 Block::Namespace { path, decls } | Block::TopModule { path, decls, .. } => {
-                    walk(path, decls, rng, &mut out, &mut tags, &mut next)
+                    walk(path, decls, rng, &mut out, &mut next)
                 }
             }
         }
     }
-    let (tags, names) = tags.into_iter().unzip();
-    (out, tags, names)
-}
-
-/// The name of `item` its qualified uses name last.
-fn item_use_name(item: &Item) -> String {
-    match item {
-        Item::Module { name, .. }
-        | Item::Value { name, .. }
-        | Item::Literal { name }
-        | Item::Function { name, .. }
-        | Item::Record { name, .. }
-        | Item::Class { name, .. }
-        | Item::Delegate { name, .. }
-        | Item::Struct { name, .. }
-        | Item::Interface { name, .. }
-        | Item::Abbrev { name, .. }
-        | Item::Exception { name, .. }
-        | Item::Measure { name } => name.clone(),
-        Item::Union { cases, .. } | Item::Enum { cases, .. } => cases[0].clone(),
-        Item::ActivePattern { case } => case.clone(),
-        Item::OptExtension { member, .. } => format!("{member}S"),
-        Item::CsExtension { member, .. } => member.clone(),
-    }
+    out
 }
 
 fn uses_of(
@@ -658,20 +613,13 @@ fn uses_of(
     next: &mut dyn FnMut() -> String,
 ) {
     let bare = rng.chance(60);
-    // A bare use, and an extension member called through its target (on a
-    // receiver, or as `System.Int32.M`), is marked in a trailing comment, so
-    // its coverage tag can tell it from a qualified use: each may rightly
-    // bind elsewhere (FSharp.Core's `id` when A's module is not opened;
-    // `String.Trim` over an extension named `Trim`; another module's
-    // extension of the same name).
-    let mark = |text: String| format!("{text} {BARE_MARK}");
     let mut push = |text: String| out.push(text);
     match item {
         Item::Module { .. } => {}
         Item::Value { name, .. } => {
             push(format!("let {} = {p}.{name}", next()));
             if bare {
-                push(mark(format!("let {} = {name}", next())));
+                push(format!("let {} = {name}", next()));
             }
         }
         Item::Literal { name } => {
@@ -684,13 +632,13 @@ fn uses_of(
         Item::Function { name, .. } => {
             push(format!("let {} = {p}.{name} 1", next()));
             if bare {
-                push(mark(format!("let {} = {name} 1", next())));
+                push(format!("let {} = {name} 1", next()));
             }
         }
         Item::ActivePattern { case } => {
             push(format!("let {} = match 2 with {p}.{case} n -> n", next()));
             if bare {
-                push(mark(format!("let {} = match 2 with {case} n -> n", next())));
+                push(format!("let {} = match 2 with {case} n -> n", next()));
             }
         }
         Item::Record { name, field, .. } => {
@@ -700,7 +648,7 @@ fn uses_of(
             ));
             push(format!("let {} (r: {p}.{name}) = r.{field}", next()));
             if bare {
-                push(mark(format!("let {} = {{ {field} = 2 }}", next())));
+                push(format!("let {} = {{ {field} = 2 }}", next()));
             }
         }
         Item::Union { name, cases, .. } => {
@@ -711,7 +659,7 @@ fn uses_of(
                 next()
             ));
             if bare {
-                push(mark(format!("let {} = {case}", next())));
+                push(format!("let {} = {case}", next()));
             }
         }
         Item::Class { name, .. } => {
@@ -720,7 +668,7 @@ fn uses_of(
                 next()
             ));
             if bare {
-                push(mark(format!("let {} = {name}()", next())));
+                push(format!("let {} = {name}()", next()));
             }
         }
         Item::Interface { name, .. } => {
@@ -741,7 +689,7 @@ fn uses_of(
         Item::Struct { name, .. } => {
             push(format!("let {} = {p}.{name}(1).X", next()));
             if bare {
-                push(mark(format!("let {} = {name}(2)", next())));
+                push(format!("let {} = {name}(2)", next()));
             }
         }
         Item::Abbrev { name, .. } => {
@@ -750,10 +698,7 @@ fn uses_of(
                 next()
             ));
             if bare {
-                push(mark(format!(
-                    "let {} : {name} = Unchecked.defaultof<_>",
-                    next()
-                )));
+                push(format!("let {} : {name} = Unchecked.defaultof<_>", next()));
             }
         }
         Item::Exception { name, .. } => {
@@ -763,13 +708,13 @@ fn uses_of(
                 next()
             ));
             if bare {
-                push(mark(format!("let {} = {name} \"y\"", next())));
+                push(format!("let {} = {name} \"y\"", next()));
             }
         }
         Item::Measure { name } => {
             push(format!("let {} = 1<{p}.{name}>", next()));
             if bare {
-                push(mark(format!("let {} = 2<{name}>", next())));
+                push(format!("let {} = 2<{name}>", next()));
             }
         }
         Item::OptExtension { target, member } => {
@@ -778,11 +723,11 @@ fn uses_of(
             } else {
                 "(1)"
             };
-            push(mark(format!("let {} = {receiver}.{member}", next())));
-            push(mark(format!("let {} = {target}.{member}S", next())));
+            push(format!("let {} = {receiver}.{member}", next()));
+            push(format!("let {} = {target}.{member}S", next()));
         }
         Item::CsExtension { holder, member, .. } => {
-            push(mark(format!("let {} = \"s\".{member} ()", next())));
+            push(format!("let {} = \"s\".{member} ()", next()));
             push(format!("let {} = {p}.{holder}.{member} \"t\"", next()));
         }
     }
@@ -1124,9 +1069,6 @@ pub const LIBRARY_DEFINE: &str = "LIBRARY_FLAG";
 /// The line of B's body that uses A's define-dependent export.
 pub const DEFINED_USE: &str = "let definedUse = ";
 
-/// The comment that ends a bare use's line in B.
-pub const BARE_MARK: &str = "// bare";
-
 /// The first line of B's body: the use of the anchor.
 pub const ANCHOR_USE: &str = "let anchorUse = ";
 
@@ -1189,45 +1131,6 @@ pub fn item_kind(item: &Item) -> &'static str {
         Item::Measure { .. } => "measure",
         Item::OptExtension { .. } => "optional extension",
         Item::CsExtension { .. } => "C#-style extension",
-    }
-}
-
-/// Names A's items take that FSharp.Core also declares, so a use of one
-/// can bind either way.
-const CORE_NAMES: &[&str] = &[
-    "List", "Option", "String", "Result", "id", "map", "length", "max", "Some", "None", "Ok",
-    "Error",
-];
-
-/// Whether `item`'s name is one FSharp.Core also declares.
-fn collides(item: &Item) -> bool {
-    let name = match item {
-        Item::Module { name, .. }
-        | Item::Value { name, .. }
-        | Item::Literal { name }
-        | Item::Function { name, .. }
-        | Item::Record { name, .. }
-        | Item::Class { name, .. }
-        | Item::Delegate { name, .. }
-        | Item::Struct { name, .. }
-        | Item::Interface { name, .. }
-        | Item::Abbrev { name, .. }
-        | Item::Exception { name, .. }
-        | Item::Measure { name } => name,
-        Item::Union { cases, .. } | Item::Enum { cases, .. } => &cases[0],
-        Item::ActivePattern { case } => case,
-        Item::OptExtension { member, .. } | Item::CsExtension { member, .. } => member,
-    };
-    CORE_NAMES.contains(&name.as_str())
-}
-
-/// The coverage tag of a use of `item`: its kind, and whether its name
-/// collides with FSharp.Core's.
-fn use_tag(item: &Item) -> String {
-    if collides(item) {
-        format!("{} (colliding)", item_kind(item))
-    } else {
-        item_kind(item).to_owned()
     }
 }
 

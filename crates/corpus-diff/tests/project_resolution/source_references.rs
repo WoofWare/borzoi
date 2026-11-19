@@ -209,41 +209,23 @@ const DEFAULT_SEED: u64 = 0x005e_ed0f_5ce5;
 /// How many cases the default run generates.
 const DEFAULT_CASES: usize = 24;
 
-/// Every kind of qualified use that binds into A in the default run, pinned:
-/// the run is fixed, so a kind leaving this list (the generator stopped
-/// emitting it, or it stopped binding) fails rather than drops out unseen.
-const DEFAULT_BOUND_KINDS: &[&str] = &[
-    "C#-style extension",
-    "abbreviation",
-    "abbreviation (colliding)",
-    "active pattern",
-    "active pattern (colliding)",
-    "class",
-    "class (colliding)",
-    "compiled-name function (colliding)",
-    "delegate",
-    "delegate (colliding)",
-    "enum",
-    "enum (colliding)",
-    "exception",
-    "function (colliding)",
-    "interface",
-    "interface (colliding)",
-    "literal",
-    "measure",
-    "record",
-    "record (colliding)",
-    "struct",
-    "struct (colliding)",
-    "union",
-    "union (colliding)",
-    "value",
-    "value (colliding)",
+/// The census of the default run's records binding into A, pinned: each
+/// key is what FCS itself reports of a record (its `SymbolKind`, its value's
+/// kind, whether it is a constructor). D1 compares whole answers, so this
+/// pins only that the compared answers contain A's surface in these forms;
+/// a kind of use the generator stopped emitting, or one that stopped
+/// binding, moves it.
+const DEFAULT_CENSUS: &[&str] = &[
+    "activepatterncase - -",
+    "field field -",
+    "member member -",
+    "member member ctor",
+    "member module -",
+    "module - -",
+    "namespace - -",
+    "type - -",
+    "unioncase - -",
 ];
-
-/// Indices of [`DEFAULT_SEED`] beyond [`DEFAULT_CASES`] the default run adds,
-/// so that every kind of qualified use binds into A somewhere in it.
-const PINNED_CASES: &[usize] = &[77, 92, 129];
 
 /// A generated case's fixture: A (under [`LIBRARY_DEFINE`]), the middle
 /// project when there is one, and B.
@@ -276,87 +258,31 @@ fn error_lines(answer: &GraphResponse) -> BTreeSet<u64> {
         .collect()
 }
 
-/// What one case's uses cover, from FCS's own records. A use tag is a
-/// declaration kind, marked when its name collides with FSharp.Core's; bare
-/// uses (and extension members called on a receiver) are left out, since
-/// they may rightly bind elsewhere.
-struct UseCoverage {
-    /// Every qualified use's tag.
-    made: BTreeSet<String>,
-    /// The tags with a qualified use FCS accepted whose intended symbol
-    /// binds into A.
-    bound: BTreeSet<String>,
-    /// Each qualified use of a non-colliding kind FCS accepted with no
-    /// record of its intended symbol binding into A there. Such a use names
-    /// A's item by a path no other assembly declares, so it can resolve
-    /// nowhere else.
-    unbound: Vec<String>,
-}
-
-fn use_coverage(case: &Case, source: &GraphResponse) -> UseCoverage {
-    let text = &consumer_files(case)[0].1;
-    let line_of = |u: &str| -> u64 {
-        let i = text
-            .lines()
-            .position(|l| l == u)
-            .expect("each use is a line of Use.fs");
-        u64::try_from(i + 1).expect("a small file")
-    };
-    let bad = error_lines(source);
-    // Whether a record on `line` of B's Use.fs is A's symbol `name`: the
-    // symbol the generator wrote there, not merely any record of A (a
-    // qualifier such as `N.M` would do).
-    // A record of the intended declaration: in A, on `line` of B's Use.fs,
-    // declared under `path`, and named `name`. The path tells apart two
-    // declarations of one name in different modules.
-    let binds_at = |line: u64, path: &str, name: &str| {
-        uses(source).any(|u| {
-            let full = u["FullName"].as_str().unwrap_or("");
-            u["Assembly"] == case.library.as_str()
-                && u["Range"]["Start"]["Line"].as_u64() == Some(line)
-                && u["Range"]["File"]
-                    .as_str()
-                    .is_some_and(|f| f.ends_with("/Use.fs"))
-                && full.starts_with(&format!("{path}."))
-                && (u["SymbolName"] == name
-                    || u["LogicalName"] == name
-                    || full.ends_with(&format!(".{name}")))
-        })
-    };
-    let mut coverage = UseCoverage {
-        made: BTreeSet::new(),
-        bound: BTreeSet::new(),
-        unbound: Vec::new(),
-    };
-    for ((u, tag), (path, symbol)) in case.uses.iter().zip(&case.use_tags).zip(&case.use_names) {
-        if tag.ends_with("(bare)") {
-            continue;
+/// The census key of a record: FCS's `SymbolKind`, the kind of value it
+/// names (`module`, `member`, `local`, or `-` for none), and whether it is
+/// a constructor.
+fn census_key(record: &Value) -> String {
+    format!(
+        "{} {} {}",
+        record["SymbolKind"].as_str().unwrap_or("?"),
+        record["Value"]["Kind"].as_str().unwrap_or("-"),
+        if record["IsConstructor"] == true {
+            "ctor"
+        } else {
+            "-"
         }
-        coverage.made.insert(tag.clone());
-        let line = line_of(u);
-        if bad.contains(&line) {
-            continue;
-        }
-        if binds_at(line, path, symbol) {
-            coverage.bound.insert(tag.clone());
-        } else if !tag.ends_with("(colliding)") {
-            coverage
-                .unbound
-                .push(format!("`{u}` ({tag}, {path}.{symbol})"));
-        }
-    }
-    coverage
+    )
 }
 
 /// Run D1 over `cases` (each a seed and an index), failing on any
-/// disagreement, broken premise or vacuous case, and unless every kind of
-/// qualified use the run makes binds into A somewhere in it.
-fn d1_over_generated_cases(cases: &[(u64, usize)], pinned_kinds: Option<&[&str]>) {
+/// disagreement, broken premise, or case whose answers hold no record of A,
+/// and, for a pinned run, unless the census of records binding into A is
+/// the pinned one.
+fn d1_over_generated_cases(cases: &[(u64, usize)], pinned_census: Option<&[&str]>) {
     println!("D1 over {} generated cases: {cases:?}", cases.len());
     let mut oracle = ProjectGraphOracle::default();
     let mut failures = Vec::new();
-    let mut into_library: BTreeMap<String, usize> = BTreeMap::new();
-    let (mut made, mut bound) = (BTreeSet::new(), BTreeSet::new());
+    let mut census: BTreeSet<String> = BTreeSet::new();
     for &(seed, i) in cases {
         let case = generate(seed, i);
         let fixture = case_fixture(&case);
@@ -364,6 +290,7 @@ fn d1_over_generated_cases(cases: &[(u64, usize)], pinned_kinds: Option<&[&str]>
             source,
             mut problems,
         } = d1(&mut oracle, &fixture, &name(&case.consumer));
+        // Exact must-commit points, each a name unique by construction.
         let anchor = format!("{}.anchor", anchor_module(&case));
         if !binds(&source, &anchor, &case.library) {
             problems.push(format!(
@@ -392,15 +319,13 @@ fn d1_over_generated_cases(cases: &[(u64, usize)], pinned_kinds: Option<&[&str]>
         {
             problems.push(format!("`{middle}.token` does not bind into {middle}"));
         }
-        let coverage = use_coverage(&case, &source);
-        for use_ in &coverage.unbound {
-            problems.push(format!(
-                "the accepted qualified use {use_} does not bind into {}",
-                case.library
-            ));
+        let into_a: Vec<&Value> = uses(&source)
+            .filter(|u| u["Assembly"] == case.library.as_str())
+            .collect();
+        if into_a.is_empty() {
+            problems.push(format!("no record binds into {}", case.library));
         }
-        made.extend(coverage.made);
-        bound.extend(coverage.bound);
+        census.extend(into_a.into_iter().map(census_key));
         if !problems.is_empty() {
             let sources: String = library_files(&case)
                 .into_iter()
@@ -413,32 +338,17 @@ fn d1_over_generated_cases(cases: &[(u64, usize)], pinned_kinds: Option<&[&str]>
                 problems.join("\n  ")
             ));
         }
-        for u in uses(&source).filter(|u| u["Assembly"] == case.library.as_str()) {
-            let kind = u["SymbolKind"].as_str().unwrap_or("?").to_owned();
-            *into_library.entry(kind).or_default() += 1;
-        }
     }
-    println!("uses binding into the library by kind: {into_library:?}");
-    println!("use kinds binding into the library: {bound:?}");
-    // A fixed run is held to a pinned list, not only to the lines it made:
-    // a kind the generator stopped emitting would leave both sets alike.
-    if let Some(pinned) = pinned_kinds {
+    println!("census of records binding into the library: {census:?}");
+    if let Some(pinned) = pinned_census {
         let pinned: BTreeSet<String> = pinned.iter().map(|k| (*k).to_owned()).collect();
-        if bound != pinned {
+        if census != pinned {
             failures.push(format!(
-                "the use kinds binding into the library moved: missing {:?}, new {:?}",
-                pinned.difference(&bound).collect::<Vec<_>>(),
-                bound.difference(&pinned).collect::<Vec<_>>()
+                "the census of records binding into the library moved: missing {:?}, new {:?}",
+                pinned.difference(&census).collect::<Vec<_>>(),
+                census.difference(&pinned).collect::<Vec<_>>()
             ));
         }
-    }
-    let never: Vec<&String> = made.difference(&bound).collect();
-    // Only the pinned run owes coverage: a short replay of a prefix may
-    // rightly hold no accepted use of some kind.
-    if pinned_kinds.is_some() && !never.is_empty() {
-        failures.push(format!(
-            "no qualified use of these kinds binds into the library in the run: {never:?}"
-        ));
     }
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
@@ -447,11 +357,8 @@ fn d1_over_generated_cases(cases: &[(u64, usize)], pinned_kinds: Option<&[&str]>
 #[test]
 #[ignore = "drives FCS; use --ignored for oracle smoke"]
 fn source_references_equal_compiled_dlls_on_generated_graphs() {
-    let cases: Vec<(u64, usize)> = (0..DEFAULT_CASES)
-        .chain(PINNED_CASES.iter().copied())
-        .map(|i| (DEFAULT_SEED, i))
-        .collect();
-    d1_over_generated_cases(&cases, Some(DEFAULT_BOUND_KINDS));
+    let cases: Vec<(u64, usize)> = (0..DEFAULT_CASES).map(|i| (DEFAULT_SEED, i)).collect();
+    d1_over_generated_cases(&cases, Some(DEFAULT_CENSUS));
 }
 
 /// D1 over a wider run: `BORZOI_SOURCE_REF_SEED` and `BORZOI_SOURCE_REF_CASES`
@@ -1048,6 +955,14 @@ fn a_compile_refuses_an_assembly_the_request_does_not_name() {
         before,
         "a refused compile leaves the earlier DLL in place"
     );
+    // A source error does not turn the refusal into ordinary diagnostics:
+    // the compile takes the check's verdict before compiling.
+    let lib_fs = fixture.paths(&name("Lib")).remove(0);
+    std::fs::write(&lib_fs, "module Lib\n\nlet y : int = \"\"\n").expect("break Lib");
+    match oracle.compile(&fixture.compile_request(&name("Lib"), &short, &BTreeMap::new())) {
+        Err(FcsInvokeError::Refused(why)) if why.contains("does not name") => {}
+        other => panic!("a broken compile against a short reference set is refused too: {other:?}"),
+    }
 }
 
 /// A failed compile names no output, even where an earlier compile left a

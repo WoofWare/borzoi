@@ -7029,6 +7029,9 @@ let private parseGraphProject (e: JsonElement) : GraphProject =
     for s in sources do
         if not (s.EndsWith ".fs" || s.EndsWith ".fsi") then
             failwithf "%s: source %s is not a .fs or .fsi file" where s
+        // fsc reads an argument that starts `/` with no other `/` as a switch.
+        if s.StartsWith "/" && not (s.Substring(1).Contains '/') then
+            failwithf "%s: source %s has the shape of a switch" where s
         requireRegularSource s
     if List.length (List.distinct sources) <> List.length sources then
         failwithf "%s: a source is given twice" where
@@ -7193,6 +7196,43 @@ let private graphOptions (graph: ValidGraph) =
               Stamp = None }
     built, outputOf
 
+// FCS resolves exactly the references the request names: an assembly it
+// found by itself (one the request left out) would make an incomplete
+// reference set look complete, on both sides of a comparison.
+let private requireResolvedSet (graph: ValidGraph) (p: GraphProject) (results: FSharpCheckProjectResults) =
+    let dlls =
+        p.References
+        |> List.choose (function
+            | Dll path -> Some(Path.GetFullPath path)
+            | ProjectRef _ -> None)
+        |> set
+    let fromSource =
+        p.References
+        |> List.choose (function
+            | ProjectRef q -> Some graph.ById.[q].AssemblyName
+            | Dll _ -> None)
+        |> set
+    let mutable seenDlls = Set.empty
+    let mutable seenProjects = Set.empty
+    for a in results.ProjectContext.GetReferencedAssemblies() do
+        match a.FileName with
+        | Some file when dlls.Contains(Path.GetFullPath file) -> seenDlls <- seenDlls.Add(Path.GetFullPath file)
+        | Some file when File.Exists file ->
+            failwithf
+                "project %s: FCS resolved assembly %s (%s), which the request does not name"
+                p.Id a.SimpleName file
+        | _ when fromSource.Contains a.SimpleName -> seenProjects <- seenProjects.Add a.SimpleName
+        | _ ->
+            failwithf
+                "project %s: FCS resolved assembly %s (%A), which the request does not name"
+                p.Id a.SimpleName a.FileName
+    // And every reference the request names is one FCS imported: a
+    // project reference as the in-memory assembly it reads from source,
+    // a DLL by its file.
+    let missing = Set.union (dlls - seenDlls) (fromSource - seenProjects)
+    if not missing.IsEmpty then
+        failwithf "invariant: project %s: FCS did not import %A" p.Id (Set.toList missing)
+
 /// A `check` request's response.
 let private respondGraphCheck (checker: FSharpChecker) (root: JsonElement) =
     let graph = parseGraphCheck root
@@ -7221,42 +7261,6 @@ let private respondGraphCheck (checker: FSharpChecker) (root: JsonElement) =
         | Ok true -> ()
         | Ok false -> failwithf "invariant: FCS reads project %s from its DLL, not from source" p.Id
         | Error why -> failwithf "invariant: cannot tell whether FCS reads project %s from source: %s" p.Id why
-    // FCS resolves exactly the references the request names: an assembly it
-    // found by itself (one the request left out) would make an incomplete
-    // reference set look complete, on both sides of a comparison.
-    let requested (p: GraphProject) (results: FSharpCheckProjectResults) =
-        let dlls =
-            p.References
-            |> List.choose (function
-                | Dll path -> Some(Path.GetFullPath path)
-                | ProjectRef _ -> None)
-            |> set
-        let fromSource =
-            p.References
-            |> List.choose (function
-                | ProjectRef q -> Some graph.ById.[q].AssemblyName
-                | Dll _ -> None)
-            |> set
-        let mutable seenDlls = Set.empty
-        let mutable seenProjects = Set.empty
-        for a in results.ProjectContext.GetReferencedAssemblies() do
-            match a.FileName with
-            | Some file when dlls.Contains(Path.GetFullPath file) -> seenDlls <- seenDlls.Add(Path.GetFullPath file)
-            | Some file when File.Exists file ->
-                failwithf
-                    "project %s: FCS resolved assembly %s (%s), which the request does not name"
-                    p.Id a.SimpleName file
-            | _ when fromSource.Contains a.SimpleName -> seenProjects <- seenProjects.Add a.SimpleName
-            | _ ->
-                failwithf
-                    "project %s: FCS resolved assembly %s (%A), which the request does not name"
-                    p.Id a.SimpleName a.FileName
-        // And every reference the request names is one FCS imported: a
-        // project reference as the in-memory assembly it reads from source,
-        // a DLL by its file.
-        let missing = Set.union (dlls - seenDlls) (fromSource - seenProjects)
-        if not missing.IsEmpty then
-            failwithf "project %s: FCS did not import %A" p.Id (Set.toList missing)
     let referenced =
         referenced
         |> List.map (fun p ->
@@ -7264,10 +7268,10 @@ let private respondGraphCheck (checker: FSharpChecker) (root: JsonElement) =
                AssemblyName = p.AssemblyName
                Diagnostics =
                 let results = projectResults built.[p.Id]
-                requested p results
+                requireResolvedSet graph p results
                 results.Diagnostics |> Array.map projectDiagnostic |})
         |> List.toArray
-    requested graph.Check checkedResults
+    requireResolvedSet graph graph.Check checkedResults
     // The records come from the whole-project check ([`projectCheckRecords`]),
     // the check FCS's compile agrees with; `Diagnostics` is every diagnostic
     // of that check, those in no file included.
@@ -7287,6 +7291,17 @@ let private respondGraphCompile (checker: FSharpChecker) (root: JsonElement) =
     let outDir = absolutePath "outDir" (required "request" "outDir" fields)
     if p.References |> List.exists (function ProjectRef _ -> true | Dll _ -> false) then
         failwithf "project %s: a compiled project references DLLs only" p.Id
+    // The check's verdict first: the project as a check request is refused
+    // exactly where a compile must be (an assembly the request does not
+    // name, a source the project check cannot describe), whether or not the
+    // compile would have written a DLL.
+    let alone = { ById = Map.ofList [ p.Id, p ]; Order = [ p ]; Check = p }
+    let built, _ = graphOptions alone
+    let results, release = checkProjectNowWith false checker built.[p.Id] "fcs-dump-graph-compile"
+    try
+        requireResolvedSet alone p results
+    finally
+        release ()
     Directory.CreateDirectory outDir |> ignore
     // Compiled into a staging directory and moved into place only once
     // validated, so a refused compile never replaces an earlier good DLL.

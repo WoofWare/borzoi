@@ -141,6 +141,14 @@ impl GraphProject {
                     s.display()
                 ));
             }
+            // fsc reads an argument that starts `/` with no other `/` as a
+            // switch, so a source at the root has no spelling it reads.
+            if s.parent() == Some(Path::new("/")) {
+                return Err(format!(
+                    "{id}: source {} has the shape of a switch",
+                    s.display()
+                ));
+            }
         }
         if self.sources.iter().collect::<BTreeSet<_>>().len() != self.sources.len() {
             return Err(format!("{id}: a source is given twice"));
@@ -1021,6 +1029,10 @@ mod tests {
             );
         }
         assert!(compile_request_line(&project("Ay", &[]), Path::new("/out/Ay")).is_ok());
+        // A source at the root has the shape of a switch to fsc.
+        let mut p = project("Ay", &[]);
+        p.sources = vec![PathBuf::from("/Lib.fs")];
+        assert!(GraphRequest::new(vec![p], name("Ay")).is_err(), "/Lib.fs");
     }
 
     /// Two projects, or two files, whose names differ only in case are
