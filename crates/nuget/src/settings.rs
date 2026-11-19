@@ -50,6 +50,10 @@
 //!   `NUGET_PACKAGES`, if set non-empty, is absolute; on Linux
 //!   `NUGET_COMMON_APPLICATION_DATA`, which moves the machine-wide folder, is
 //!   absolute if set non-empty.
+//! - **User config.** `<home>/.nuget/NuGet/NuGet.Config` is a regular file.
+//!   Where there is none NuGet writes a default one, and throws where it
+//!   cannot (a home that cannot be created or written), which is known only
+//!   by writing.
 //! - **Which files.** NuGet decides which spelling of `nuget.config` it loads
 //!   from what it believes of the file system's case sensitivity, a belief it
 //!   probes once per process. A folder holding a config file is admitted only
@@ -557,7 +561,7 @@ pub struct GlobalPackagesFolder {
     pub origin: FolderOrigin,
     /// The config files NuGet loads, most significant first, as
     /// `ISettings.GetConfigFilePaths` lists them. The user config file is
-    /// always among them: NuGet writes a default one where there is none.
+    /// always among them: the model commits only where it exists.
     pub config_files: Vec<PathBuf>,
 }
 
@@ -587,6 +591,9 @@ pub enum GlobalPackagesFolderDecline {
     HomeUnknown,
     /// An environment variable NuGet reads holds a value outside the domain.
     Environment { name: &'static str },
+    /// There is no user config, which NuGet then writes, and throws where it
+    /// cannot: whether it can is known only by writing.
+    UserConfigAbsent { file: PathBuf },
     /// Which config files NuGet loads from this folder depends on what it
     /// believes of the file system, or the folder could not be listed.
     Folder { folder: PathBuf },
@@ -614,6 +621,11 @@ impl fmt::Display for GlobalPackagesFolderDecline {
             GlobalPackagesFolderDecline::Environment { name } => {
                 write!(f, "{name} holds a value outside the modelled domain")
             }
+            GlobalPackagesFolderDecline::UserConfigAbsent { file } => write!(
+                f,
+                "there is no user config {}, which NuGet would write",
+                file.display()
+            ),
             GlobalPackagesFolderDecline::Folder { folder } => write!(
                 f,
                 "which config files NuGet loads from {} cannot be predicted",
@@ -668,9 +680,6 @@ pub fn nuget_home_with(
 struct ConfigFileRef {
     path: PathBuf,
     folder: PathBuf,
-    /// `false` for a user config NuGet will write: its default holds package
-    /// sources alone.
-    exists: bool,
 }
 
 /// The global packages folder restore uses for a project in `root` that sets
@@ -702,11 +711,7 @@ pub fn global_packages_folder_with(
     let files = config_files(root, &home, environment, fs)?;
     let mut parsed = Vec::with_capacity(files.len());
     for file in &files {
-        parsed.push(if file.exists {
-            read_config_file(&file.path, fs)?
-        } else {
-            SettingsFile::default()
-        });
+        parsed.push(read_config_file(&file.path, fs)?);
     }
     let config_files: Vec<PathBuf> = files.iter().map(|file| file.path.clone()).collect();
 
@@ -798,28 +803,29 @@ fn config_files(
             files.push(ConfigFileRef {
                 path,
                 folder: folder.to_owned(),
-                exists: true,
             });
         }
     }
 
     let user_folder = home.join(".nuget").join("NuGet");
     let user_file = user_folder.join(DEFAULT_FILE_NAME);
-    // NuGet writes a default config (package sources only) where there is
-    // none, and fails where it cannot.
-    let exists = match fs.metadata(&user_file) {
-        Ok(metadata) if metadata.is_file => true,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+    // NuGet writes a default config where there is none, and throws where
+    // it cannot. Whether it can is known only by writing, which a reader
+    // does not do, so a user config that is not there declines.
+    match fs.metadata(&user_file) {
+        Ok(metadata) if metadata.is_file => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(GlobalPackagesFolderDecline::UserConfigAbsent { file: user_file });
+        }
         _ => {
             return Err(GlobalPackagesFolderDecline::Folder {
                 folder: user_folder,
             });
         }
-    };
+    }
     files.push(ConfigFileRef {
         path: user_file,
         folder: user_folder.clone(),
-        exists,
     });
 
     let additional = user_folder.join("config");
@@ -827,7 +833,6 @@ fn config_files(
         files.push(ConfigFileRef {
             path: additional.join(name),
             folder: additional.clone(),
-            exists: true,
         });
     }
 
@@ -842,7 +847,6 @@ fn config_files(
         files.push(ConfigFileRef {
             path: machine_wide.join(name),
             folder: machine_wide.clone(),
-            exists: true,
         });
     }
     Ok(files)
@@ -1077,6 +1081,35 @@ mod tests {
         assert_eq!(expand("a%A").as_deref(), Some("a%A"));
         assert_eq!(expand("%A%/%U%").as_deref(), Some("x/%U%"));
         assert_eq!(expand("%%"), None);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod user_config_tests {
+    use super::*;
+
+    /// Where there is no user config NuGet writes one, and throws where it
+    /// cannot (here, under a home it cannot create): the model, which does
+    /// not write, declines rather than commit to the folder of a default it
+    /// cannot know NuGet wrote.
+    #[test]
+    fn a_user_config_nuget_would_have_to_write_declines() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let project = std::fs::canonicalize(tmp.path()).unwrap().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let home = PathBuf::from("/nonexistent/borzoi-settings-test");
+        let environment: BTreeMap<OsString, OsString> = [(
+            OsString::from("DOTNET_CLI_HOME"),
+            home.clone().into_os_string(),
+        )]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            global_packages_folder(&project, &environment),
+            Err(GlobalPackagesFolderDecline::UserConfigAbsent {
+                file: home.join(".nuget").join("NuGet").join(DEFAULT_FILE_NAME)
+            })
+        );
     }
 }
 

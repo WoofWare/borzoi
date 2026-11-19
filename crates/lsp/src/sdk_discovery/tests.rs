@@ -411,6 +411,11 @@ impl PackagesLayout {
         let project = tmp.path().join("proj").join("App.fsproj");
         fs::create_dir_all(project.parent().unwrap()).unwrap();
         fs::write(tmp.path().join("global.json"), "{}").unwrap();
+        // The user config, naming no folder: where there is none NuGet
+        // writes one, which the settings model declines.
+        let user_config = home.join(".nuget").join("NuGet").join("NuGet.Config");
+        fs::create_dir_all(user_config.parent().unwrap()).unwrap();
+        fs::write(&user_config, "<configuration />\n").unwrap();
         Self {
             tmp,
             dotnet,
@@ -544,6 +549,29 @@ fn pinned_sdk_resolves_from_the_home_default_without_a_config() {
             .expect("resolves"),
     );
     assert_eq!(paths.props, layout.home_copy);
+}
+
+/// With no user config, which NuGet would write (and throw where it cannot),
+/// the settings model declines, and so does a pinned name NuGet would resolve.
+#[test]
+fn pinned_sdk_declines_without_a_user_config() {
+    let layout = PackagesLayout::new();
+    fs::remove_file(
+        layout
+            .home
+            .join(".nuget")
+            .join("NuGet")
+            .join("NuGet.Config"),
+    )
+    .unwrap();
+    let disc = layout.discovery(&layout.env());
+    match disc.resolve("My.Custom.Sdk/1.2.3", &Observer::new()) {
+        Err(SdkResolveError::UnsupportedLayout { reason }) => assert!(
+            reason.contains("no user config"),
+            "the decline must say why: {reason}"
+        ),
+        other => panic!("expected a decline, got {other:?}"),
+    }
 }
 
 /// Where the NuGet settings model cannot say which folder NuGet would use, a
@@ -940,9 +968,12 @@ fn e2e_msbuild_sdks_pin_overrides_caller_spec() {
     )
     .unwrap();
 
-    // NuGet loads its settings only under a home folder it can read.
+    // NuGet loads its settings only under a home folder it can read, and the
+    // settings model only where the user config is there already.
     let home = tmp.path().join("home");
-    fs::create_dir_all(&home).unwrap();
+    let user_config = home.join(".nuget").join("NuGet").join("NuGet.Config");
+    fs::create_dir_all(user_config.parent().unwrap()).unwrap();
+    fs::write(&user_config, "<configuration />\n").unwrap();
     let env = env_with(|e| {
         e.dotnet_root = Some(dotnet);
         e.nuget_packages_dir = Some(nuget.clone());
@@ -2082,9 +2113,12 @@ fn msbuild_sdks_pinned_resolution_declines_under_the_override() {
     )
     .unwrap();
 
-    // NuGet loads its settings only under a home folder it can read.
+    // NuGet loads its settings only under a home folder it can read, and the
+    // settings model only where the user config is there already.
     let home = tmp.path().join("home");
-    fs::create_dir_all(&home).unwrap();
+    let user_config = home.join(".nuget").join("NuGet").join("NuGet.Config");
+    fs::create_dir_all(user_config.parent().unwrap()).unwrap();
+    fs::write(&user_config, "<configuration />\n").unwrap();
     let env = env_with(|e| {
         e.dotnet_root = Some(dotnet);
         e.nuget_packages_dir = Some(nuget.clone());

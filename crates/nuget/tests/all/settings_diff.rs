@@ -445,7 +445,9 @@ fn gen_case(rng: &mut SplitMix64, base: &Path, cli_home: bool) -> Case {
         }
     }
     let home = if cli_home { "cli-home" } else { "home" };
-    if rng.below(2) == 0 {
+    // Mostly present: the model declines where there is no user config,
+    // which NuGet would write.
+    if rng.below(8) != 0 {
         let spelling = *rng.pick(&[
             "NuGet.Config",
             "NuGet.Config",

@@ -1438,7 +1438,9 @@ mod tests {
             let tree = Tree {
                 project_config: None,
                 repo_config: None,
-                user_config: None,
+                // NuGet writes a user config where there is none, which the
+                // settings model declines.
+                user_config: Some(Folder::Unset),
                 environment: None,
                 lock: false,
                 linked: false,
