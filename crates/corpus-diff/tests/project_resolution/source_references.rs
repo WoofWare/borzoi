@@ -209,6 +209,39 @@ const DEFAULT_SEED: u64 = 0x005e_ed0f_5ce5;
 /// How many cases the default run generates.
 const DEFAULT_CASES: usize = 24;
 
+/// Every kind of qualified use that binds into A in the default run, pinned:
+/// the run is fixed, so a kind leaving this list (the generator stopped
+/// emitting it, or it stopped binding) fails rather than drops out unseen.
+const DEFAULT_BOUND_KINDS: &[&str] = &[
+    "C#-style extension",
+    "abbreviation",
+    "abbreviation (colliding)",
+    "active pattern",
+    "active pattern (colliding)",
+    "class",
+    "class (colliding)",
+    "compiled-name function (colliding)",
+    "delegate",
+    "delegate (colliding)",
+    "enum",
+    "enum (colliding)",
+    "exception",
+    "function (colliding)",
+    "interface",
+    "interface (colliding)",
+    "literal",
+    "measure",
+    "optional extension",
+    "record",
+    "record (colliding)",
+    "struct",
+    "struct (colliding)",
+    "union",
+    "union (colliding)",
+    "value",
+    "value (colliding)",
+];
+
 /// Indices of [`DEFAULT_SEED`] beyond [`DEFAULT_CASES`] the default run adds,
 /// so that every kind of qualified use binds into A somewhere in it.
 const PINNED_CASES: &[usize] = &[77, 92, 129];
@@ -314,7 +347,7 @@ fn use_coverage(case: &Case, source: &GraphResponse) -> UseCoverage {
 /// Run D1 over `cases` (each a seed and an index), failing on any
 /// disagreement, broken premise or vacuous case, and unless every kind of
 /// qualified use the run makes binds into A somewhere in it.
-fn d1_over_generated_cases(cases: &[(u64, usize)]) {
+fn d1_over_generated_cases(cases: &[(u64, usize)], pinned_kinds: Option<&[&str]>) {
     println!("D1 over {} generated cases: {cases:?}", cases.len());
     let mut oracle = ProjectGraphOracle::default();
     let mut failures = Vec::new();
@@ -383,6 +416,18 @@ fn d1_over_generated_cases(cases: &[(u64, usize)]) {
     }
     println!("uses binding into the library by kind: {into_library:?}");
     println!("use kinds binding into the library: {bound:?}");
+    // A fixed run is held to a pinned list, not only to the lines it made:
+    // a kind the generator stopped emitting would leave both sets alike.
+    if let Some(pinned) = pinned_kinds {
+        let pinned: BTreeSet<String> = pinned.iter().map(|k| (*k).to_owned()).collect();
+        if bound != pinned {
+            failures.push(format!(
+                "the use kinds binding into the library moved: missing {:?}, new {:?}",
+                pinned.difference(&bound).collect::<Vec<_>>(),
+                bound.difference(&pinned).collect::<Vec<_>>()
+            ));
+        }
+    }
     let never: Vec<&String> = made.difference(&bound).collect();
     if !never.is_empty() {
         failures.push(format!(
@@ -400,7 +445,7 @@ fn source_references_equal_compiled_dlls_on_generated_graphs() {
         .chain(PINNED_CASES.iter().copied())
         .map(|i| (DEFAULT_SEED, i))
         .collect();
-    d1_over_generated_cases(&cases);
+    d1_over_generated_cases(&cases, Some(DEFAULT_BOUND_KINDS));
 }
 
 /// D1 over a wider run: `BORZOI_SOURCE_REF_SEED` and `BORZOI_SOURCE_REF_CASES`
@@ -415,7 +460,7 @@ fn deep_source_references_equal_compiled_dlls_on_generated_graphs() {
         s.parse().expect("BORZOI_SOURCE_REF_CASES is a count")
     });
     let cases: Vec<(u64, usize)> = (0..count).map(|i| (seed, i)).collect();
-    d1_over_generated_cases(&cases);
+    d1_over_generated_cases(&cases, None);
 }
 
 /// The generator's coverage over the default run: every declaration kind A
@@ -724,7 +769,11 @@ fn a_rewritten_reference_is_read_afresh_whatever_its_timestamp() {
     let stamp = std::fs::metadata(dll_path)
         .and_then(|m| m.modified())
         .expect("a timestamp");
-    std::fs::copy(&rewritten_dll[&name("Lib")], dll_path).expect("rewrite the DLL");
+    // A new file renamed into place: a reader still holding the old one (a
+    // cache the request failed to clear) keeps its old bytes.
+    let fresh = dll_path.with_extension("new");
+    std::fs::copy(&rewritten_dll[&name("Lib")], &fresh).expect("write the new DLL");
+    std::fs::rename(&fresh, dll_path).expect("rename it into place");
     set_modified(dll_path, stamp);
     let second = two.compile(&pin).expect("the compiler answers");
     assert!(
@@ -926,6 +975,39 @@ fn an_executable_compiles() {
         answer.output.as_ref().is_some_and(|o| o.is_file()),
         "{answer:#?}"
     );
+}
+
+/// A compile whose DLL would reference an assembly the request leaves out
+/// (System.Runtime, which the compiler finds by itself) is refused, as the
+/// check refuses it.
+#[test]
+#[ignore = "drives FCS; use --ignored for oracle smoke"]
+fn a_compile_refuses_an_assembly_the_request_does_not_name() {
+    let fixture = ProjectGraphFixture::materialise(vec![project(
+        "Lib",
+        vec![("Lib.fs".into(), "module Lib\n\nlet y = 1\n".into())],
+        &[],
+    )])
+    .expect("a graph");
+    let short: Vec<PathBuf> = framework_references()
+        .iter()
+        .filter(|p| !p.ends_with("System.Runtime.dll"))
+        .cloned()
+        .collect();
+    assert!(
+        short.len() < framework_references().len(),
+        "System.Runtime is in the reference set"
+    );
+    match ProjectGraphOracle::default().compile(&fixture.compile_request(
+        &name("Lib"),
+        &short,
+        &BTreeMap::new(),
+    )) {
+        Err(FcsInvokeError::Refused(why)) if why.contains("does not name") => {}
+        other => panic!(
+            "a compile against an assembly the request leaves out must be refused: {other:?}"
+        ),
+    }
 }
 
 /// A failed compile names no output, even where an earlier compile left a

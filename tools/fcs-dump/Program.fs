@@ -6381,13 +6381,27 @@ extern int private systemNativeStat(
     [<System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.LPUTF8Str)>] string path,
     byte[] output)
 
-/// Whether `path` is a regular file, links followed: by the runtime's own
-/// `stat` (`SystemNative_Stat`, whose `FileStatus` starts `Flags`, `Mode`,
-/// with the file type normalised to `S_IFREG = 0x8000`), so nothing has to
-/// open it to find out. Opening a FIFO or a device blocks or reads forever.
-let private isRegularFile (path: string) =
+/// Whether `path` is a regular file, links followed, on Unix: by the
+/// runtime's own `stat` (`SystemNative_Stat`, whose `FileStatus` starts
+/// `Flags`, `Mode`, with the file type normalised to `S_IFREG = 0x8000`), so
+/// nothing has to open it to find out. Opening a FIFO or a device blocks or
+/// reads forever.
+let private isRegularFileOnUnix (path: string) =
     let status = Array.zeroCreate<byte> 512
     systemNativeStat (path, status) = 0 && (BitConverter.ToInt32(status, 4) &&& 0xF000) = 0x8000
+
+/// [`isRegularFile`] on Windows, where `libSystem.Native` does not exist and
+/// there are no FIFOs: a file that exists and is neither a directory nor a
+/// device. Not exercised by any CI lane (none runs Windows).
+let private isRegularFileOnWindows (path: string) =
+    File.Exists path
+    && (let attributes = File.GetAttributes path
+        not (attributes.HasFlag FileAttributes.Directory || attributes.HasFlag FileAttributes.Device))
+
+/// Whether `path` is a regular file, links followed, found out without
+/// opening it ([`isRegularFileOnUnix`], [`isRegularFileOnWindows`]).
+let private isRegularFile (path: string) =
+    if OperatingSystem.IsWindows() then isRegularFileOnWindows path else isRegularFileOnUnix path
 
 /// Refuse a reference `path` unless it is a regular, non-empty file
 /// ([`isRegularFile`]); an assembly is never empty.
@@ -6488,7 +6502,12 @@ let private refuseConflatedSources (paths: string[]) =
 /// caches ([`referencesChanged`]); and a stamp of its own gives each request
 /// a project FCS has not checked, dropped from FCS's caches once read (the
 /// returned release).
-let private checkProjectNow (checker: FSharpChecker) (projOpts: FSharpProjectOptions) (userOpName: string) =
+let private checkProjectNowWith
+    (trackDigests: bool)
+    (checker: FSharpChecker)
+    (projOpts: FSharpProjectOptions)
+    (userOpName: string)
+    =
     let opts =
         { withFullReferencePaths projOpts with
             Stamp = Some(System.Threading.Interlocked.Increment(&projectCheckRequests)) }
@@ -6511,7 +6530,8 @@ let private checkProjectNow (checker: FSharpChecker) (projOpts: FSharpProjectOpt
         List.ofSeq found
     for o in projects do
         refuseConflatedSources o.SourceFiles
-    if referencesChanged (projects |> List.collect readableReferences |> List.distinct) then
+    let references = projects |> List.collect readableReferences |> List.distinct
+    if trackDigests && referencesChanged references then
         checker.InvalidateAll()
     try
         requestSources.Clear()
@@ -6534,6 +6554,11 @@ let private checkProjectNow (checker: FSharpChecker) (projOpts: FSharpProjectOpt
     with _ ->
         release ()
         reraise ()
+
+/// [`checkProjectNowWith`], clearing FCS's caches when a reference's bytes
+/// changed ([`referencesChanged`]).
+let private checkProjectNow (checker: FSharpChecker) (projOpts: FSharpProjectOptions) (userOpName: string) =
+    checkProjectNowWith true checker projOpts userOpName
 
 /// A project-check oracle's payload, `{ Files, Diagnostics }`, taken from
 /// `results`, the whole-project check of `paths`: each file's record
@@ -7179,7 +7204,9 @@ let private respondGraphCheck (checker: FSharpChecker) (root: JsonElement) =
     // conflate and line directives refused, unreadable references refused,
     // for the checked project and every project it reaches from source.
     let checkedResults, release =
-        checkProjectNow checker built.[graph.Check.Id] "fcs-dump-uses-project-graph"
+        // The dispatcher already cleared FCS's caches for this request, so
+        // no reference digest is needed to decide it.
+        checkProjectNowWith false checker built.[graph.Check.Id] "fcs-dump-uses-project-graph"
     try
     let projectResults (opts: FSharpProjectOptions) =
         checker.ParseAndCheckProject(opts, userOpName = "fcs-dump-uses-project-graph")
@@ -7265,6 +7292,25 @@ let private respondGraphCompile (checker: FSharpChecker) (root: JsonElement) =
     // earlier one in place, which is not this request's artefact.
     let output: string | null =
         if errors || failure.IsSome then null else Path.Combine(outDir, p.AssemblyName + ".dll")
+    // The DLL references exactly assemblies the request names: one the
+    // compiler found by itself would make an incomplete reference set look
+    // complete. Read from the DLL it wrote.
+    match output with
+    | null -> ()
+    | dll ->
+        let named =
+            p.References
+            |> List.choose (function
+                | Dll path -> Some(dllAssembly "reference" path)
+                | ProjectRef _ -> None)
+            |> set
+        use stream = File.OpenRead dll
+        use pe = new System.Reflection.PortableExecutable.PEReader(stream)
+        let md = System.Reflection.Metadata.PEReaderExtensions.GetMetadataReader pe
+        for h in md.AssemblyReferences do
+            let name = md.GetString(md.GetAssemblyReference(h).Name)
+            if not (named.Contains name) then
+                failwithf "project %s: the compile referenced assembly %s, which the request does not name" p.Id name
     {| Diagnostics = diagnostics |> Array.map projectDiagnostic
        Output = output |}
 
