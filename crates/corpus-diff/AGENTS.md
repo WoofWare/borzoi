@@ -17,6 +17,33 @@ substituted into comments and strings, which FCS checks too. Depends on
 its library, not its tests, so it is a regular dependency); driven by
 `docs/project-corpus-diff-runner.md`.
 
+It also drives the project-graph oracle (`ProjectGraphOracle`,
+`fcs-dump uses-project-graph-batch`, typed in
+`borzoi_oracle_harness::project_graph`): FCS checking a project with each
+F# project reference handed to it from source, as an `FSharpReference`,
+which is the semantics borzoi resolves `<ProjectReference>`s against. A
+request is a value per project (id, assembly name, target, sources,
+defines, references) and `fcs-dump` builds the argument vector from one
+template, so no compiler switch crosses the wire; its `compile` op builds a
+DLL with FCS's own compiler on the same vector.
+`tests/project_resolution/source_references.rs` holds it to **D1(G, C)**:
+over generated graphs G (`tests/project_resolution/source_reference_gen.rs`:
+every declaration kind a library exports, `.fsi` hiding, `internal` with and
+without `InternalsVisibleTo`, names colliding with FSharp.Core, a middle
+project, an export that depends on the library's defines), in currency C
+(the consumer's whole-project file records and diagnostics), the answer with
+each reference from source equals the answer with each reference as the DLL
+FCS compiled. Its one assumption is that FCS's check and FCS's compile agree
+on one argument vector; it claims nothing about any real build. The file
+records come from the whole-project check, not FCS's per-file check (which
+defines `EDITING`). Each case must bind its exact anchors (names unique by
+construction) and hold at least one record of the library; the pinned
+default run's census of records binding into the library, keyed by what FCS
+reports of them, is pinned. That is all it claims about coverage: not that
+each generated declaration was reached. `deep_` runs 200 cases
+(`BORZOI_SOURCE_REF_SEED`, `BORZOI_SOURCE_REF_CASES`), and the
+whole-project gate skips it.
+
 `tests/project_resolution/fcs_dump_boundary.rs` holds `fcs-dump`'s resident
 ops to the hostile-value library (`crates/oracle-harness/AGENTS.md`): every
 wire mutation of a good request to `file-batch`, `uses-project-batch` and

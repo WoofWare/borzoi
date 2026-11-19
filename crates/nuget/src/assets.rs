@@ -130,6 +130,12 @@ pub enum AssetSelectionDecline {
     NonUtf8PackageFile {
         path: PathBuf,
     },
+    /// A package file's path holds a NUL, which no file name holds, so the
+    /// list came from no file system; NuGet's content model takes such a path
+    /// for no asset.
+    NulInPackageFile {
+        path: String,
+    },
     /// A symlinked folder in the package leads back to a folder it is inside,
     /// so the package has no finite file list (restore's enumeration does not
     /// stop either).
@@ -168,6 +174,9 @@ impl fmt::Display for AssetSelectionDecline {
             AssetSelectionDecline::NonUtf8PackageFile { path } => {
                 write!(f, "package file name is not UTF-8: {}", path.display())
             }
+            AssetSelectionDecline::NulInPackageFile { path } => {
+                write!(f, "package file path holds a NUL: {path:?}")
+            }
             AssetSelectionDecline::SymlinkCycle { path } => {
                 write!(
                     f,
@@ -191,6 +200,7 @@ impl Error for AssetSelectionDecline {
             | AssetSelectionDecline::LibContract { .. }
             | AssetSelectionDecline::UndecidableReferenceName { .. }
             | AssetSelectionDecline::NonUtf8PackageFile { .. }
+            | AssetSelectionDecline::NulInPackageFile { .. }
             | AssetSelectionDecline::SymlinkCycle { .. } => None,
         }
     }
@@ -300,6 +310,9 @@ pub fn select_compile_assets(
     // `lib/contract` packages down a compat path we decline on.
     let mut assets = Vec::new();
     for file in files {
+        if file.contains('\0') {
+            return Err(AssetSelectionDecline::NulInPackageFile { path: file.clone() });
+        }
         if !is_allowed_library_file(file) {
             continue;
         }

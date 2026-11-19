@@ -16,6 +16,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use borzoi_oracle_harness::fcs_position::LineIndex;
+use borzoi_oracle_harness::project_graph::{
+    CompileRequest, CompileResponse, GraphRequest, GraphResponse, ResponseError, parse_response,
+};
 use borzoi_oracle_harness::{BatchChild, BatchFailure};
 use borzoi_spawn::{BoundedCommand, ChildFailure};
 
@@ -826,7 +829,21 @@ impl UsesProjectOracle {
 /// than none: a healthy but large project would be killed and recorded as
 /// skipped, quietly shrinking the corpus the diff claims to cover.
 fn spawn_uses_project_batch() -> Result<BatchChild, FcsInvokeError> {
-    let built = fcs_dump_command("uses-project-batch")?;
+    spawn_project_batch("uses-project-batch")
+}
+
+/// [`spawn_uses_project_batch`] for any of `fcs-dump`'s whole-project batch
+/// subcommands.
+fn spawn_project_batch(subcommand: &str) -> Result<BatchChild, FcsInvokeError> {
+    spawn_project_batch_with(subcommand, PROJECT_TIMEOUT)
+}
+
+/// [`spawn_project_batch`] with a request budget of `timeout`.
+fn spawn_project_batch_with(
+    subcommand: &str,
+    timeout: Duration,
+) -> Result<BatchChild, FcsInvokeError> {
+    let built = fcs_dump_command(subcommand)?;
     assert!(
         built.get_envs().next().is_none() && built.get_current_dir().is_none(),
         "a respawn rebuilds the command from its program and arguments alone"
@@ -839,10 +856,74 @@ fn spawn_uses_project_batch() -> Result<BatchChild, FcsInvokeError> {
             cmd.args(&args);
             cmd
         }),
-        "fcs-dump uses-project-batch",
-        PROJECT_TIMEOUT,
+        format!("fcs-dump {subcommand}"),
+        timeout,
         1,
     ))
+}
+
+/// The resident project-graph oracle, `fcs-dump uses-project-graph-batch`
+/// (`borzoi_oracle_harness::project_graph`): a `check` of a [`GraphRequest`],
+/// and a `compile` of one project with FCS's own compiler. Spawned on the
+/// first request, as [`UsesProjectOracle`] is.
+#[derive(Default)]
+pub struct ProjectGraphOracle {
+    child: Option<BatchChild>,
+    /// The budget per request; [`PROJECT_TIMEOUT`] unless a test set a
+    /// shorter one ([`ProjectGraphOracle::with_timeout`]).
+    timeout: Option<Duration>,
+}
+
+impl ProjectGraphOracle {
+    /// An oracle whose every request has `timeout`, so a probe that a
+    /// regressed oracle would leave waiting (a FIFO it opens) fails fast
+    /// instead of holding the run for the whole-project budget.
+    pub fn with_timeout(timeout: Duration) -> Self {
+        ProjectGraphOracle {
+            child: None,
+            timeout: Some(timeout),
+        }
+    }
+
+    /// FCS's answer to `request`.
+    pub fn check(&mut self, request: &GraphRequest) -> Result<GraphResponse, FcsInvokeError> {
+        let response = self.round_trip(&request.to_json_line())?;
+        parse_response(&response).map_err(FcsInvokeError::from)
+    }
+
+    /// FCS's answer to a check request given as an untyped JSON value, so a
+    /// test can put the oracle's own parser to a request the typed builder
+    /// would not make. Refused unsent unless its `op` is `check` (a raw
+    /// `compile` would write a DLL); serialised, it is one line.
+    pub fn check_value(
+        &mut self,
+        request: &serde_json::Value,
+    ) -> Result<GraphResponse, FcsInvokeError> {
+        if request.get("op").and_then(serde_json::Value::as_str) != Some("check") {
+            return Err(FcsInvokeError::Refused(
+                "a raw request must be a check".to_owned(),
+            ));
+        }
+        let response = self.round_trip(&request.to_string())?;
+        parse_response(&response).map_err(FcsInvokeError::from)
+    }
+
+    /// FCS's compiler's answer to a `compile` request.
+    pub fn compile(&mut self, request: &CompileRequest) -> Result<CompileResponse, FcsInvokeError> {
+        let response = self.round_trip(request.as_line())?;
+        parse_response(&response).map_err(FcsInvokeError::from)
+    }
+
+    fn round_trip(&mut self, line: &str) -> Result<String, FcsInvokeError> {
+        if self.child.is_none() {
+            self.child = Some(spawn_project_batch_with(
+                "uses-project-graph-batch",
+                self.timeout.unwrap_or(PROJECT_TIMEOUT),
+            )?);
+        }
+        let child = self.child.as_mut().expect("spawned above");
+        child.try_request(line).map_err(FcsInvokeError::Oracle)
+    }
 }
 
 /// The message of a `{"BatchError": …}` response: the oracle caught an
@@ -882,6 +963,9 @@ pub enum FcsInvokeError {
     Oracle(BatchFailure),
     /// The resident oracle answered with a `BatchError`.
     Refused(String),
+    /// The resident oracle answered with a line that is no response of its
+    /// protocol: a broken oracle, not a rejected input.
+    Malformed(String),
 }
 
 impl fmt::Display for FcsInvokeError {
@@ -894,13 +978,28 @@ impl fmt::Display for FcsInvokeError {
                 )
             }
             Self::Harness(e) => write!(f, "fcs-dump did not answer: {e}"),
-            Self::Oracle(e) => write!(f, "fcs-dump uses-project-batch did not answer: {e}"),
-            Self::Refused(message) => write!(f, "fcs-dump uses-project-batch failed: {message}"),
+            Self::Oracle(e) => write!(f, "the resident fcs-dump did not answer: {e}"),
+            Self::Refused(message) => write!(f, "the resident fcs-dump refused: {message}"),
+            Self::Malformed(message) => {
+                write!(
+                    f,
+                    "the resident fcs-dump answered outside its protocol: {message}"
+                )
+            }
         }
     }
 }
 
 impl std::error::Error for FcsInvokeError {}
+
+impl From<ResponseError> for FcsInvokeError {
+    fn from(e: ResponseError) -> Self {
+        match e {
+            ResponseError::Refused(m) => Self::Refused(m),
+            ResponseError::Malformed(m) => Self::Malformed(m),
+        }
+    }
+}
 
 /// The `fcs-dump` invocation for `subcommand`. Without `BORZOI_FCS_DUMP` the
 /// first call in the process builds `tools/fcs-dump` and later calls reuse the

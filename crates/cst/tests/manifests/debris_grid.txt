@@ -17,7 +17,6 @@
 -> foo ;; begin | divergent
 -> foo ;; begin | loses `let after = a`
 -> foo ;; begin⏎    x | divergent
--> foo ;; { }⏎    x | loses `let after = a`
 -> foo [<A>] ;;⏎    let inner = 1 | divergent
 -> foo [<A>] ;;⏎    x | divergent
 -> foo [<A>] ;⏎    let inner = 1 | divergent
@@ -65,13 +64,11 @@ _ foo ; )⏎    x | divergent
 _ foo ; begin | divergent
 _ foo ; begin | loses `let after = a`
 _ foo ; begin⏎    x | divergent
-_ foo ; { }⏎    x | loses `let after = a`
 _ foo ;; )⏎    let inner = 1 | divergent
 _ foo ;; )⏎    x | divergent
 _ foo ;; begin | divergent
 _ foo ;; begin | loses `let after = a`
 _ foo ;; begin⏎    x | divergent
-_ foo ;; { }⏎    x | loses `let after = a`
 _ foo [<A>] ;;⏎    let inner = 1 | divergent
 _ foo [<A>] ;;⏎    x | divergent
 _ foo [<A>] ;⏎    let inner = 1 | divergent
@@ -1096,13 +1093,11 @@ private foo ; )⏎    x | divergent
 private foo ; begin | divergent
 private foo ; begin | loses `let after = a`
 private foo ; begin⏎    x | divergent
-private foo ; { }⏎    x | loses `let after = a`
 private foo ;; )⏎    let inner = 1 | divergent
 private foo ;; )⏎    x | divergent
 private foo ;; begin | divergent
 private foo ;; begin | loses `let after = a`
 private foo ;; begin⏎    x | divergent
-private foo ;; { }⏎    x | loses `let after = a`
 private foo [<A>] ;;⏎    let inner = 1 | divergent
 private foo [<A>] ;;⏎    x | divergent
 private foo [<A>] ;⏎    let inner = 1 | divergent

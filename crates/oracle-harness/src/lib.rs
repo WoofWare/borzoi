@@ -42,6 +42,7 @@ pub mod module_tree;
 pub mod nuget_oracle;
 pub mod panic_silence;
 pub mod par_map;
+pub mod project_graph;
 pub mod repetition_shapes;
 pub mod restore_globals;
 pub mod stack_probe;
@@ -91,10 +92,8 @@ pub enum BatchFailure {
     Stdin(std::io::Error),
     /// The oracle could not be started.
     Spawn(std::io::Error),
-    /// The request is not one line: it is blank, or holds a line break. A
-    /// line-based oracle would read it as no request, leaving the driver to
-    /// wait out its deadline, or as several, matching every later answer to
-    /// the wrong request. Nothing was sent, and the child is still in step.
+    /// The request is blank or holds a line break, so it is not one request
+    /// line: it was not sent.
     NotOneLine,
 }
 
@@ -114,8 +113,7 @@ impl std::fmt::Display for BatchFailure {
             BatchFailure::Spawn(e) => write!(f, "starting the oracle failed: {e}"),
             BatchFailure::NotOneLine => write!(
                 f,
-                "the request is blank or holds a line break, so it is not one request line; \
-                 nothing was sent"
+                "the request is blank or holds a line break, so it is not one request line"
             ),
         }
     }
@@ -284,29 +282,27 @@ impl BatchChild {
     ///
     /// A wedged or crashed oracle is killed, reaped, and respawned, and the request
     /// retried on the fresh child, up to `attempts` times; only then does it panic.
-    /// A request that is not one line ([`BatchFailure::NotOneLine`]) panics
-    /// without being sent.
     pub fn request(&mut self, request: &str) -> String {
-        match self.try_request(request) {
-            Ok(answer) => answer,
-            Err(why @ BatchFailure::NotOneLine) => {
-                panic!("{} was not asked {request:?}: {why}", self.what)
-            }
-            Err(why) => panic!(
+        self.try_request(request).unwrap_or_else(|why| match why {
+            // Refused here, before any child saw it: no attempt, no stderr.
+            BatchFailure::NotOneLine => panic!("{} was not sent {request:?}: {why}", self.what),
+            _ => panic!(
                 "{} failed {} time(s) answering {request:?}: {why} (see the child's stderr above)",
                 self.what, self.attempts,
             ),
-        }
+        })
     }
 
     /// [`request`](Self::request), with the failure of the last attempt
     /// returned rather than panicked on. The child that failed it is gone, so
     /// the next request is put to a fresh one.
     ///
-    /// A request that is blank (as `str::trim`, and .NET's `String.Trim`,
-    /// see it) or holds a line feed or a carriage return (each a line end to
-    /// .NET's line reader) is refused with [`BatchFailure::NotOneLine`], and
-    /// the child, which saw nothing, is kept.
+    /// A request that is blank or holds `\n` or `\r` is refused with
+    /// [`BatchFailure::NotOneLine`] before anything is written: responses are
+    /// paired with requests by position, one line each, so it would draw no
+    /// answer (an oracle that skips blank lines leaves the caller waiting out
+    /// the whole budget) or several, and every later request would get
+    /// another's.
     pub fn try_request(&mut self, request: &str) -> Result<String, BatchFailure> {
         if request.trim().is_empty() || request.contains(['\n', '\r']) {
             return Err(BatchFailure::NotOneLine);

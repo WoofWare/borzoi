@@ -274,6 +274,7 @@ dependencies = [
  "proc-macro2",
  "proptest",
  "roxmltree",
+ "serde",
  "serde_json",
  "tempfile",
 ]

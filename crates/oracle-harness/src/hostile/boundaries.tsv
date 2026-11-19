@@ -38,6 +38,7 @@ crates/corpus-diff/src/perturb.rs	pending	2
 crates/corpus-diff/src/utf16.rs	pending	2
 crates/corpus-diff/tests/project_resolution.rs	pending	2
 crates/corpus-diff/tests/project_resolution/fcs_dump_boundary.rs	draws	fcs_dump_project=fs+change+name+spelling+source;fcs_dump_wire=wire
+crates/corpus-diff/tests/project_resolution/source_reference_gen.rs	pending	2
 crates/cst/src/directives/driver.rs	pending	3
 crates/cst/src/directives/expr.rs	pending	3
 crates/cst/src/directives/line.rs	pending	3
@@ -63,6 +64,7 @@ crates/cst/tests/all/nullness_gate.rs	pending	3
 crates/cst/tests/all/parser_diff_app_nesting.rs	pending	3
 crates/cst/tests/all/parser_diff_arg_name_generator.rs	pending	3
 crates/cst/tests/all/parser_diff_bare_member_grid.rs	pending	3
+crates/cst/tests/all/parser_diff_brace_body_grid.rs	pending	3
 crates/cst/tests/all/parser_diff_decl_sequence_grid.rs	pending	3
 crates/cst/tests/all/parser_diff_dot_dot_grid.rs	pending	3
 crates/cst/tests/all/parser_diff_dot_index_spacing.rs	pending	3
@@ -237,6 +239,7 @@ crates/nuget/tests/all/version_properties.rs	pending	2
 crates/oracle-harness/src/fcs_position.rs	pending	3
 crates/oracle-harness/src/manifest.rs	pending	3
 crates/oracle-harness/src/module_tree.rs	pending	3
+crates/oracle-harness/src/project_graph.rs	pending	2
 crates/oracle-harness/src/repetition_shapes.rs	pending	3
 crates/oracle-harness/src/xml_pump.rs	pending	3
 crates/sema/src/assembly_env.rs	pending	3
