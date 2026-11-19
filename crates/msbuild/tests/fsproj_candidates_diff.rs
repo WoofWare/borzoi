@@ -224,8 +224,8 @@ fn evaluate(
     let extra: HashMap<String, String> = globals.into_iter().collect();
     let parse = |probe: &ReadProbe| {
         parse_fsproj_reads(
-            xml,
-            path,
+            &borzoi_msbuild::ProjectFile::buffer(path, xml)
+                .expect("a project path spelt as its full path"),
             &extra,
             &common::oracle_environment(),
             None,
@@ -411,8 +411,8 @@ fn a_candidate_that_doubles_gives_up_rather_than_grow() {
         ..ReadProbe::default()
     };
     let (_, reads) = parse_fsproj_reads(
-        &xml,
-        &path,
+        &borzoi_msbuild::ProjectFile::buffer(&path, &xml)
+            .expect("a project path spelt as its full path"),
         &HashMap::from([("G".to_owned(), "y".to_owned())]),
         &common::oracle_environment(),
         None,
@@ -439,8 +439,8 @@ fn candidates_alone(xml: &str, name: &str) -> Option<BTreeSet<String>> {
         ..ReadProbe::default()
     };
     let (_, reads) = parse_fsproj_reads(
-        xml,
-        &path,
+        &borzoi_msbuild::ProjectFile::buffer(&path, xml)
+            .expect("a project path spelt as its full path"),
         &HashMap::from([("G".to_owned(), "y".to_owned())]),
         &common::oracle_environment(),
         None,
@@ -587,8 +587,8 @@ fn a_speculative_expansion_probes_nothing() {
                </PropertyGroup></Project>";
     std::fs::write(&path, xml).unwrap();
     let (parsed, _) = parse_fsproj_reads(
-        xml,
-        &path,
+        &borzoi_msbuild::ProjectFile::buffer(&path, xml)
+            .expect("a project path spelt as its full path"),
         &HashMap::from([("G".to_owned(), "y".to_owned())]),
         &common::oracle_environment(),
         None,
@@ -615,8 +615,8 @@ fn a_tracked_speculative_expansion_probes_nothing() {
     std::fs::write(&path, xml).unwrap();
     let parse = |properties: Vec<String>| {
         parse_fsproj_reads(
-            xml,
-            &path,
+            &borzoi_msbuild::ProjectFile::buffer(&path, xml)
+                .expect("a project path spelt as its full path"),
             &HashMap::from([("G".to_owned(), "y".to_owned())]),
             &common::oracle_environment(),
             None,

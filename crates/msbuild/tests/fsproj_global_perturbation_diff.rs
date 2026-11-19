@@ -711,8 +711,8 @@ fn evaluate_both(
     // The served walk's candidates, which every startup directory's MSBuild
     // value must be among.
     let (_, served_reads) = parse_fsproj_reads(
-        xml,
-        &project_path,
+        &borzoi_msbuild::ProjectFile::buffer(&project_path, xml)
+            .expect("a project path spelt as its full path"),
         &extra,
         &common::oracle_environment(),
         sdk_resolver,
