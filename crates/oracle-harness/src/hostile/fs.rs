@@ -95,6 +95,27 @@ impl State {
     }
 }
 
+/// The alphabet of file-system states: every [`State`], under its dimension,
+/// for a harness that enumerates them ([`super::Alphabet::entries`]) or mixes
+/// them into its own at [`super::RATE`] ([`super::Alphabet::sample`]). A
+/// state is made with [`HostileFs::place`].
+pub fn alphabet() -> &'static super::Alphabet<State> {
+    static ALPHABET: std::sync::OnceLock<super::Alphabet<State>> = std::sync::OnceLock::new();
+    ALPHABET.get_or_init(|| {
+        super::Alphabet::new(
+            super::Kind::FsState,
+            State::ALL
+                .iter()
+                .map(|state| super::Entry {
+                    dimension: state.dimension(),
+                    value: *state,
+                    why: state.dimension().why(),
+                })
+                .collect(),
+        )
+    })
+}
+
 /// A file changing between two requests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Change {
@@ -875,6 +896,15 @@ mod tests {
         let states: BTreeSet<_> = State::ALL.iter().map(|s| s.dimension()).collect();
         assert_eq!(states.len(), State::ALL.len());
         assert_eq!(states, Kind::FsState.dimensions().collect());
+        // The alphabet holds every state once, under its own dimension.
+        assert_eq!(alphabet().kind(), Kind::FsState);
+        assert_eq!(alphabet().entries().len(), State::ALL.len());
+        assert!(
+            alphabet()
+                .entries()
+                .iter()
+                .all(|e| e.dimension == e.value.dimension())
+        );
         let changes: BTreeSet<_> = Change::ALL.iter().map(|c| c.dimension()).collect();
         assert_eq!(changes.len(), Change::ALL.len());
         assert_eq!(changes, Kind::FsChange.dimensions().collect());
