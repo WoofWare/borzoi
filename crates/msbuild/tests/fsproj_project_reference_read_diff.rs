@@ -292,7 +292,12 @@ impl ReadDocument {
     /// unconditional (so MSBuild makes it) and such a reference reads its
     /// name. A write a later one replaces, or one under a gate, may reach no
     /// reference.
-    fn read_dimensions(&self, evaluated: &[bool]) -> BTreeSet<Dimension> {
+    ///
+    /// A name's value is followed through copies (`$(Other)`,
+    /// `$(Other.Length)`) to the write that made it. `None` where that is not
+    /// known: a write on the way stands under a gate, which MSBuild may make
+    /// or skip, so the census records nothing rather than call the read plain.
+    fn read_dimensions(&self, evaluated: &[bool]) -> Option<BTreeSet<Dimension>> {
         let mut dimensions = BTreeSet::new();
         for name in READ_NAMES {
             let read = self
@@ -300,14 +305,30 @@ impl ReadDocument {
                 .iter()
                 .zip(evaluated)
                 .any(|(r, evaluated)| *evaluated && r.reads.contains(&name));
-            if let Some(last) = self.writes.iter().rev().find(|w| w.name == name)
-                && read
-                && last.condition.is_empty()
-            {
-                dimensions.extend(last.body.hostile.iter().copied());
+            if read {
+                dimensions.extend(self.provenance(name, self.writes.len())?);
             }
         }
-        dimensions
+        Some(dimensions)
+    }
+
+    /// The dimensions of the value `name` holds after the first `before`
+    /// writes ([`Self::read_dimensions`]).
+    fn provenance(&self, name: &str, before: usize) -> Option<BTreeSet<Dimension>> {
+        let Some(at) = self.writes[..before].iter().rposition(|w| w.name == name) else {
+            return Some(BTreeSet::new());
+        };
+        let write = &self.writes[at];
+        if !write.condition.is_empty() {
+            return None;
+        }
+        let mut dimensions: BTreeSet<Dimension> = write.body.hostile.clone();
+        for other in READ_NAMES {
+            if write.body.value.starts_with(&format!("$({other}")) {
+                dimensions.extend(self.provenance(other, at)?);
+            }
+        }
+        Some(dimensions)
     }
 
     /// Every dimension any write carries.
@@ -500,8 +521,9 @@ fn doubted_read_sweep(oracle: &mut Oracle, seed: u64, cases: usize) -> ReadCensu
         };
         if let Some(verdict) = verdict
             && evaluated.iter().any(|e| *e)
+            && let Some(read) = document.read_dimensions(&evaluated)
         {
-            census.reached(&document.read_dimensions(&evaluated), verdict);
+            census.reached(&read, verdict);
         }
         if witness {
             continue;
@@ -582,6 +604,16 @@ fn a_reference_reading_a_refused_name_is_no_certain_omission() {
              <Choose><When{UNSUPPORTED_TRUE}><ItemGroup><ProjectReference Include=\"$(P).fsproj\" /></ItemGroup></When></Choose>\
              <ItemGroup><ProjectReference Include=\"A.fsproj\" /></ItemGroup>"
         ),
+        // A nested `<When>` that a write of the undecided branch around it
+        // opens: false on the value before the `<Choose>`, true on the
+        // branch's own.
+        format!(
+            "<PropertyGroup><P>{refused}</P></PropertyGroup>\
+             <Choose><When{UNSUPPORTED_TRUE}><PropertyGroup><X>one</X></PropertyGroup>\
+             <Choose><When Condition=\"'$(X)' == 'one'\">\
+             <ItemGroup><ProjectReference Include=\"$(P).fsproj\" /></ItemGroup></When></Choose></When></Choose>\
+             <ItemGroup><ProjectReference Include=\"A.fsproj\" /></ItemGroup>"
+        ),
         // A gate on a toolset name the walk holds no value of without a
         // startup directory.
         format!(
@@ -626,6 +658,35 @@ fn a_reference_reading_a_refused_name_is_no_certain_omission() {
             parsed.project_references
         );
     }
+}
+
+/// The arms after a `<When>` that holds whatever the doubted names hold are
+/// ones MSBuild never evaluates the gates of: deciding which arms are dead
+/// probes none of their files, so the read set holds nothing MSBuild does
+/// not consult.
+#[test]
+fn the_arms_after_a_taken_one_are_not_probed() {
+    let xml = format!(
+        "<Project><Choose><When{UNSUPPORTED_TRUE}><PropertyGroup><X>1</X></PropertyGroup></When>\
+         <When Condition=\"true\"><PropertyGroup><Y>1</Y></PropertyGroup></When>\
+         <When Condition=\"Exists('not-reached')\"><PropertyGroup><Z>1</Z></PropertyGroup></When>\
+         </Choose></Project>"
+    );
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let root = borzoi_msbuild::observed::host_fs::canonicalize(dir.path()).expect("canonicalize");
+    let proj = layout(&root);
+    std::fs::write(&proj, &xml).unwrap();
+    let parsed = parse_fsproj_with_imports(
+        &borzoi_msbuild::ProjectFile::buffer(&proj, &xml)
+            .expect("a project path spelt as its full path"),
+        &HashMap::new(),
+        &common::oracle_environment(),
+        None,
+        None,
+    )
+    .expect("well-formed XML parses");
+    let read = format!("{:?}", parsed.read_set);
+    assert!(!read.contains("not-reached"), "{read}");
 }
 
 /// A function that reads a name without naming it (`AreFeaturesEnabled`
@@ -715,6 +776,21 @@ fn a_dead_reference_reading_a_refused_name_costs_no_certainty() {
         // holds.
         "<ItemGroup><ProjectReference Include=\"B$( P).fsproj\" /></ItemGroup>".to_owned(),
         "<ItemGroup><ProjectReference Include=\"B$(P ).fsproj\" /></ItemGroup>".to_owned(),
+        // A gate false whatever a doubted name holds, which the walk cannot
+        // evaluate on the value it holds (`É` against `é`).
+        format!(
+            "<PropertyGroup><Gate{UNSUPPORTED_TRUE}>É</Gate></PropertyGroup>\
+             <ItemGroup><ProjectReference Include=\"$(Gate).fsproj\" Condition=\"'$(Gate)' == 'é' And false\" /></ItemGroup>"
+        ),
+        // A nested `<When>` a clean value decides false whatever a name the
+        // enclosing undecided branch writes holds.
+        format!(
+            "<PropertyGroup><Gate>{REFUSED_BODY}</Gate></PropertyGroup>\
+             <PropertyGroup><Gate>false</Gate></PropertyGroup>\
+             <Choose><When{UNSUPPORTED_TRUE}><PropertyGroup><X>one</X></PropertyGroup>\
+             <Choose><When Condition=\"$(Gate) And '$(X)' == 'one'\">\
+             <ItemGroup><ProjectReference Include=\"$(P).fsproj\" /></ItemGroup></When></Choose></When></Choose>"
+        ),
         // The same of a name written under a gate the walk cannot decide.
         format!(
             "<PropertyGroup><G{UNSUPPORTED_TRUE}>x</G></PropertyGroup>\

@@ -578,9 +578,9 @@ fn a_wide_undecided_choose_decides_each_when_once() {
         evaluate_project(body);
         start.elapsed()
     };
-    time(100);
-    let narrow = time(400);
-    let wide = time(1_600);
+    time(500);
+    let narrow = time(2_000);
+    let wide = time(8_000);
     let ratio = wide.as_secs_f64() / narrow.as_secs_f64().max(1e-6);
     assert!(
         ratio < 10.0,

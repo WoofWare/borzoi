@@ -109,7 +109,7 @@
 //! SDK the walk cannot resolve: its resolver may decline one MSBuild resolves.
 //! The pure walker follows no import and judges none; it judges conditions.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
@@ -899,43 +899,59 @@ pub(super) fn judge_branch(
 
 /// Whether MSBuild cannot take the `<When>` or `<Otherwise>` at `branch`, by
 /// the gates of its `<Choose>`, which MSBuild evaluates on the state before
-/// the `<Choose>`: an earlier `<When>`'s true, or its own false, each on
-/// values the walk holds and decided exactly
-/// ([`State::condition_is_decided_exactly`], the reference gates' policy),
-/// reading no name the path it judges leaves unknown. A refusal a clean
-/// write overwrote does not keep such a gate open, as it keeps an import
-/// point's ([`directory_build::decision_from_certain_inputs`]): the rejection
+/// the `<Choose>`: an earlier `<When>`'s true, or its own false, each decided
+/// whatever the names the walk doubts hold, those the judged path writes
+/// included ([`State::reference_gate_decision`]). A refusal a clean write
+/// overwrote does not keep such a gate open, as it keeps an import point's
+/// ([`directory_build::decision_from_certain_inputs`]): the rejection
 /// judgement walks the arm all the same; [`super::item_pass`]'s reference
 /// check does not count what it defers from there.
 ///
-/// Each `<When>`'s decision is taken once per pass over the arms of its
-/// `<Choose>` (`State::arm_decisions`, which [`judge_whens`] and
-/// `handle_choose` clear when the pass ends), so a chain of `n` arms costs
-/// `n` decisions.
+/// The arms' fates are taken in one pass over the `<Choose>` per pass over its
+/// arms (`State::arm_decisions`, which [`judge_whens`] and `handle_choose`
+/// clear when the pass ends), each found again by its offset, and a gate after
+/// one that holds whatever the doubted names hold is not evaluated, as MSBuild
+/// does not evaluate it: so a chain of `n` arms costs `n` decisions, and the
+/// read set gains no probe MSBuild does not make.
 fn arm_is_dead(branch: Node<'_, '_>, state: &mut State<'_>) -> bool {
     let Some(choose) = branch.parent_element() else {
         return false;
     };
-    let decisions = match state.arm_decisions.get(&choose_key(choose)) {
-        Some(decisions) => std::rc::Rc::clone(decisions),
+    let fates = match state.arm_decisions.get(&choose_key(choose)) {
+        Some(fates) => std::rc::Rc::clone(fates),
         None => {
-            let decisions: std::rc::Rc<[Option<bool>]> = choose
-                .children()
-                .filter(|c| c.has_tag_name("When"))
-                .map(|when| when_decision(when, state))
-                .collect();
+            let fates = std::rc::Rc::new(arm_fates(choose, state));
             state
                 .arm_decisions
-                .insert(choose_key(choose), std::rc::Rc::clone(&decisions));
-            decisions
+                .insert(choose_key(choose), std::rc::Rc::clone(&fates));
+            fates
         }
     };
-    let at = choose
-        .children()
-        .filter(|c| c.has_tag_name("When"))
-        .position(|when| when.id() == branch.id());
-    let earlier = at.unwrap_or(decisions.len());
-    decisions[..earlier].contains(&Some(true)) || at.is_some_and(|at| decisions[at] == Some(false))
+    fates.get(&branch.range().start).copied().unwrap_or(false)
+}
+
+/// Whether each arm of the `<Choose>` at `choose` is one MSBuild cannot take
+/// ([`arm_is_dead`]), by the offset of its `<When>` or `<Otherwise>`.
+fn arm_fates(choose: Node<'_, '_>, state: &State<'_>) -> HashMap<usize, bool> {
+    let entry_dir = state.entry_project_dir.clone();
+    let mut fates = HashMap::new();
+    let mut taken = false;
+    for arm in choose.children().filter(Node::is_element) {
+        let dead = taken
+            || match attribute(arm, "Condition").filter(|_| arm.has_tag_name("When")) {
+                Some(condition) => match state.reference_gate_decision(&condition, &entry_dir) {
+                    Some(true) => {
+                        taken = true;
+                        false
+                    }
+                    Some(false) => true,
+                    None => false,
+                },
+                None => false,
+            };
+        fates.insert(arm.range().start, dead);
+    }
+    fates
 }
 
 /// The key of the `<Choose>` at `choose` in `State::arm_decisions`.
@@ -944,33 +960,6 @@ pub(super) fn choose_key(choose: Node<'_, '_>) -> (usize, usize) {
         std::ptr::from_ref(choose.document()) as usize,
         choose.range().start,
     )
-}
-
-/// The way the `<When>` at `when` decides on the values the walk holds,
-/// decided exactly and reading no name the judged path leaves unknown
-/// ([`arm_is_dead`]).
-fn when_decision(when: Node<'_, '_>, state: &State<'_>) -> Option<bool> {
-    let entry_dir = state.entry_project_dir.clone();
-    let condition = attribute(when, "Condition")?;
-    if properties::property_references(&condition).any(|name| state.speculatively_unheld(name))
-        || !state.condition_is_decided_exactly(&condition, Some(&entry_dir), &|name| {
-            state.undefined_read_is_exact(name)
-        })
-    {
-        return None;
-    }
-    let observer = state.observer;
-    let exists = |path: &str| condition_exists(observer, path, &entry_dir);
-    let probes = state.follow_imports.then_some(condition::Probes {
-        exists: &exists,
-        observer,
-    });
-    match condition::evaluate_at(&condition, &state.lookup, probes, state.condition_site()).outcome
-    {
-        condition::Outcome::True => Some(true),
-        condition::Outcome::False => Some(false),
-        _ => None,
-    }
 }
 
 /// [`judge_branch`] within its speculative walk.

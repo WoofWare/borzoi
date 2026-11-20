@@ -1314,7 +1314,7 @@ struct State<'r> {
     /// The `<When>` decisions of each `<Choose>` the judgement is judging the
     /// arms of now, by the `<Choose>` (its document and offset), taken once on
     /// the state before it ([`rejection::judge_branch`]).
-    arm_decisions: HashMap<(usize, usize), std::rc::Rc<[Option<bool>]>>,
+    arm_decisions: HashMap<(usize, usize), std::rc::Rc<HashMap<usize, bool>>>,
     /// The root each root-surfacing diagnostic stood for, by its index in
     /// `diagnostics`, captured when it was pushed. A diagnostic carries only a
     /// name, and that name's root may change later in the walk;
@@ -2943,6 +2943,43 @@ impl<'r> State<'r> {
 
     fn raw_uses_sdk_package_taint(&self, raw: &str) -> bool {
         self.sdk_package_taint_for_raw(raw).is_some()
+    }
+
+    /// The way the gate `condition` of a reference, its group or an arm of a
+    /// `<Choose>` around it decides whatever the names the walk doubts hold
+    /// (the reference gates' policy: unpinned or SDK-tainted, held as no value
+    /// it can show undefined, or written on the path the judgement walks), on
+    /// the values it holds, three-valued (`condition::decide_without`), `Exists`
+    /// resolved against `dir`. A refusal a clean write overwrote leaves the
+    /// bound value deciding, as it does not for an import point
+    /// ([`directory_build::decision_from_certain_inputs`]). Once the walk has
+    /// hidden content, a doubted name it reads settles nothing
+    /// ([`Self::condition_is_decided_exactly`] says why).
+    fn reference_gate_decision(&self, condition: &str, dir: &Path) -> Option<bool> {
+        let unknown = |name: &str| {
+            self.trust_of(name).reference_is_untrusted()
+                || (!self.lookup.is_bound(name) && !self.undefined_read_is_exact(name))
+                || self.speculatively_unheld(name)
+        };
+        if self.walk_opaque.is_some() && properties::property_references(condition).any(unknown) {
+            return None;
+        }
+        let observer = self.observer;
+        let exists = |path: &str| condition_exists(observer, path, dir);
+        let probes = self.follow_imports.then_some(condition::Probes {
+            exists: &exists,
+            observer,
+        });
+        match condition::decide_without(
+            condition,
+            &self.lookup,
+            probes,
+            self.condition_site(),
+            &unknown,
+        ) {
+            condition::Decision::Decided(value) => Some(value),
+            _ => None,
+        }
     }
 
     /// Whether `raw` reads a name whose value the real build may hold
