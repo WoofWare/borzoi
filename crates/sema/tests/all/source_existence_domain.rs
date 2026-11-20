@@ -48,8 +48,8 @@ fn every_form_is_read_or_declined_as_its_verdict_says() {
         };
         // A read witness must be graded against FCS (`exact` or `covers`),
         // not merely not declined: an ungraded verdict tests no containment.
-        let read = verdict.starts_with("certified: exact")
-            || verdict.starts_with("certified: covers");
+        let read =
+            verdict.starts_with("certified: exact") || verdict.starts_with("certified: covers");
         let declined = verdict.starts_with("certified: unread");
         if (form.verdict() == Verdict::Read && !read)
             || (form.verdict() != Verdict::Read && !declined)
