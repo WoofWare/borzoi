@@ -72,6 +72,29 @@ fn draw_value(rng: &mut SplitMix64) -> hostile::Drawn<String> {
     }
 }
 
+/// [`draw_value`] for a property's last write: no hostile value a later
+/// write would put back, as nothing does.
+fn draw_final_value(rng: &mut SplitMix64) -> hostile::Drawn<String> {
+    let plain = *rng.pick(PLAIN);
+    let finals = value::alphabet().filtered(|entry| entry.value.write == value::Write::Final);
+    match hostile::sample(&finals, rng.next()) {
+        Some(entry) => hostile::Drawn::of(entry).map(|v| v.render(plain)),
+        None => hostile::Drawn::plain(plain.to_owned()),
+    }
+}
+
+#[test]
+fn a_last_write_draws_no_value_a_later_write_puts_back() {
+    let mut rng = SplitMix64(0x1092);
+    let drawn: Vec<_> = (0..20_000).map(|_| draw_final_value(&mut rng)).collect();
+    assert!(drawn.iter().any(|d| !d.hostile.is_empty()));
+    assert!(
+        drawn
+            .iter()
+            .all(|d| !d.hostile.contains(&Dimension::OverwrittenLater))
+    );
+}
+
 /// An operand naming one of `names`: a literal, a reference, or a property
 /// function, modelled or not, that may throw on its receiver.
 fn operand(rng: &mut SplitMix64, names: &[&str]) -> String {
@@ -702,7 +725,7 @@ fn draw_project(rng: &mut SplitMix64, excluded: &BTreeSet<Dimension>) -> Option<
     let b = draw_value(rng);
     let held = draw_value(rng);
     let real = draw_value(rng);
-    let rewritten = draw_value(rng);
+    let rewritten = draw_final_value(rng);
     let rewrite: Option<&'static str> = *rng.pick(&[None, None, Some("A"), Some("B")]);
     let carried = [&a, &b, &held, &real]
         .into_iter()
@@ -773,6 +796,16 @@ const WITNESSES: &[Witness] = &[
         values: ["1.2.3", "x;y;z", "1.2.3", "2.0"],
         template: "<ItemGroup Condition=\"false\"><I Include=\"{t}\" /></ItemGroup>",
         body: "$(A.Contains(NULL))",
+        gate: "",
+        gap: "unmodelled-body",
+    },
+    // The same gap, beside an expression on `X` no value tried for it
+    // rescues (none is 41 characters long): the classifier reaches it only by
+    // striking both, so this keeps that step answering for a project.
+    Witness {
+        values: ["2.0", "true\n/out:obj/Evil.dll", "1.2.3", "abc"],
+        template: "<ItemGroup><I Include=\"{t}\" /></ItemGroup>",
+        body: "$([MSBuild]::VersionGreaterThan($(B), 1.0));$(X[40])",
         gate: "",
         gap: "unmodelled-body",
     },
