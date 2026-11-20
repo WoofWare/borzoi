@@ -569,11 +569,13 @@ pub mod held_still {
                 (dir.to_path_buf(), super::stamp_of(&meta))
             })
             .collect();
-        let before = HELD.replace(Some(held));
-        assert!(
-            before.is_none(),
-            "a thread holds one set of directories still at a time"
-        );
+        HELD.with_borrow_mut(|slot| {
+            assert!(
+                slot.is_none(),
+                "a thread holds one set of directories still at a time"
+            );
+            *slot = Some(held);
+        });
         HeldStill {
             _thread: std::marker::PhantomData,
         }
