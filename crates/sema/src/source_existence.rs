@@ -1,113 +1,96 @@
-//! A referenced F# project's **existence surface**, read from its source
+//! A referenced F# project's **entity surface**, read from its source
 //! ([`source_existence`]): rows in the currency of
-//! [`borzoi_assembly::existence`], so the extension gate's existence
-//! questions read a project reference as they read a DLL.
+//! [`borzoi_assembly::existence`], so open certification reads a project
+//! reference as it reads a DLL.
 //!
 //! The function is pure. Its input is a producer project A as the caller
 //! evaluated it ([`Producer`]): A's Compile items, parsed under A's own
 //! defines and language version, and what the caller knows of A's reference
-//! environment ([`MarkerRoutes`]). Its output ([`SourceExistence`]) is either
-//! the rows, or `Unread` with the reason A's surface cannot be known.
+//! environment ([`MarkerRoutes`], [`ProviderReferences`]). Its output
+//! ([`SourceExistence`]) is either the rows, or `Unread` with the reason A's
+//! surface cannot be known.
 //!
-//! # Who reads it, and the claim
+//! # The claim, by half
 //!
-//! This surface serves the **existence consumers only**: the
-//! [`crate::assembly_env::existence`] set, which `add_index` builds from an
-//! [`ExistenceIndex`], and the open certification and extension-scope gate
-//! that question it. What that set reads of a row is all the walk derives:
+//! The [`crate::assembly_env::existence`] set answers two families of
+//! questions, and a source producer feeds each from a different reading.
 //!
-//! - an entity's namespace, enclosers and names, each **canonical** (a
-//!   generic arity suffix and one trailing `Module` stripped), its logical
-//!   and compiled names alike;
-//! - whether it is a namespace, an abbreviation or anything else;
-//! - its `[<AutoOpen>]` flag, and on an abbreviation its `[<Extension>]` one;
-//! - an extension row's place, each of its names (a call answers to a name
-//!   or to its accessor-stripped stem), and its staticness;
-//! - the assembly-level `[<AutoOpen("…")>]` paths, as a set.
+//! - **The entity half** (this module): what open certification asks, from
+//!   an entity's namespace, enclosers and names (each **canonical**: a generic
+//!   arity suffix and one trailing `Module` stripped), whether it is a
+//!   namespace or an abbreviation, its `[<AutoOpen>]` flag, and the
+//!   assembly-level `[<AutoOpen("…")>]` paths. Every such question is
+//!   monotone, so the claim is **containment** on those facts: every one the
+//!   set holds of FCS's CCU for A (its in-memory signature, and the pickle of
+//!   the DLL FCS compiles from it) it also holds of these rows.
+//!   `source_existence_diff` grades that on the set's own facts
+//!   (`test_support::existence_facts`), and pins the surplus.
+//! - **The extension half** is not read here. FCS binds a call to an
+//!   extension by its logical name (`MethInfo.LogicalName`, `infos.fs`), so
+//!   the gate reads A's `ExtensionNames`, the currency it already reads for
+//!   B's own files, and the claim is the gate grid's certain-implies-exact,
+//!   graded with A as a referenced project. These rows carry no extension
+//!   rows ([`SourceSurface`] has no field for them) and no `[<Extension>]`
+//!   flag.
 //!
-//! Every question the set answers is monotone: a fact more only ever makes
-//! it say "something may be there". So the claim is **containment**: every
-//! fact the set holds of FCS's CCU for A (its in-memory signature, and the
-//! pickle of the DLL FCS compiles from it) it also holds of these rows.
-//! `source_existence_diff` holds that on the set's own facts
-//! (`test_support::existence_facts`), and pins the surplus, which is what a
-//! superset costs the gate. No consumer needs a field exactly, so none is
-//! claimed exact; where a surplus could make the gate useless (one
-//! abbreviation marked `[<Extension>]` or `[<AutoOpen>]` makes every name a
-//! possible extension), the walk names the [`Approximation`] it came from.
+//! Fields no entity question reads are constants: an entity's accessibility
+//! (`public` is always `true`), its kind beyond namespace and abbreviation,
+//! and the `[<Extension>]` flag. **A later stage that reads more of a source
+//! producer (stage 2a's shells read accessibility and kinds) must derive
+//! those fields itself, with its own exactness claim and grading.**
 //!
-//! Fields no existence question reads are left as constants: an entity's
-//! accessibility (`public` is always `true`), its kind beyond namespace and
-//! abbreviation (a measure, an exception and a module are all `Type` or
-//! `Module`), and the `[<Extension>]` flag FCS infers on a type or module
-//! from its members. **A later stage that reads more of a source producer
-//! (stage 2a's shells read accessibility and kinds) must derive those fields
-//! itself, with its own exactness claim and grading**: nothing here is an
-//! exact source for them.
+//! # What the walk reads, and how it knows it read all of it
+//!
+//! Each syntax node the walk interprets is a [`Leaf`], and the walk reads it
+//! by classifying it into one [`Form`]: a closed list, whose
+//! [`Form::verdict`] says whether a producer holding it is read. A
+//! classifier accounts for **every child** of its node ([`consumed`]): a
+//! child no classifier names (an unexpected token, a node shape the grammar
+//! grows) is [`ExistenceUnread::Unreadable`], so a child the walk did not
+//! read cannot change the surface unseen. `source_existence_domain` grades
+//! every [`Form::ALL`] witness against FCS.
+//!
+//! Three readings scan raw syntax kinds rather than a typed child
+//! ([`RAW_SCANS`]); each has its own grid cell.
 //!
 //! # Spellings the walk derives
 //!
-//! Every name the walk emits is written in A's source, or derived from
-//! written names by a formula of FCS's. No consumer needs a derived spelling
-//! exactly, since only a backticked name queries one, so for each formula the
-//! walk emits every spelling it could produce (a bounded surplus, pinned per
-//! cell) rather than model which one it does produce:
+//! Every name the walk emits is written in A's source, but for these:
 //!
-//! - **An optional extension member's compiled name**, `T.name` then
-//!   `.Static` (a member that is neither instance nor constructor) then
-//!   `.Override` (an override or explicit implementation)
-//!   (`CheckExpressions.fs:1099-1105`): every one of the four suffix
-//!   combinations, for every name of `T` and every spelling of `name`
-//!   ([`EXTENSION_SUFFIXES`], [`FileWalk::val_row`]).
-//! - **The extended type's logical name `T`**, its name with an arity
-//!   suffix (``List`1``, `tcref.LogicalName`): the bare name and every
-//!   arity up to the head's written parameter count. A head that writes no
-//!   parameters bounds nothing unless the type is certainly this list's, and
-//!   declines ([`Leaf::AugmentationHead`]). The `under_written_arity` row
-//!   grades a head that writes fewer parameters than its type has.
-//! - **A tuple augmentation's type**, `mkCompiledTupleTyconRef`
-//!   (`TypedTreeOps.Remap.fs:835`): ``Tuple`1`` to ``Tuple`8`` and
-//!   ``ValueTuple`1`` to ``ValueTuple`8``.
-//! - **Accessor names**, `get_`/`set_` (`CheckExpressions.fs:1066-1067`) and
-//!   a `[<CLIEvent>]`'s `add_`/`remove_` (`CheckExpressions.fs:4482-4483`):
-//!   every val's every accessor spelling, whatever accessors it has
-//!   ([`ACCESSOR_PREFIXES`], [`val_spellings`]).
-//! - **`[<CompiledName>]`**, which replaces a method's compiled name and
-//!   leaves a property's to codegen (`CheckExpressions.fs:1410-1419`): every
-//!   literal an attribute may give, with each accessor spelling of it,
-//!   beside the formula's names. One the walk cannot read declines.
-//! - **A class `let`'s fresh name**, `basic@line` and `basic@line-k`
-//!   (`FreshCompilerGeneratedName`, `CheckIncrementalClasses.fs:331`): every
-//!   line the head spans ([`head_lines`]) by every binder count. These are the
-//!   only positions the walk reads.
-//! - **A module's `Module` suffix** (`AdjustModuleName`,
-//!   `CheckDeclarations.fs:2736-2738`): canonical spelling strips one, so
-//!   both readings are the same name except for one already ending in
-//!   `Module`, whose both readings the walk emits.
-//! - **Generic arity on an entity's own name** (``Map`2``): erased by
-//!   canonical spelling, so none is emitted.
-//! - **Spellings taken as written:** an active pattern's `|A|_|`
-//!   (`pars.fsy`, `opName`) and an operator's compiled name `op_PlusDot`
-//!   (`CompileOpName`, ported as `borzoi_assembly::op_name` and held to FCS by
-//!   `operator_name_diff`) are FCS's logical names for what is written, not a
-//!   choice FCS makes. An exception's pickle keeps its written name
-//!   (`NewExn`, `TypedTree.fs:6437`).
+//! - **A module's `Module` suffix** (`ComputeModuleOrNamespaceKind` and
+//!   `AdjustModuleName`, `CheckDeclarations.fs:2731-2738`): a nested module
+//!   takes it under `[<CompilationRepresentation(ModuleSuffix)>]` or beside a
+//!   type of its name in its own declaration list (`TypeNamesInNonMutRecDecls`
+//!   and kin, `CheckDeclarations.fs:2773-2809`); a top-level module only under
+//!   the attribute (FCS reads `module A.M` as a namespace holding one module,
+//!   `CheckDeclarations.fs:5903-5917`). Canonical spelling strips one
+//!   `Module`, so the suffix moves a fact only on a name already ending in
+//!   `Module`, where the walk decides it exactly or declines
+//!   ([`ExistenceUnread::ModuleSuffix`]).
+//! - **A type's `[<CompiledName>]`**: the literal, beside the logical name.
+//!   One the walk cannot read declines.
+//! - **Generic arity on an entity's name** (``Map`2``): erased by canonical
+//!   spelling, so none is emitted.
 //!
 //! # Attributes
 //!
-//! Whether an attribute is `[<AutoOpen>]`, `[<Extension>]`, `[<Measure>]`,
-//! `[<CompiledName>]`, `[<CLIEvent>]` or `[<TypeProviderAssembly>]` depends on
+//! Whether an attribute is `[<AutoOpen>]`, `[<Measure>]`, `[<CompiledName>]`,
+//! `[<CompilationRepresentation>]` or `[<TypeProviderAssembly>]` depends on
 //! what its name resolves to, and A's references can route any name to any of
 //! them (an abbreviation) or away from them (a shadow). The walk does not
-//! resolve: the caller states what each written attribute name denotes
-//! ([`MarkerRoutes::Certified`]), or nothing at all
-//! ([`MarkerRoutes::Unknown`]), in which case every attribute may denote every
-//! marker.
+//! resolve: the caller states what each written name denotes
+//! ([`MarkerRoutes::Certified`], by the full name of the type it resolves
+//! to), or nothing at all ([`MarkerRoutes::Unknown`]), in which case every
+//! attribute may denote every marker.
 //!
-//! Whether a type application, or a bare type name, is a generative type
-//! provider's (`type T = Gen<N>`, `N` a literal) depends on whether one of A's
-//! references is a provider: the caller states that too
-//! ([`ProviderReferences`]).
+//! # The input bound
+//!
+//! Before it walks, the walk bounds its input ([`MAX_NAME_BYTES`],
+//! [`MAX_DEPTH`], [`MAX_DECLARATIONS`]) and declines past it
+//! ([`ExistenceUnread::TooManyReadings`]). Inside the bound every row is one
+//! declaration's, and its path at most [`MAX_DEPTH`] names of at most
+//! [`MAX_NAME_BYTES`]: the memory the rows take is bounded by the input, with
+//! no metering to forget.
 //!
 //! # The input inventory
 //!
@@ -122,22 +105,19 @@
 #![deny(clippy::wildcard_enum_match_arm)]
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
 
 use borzoi_assembly::existence::{
-    ExistenceIndex, ExtensionRow, IndexLayer, PickleLayer, PickledEntityKind, PickledEntityRow,
+    ExistenceIndex, PickleLayer, PickledEntityKind, PickledEntityRow,
 };
 use borzoi_cst::syntax::{
-    AstNode, Attribute, AttributeList, Binding, Expr, ImplicitCtor, LongIdent, MemberDefn,
-    MemberLetBindings, ModuleDecl, ModuleOrNamespace, ModuleOrNamespaceKind, Pat, SigDecl,
-    SyntaxKind, SyntaxNode, TextSize, Type, TypeDefn, TypeDefnRepr,
+    AstNode, Attribute, AttributeList, ExceptionDefnDecl, Expr, ImplicitCtor, LongIdent,
+    MemberDefn, ModuleDecl, ModuleOrNamespace, ModuleOrNamespaceKind, SigDecl, SyntaxKind,
+    SyntaxNode, TupleTypeExtensionHead, TyparDecls, Type, TypeDefn, TypeDefnRepr, UnionCase,
 };
 
-use crate::FcsRange;
 use crate::def::id_text;
 use crate::recovery::SyntaxRecovery;
-use crate::resolve::extension_names::{
-    MemberRole, MemberShape, MemberVal, active_pattern_name, member_shape, val_sig_name,
-};
 use crate::resolve::{ProjectFile, SourceFile, signature_partners};
 
 /// A producer project, as the caller evaluated it for the dependant that
@@ -170,8 +150,8 @@ pub enum ProviderReferences {
     /// No reference is a type provider (none carries
     /// `[<TypeProviderAssembly>]`): a type application is never one.
     None,
-    /// One may be: an abbreviation of a prefix type application may be a
-    /// generative provider's.
+    /// One may be: an abbreviation of any named type may be a generative
+    /// provider's.
     Possible,
 }
 
@@ -185,46 +165,45 @@ pub enum CompileItem<'a> {
     Unreadable(&'a str),
 }
 
-/// An attribute a declaration's existence rows depend on.
+/// An attribute the entity rows depend on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Marker {
     /// `Microsoft.FSharp.Core.AutoOpenAttribute`.
     AutoOpen,
-    /// `System.Runtime.CompilerServices.ExtensionAttribute`.
-    Extension,
-    /// `Microsoft.FSharp.Core.MeasureAttribute`.
+    /// `Microsoft.FSharp.Core.MeasureAttribute`: decides whether
+    /// `type X = X` is an abbreviation.
     Measure,
-    /// `Microsoft.FSharp.Core.CompiledNameAttribute`.
+    /// `Microsoft.FSharp.Core.CompiledNameAttribute`, on a type.
     CompiledName,
+    /// `Microsoft.FSharp.Core.CompilationRepresentationAttribute`, whose
+    /// `ModuleSuffix` flag suffixes a module.
+    CompilationRepresentation,
     /// `Microsoft.FSharp.Core.CompilerServices.TypeProviderAssemblyAttribute`.
     TypeProviderAssembly,
-    /// `Microsoft.FSharp.Core.CLIEventAttribute`.
-    CliEvent,
 }
 
 impl Marker {
     /// Every marker.
-    pub const ALL: [Marker; 6] = [
+    pub const ALL: [Marker; 5] = [
         Marker::AutoOpen,
-        Marker::Extension,
         Marker::Measure,
         Marker::CompiledName,
+        Marker::CompilationRepresentation,
         Marker::TypeProviderAssembly,
-        Marker::CliEvent,
     ];
 
     /// The marker's full name, its namespace's segments then its type name.
     pub fn full_name(self) -> &'static [&'static str] {
         match self {
             Marker::AutoOpen => &["Microsoft", "FSharp", "Core", "AutoOpenAttribute"],
-            Marker::Extension => &[
-                "System",
-                "Runtime",
-                "CompilerServices",
-                "ExtensionAttribute",
-            ],
             Marker::Measure => &["Microsoft", "FSharp", "Core", "MeasureAttribute"],
             Marker::CompiledName => &["Microsoft", "FSharp", "Core", "CompiledNameAttribute"],
+            Marker::CompilationRepresentation => &[
+                "Microsoft",
+                "FSharp",
+                "Core",
+                "CompilationRepresentationAttribute",
+            ],
             Marker::TypeProviderAssembly => &[
                 "Microsoft",
                 "FSharp",
@@ -232,7 +211,6 @@ impl Marker {
                 "CompilerServices",
                 "TypeProviderAssemblyAttribute",
             ],
-            Marker::CliEvent => &["Microsoft", "FSharp", "Core", "CLIEventAttribute"],
         }
     }
 }
@@ -248,17 +226,20 @@ pub enum MarkerRoutes {
     Unknown,
     /// For each written attribute name (its identifiers, de-quoted, as
     /// written, with or without the `Attribute` suffix exactly as written),
-    /// the markers it denotes at **every** site in A that writes it, in A's
-    /// environment (A's own declarations and its references). A name whose
-    /// sites denote different things (opens can make one written name resolve
-    /// differently in two files) must be omitted. An omitted name is read as
-    /// under [`MarkerRoutes::Unknown`], so an incomplete certificate is sound
-    /// and only widens the surplus. An empty set certifies that the name
+    /// the markers it denotes: a marker exactly when, at **every** site in A
+    /// that writes it, the name resolves to a type whose full name is the
+    /// marker's ([`Marker::full_name`]), in any assembly, A's own included.
+    /// This is path identity, as the DLL reader compares an attribute's type
+    /// (`pickled_rows::carries`), not the identity of one tycon. A name that
+    /// resolves to no type, or to types of different full names at
+    /// different sites, must be omitted. An omitted name is read as under
+    /// [`MarkerRoutes::Unknown`], so an incomplete certificate is sound and
+    /// only widens the surplus. An empty set certifies that the name
     /// denotes no marker.
     Certified(BTreeMap<Vec<String>, BTreeSet<Marker>>),
 }
 
-/// Why A's existence surface cannot be read.
+/// Why A's entity surface cannot be read.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum ExistenceUnread {
     /// A Compile item could not be read.
@@ -273,318 +254,188 @@ pub enum ExistenceUnread {
     /// A `#r`, `#reference`, `#load`, `#I` or `#include` directive.
     HashReference(usize),
     /// A type provider may be in use (a static argument in an abbreviation's
-    /// target, or with [`ProviderReferences::Possible`] any prefix type
-    /// application there), or A may be one (an assembly attribute that may
-    /// be `[<TypeProviderAssembly>]`): FCS then reads A's DLL, not its
-    /// source.
+    /// target, or with [`ProviderReferences::Possible`] any named type
+    /// there), or A may be one (an assembly attribute that may be
+    /// `[<TypeProviderAssembly>]`): FCS then reads A's DLL, not its source.
     TypeProvider(usize),
     /// An assembly-level attribute that may be `[<AutoOpen>]` has an argument
     /// the walk cannot read as a string.
     UnreadableAutoOpen(usize),
-    /// An attribute that may be `[<CompiledName>]`, on an entity or a
-    /// possible extension member, has an argument the walk cannot read as a
-    /// string: the compiled name is unknown.
+    /// An attribute that may be `[<CompiledName>]` on a type has an argument
+    /// the walk cannot read as a string.
     UnreadableCompiledName(usize),
-    /// A possible extension member, or a declaration, whose name the walk
-    /// cannot read.
-    UnnamedDeclaration(usize),
     /// A headerless file whose implicit module name the walk cannot spell.
     AnonymousModuleName(usize),
-    /// The rows exceed `MAX_ROWS`: each module whose name ends in `Module`
-    /// doubles the paths under it.
+    /// A module whose name ends in `Module` under an attribute that may
+    /// suffix it, or beside a type of its name that may count: whether FCS
+    /// spells it `…ModuleModule` is unknown.
+    ModuleSuffix(usize),
+    /// The input exceeds the walk's bound ([`MAX_NAME_BYTES`],
+    /// [`MAX_DEPTH`], [`MAX_DECLARATIONS`]).
     TooManyReadings,
-    /// A type's `[<Extension>]` `let`, whose compiled name may carry its
-    /// line (`f@7`), in a file whose `#line` directives may move the lines
-    /// FCS reports.
-    LineDirective(usize),
-    /// A leaf form outside the certified domain ([`LEAF_FORMS`]).
-    OutsideDomain(usize, Leaf),
+    /// A node of this leaf the walk cannot classify: a shape outside every
+    /// [`Form`], or a child no classifier accounts for.
+    Unreadable(usize, Leaf),
 }
 
-/// A syntax leaf the walk interprets, whose forms it certifies one by one
-/// ([`LEAF_FORMS`]).
+/// A syntax node the walk interprets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Leaf {
-    /// A type definition's name.
-    TypeHead,
-    /// An augmentation's head: the type it extends.
-    AugmentationHead,
-    /// An abbreviation's target, where a reference may be a type provider.
-    ProvidedTarget,
-    /// An `[<Extension>]` binding's pattern: the values it names.
-    BindingHead,
+    /// A file's `namespace` or `module` header, or its absence.
+    FileHeader,
+    /// A long identifier the walk reads a name from.
+    Name,
+    /// `module M = …` in a declaration list.
+    NestedModule,
+    /// A type definition's head.
+    TypeDefinition,
+    /// `exception E …`.
+    Exception,
+    /// An abbreviation's target type.
+    AbbreviationTarget,
+    /// An attribute: its target, name and argument.
+    Attribute,
+    /// A `#` directive.
+    HashDirective,
 }
 
-/// What the walk does with one form of a [`Leaf`].
+/// Whether a producer holding a form is read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
-    /// Read, and graded by `source_existence_diff`.
+    /// The walk reads it, and FCS's facts for it are graded.
     Read,
-    /// Declined.
+    /// The walk declines the producer.
     Declined,
 }
 
-/// One form of a leaf: a file that writes it, and the walk's verdict. The
-/// table is the certified domain: `source_existence_domain` grades every
-/// `Read` row against FCS and holds the walk to every row's verdict, so the
-/// predicate and the forms it admits cannot drift apart. A form not in the
-/// table is outside the domain only if the walk declines it; a leaf the walk
-/// reads gains a row for each form it reads.
-#[derive(Debug, Clone, Copy)]
-pub struct LeafForm {
-    pub leaf: Leaf,
-    pub form: &'static str,
-    /// A producer file writing the form.
-    pub source: &'static str,
-    /// Whether the producer's references may hold a type provider.
-    pub providers: ProviderReferences,
-    pub verdict: Verdict,
+/// Declare [`Form`], [`Form::ALL`] and each form's leaf, verdict and witness
+/// together, so that a form cannot exist without all four.
+macro_rules! forms {
+    ($($(#[doc = $doc:literal])* $name:ident: $leaf:ident, $verdict:ident, $witness:literal;)*) => {
+        /// Every shape a [`Leaf`] is classified into: the closed list of what
+        /// the walk reads.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+        pub enum Form {
+            $($(#[doc = $doc])* $name,)*
+        }
+
+        impl Form {
+            /// Every form, in declaration order.
+            pub const ALL: &'static [Form] = &[$(Form::$name,)*];
+
+            /// The leaf the form is a shape of.
+            pub fn leaf(self) -> Leaf {
+                match self {
+                    $(Form::$name => Leaf::$leaf,)*
+                }
+            }
+
+            /// Whether a producer holding the form is read, with no
+            /// reference a type provider.
+            pub fn verdict(self) -> Verdict {
+                match self {
+                    $(Form::$name => Verdict::$verdict,)*
+                }
+            }
+
+            /// A producer (one implementation file) whose walk classifies
+            /// the form: the domain grid's cell for it.
+            pub fn witness(self) -> &'static str {
+                match self {
+                    $(Form::$name => $witness,)*
+                }
+            }
+        }
+    };
 }
 
-/// The certified domain of each leaf ([`LeafForm`]).
-pub const LEAF_FORMS: &[LeafForm] = &[
-    LeafForm {
-        leaf: Leaf::BindingHead,
-        form: "value",
-        source: "module D\n[<System.Runtime.CompilerServices.Extension>]\nlet f = fun (s: string) -> s\n",
-        providers: ProviderReferences::None,
-        verdict: Verdict::Read,
-    },
-    LeafForm {
-        leaf: Leaf::BindingHead,
-        form: "function",
-        source: "module D\n[<System.Runtime.CompilerServices.Extension>]\nlet f (s: string) = s\n",
-        providers: ProviderReferences::None,
-        verdict: Verdict::Read,
-    },
-    LeafForm {
-        leaf: Leaf::BindingHead,
-        form: "operator",
-        source: "module D\n[<System.Runtime.CompilerServices.Extension>]\nlet (+++) (a: string) (b: string) = a + b\n",
-        providers: ProviderReferences::None,
-        verdict: Verdict::Read,
-    },
-    LeafForm {
-        leaf: Leaf::BindingHead,
-        form: "active_pattern",
-        source: "module D\n[<System.Runtime.CompilerServices.Extension>]\nlet (|Even|Odd|) (n: int) = if n % 2 = 0 then Even else Odd\n",
-        providers: ProviderReferences::None,
-        verdict: Verdict::Read,
-    },
-    LeafForm {
-        leaf: Leaf::BindingHead,
-        form: "nullary_active_pattern",
-        source: "module D\n[<System.Runtime.CompilerServices.Extension>]\nlet (|Zero|_|) = function 0 -> Some () | _ -> None\n",
-        providers: ProviderReferences::None,
-        verdict: Verdict::Read,
-    },
-    LeafForm {
-        leaf: Leaf::BindingHead,
-        form: "parenthesised_typed",
-        source: "module D\n[<System.Runtime.CompilerServices.Extension>]\nlet (f: string -> string) = id\n",
-        providers: ProviderReferences::None,
-        verdict: Verdict::Read,
-    },
-    LeafForm {
-        leaf: Leaf::BindingHead,
-        form: "upper_case_head",
-        source: "module D\n[<System.Runtime.CompilerServices.Extension>]\nlet Shout (s: string) = s\n",
-        providers: ProviderReferences::None,
-        verdict: Verdict::Read,
-    },
-    LeafForm {
-        leaf: Leaf::BindingHead,
-        form: "tuple",
-        source: "module D\n[<System.Runtime.CompilerServices.Extension>]\nlet a, b = 1, 2\n",
-        providers: ProviderReferences::None,
-        verdict: Verdict::Read,
-    },
-    LeafForm {
-        leaf: Leaf::BindingHead,
-        form: "as",
-        source: "module D\n[<System.Runtime.CompilerServices.Extension>]\nlet ((|Foo|_|) as f) = fun (x: int) -> Some x\n",
-        providers: ProviderReferences::None,
-        verdict: Verdict::Declined,
-    },
-    LeafForm {
-        leaf: Leaf::BindingHead,
-        form: "record",
-        source: "module D\ntype R = { A: int }\n[<System.Runtime.CompilerServices.Extension>]\nlet { A = a } = { A = 1 }\n",
-        providers: ProviderReferences::None,
-        verdict: Verdict::Declined,
-    },
-    LeafForm {
-        leaf: Leaf::BindingHead,
-        form: "list",
-        source: "module D\n[<System.Runtime.CompilerServices.Extension>]\nlet [ a; b ] = [ 1; 2 ]\n",
-        providers: ProviderReferences::None,
-        verdict: Verdict::Declined,
-    },
-    LeafForm {
-        leaf: Leaf::BindingHead,
-        form: "named_fields",
-        source: "module D\ntype U = C of F: int\n[<System.Runtime.CompilerServices.Extension>]\nlet C(F = x) = C 1\n",
-        providers: ProviderReferences::None,
-        verdict: Verdict::Declined,
-    },
-    LeafForm {
-        leaf: Leaf::BindingHead,
-        form: "nested_tuple",
-        source: "module D\n[<System.Runtime.CompilerServices.Extension>]\nlet (a, (b, c)) = (1, (2, 3))\n",
-        providers: ProviderReferences::None,
-        verdict: Verdict::Declined,
-    },
-    LeafForm {
-        leaf: Leaf::BindingHead,
-        form: "attributed",
-        source: "module D\n[<System.Runtime.CompilerServices.Extension>]\nlet ([<System.Obsolete>] f: string -> string) = id\n",
-        providers: ProviderReferences::None,
-        verdict: Verdict::Declined,
-    },
-    LeafForm {
-        leaf: Leaf::TypeHead,
-        form: "single",
-        source: "namespace D\ntype T = { X: int }\n",
-        providers: ProviderReferences::None,
-        verdict: Verdict::Read,
-    },
-    LeafForm {
-        leaf: Leaf::TypeHead,
-        form: "dotted",
-        source: "module D\ntype X.Y = { N: int }\n",
-        providers: ProviderReferences::None,
-        verdict: Verdict::Declined,
-    },
-    LeafForm {
-        leaf: Leaf::AugmentationHead,
-        form: "local",
-        source: "module D\ntype R = { X: int }\ntype R with\n    member r.M() = 1\n",
-        providers: ProviderReferences::None,
-        verdict: Verdict::Read,
-    },
-    LeafForm {
-        leaf: Leaf::AugmentationHead,
-        form: "qualified",
-        source: "module D\ntype System.String with\n    member s.M() = 1\n",
-        providers: ProviderReferences::None,
-        // No written parameters: the head does not bound the arity in the
-        // extension's compiled names.
-        verdict: Verdict::Declined,
-    },
-    LeafForm {
-        leaf: Leaf::AugmentationHead,
-        form: "arity_less_generic",
-        source: "module D\ntype list with\n    member xs.M() = 1\n",
-        providers: ProviderReferences::None,
-        verdict: Verdict::Declined,
-    },
-    LeafForm {
-        leaf: Leaf::AugmentationHead,
-        form: "qualified_generic",
-        source: "module D\ntype System.Collections.Generic.List<'T> with\n    member l.M() = 1\n",
-        providers: ProviderReferences::None,
-        verdict: Verdict::Read,
-    },
-    // Fewer parameters than the type has: FCS rejects it, and the domain
-    // grid shows whether its recovery keeps the written arity.
-    LeafForm {
-        leaf: Leaf::AugmentationHead,
-        form: "under_written_arity",
-        source: "module D\ntype System.Collections.Generic.Dictionary<'K> with\n    member d.M() = 1\n",
-        providers: ProviderReferences::None,
-        verdict: Verdict::Read,
-    },
-    LeafForm {
-        leaf: Leaf::AugmentationHead,
-        form: "generic",
-        source: "module D\ntype List<'T> with\n    member l.M() = 1\n",
-        providers: ProviderReferences::None,
-        verdict: Verdict::Read,
-    },
-    LeafForm {
-        leaf: Leaf::AugmentationHead,
-        form: "tuple",
-        source: "module D\ntype (int * int) with\n    member x.M() = 1\n",
-        providers: ProviderReferences::None,
-        verdict: Verdict::Read,
-    },
-    LeafForm {
-        leaf: Leaf::AugmentationHead,
-        form: "module_alias",
-        source: "module rec D\nmodule Alias = D\ntype T<'a>() =\n    member _.X = 1\ntype Alias.T<'a> with\n    [<System.Runtime.CompilerServices.Extension>]\n    static member E(s: string) = s\n",
-        providers: ProviderReferences::None,
-        verdict: Verdict::Read,
-    },
-    LeafForm {
-        leaf: Leaf::AugmentationHead,
-        form: "global",
-        source: "namespace rec D\ntype C<'a>() = class end\ntype global.D.C<'a> with\n    static member E(s: string) = s\n",
-        providers: ProviderReferences::None,
-        verdict: Verdict::Declined,
-    },
-    LeafForm {
-        leaf: Leaf::ProvidedTarget,
-        form: "tuple",
-        source: "namespace D\ntype T = int * int\n",
-        providers: ProviderReferences::Possible,
-        verdict: Verdict::Read,
-    },
-    LeafForm {
-        leaf: Leaf::ProvidedTarget,
-        form: "function",
-        source: "namespace D\ntype T = int -> int\n",
-        providers: ProviderReferences::Possible,
-        verdict: Verdict::Read,
-    },
-    LeafForm {
-        leaf: Leaf::ProvidedTarget,
-        form: "array",
-        source: "namespace D\ntype T = int[]\n",
-        providers: ProviderReferences::Possible,
-        verdict: Verdict::Read,
-    },
-    LeafForm {
-        leaf: Leaf::ProvidedTarget,
-        form: "variable",
-        source: "namespace D\ntype T<'a> = 'a\n",
-        providers: ProviderReferences::Possible,
-        verdict: Verdict::Read,
-    },
-    LeafForm {
-        leaf: Leaf::ProvidedTarget,
-        form: "anonymous_record",
-        source: "namespace D\ntype T = {| X: int |}\n",
-        providers: ProviderReferences::Possible,
-        verdict: Verdict::Read,
-    },
-    LeafForm {
-        leaf: Leaf::ProvidedTarget,
-        form: "wildcard",
-        source: "namespace D\ntype T<'a> = _\n",
-        providers: ProviderReferences::Possible,
-        verdict: Verdict::Read,
-    },
-    LeafForm {
-        leaf: Leaf::ProvidedTarget,
-        form: "named",
-        source: "namespace D\ntype T = int\n",
-        providers: ProviderReferences::Possible,
-        verdict: Verdict::Declined,
-    },
-    LeafForm {
-        leaf: Leaf::ProvidedTarget,
-        form: "postfix",
-        source: "namespace D\ntype T = int list\n",
-        providers: ProviderReferences::Possible,
-        verdict: Verdict::Declined,
-    },
-    LeafForm {
-        leaf: Leaf::ProvidedTarget,
-        form: "prefix",
-        source: "namespace D\ntype T = Map<int, int>\n",
-        providers: ProviderReferences::Possible,
-        verdict: Verdict::Declined,
-    },
+forms! {
+    /// `namespace global`.
+    GlobalNamespace: FileHeader, Read, "namespace global\ntype T = int\n";
+    /// `namespace A.B`.
+    Namespace: FileHeader, Read, "namespace A.B\ntype T = int\n";
+    /// `module A.M` at the top of a file.
+    NamedModule: FileHeader, Read, "module A.M\ntype T = int\n";
+    /// A file with no header: its implicit module, named from the file.
+    AnonymousModule: FileHeader, Read, "type T = int\nlet x = 1\n";
+    /// A long identifier of plain identifiers.
+    PlainName: Name, Read, "module A.B.C\nlet x = 1\n";
+    /// A long identifier rooted at `global.` (an attribute's name).
+    RootedName: Name, Read, "module D\n[<global.Microsoft.FSharp.Core.AutoOpen>]\nmodule M =\n    let x = 1\n";
+    /// `module M = …`.
+    NestedModule: NestedModule, Read, "module Outer\nmodule Inner =\n    let x = 1\n";
+    /// `module M = begin end`, a module with no declarations.
+    EmptyNestedModule: NestedModule, Read, "module Outer\nmodule Inner = begin end\n";
+    /// `type T = …`, no type parameters.
+    Type: TypeDefinition, Read, "module D\ntype T = { X: int }\n";
+    /// `type T<'a> = …`.
+    GenericType: TypeDefinition, Read, "module D\ntype T<'a> = { X: 'a }\n";
+    /// `type T with …`: an augmentation, which declares no entity.
+    Augmentation: TypeDefinition, Read, "module D\ntype R = { X: int }\ntype R with\n    member r.Y = 1\n";
+    /// `type (int * int) with …`, which declares no entity.
+    TupleAugmentation: TypeDefinition, Read, "module D\ntype (int * int) with\n    member x.M() = 1\n";
+    /// `type X.Y = …`: FCS rejects it (FS0925) and recovers it as `X`.
+    DottedType: TypeDefinition, Declined, "module D\ntype X.Y = { N: int }\n";
+    /// `exception E of …`.
+    Exception: Exception, Read, "module D\nexception E of string\n";
+    /// `exception F = E`.
+    ExceptionAbbreviation: Exception, Read, "module D\nexception E of string\nexception F = E\n";
+    /// `type X = X`: a union unless `X` is a unit of measure.
+    SelfNamedTarget: AbbreviationTarget, Read, "module D\ntype X = X\n";
+    /// `type A = int`: a name FSharp.Core declares in a namespace every file
+    /// has open.
+    FSharpCoreTarget: AbbreviationTarget, Read, "module D\ntype A = int\n";
+    /// `type A = B`, `B` one identifier: a union case when `B` names no type.
+    SingleIdentTarget: AbbreviationTarget, Read, "module D\ntype A = B\n";
+    /// A tuple, function, array, variable or anonymous type: no provider's.
+    StructuralTarget: AbbreviationTarget, Read, "module D\ntype A = int * string\n";
+    /// Any other named type (qualified, applied).
+    NamedTarget: AbbreviationTarget, Read, "module D\ntype A = System.Collections.Generic.List<int>\n";
+    /// A type holding a static argument: a type provider's.
+    StaticArgumentTarget: AbbreviationTarget, Declined, "module D\ntype A = Provider<\"x\">\n";
+    /// `[<A>]`.
+    AttributeNoArgument: Attribute, Read, "module D\n[<AutoOpen>]\nmodule M =\n    let x = 1\n";
+    /// `[<A()>]`.
+    AttributeUnitArgument: Attribute, Read, "module D\n[<AutoOpen()>]\nmodule M =\n    let x = 1\n";
+    /// `[<A("…")>]`, a regular string with no escape.
+    AttributeStringArgument: Attribute, Read, "module D\n[<CompiledName(\"R\")>]\ntype T = { X: int }\n";
+    /// `[<A(@"…")>]`.
+    AttributeVerbatimArgument: Attribute, Read, "module D\n[<CompiledName(@\"R\")>]\ntype T = { X: int }\n";
+    /// `[<A("""…""")>]`.
+    AttributeTripleQuotedArgument: Attribute, Read, "module D\n[<CompiledName(\"\"\"R\"\"\")>]\ntype T = { X: int }\n";
+    /// `[<A(B.C)>]`, a long identifier: a flags value.
+    AttributeLongIdentArgument: Attribute, Read, "module D\n[<CompilationRepresentation(CompilationRepresentationFlags.ModuleSuffix)>]\nmodule M =\n    let x = 1\n";
+    /// Any other argument.
+    AttributeOtherArgument: Attribute, Read, "module D\n[<System.Obsolete(\"a\" + \"b\")>]\ntype T = { X: int }\n";
+    /// `[<assembly: A>]`.
+    AssemblyTarget: Attribute, Read, "module D\n[<assembly: AutoOpen(\"D\")>]\ndo ()\n";
+    /// `[<module: A>]`, `[<type: A>]`, `[<return: A>]` and FCS's other
+    /// carrier targets.
+    CarrierTarget: Attribute, Read, "module D\n[<type: CompiledName(\"R\")>]\ntype T = { X: int }\n";
+    /// `#r`, `#reference`, `#load`, `#I`, `#include`: code the check reads
+    /// from elsewhere.
+    ReferenceDirective: HashDirective, Declined, "module D\n#r \"x.dll\"\nlet x = 1\n";
+    /// Any other directive (`#time`, `#help`, …). `#nowarn` is trivia to
+    /// the parser, never a declaration.
+    OtherDirective: HashDirective, Read, "module D\n#time \"on\"\nlet x = 1\n";
+}
+
+/// The readings that scan raw syntax kinds rather than read a typed child,
+/// each with the grid cell that witnesses it.
+pub const RAW_SCANS: &[(&str, &str)] = &[
+    (
+        "HASH_DIRECTIVE_DECL anywhere in a file: a directive in any module declines A",
+        "hash_reference_nested",
+    ),
+    (
+        "a directive's first IDENT_TOK, de-quoted: the directive's name",
+        "quoted_load_directive",
+    ),
+    (
+        "every ATTRIBUTE_LIST, and whether an ATTRIBUTES_DECL holds it: \
+         the attributes FCS may read as assembly-level",
+        "standalone_assembly_attribute",
+    ),
 ];
 
 /// A place the walk emitted facts FCS's CCU may not hold: where the surplus
@@ -599,21 +450,6 @@ pub enum Approximation {
     /// `type A = B` with `B` a single identifier: FCS reads a single-case
     /// union when `B` names no type in scope.
     AbbreviationOrUnion,
-    /// An augmentation that may be intrinsic or optional: both readings'
-    /// rows.
-    AugmentationKind,
-    /// A module whose name ends in `Module`: FCS may add the suffix
-    /// (`FooModuleModule`), which the set's canonical spelling does not
-    /// strip, so both readings' paths.
-    ModuleSuffix,
-    /// An `[<Extension>]` binding whose pattern is not a single name.
-    BindingPattern,
-    /// A declaration FCS rejects in its position, read as written.
-    RejectedShape,
-    /// A type's `[<Extension>]` `let`: its name, and every name FCS may
-    /// mangle it to (`f@7`, `f@7-1`, …) when an earlier name of the type
-    /// took it.
-    ClassLetName,
 }
 
 /// What [`source_existence`] read.
@@ -623,37 +459,37 @@ pub enum SourceExistence {
     Unread(ExistenceUnread),
 }
 
-/// A's existence surface.
+/// A's entity surface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceSurface {
-    /// An empty `il` layer (FCS reads a project from source with no IL), the
-    /// pickle rows, and the pickle's extension rows.
-    pub index: ExistenceIndex,
+    /// The pickle's entity rows, namespaces included: no IL layer (FCS reads
+    /// a project from source with none) and no extension rows (the gate
+    /// reads A's `ExtensionNames`).
+    pub entities: Vec<PickledEntityRow>,
     /// The paths an assembly-level `[<AutoOpen("…")>]` may name: FCS's
     /// `GetAutoOpenAttributes`, or more.
     pub assembly_auto_opens: Vec<String>,
     /// Where the rows may hold more than FCS's.
     pub approximations: BTreeSet<Approximation>,
-    /// Every abbreviation row that may lend (marked, or possibly marked,
-    /// `[<AutoOpen>]` or `[<Extension>]`), with the approximations that may
-    /// have made it: a surplus lender is accounted for at its own path.
-    pub lender_sources: Vec<LenderSource>,
 }
 
-/// An abbreviation row that may lend, and the approximations that may have
-/// made it ([`SourceSurface::lender_sources`]).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LenderSource {
-    pub namespace: Vec<String>,
-    pub enclosing: Vec<String>,
-    pub approximations: BTreeSet<Approximation>,
+impl SourceSurface {
+    /// The rows as an existence index: an empty IL layer, the entity rows,
+    /// and no extension rows.
+    pub fn index(&self) -> ExistenceIndex {
+        ExistenceIndex {
+            il: Vec::new(),
+            pickle: PickleLayer::Read(self.entities.clone()),
+            extensions: Vec::new(),
+        }
+    }
 }
 
 impl SourceExistence {
-    /// The extension gate's input for A.
+    /// The existence set's input for A's entity half.
     pub fn existence_input(&self) -> crate::ExistenceInput {
         match self {
-            SourceExistence::Read(s) => crate::ExistenceInput::Read(s.index.clone()),
+            SourceExistence::Read(s) => crate::ExistenceInput::Read(s.index()),
             SourceExistence::Unread(_) => crate::ExistenceInput::Unread,
         }
     }
@@ -664,7 +500,7 @@ impl SourceExistence {
 macro_rules! channels {
     ($($(#[doc = $doc:literal])* $name:ident,)*) => {
         /// One row of the input inventory: a channel through which A's
-        /// source, or A's evaluation, can decide A's existence surface.
+        /// source, or A's evaluation, can decide A's entity surface.
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
         pub enum Channel {
             $($(#[doc = $doc])* $name,)*
@@ -708,9 +544,10 @@ channels! {
     /// `module X = Y`, which declares no entity.
     ModuleAbbreviation,
     /// The `Module` suffix FCS adds to a module beside a type of its name,
-    /// or under `[<CompilationRepresentation(ModuleSuffix)>]`: canonical
-    /// spelling strips it, but for a name already ending in `Module`.
+    /// or under `[<CompilationRepresentation(ModuleSuffix)>]`.
     ModuleSuffix,
+    /// A suffix the walk cannot decide on a name ending in `Module`.
+    UncertainModuleSuffix,
     /// Class, struct, interface, record, union, enum, delegate, measure.
     TypeDefinition,
     /// `type A = T`.
@@ -723,12 +560,10 @@ channels! {
     TypeProviderUse,
     /// `[<AutoOpen>]` on an entity.
     AutoOpenAttribute,
-    /// `[<Extension>]` on an abbreviation or a member.
-    ExtensionAttribute,
     /// `[<CompiledName("…")>]` on a type (modules and exceptions ignore it).
     CompiledNameAttribute,
-    /// An attribute's explicit target: a `return:` one is the return
-    /// value's, any other the carrier's.
+    /// An attribute's explicit target: an entity keeps every attribute of
+    /// its lists, whatever the target.
     AttributeTarget,
     /// An attribute that may be `[<CompiledName>]` with an argument the walk
     /// cannot read.
@@ -744,40 +579,17 @@ channels! {
     TypeProviderAssembly,
     /// An attribute name the certificate does not cover.
     UncertifiedAttribute,
-    /// A member of an optional augmentation (`type T with` of a type the
-    /// list does not declare).
-    OptionalExtensionMember,
-    /// An augmentation of a class-like type of the same list: intrinsic.
-    IntrinsicAugmentation,
-    /// An augmentation whose kind the walk cannot decide.
-    AugmentationKind,
-    /// A member under `[<Extension>]`, C# style.
-    CSharpExtensionMember,
-    /// A module `let`, `extern` or signature `val` under `[<Extension>]`.
-    ExtensionBinding,
-    /// An `[<Extension>]` binding whose pattern is not one name.
-    BindingPattern,
-    /// A type's `let` under `[<Extension>]`, whose name FCS mangles when an
-    /// earlier name of the type took it.
-    ClassLet,
-    /// A `#line` directive in a file with a type's `[<Extension>]` `let`.
-    LineDirective,
-    /// A leaf form outside the certified domain ([`LEAF_FORMS`]).
-    OutsideDomain,
-    /// A member or declaration the walk cannot name.
-    UnnamedDeclaration,
-    /// A member FCS rejects in an augmentation.
-    RejectedShape,
-    /// More readings than the walk will emit.
-    ReadingsBudget,
+    /// A node shape outside every [`Form`], or a child no classifier reads.
+    Unreadable,
+    /// An input past the walk's bound.
+    InputBound,
+    /// Extension members, under any attribute and in any shape: A's
+    /// `ExtensionNames`, which the gate reads.
+    ExtensionMembers,
     /// An entity's accessibility, combined with its enclosers'.
     Accessibility,
-    /// A generic type's arity suffix, which units of measure do not count.
-    GenericArity,
     /// `[<Measure>] type m`, and an exception's or a module's kind.
     EntityKind,
-    /// The `[<Extension>]` FCS adds to a type or module from its members.
-    ImpliedExtensionAttribute,
 }
 
 impl Channel {
@@ -791,45 +603,33 @@ impl Channel {
             | Channel::Recovered
             | Channel::HashReference
             | Channel::AnonymousModuleName
+            | Channel::UncertainModuleSuffix
             | Channel::TypeProviderUse
             | Channel::UnreadableCompiledName
             | Channel::AssemblyAutoOpenUnreadable
             | Channel::TypeProviderAssembly
-            | Channel::UnnamedDeclaration
-            | Channel::ReadingsBudget
-            | Channel::LineDirective
-            | Channel::OutsideDomain => Treatment::Declined,
+            | Channel::Unreadable
+            | Channel::InputBound => Treatment::Declined,
             Channel::Defines | Channel::LanguageVersion | Channel::GeneratedItems => {
                 Treatment::Caller
             }
             Channel::SignaturePair => Treatment::Approximated(A::SignaturePair),
-            Channel::ModuleSuffix => Treatment::Approximated(A::ModuleSuffix),
             Channel::AbbreviationOrUnion => Treatment::Approximated(A::AbbreviationOrUnion),
             Channel::UncertifiedAttribute => Treatment::Approximated(A::UncertainAttribute),
-            Channel::AugmentationKind => Treatment::Approximated(A::AugmentationKind),
-            Channel::BindingPattern => Treatment::Approximated(A::BindingPattern),
-            Channel::RejectedShape => Treatment::Approximated(A::RejectedShape),
-            Channel::ClassLet => Treatment::Approximated(A::ClassLetName),
-            Channel::Accessibility
-            | Channel::GenericArity
-            | Channel::EntityKind
-            | Channel::ImpliedExtensionAttribute => Treatment::Unconsumed,
+            Channel::ExtensionMembers => Treatment::ExtensionNames,
+            Channel::Accessibility | Channel::EntityKind => Treatment::Unconsumed,
             Channel::HeaderlessFile
             | Channel::Namespace
             | Channel::Module
             | Channel::ModuleAbbreviation
+            | Channel::ModuleSuffix
             | Channel::TypeDefinition
             | Channel::Abbreviation
             | Channel::Exception
             | Channel::AutoOpenAttribute
-            | Channel::ExtensionAttribute
             | Channel::CompiledNameAttribute
             | Channel::AttributeTarget
-            | Channel::AssemblyAutoOpen
-            | Channel::OptionalExtensionMember
-            | Channel::IntrinsicAugmentation
-            | Channel::CSharpExtensionMember
-            | Channel::ExtensionBinding => Treatment::Modelled,
+            | Channel::AssemblyAutoOpen => Treatment::Modelled,
         }
     }
 }
@@ -845,50 +645,55 @@ pub enum Treatment {
     Declined,
     /// The caller's: the input carries it, already applied.
     Caller,
-    /// It decides only fields no existence question reads, which the walk
+    /// Read by A's `ExtensionNames`, which the gate consumes, not by this
+    /// walk.
+    ExtensionNames,
+    /// It decides only fields no entity question reads, which the walk
     /// leaves constant.
     Unconsumed,
 }
 
-/// The most rows one file's walk emits, and the most declarations it visits,
-/// before it declines ([`ExistenceUnread::TooManyReadings`]).
-pub const MAX_ROWS: usize = 200_000;
+/// The longest entity name (a namespace segment, a module, type or
+/// exception name), in bytes, the walk reads.
+pub const MAX_NAME_BYTES: usize = 256;
 
-/// The accessor prefixes FCS gives a member's vals: a property's
-/// (`CheckExpressions.fs:1066-1067`) and a `[<CLIEvent>]`'s
-/// (`CheckExpressions.fs:4482-4483`).
-const ACCESSOR_PREFIXES: [&str; 4] = ["get_", "set_", "add_", "remove_"];
+/// The most names in an entity's path (its namespace's segments, its
+/// enclosing modules', and its own) the walk reads.
+pub const MAX_DEPTH: usize = 16;
 
-/// The suffixes FCS's formula appends to an optional extension member's
-/// compiled name `T.name` (`CheckExpressions.fs:1099-1105`): `.Static` for
-/// a member that is neither an instance member nor a constructor, then
-/// `.Override` for an override or explicit implementation. Every
-/// combination is emitted.
-const EXTENSION_SUFFIXES: [&str; 4] = ["", ".Static", ".Override", ".Static.Override"];
+/// The most declarations (namespace segments of every header, modules,
+/// types and exceptions) of one project the walk reads.
+pub const MAX_DECLARATIONS: usize = 50_000;
 
-/// The most bytes of names the walk's rows copy, every row's path included,
-/// before it declines ([`ExistenceUnread::TooManyReadings`]). Each row
-/// repeats every name enclosing it, so [`MAX_ROWS`] alone does not bound
-/// them: long names under deep nesting multiply.
-pub const MAX_ROW_BYTES: usize = 64 << 20;
-
-/// A's existence surface, read from its source. See the module docs.
+/// A's entity surface, read from its source. See the module docs.
 pub fn source_existence(producer: Producer<'_>) -> SourceExistence {
+    read(producer).0
+}
+
+/// [`source_existence`], with every [`Form`] the walk classified before it
+/// finished or declined.
+pub(crate) fn read(producer: Producer<'_>) -> (SourceExistence, BTreeSet<Form>) {
     match producer {
-        Producer::FoldRefused(why) => {
-            SourceExistence::Unread(ExistenceUnread::FoldRefused(why.to_owned()))
-        }
-        Producer::UnservedTfm(why) => {
-            SourceExistence::Unread(ExistenceUnread::UnservedTfm(why.to_owned()))
-        }
+        Producer::FoldRefused(why) => (
+            SourceExistence::Unread(ExistenceUnread::FoldRefused(why.to_owned())),
+            BTreeSet::new(),
+        ),
+        Producer::UnservedTfm(why) => (
+            SourceExistence::Unread(ExistenceUnread::UnservedTfm(why.to_owned())),
+            BTreeSet::new(),
+        ),
         Producer::Evaluated {
             items,
             routes,
             providers,
-        } => match walk_project(items, routes, providers) {
-            Ok(surface) => SourceExistence::Read(surface),
-            Err(why) => SourceExistence::Unread(why),
-        },
+        } => {
+            let mut forms = BTreeSet::new();
+            let read = match walk_project(items, routes, providers, &mut forms) {
+                Ok(surface) => SourceExistence::Read(surface),
+                Err(why) => SourceExistence::Unread(why),
+            };
+            (read, forms)
+        }
     }
 }
 
@@ -896,6 +701,7 @@ fn walk_project(
     items: &[CompileItem<'_>],
     routes: &MarkerRoutes,
     providers: ProviderReferences,
+    forms: &mut BTreeSet<Form>,
 ) -> Result<SourceSurface, ExistenceUnread> {
     let mut files = Vec::with_capacity(items.len());
     for item in items {
@@ -906,25 +712,25 @@ fn walk_project(
             }
         }
     }
-    let partners = signature_partners(&files);
-    let module_abbreviations = files.iter().any(|pf| {
-        pf.file
-            .syntax()
-            .descendants()
-            .any(|n| n.kind() == SyntaxKind::MODULE_ABBREV_DECL)
-    });
-    let mut out = Out::default();
     for (i, pf) in files.iter().enumerate() {
         if !matches!(&pf.recovery, SyntaxRecovery::Reported(errors) if errors.is_empty()) {
             return Err(ExistenceUnread::Recovered(i));
         }
+    }
+    preflight(&files)?;
+    let partners = signature_partners(&files);
+    let mut out = Out::default();
+    for (i, pf) in files.iter().enumerate() {
         let root = pf.file.syntax();
-        if root
+        for directive in root
             .descendants()
             .filter(|n| n.kind() == SyntaxKind::HASH_DIRECTIVE_DECL)
-            .any(|d| brings_in_references(&d))
         {
-            return Err(ExistenceUnread::HashReference(i));
+            let form = hash_directive(&directive);
+            forms.insert(form);
+            if form.verdict() == Verdict::Declined {
+                return Err(ExistenceUnread::HashReference(i));
+            }
         }
         // A signature and its implementation contribute both their rows
         // (decision D7): FCS's are the signature's, which the union holds.
@@ -935,16 +741,12 @@ fn walk_project(
             index: i,
             routes,
             providers,
-            module_abbreviations,
-            paired: partners[i].is_some(),
-            visits: 0,
-            out: std::mem::take(&mut out),
-            lines: Lines::of(root).map(std::rc::Rc::new),
+            out: &mut out,
+            forms,
         };
         file.walk(pf)?;
-        out = file.out;
     }
-    let mut rows: Vec<PickledEntityRow> = out
+    let mut entities: Vec<PickledEntityRow> = out
         .namespaces
         .into_iter()
         .map(|mut path| {
@@ -961,50 +763,205 @@ fn walk_project(
             }
         })
         .collect();
-    rows.extend(out.entities);
-    rows.sort();
-    rows.dedup();
-    let mut extensions = out.extensions;
-    extensions.sort();
-    extensions.dedup();
+    entities.extend(out.entities);
+    entities.sort();
+    entities.dedup();
     Ok(SourceSurface {
-        index: ExistenceIndex {
-            il: Vec::new(),
-            pickle: PickleLayer::Read(rows),
-            extensions,
-        },
+        entities,
         assembly_auto_opens: out.auto_opens,
         approximations: out.approximations,
-        lender_sources: out.lender_sources,
     })
 }
 
-/// Whether a hash directive brings in an assembly or a source file.
-fn brings_in_references(directive: &SyntaxNode) -> bool {
-    directive
+/// Hold the input to the walk's bound before anything is walked: every
+/// entity name at most [`MAX_NAME_BYTES`], every path at most
+/// [`MAX_DEPTH`] deep, at most [`MAX_DECLARATIONS`] declarations.
+fn preflight(files: &[ProjectFile]) -> Result<(), ExistenceUnread> {
+    let mut declarations = 0usize;
+    let mut count = |names: &[String], depth: usize| -> Result<(), ExistenceUnread> {
+        declarations += names.len().max(1);
+        if depth > MAX_DEPTH
+            || declarations > MAX_DECLARATIONS
+            || names.iter().any(|n| n.len() > MAX_NAME_BYTES)
+        {
+            Err(ExistenceUnread::TooManyReadings)
+        } else {
+            Ok(())
+        }
+    };
+    for pf in files {
+        let modules: Vec<ModuleOrNamespace> = match &pf.file {
+            SourceFile::Impl(f) => f.modules().collect(),
+            SourceFile::Sig(f) => f.modules().collect(),
+        };
+        for m in modules {
+            let header = m.long_id().map(|li| names_of(&li)).unwrap_or_default();
+            count(&header, header.len())?;
+            let decls = match &pf.file {
+                SourceFile::Impl(_) => Decls::Impl(m.decls().collect()),
+                SourceFile::Sig(_) => Decls::Sig(m.sig_decls().collect()),
+            };
+            preflight_decls(&decls, header.len(), &mut count)?;
+        }
+    }
+    Ok(())
+}
+
+fn preflight_decls(
+    decls: &Decls,
+    depth: usize,
+    count: &mut impl FnMut(&[String], usize) -> Result<(), ExistenceUnread>,
+) -> Result<(), ExistenceUnread> {
+    let type_names = |defns: &mut dyn Iterator<Item = TypeDefn>| -> Vec<String> {
+        defns
+            .filter_map(|d| d.long_id())
+            .flat_map(|li| names_of(&li))
+            .collect()
+    };
+    match decls {
+        Decls::Impl(ds) => {
+            for d in ds {
+                match d {
+                    ModuleDecl::NestedModule(m) => {
+                        let names = m.long_id().map(|li| names_of(&li)).unwrap_or_default();
+                        count(&names, depth + 1)?;
+                        preflight_decls(&Decls::Impl(m.decls().collect()), depth + 1, count)?;
+                    }
+                    ModuleDecl::Types(t) => count(&type_names(&mut t.defns()), depth + 1)?,
+                    ModuleDecl::Exception(e) => count(&exception_names(e), depth + 1)?,
+                    ModuleDecl::Let(_)
+                    | ModuleDecl::Extern(_)
+                    | ModuleDecl::Expr(_)
+                    | ModuleDecl::Open(_)
+                    | ModuleDecl::ModuleAbbrev(_)
+                    | ModuleDecl::Attributes(_)
+                    | ModuleDecl::HashDirective(_) => {}
+                }
+            }
+        }
+        Decls::Sig(ds) => {
+            for d in ds {
+                match d {
+                    SigDecl::NestedModule(m) => {
+                        let names = m.long_id().map(|li| names_of(&li)).unwrap_or_default();
+                        count(&names, depth + 1)?;
+                        preflight_decls(&Decls::Sig(m.sig_decls().collect()), depth + 1, count)?;
+                    }
+                    SigDecl::Types(t) => count(&type_names(&mut t.defns()), depth + 1)?,
+                    SigDecl::Exception(e) => count(&exception_names(e), depth + 1)?,
+                    SigDecl::Val(_)
+                    | SigDecl::Open(_)
+                    | SigDecl::ModuleAbbrev(_)
+                    | SigDecl::HashDirective(_) => {}
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn exception_names(e: &ExceptionDefnDecl) -> Vec<String> {
+    e.union_case()
+        .and_then(|c| c.ident())
+        .map(|t| vec![id_text(&t).into_owned()])
+        .unwrap_or_default()
+}
+
+fn names_of(li: &LongIdent) -> Vec<String> {
+    li.idents().map(|t| id_text(&t).into_owned()).collect()
+}
+
+/// Whether every child of `node` is accounted for: a node `nodes` accepts, a
+/// token whose kind `tokens` accepts, trivia, or a zero-width layout token
+/// the lex filter inserted. A classifier calls this over the node it
+/// classifies, naming exactly the children it read or knows cannot change
+/// the surface, so a child it does not name declines.
+fn consumed(
+    node: &SyntaxNode,
+    nodes: impl Fn(&SyntaxNode) -> bool,
+    tokens: impl Fn(SyntaxKind) -> bool,
+) -> bool {
+    node.children_with_tokens().all(|el| match el.as_node() {
+        Some(n) => nodes(n),
+        None => el
+            .as_token()
+            .is_some_and(|t| t.kind().is_trivia() || t.text().is_empty() || tokens(t.kind())),
+    })
+}
+
+/// A long identifier's names, and its form: plain identifiers, or rooted at
+/// `global.`, whose names start with `global` (a rooted name is written
+/// apart from an unrooted one, and may resolve apart). `None` for any other
+/// child (an operator, an active pattern's name).
+fn long_ident(li: &LongIdent) -> Option<(Form, Vec<String>)> {
+    if !consumed(
+        li.syntax(),
+        |_| false,
+        |k| {
+            matches!(
+                k,
+                SyntaxKind::IDENT_TOK | SyntaxKind::DOT_TOK | SyntaxKind::GLOBAL_TOK
+            )
+        },
+    ) {
+        return None;
+    }
+    // `global` leads a rooted name: a keyword token, or (in an attribute's
+    // name) an identifier spelled `global` with no backticks.
+    let first = li
+        .syntax()
         .children_with_tokens()
         .filter_map(|el| el.into_token())
-        .find(|t| t.kind() == SyntaxKind::IDENT_TOK)
-        .is_some_and(|t| {
-            // `#``load```: FCS reads the quoted name as the directive.
-            matches!(
+        .find(|t| !t.kind().is_trivia());
+    let keyword = first
+        .as_ref()
+        .is_some_and(|t| t.kind() == SyntaxKind::GLOBAL_TOK);
+    let spelled = first
+        .as_ref()
+        .is_some_and(|t| t.kind() == SyntaxKind::IDENT_TOK && t.text() == "global");
+    let mut names = names_of(li);
+    if keyword {
+        names.insert(0, "global".to_owned());
+    }
+    if names.is_empty() {
+        return None;
+    }
+    Some((
+        if keyword || spelled {
+            Form::RootedName
+        } else {
+            Form::PlainName
+        },
+        names,
+    ))
+}
+
+/// A `#` directive's form, by its name: its first identifier, de-quoted
+/// (`#``load``` is `#load` to FCS).
+fn hash_directive(directive: &SyntaxNode) -> Form {
+    let name = directive
+        .children_with_tokens()
+        .filter_map(|el| el.into_token())
+        .find(|t| t.kind() == SyntaxKind::IDENT_TOK);
+    match name {
+        Some(t)
+            if matches!(
                 id_text(&t).as_ref(),
                 "r" | "reference" | "load" | "I" | "i" | "include"
-            )
-        })
+            ) =>
+        {
+            Form::ReferenceDirective
+        }
+        Some(_) | None => Form::OtherDirective,
+    }
 }
 
 #[derive(Default)]
 struct Out {
     namespaces: BTreeSet<Vec<String>>,
     entities: Vec<PickledEntityRow>,
-    extensions: Vec<ExtensionRow>,
     auto_opens: Vec<String>,
     approximations: BTreeSet<Approximation>,
-    lender_sources: Vec<LenderSource>,
-    /// The bytes of names the rows so far copy, paths included
-    /// ([`MAX_ROW_BYTES`]).
-    bytes: usize,
 }
 
 /// Whether something holds: yes, no, or not known.
@@ -1025,60 +982,143 @@ impl Maybe {
     }
 }
 
-/// The written name of `attr`, de-quoted, or `None` for `[<>]`.
-fn written_name(attr: &Attribute) -> Option<Vec<String>> {
-    let li = attr.type_name()?;
-    let segs: Vec<String> = li.idents().map(|t| id_text(&t).into_owned()).collect();
-    (!segs.is_empty()).then_some(segs)
-}
-
-/// A string literal's value, for the literal forms whose value is their
-/// text: a regular string with no escape, a verbatim string, and a
-/// triple-quoted one. `None` for anything else.
-fn string_literal(expr: &Expr) -> Option<String> {
-    if let Expr::Paren(p) = expr {
-        return p.inner().as_ref().and_then(string_literal);
-    }
-    let Expr::Const(c) = expr else {
-        return None;
-    };
-    let tok = c.literal()?;
-    let text = tok.text();
-    let kind = tok.kind();
-    if kind == SyntaxKind::STRING_LIT {
-        let inner = text.strip_prefix('"')?.strip_suffix('"')?;
-        (!inner.contains('\\')).then(|| inner.to_owned())
-    } else if kind == SyntaxKind::VERBATIM_STRING_LIT {
-        let inner = text.strip_prefix("@\"")?.strip_suffix('"')?;
-        Some(inner.replace("\"\"", "\""))
-    } else if kind == SyntaxKind::TRIPLE_STRING_LIT {
-        let inner = text.strip_prefix("\"\"\"")?.strip_suffix("\"\"\"")?;
-        Some(inner.to_owned())
-    } else {
-        None
-    }
-}
-
 /// What one attribute's argument says, for the markers that read it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Arg {
-    /// No argument (`[<AutoOpen>]`).
+    /// No argument, or `()`.
     None,
     /// A string literal.
     Literal(String),
+    /// A long identifier (`CompilationRepresentationFlags.ModuleSuffix`).
+    LongIdent(Vec<String>),
     /// Anything else.
     Other,
 }
 
-fn arg_of(attr: &Attribute) -> Arg {
-    match attr.arg() {
-        None => Arg::None,
-        Some(Expr::Const(c)) if c.literal().is_some_and(|t| t.text() == "()") => Arg::None,
-        Some(e) => match string_literal(&e) {
-            Some(s) => Arg::Literal(s),
-            None => Arg::Other,
+/// One attribute, classified: its written name, whether it targets the
+/// assembly, and its argument.
+struct AttrRead {
+    name: Vec<String>,
+    assembly: bool,
+    arg: Arg,
+}
+
+/// An attribute's form and reading, or `None` for a shape outside every
+/// form: a child no classifier names (type arguments), an unnamed attribute
+/// (`[<>]`), or a target FCS does not know.
+fn attribute(attr: &Attribute, forms: &mut BTreeSet<Form>) -> Option<AttrRead> {
+    if !consumed(
+        attr.syntax(),
+        |n| {
+            n.kind() == SyntaxKind::ATTRIBUTE_TARGET
+                || LongIdent::can_cast(n.kind())
+                || Expr::can_cast(n.kind())
         },
+        |_| false,
+    ) {
+        return None;
     }
+    let (name_form, name) = long_ident(&attr.type_name()?)?;
+    forms.insert(name_form);
+    let assembly = match attr.target() {
+        None => false,
+        Some(t) => match t.text() {
+            "assembly" => {
+                forms.insert(Form::AssemblyTarget);
+                true
+            }
+            // FCS's `attributeTarget`s that name the carrier.
+            "module" | "type" | "return" | "field" | "property" | "method" | "param"
+            | "constructor" | "event" => {
+                forms.insert(Form::CarrierTarget);
+                false
+            }
+            _ => return None,
+        },
+    };
+    let (form, arg) = match attr.arg() {
+        None => (Form::AttributeNoArgument, Arg::None),
+        Some(e) => argument(&e),
+    };
+    forms.insert(form);
+    Some(AttrRead {
+        name,
+        assembly,
+        arg,
+    })
+}
+
+/// An attribute argument's form and what it says.
+fn argument(expr: &Expr) -> (Form, Arg) {
+    let other = (Form::AttributeOtherArgument, Arg::Other);
+    // `()`, which the parser keeps as a constant of its two tokens.
+    if let Expr::Const(c) = expr
+        && c.syntax()
+            .children_with_tokens()
+            .filter_map(|el| el.into_token())
+            .filter(|t| !t.kind().is_trivia())
+            .map(|t| t.kind())
+            .eq([SyntaxKind::LPAREN_TOK, SyntaxKind::RPAREN_TOK])
+    {
+        return (Form::AttributeUnitArgument, Arg::None);
+    }
+    let Expr::Paren(p) = expr else {
+        return other;
+    };
+    let Some(inner) = p.inner() else {
+        return (Form::AttributeUnitArgument, Arg::None);
+    };
+    if let Expr::Const(c) = &inner {
+        let Some(tok) = c.literal() else {
+            return other;
+        };
+        let text = tok.text();
+        let kind = tok.kind();
+        return if kind == SyntaxKind::STRING_LIT {
+            match text.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
+                Some(s) if !s.contains('\\') => {
+                    (Form::AttributeStringArgument, Arg::Literal(s.to_owned()))
+                }
+                _ => other,
+            }
+        } else if kind == SyntaxKind::VERBATIM_STRING_LIT {
+            match text.strip_prefix("@\"").and_then(|s| s.strip_suffix('"')) {
+                Some(s) => (
+                    Form::AttributeVerbatimArgument,
+                    Arg::Literal(s.replace("\"\"", "\"")),
+                ),
+                None => other,
+            }
+        } else if kind == SyntaxKind::TRIPLE_STRING_LIT {
+            match text
+                .strip_prefix("\"\"\"")
+                .and_then(|s| s.strip_suffix("\"\"\""))
+            {
+                Some(s) => (
+                    Form::AttributeTripleQuotedArgument,
+                    Arg::Literal(s.to_owned()),
+                ),
+                None => other,
+            }
+        } else {
+            other
+        };
+    }
+    if let Expr::LongIdent(l) = &inner {
+        return match l.long_ident().as_ref().and_then(long_ident) {
+            Some((_, names)) => (Form::AttributeLongIdentArgument, Arg::LongIdent(names)),
+            None => other,
+        };
+    }
+    if let Expr::Ident(i) = &inner
+        && let Some(t) = i.ident()
+    {
+        return (
+            Form::AttributeLongIdentArgument,
+            Arg::LongIdent(vec![id_text(&t).into_owned()]),
+        );
+    }
+    other
 }
 
 /// What a set of attribute lists says about each marker.
@@ -1089,6 +1129,9 @@ struct Marks {
     /// An attribute that may be `[<CompiledName>]` whose argument is no
     /// literal.
     compiled_name_unreadable: bool,
+    /// Whether an attribute that may be `[<CompilationRepresentation>]` may
+    /// pass `ModuleSuffix`.
+    module_suffix: Maybe,
     /// Some denotation was uncertain and some marker possible because of it.
     uncertain: bool,
 }
@@ -1097,160 +1140,34 @@ impl Marks {
     fn get(&self, m: Marker) -> Maybe {
         self.markers.get(&m).copied().unwrap_or(Maybe::No)
     }
-
-    /// Whether `m` may apply.
-    fn may(&self, m: Marker) -> bool {
-        self.get(m) != Maybe::No
-    }
 }
 
 impl MarkerRoutes {
     /// What the attribute written `name` may denote: `Some(set)` exactly,
     /// `None` when anything.
-    fn denotes(&self, name: Option<&[String]>) -> Option<&BTreeSet<Marker>> {
-        match (self, name) {
-            (MarkerRoutes::Certified(map), Some(name)) => map.get(name),
-            _ => None,
+    fn denotes(&self, name: &[String]) -> Option<&BTreeSet<Marker>> {
+        match self {
+            MarkerRoutes::Certified(map) => map.get(name),
+            MarkerRoutes::Unknown => None,
         }
     }
 
-    /// What `lists` on a member or a `let` definition say: a `return:`
-    /// attribute is the return value's.
-    fn marks<'l>(&self, lists: impl IntoIterator<Item = &'l AttributeList>) -> Marks {
-        self.marks_on(lists, true)
-    }
-
-    /// What `lists` on a carrier FCS gives a `return:` attribute to say: a
-    /// module, a type, an exception, a primary constructor, and a signature
-    /// (`val`, member signature, abstract slot).
-    fn entity_marks<'l>(&self, lists: impl IntoIterator<Item = &'l AttributeList>) -> Marks {
-        self.marks_on(lists, false)
-    }
-
-    fn marks_on<'l>(
-        &self,
-        lists: impl IntoIterator<Item = &'l AttributeList>,
-        has_return_value: bool,
-    ) -> Marks {
-        let mut marks = Marks {
-            markers: BTreeMap::new(),
-            compiled_names: Vec::new(),
-            compiled_name_unreadable: false,
-            uncertain: false,
-        };
-        for list in lists {
-            // Every attribute of the list FCS keeps on the carrier
-            // (`TcAttributes`), whatever its target, an `assembly:` one too
-            // (which the assembly's own list also gets); but a `return:` one
-            // is a return value's, where the carrier has one.
-            for attr in list.attributes() {
-                if has_return_value && attr.target().is_some_and(|t| t.text() == "return") {
-                    continue;
-                }
-                let name = written_name(&attr);
-                let denoted = self.denotes(name.as_deref());
-                for m in Marker::ALL {
-                    let maybe = match denoted {
-                        Some(set) if set.contains(&m) => Maybe::Yes,
-                        Some(_) => Maybe::No,
-                        None => {
-                            marks.uncertain = true;
-                            Maybe::Possibly
-                        }
-                    };
-                    if maybe == Maybe::No {
-                        continue;
-                    }
-                    let slot = marks.markers.entry(m).or_insert(Maybe::No);
-                    *slot = slot.or(maybe);
-                    if m == Marker::CompiledName {
-                        match arg_of(&attr) {
-                            Arg::Literal(s) => marks.compiled_names.push(s),
-                            // `[<CompiledName>]` with no argument does not
-                            // compile; any other attribute with none names
-                            // nothing.
-                            Arg::None => {}
-                            Arg::Other => marks.compiled_name_unreadable = true,
-                        }
-                    }
-                }
-            }
-        }
-        marks
-    }
-}
-
-/// The scope a declaration sits in.
-#[derive(Debug, Clone)]
-struct Scope {
-    namespace: Vec<String>,
-    /// The enclosing modules' and types' logical names, outermost first.
-    enclosing: Vec<String>,
-    /// Whether an enclosing module is read under the `Module` suffix the
-    /// walk adds as a second reading ([`Approximation::ModuleSuffix`]).
-    suffixed: bool,
-}
-
-impl Scope {
-    /// Directly in namespace `namespace`.
-    fn root(namespace: Vec<String>) -> Scope {
-        Scope {
-            namespace,
-            enclosing: Vec::new(),
-            suffixed: false,
-        }
-    }
-
-    /// Inside the entity `name` of this scope.
-    fn inner(&self, name: &str) -> Scope {
-        let mut enclosing = self.enclosing.clone();
-        enclosing.push(name.to_owned());
-        Scope {
-            namespace: self.namespace.clone(),
-            enclosing,
-            suffixed: self.suffixed,
+    /// Whether the attribute written `name` may be `m`.
+    fn may_be(&self, name: &[String], m: Marker) -> Maybe {
+        match self.denotes(name) {
+            Some(set) if set.contains(&m) => Maybe::Yes,
+            Some(_) => Maybe::No,
+            None => Maybe::Possibly,
         }
     }
 }
 
-/// One type definition of a declaration list, as an augmentation's kind
-/// reads it.
-#[derive(Debug, Clone)]
-struct LocalType {
-    /// Its declared type parameters' count.
-    arity: usize,
-    /// Its position in the declaration list.
-    position: usize,
-    /// Certainly a class, struct, record or union whose name counts every
-    /// type parameter (none may be a unit of measure): augmenting it in its
-    /// own list, under its full arity, is intrinsic.
-    class_like: bool,
-}
-
-/// The declaration list an augmentation sits in.
-struct ListCtx {
-    /// The list's type definitions, by name, each name's in position order:
-    /// an augmentation looks up only its own name's.
-    locals: BTreeMap<String, Vec<LocalType>>,
-    /// The positions that may change what a later name resolves to: an
-    /// `open`, a nested module (which may be `[<AutoOpen>]`). Ascending.
-    barriers: Vec<usize>,
-    is_rec: bool,
-}
-
-struct FileWalk<'r> {
+struct FileWalk<'w> {
     index: usize,
-    routes: &'r MarkerRoutes,
+    routes: &'w MarkerRoutes,
     providers: ProviderReferences,
-    /// Whether some file of the project declares a module abbreviation.
-    module_abbreviations: bool,
-    /// Whether this file is one of a signature pair.
-    paired: bool,
-    /// Declarations visited, which a module's second reading repeats.
-    visits: usize,
-    out: Out,
-    /// The file's lines, or `None` when a `#line` directive may move them.
-    lines: Option<std::rc::Rc<Lines>>,
+    out: &'w mut Out,
+    forms: &'w mut BTreeSet<Form>,
 }
 
 /// A declaration list being walked: impl decls or sig decls.
@@ -1259,7 +1176,58 @@ enum Decls {
     Sig(Vec<SigDecl>),
 }
 
+/// The enclosing modules of a scope, innermost last: shared between every
+/// scope beneath them, so entering a module copies no path.
+struct Encloser {
+    name: String,
+    parent: Option<Rc<Encloser>>,
+}
+
+/// The scope a declaration sits in.
+#[derive(Clone)]
+struct Scope {
+    namespace: Rc<[String]>,
+    enclosing: Option<Rc<Encloser>>,
+}
+
+impl Scope {
+    /// Directly in namespace `namespace`.
+    fn root(namespace: &[String]) -> Scope {
+        Scope {
+            namespace: namespace.into(),
+            enclosing: None,
+        }
+    }
+
+    /// Inside the module `name` of this scope.
+    fn inner(&self, name: &str) -> Scope {
+        Scope {
+            namespace: Rc::clone(&self.namespace),
+            enclosing: Some(Rc::new(Encloser {
+                name: name.to_owned(),
+                parent: self.enclosing.clone(),
+            })),
+        }
+    }
+
+    /// The enclosing modules' names, outermost first: a row's own copy.
+    fn enclosing(&self) -> Vec<String> {
+        let mut names = Vec::new();
+        let mut at = self.enclosing.as_deref();
+        while let Some(e) = at {
+            names.push(e.name.clone());
+            at = e.parent.as_deref();
+        }
+        names.reverse();
+        names
+    }
+}
+
 impl FileWalk<'_> {
+    fn unreadable(&self, leaf: Leaf) -> ExistenceUnread {
+        ExistenceUnread::Unreadable(self.index, leaf)
+    }
+
     fn walk(&mut self, pf: &ProjectFile) -> Result<(), ExistenceUnread> {
         let root = pf.file.syntax();
         self.assembly_attributes(root)?;
@@ -1267,105 +1235,95 @@ impl FileWalk<'_> {
             SourceFile::Impl(f) => f.modules().collect(),
             SourceFile::Sig(f) => f.modules().collect(),
         };
-        let is_sig = matches!(pf.file, SourceFile::Sig(_));
         for m in modules {
-            let decls = if is_sig {
-                Decls::Sig(m.sig_decls().collect())
-            } else {
-                Decls::Impl(m.decls().collect())
+            let decls = match &pf.file {
+                SourceFile::Impl(_) => Decls::Impl(m.decls().collect()),
+                SourceFile::Sig(_) => Decls::Sig(m.sig_decls().collect()),
             };
+            // The header: its keyword, access and `rec` tokens, its name,
+            // its attribute lists, and its declarations.
+            if !consumed(
+                m.syntax(),
+                |n| {
+                    LongIdent::can_cast(n.kind())
+                        || AttributeList::can_cast(n.kind())
+                        || ModuleDecl::can_cast(n.kind())
+                        || SigDecl::can_cast(n.kind())
+                },
+                |k| {
+                    matches!(
+                        k,
+                        SyntaxKind::MODULE_TOK
+                            | SyntaxKind::NAMESPACE_TOK
+                            | SyntaxKind::ACCESS_TOK
+                            | SyntaxKind::REC_TOK
+                            | SyntaxKind::GLOBAL_TOK
+                            // Separators between declarations.
+                            | SyntaxKind::SEMI_TOK
+                            | SyntaxKind::SEMISEMI_TOK
+                    )
+                },
+            ) {
+                return Err(self.unreadable(Leaf::FileHeader));
+            }
             match m.kind() {
                 ModuleOrNamespaceKind::GlobalNamespace => {
-                    self.decls(&Scope::root(Vec::new()), &decls, m.is_rec())?;
+                    self.forms.insert(Form::GlobalNamespace);
+                    self.decls(&Scope::root(&[]), &decls, m.is_rec())?;
                 }
                 ModuleOrNamespaceKind::DeclaredNamespace => {
-                    let ns = long_id_segments(m.long_id())
-                        .ok_or(ExistenceUnread::UnnamedDeclaration(self.index))?;
-                    self.namespace(&ns)?;
-                    self.decls(&Scope::root(ns), &decls, m.is_rec())?;
+                    self.forms.insert(Form::Namespace);
+                    let ns = self.name(m.long_id())?;
+                    self.namespace(&ns);
+                    self.decls(&Scope::root(&ns), &decls, m.is_rec())?;
                 }
-                ModuleOrNamespaceKind::NamedModule | ModuleOrNamespaceKind::Anon => {
-                    let (segments, attrs): (Vec<String>, Vec<AttributeList>) =
-                        if m.kind() == ModuleOrNamespaceKind::Anon {
-                            let segs = pf
-                                .qnof
-                                .anonymous_module_segments()
-                                .ok_or(ExistenceUnread::AnonymousModuleName(self.index))?;
-                            (segs, Vec::new())
-                        } else {
-                            (
-                                long_id_segments(m.long_id())
-                                    .ok_or(ExistenceUnread::UnnamedDeclaration(self.index))?,
-                                m.attributes().collect(),
-                            )
-                        };
-                    let (name, ns) = segments.split_last().expect("segments are not empty");
-                    self.namespace(ns)?;
-                    self.module(&Scope::root(ns.to_vec()), name, &attrs, &decls, m.is_rec())?;
+                ModuleOrNamespaceKind::NamedModule => {
+                    self.forms.insert(Form::NamedModule);
+                    let segments = self.name(m.long_id())?;
+                    let attrs: Vec<AttributeList> = m.attributes().collect();
+                    let (name, ns) = segments.split_last().expect("a name is not empty");
+                    self.namespace(ns);
+                    // FCS reads `module A.M` as a namespace holding one
+                    // module: no type shares its list.
+                    self.module(
+                        &Scope::root(ns),
+                        name,
+                        &attrs,
+                        &decls,
+                        m.is_rec(),
+                        Maybe::No,
+                    )?;
+                }
+                ModuleOrNamespaceKind::Anon => {
+                    self.forms.insert(Form::AnonymousModule);
+                    let segments = pf
+                        .qnof
+                        .anonymous_module_segments()
+                        .ok_or(ExistenceUnread::AnonymousModuleName(self.index))?;
+                    let (name, ns) = segments.split_last().expect("a name is not empty");
+                    self.namespace(ns);
+                    self.module(&Scope::root(ns), name, &[], &decls, m.is_rec(), Maybe::No)?;
                 }
             }
         }
         Ok(())
     }
 
-    /// Whether the rows so far are within [`MAX_ROWS`]: a module whose name
-    /// ends in `Module` doubles the paths under it, and a walk past the bound
-    /// declines rather than emit an unbounded or truncated surface.
-    fn within_budget(&self) -> Result<(), ExistenceUnread> {
-        let rows = self.out.entities.len() + self.out.extensions.len() + self.out.namespaces.len();
-        if rows > MAX_ROWS {
-            Err(ExistenceUnread::TooManyReadings)
-        } else {
-            Ok(())
-        }
+    /// A long identifier's names, its form recorded.
+    fn name(&mut self, li: Option<LongIdent>) -> Result<Vec<String>, ExistenceUnread> {
+        let (form, names) = li
+            .as_ref()
+            .and_then(long_ident)
+            .ok_or_else(|| self.unreadable(Leaf::Name))?;
+        self.forms.insert(form);
+        Ok(names)
     }
 
-    /// Charge `rows` rows at `scope`, each copying its path and `names`
-    /// bytes of its own, before they are made.
-    fn charge(&mut self, scope: &Scope, rows: usize, names: usize) -> Result<(), ExistenceUnread> {
-        let path: usize = scope
-            .namespace
-            .iter()
-            .chain(&scope.enclosing)
-            .map(String::len)
-            .sum();
-        self.out.bytes = self
-            .out
-            .bytes
-            .saturating_add(rows.saturating_mul(path.saturating_add(names)));
-        if self.out.bytes > MAX_ROW_BYTES {
-            Err(ExistenceUnread::TooManyReadings)
-        } else {
-            Ok(())
-        }
-    }
-
-    /// Charge one declaration visit: each reading of a module whose name
-    /// ends in `Module` walks its contents again, rows or none, so the work
-    /// is bounded apart from the rows.
-    fn visit(&mut self) -> Result<(), ExistenceUnread> {
-        self.visits += 1;
-        if self.visits > MAX_ROWS {
-            Err(ExistenceUnread::TooManyReadings)
-        } else {
-            Ok(())
-        }
-    }
-
-    /// Record namespace `ns` and its prefixes: quadratic in its segments,
-    /// so charged to the budget before they are made.
-    fn namespace(&mut self, ns: &[String]) -> Result<(), ExistenceUnread> {
-        if self.out.namespaces.len() + ns.len() * (ns.len() + 1) / 2 > MAX_ROWS {
-            return Err(ExistenceUnread::TooManyReadings);
-        }
-        let prefixes: usize = (1..=ns.len())
-            .map(|k| ns[..k].iter().map(String::len).sum::<usize>())
-            .sum();
-        self.charge(&Scope::root(Vec::new()), 1, prefixes)?;
+    /// Record namespace `ns` and its prefixes.
+    fn namespace(&mut self, ns: &[String]) {
         for k in 1..=ns.len() {
             self.out.namespaces.insert(ns[..k].to_vec());
         }
-        Ok(())
     }
 
     /// Every attribute of the file FCS may read as assembly-level: one with
@@ -1380,22 +1338,14 @@ impl FileWalk<'_> {
                 .syntax()
                 .ancestors()
                 .any(|a| a.kind() == SyntaxKind::ATTRIBUTES_DECL);
-            for attr in list.attributes() {
-                let assembly = attr.target().is_some_and(|t| t.text() == "assembly");
-                if !(assembly || standalone) {
+            for read in self.attribute_list(&list)? {
+                if !(read.assembly || standalone) {
                     continue;
                 }
-                let name = written_name(&attr);
-                let denoted = self.routes.denotes(name.as_deref());
-                let may = |m: Marker| match denoted {
-                    Some(set) if set.contains(&m) => Maybe::Yes,
-                    Some(_) => Maybe::No,
-                    None => Maybe::Possibly,
-                };
-                if may(Marker::TypeProviderAssembly) != Maybe::No {
+                if self.routes.may_be(&read.name, Marker::TypeProviderAssembly) != Maybe::No {
                     return Err(ExistenceUnread::TypeProvider(self.index));
                 }
-                match (may(Marker::AutoOpen), arg_of(&attr)) {
+                match (self.routes.may_be(&read.name, Marker::AutoOpen), read.arg) {
                     (Maybe::No, _) | (_, Arg::None) => {}
                     (Maybe::Yes, Arg::Literal(path)) => self.out.auto_opens.push(path),
                     (Maybe::Possibly, Arg::Literal(path)) => {
@@ -1404,70 +1354,128 @@ impl FileWalk<'_> {
                             .approximations
                             .insert(Approximation::UncertainAttribute);
                     }
-                    (_, Arg::Other) => return Err(ExistenceUnread::UnreadableAutoOpen(self.index)),
+                    (Maybe::Yes | Maybe::Possibly, Arg::LongIdent(_) | Arg::Other) => {
+                        return Err(ExistenceUnread::UnreadableAutoOpen(self.index));
+                    }
                 }
             }
         }
         Ok(())
     }
 
-    /// The type definitions and barriers of a declaration list.
-    fn list_ctx(&self, decls: &Decls, is_rec: bool) -> ListCtx {
-        let mut ctx = ListCtx {
-            locals: BTreeMap::new(),
-            barriers: Vec::new(),
-            is_rec,
+    /// An attribute list's attributes, each classified.
+    fn attribute_list(&mut self, list: &AttributeList) -> Result<Vec<AttrRead>, ExistenceUnread> {
+        if !consumed(
+            list.syntax(),
+            |n| Attribute::can_cast(n.kind()),
+            |k| {
+                matches!(
+                    k,
+                    SyntaxKind::LBRACK_LESS_TOK
+                        | SyntaxKind::GREATER_RBRACK_TOK
+                        | SyntaxKind::SEMI_TOK
+                )
+            },
+        ) {
+            return Err(self.unreadable(Leaf::Attribute));
+        }
+        list.attributes()
+            .map(|a| {
+                attribute(&a, self.forms)
+                    .ok_or(ExistenceUnread::Unreadable(self.index, Leaf::Attribute))
+            })
+            .collect()
+    }
+
+    /// What `lists` on an entity say. An entity keeps every attribute of its
+    /// lists, whatever its target (FCS gives a `return:` one to the carrier
+    /// on an entity).
+    fn marks(&mut self, lists: &[AttributeList]) -> Result<Marks, ExistenceUnread> {
+        let mut marks = Marks {
+            markers: BTreeMap::new(),
+            compiled_names: Vec::new(),
+            compiled_name_unreadable: false,
+            module_suffix: Maybe::No,
+            uncertain: false,
         };
-        let types = |position: usize, defn: &TypeDefn, ctx: &mut ListCtx| {
-            if is_augmentation(defn) {
-                return;
-            }
-            let Some(name) = defn
-                .long_id()
-                .and_then(|li| li.idents().last())
-                .map(|t| id_text(&t).into_owned())
-            else {
-                return;
-            };
-            let typars: Vec<_> = defn
-                .typar_decls()
-                .map(|d| d.typars().collect())
-                .unwrap_or_default();
-            // A type parameter with an attribute may be a unit of measure,
-            // which the name does not count.
-            let full_arity = typars.iter().all(|t| t.attributes().next().is_none());
-            ctx.locals.entry(name).or_default().push(LocalType {
-                arity: typars.len(),
-                position,
-                class_like: full_arity && certainly_class_like(defn),
-            });
-        };
-        // An exception is a class-like augmentation target too.
-        let exception =
-            |position: usize, e: &borzoi_cst::syntax::ExceptionDefnDecl, ctx: &mut ListCtx| {
-                if let Some(t) = e.union_case().and_then(|c| c.ident()) {
-                    let name = id_text(&t).into_owned();
-                    ctx.locals.entry(name).or_default().push(LocalType {
-                        arity: 0,
-                        position,
-                        class_like: true,
-                    });
+        for list in lists {
+            for read in self.attribute_list(list)? {
+                for m in Marker::ALL {
+                    let maybe = self.routes.may_be(&read.name, m);
+                    if maybe == Maybe::No {
+                        continue;
+                    }
+                    if maybe == Maybe::Possibly {
+                        marks.uncertain = true;
+                    }
+                    let slot = marks.markers.entry(m).or_insert(Maybe::No);
+                    *slot = slot.or(maybe);
+                    match m {
+                        Marker::CompiledName => match &read.arg {
+                            Arg::Literal(s) => marks.compiled_names.push(s.clone()),
+                            // `[<CompiledName>]` with no argument does not
+                            // compile; any other attribute with none names
+                            // nothing.
+                            Arg::None => {}
+                            Arg::LongIdent(_) | Arg::Other => marks.compiled_name_unreadable = true,
+                        },
+                        Marker::CompilationRepresentation => {
+                            let suffix = match &read.arg {
+                                Arg::None | Arg::Literal(_) => Maybe::No,
+                                // `CompilationRepresentationFlags.ModuleSuffix`,
+                                // or an alias of it: a flag named anything
+                                // else is no suffix.
+                                Arg::LongIdent(names) => {
+                                    if names.last().is_some_and(|n| n == "ModuleSuffix") {
+                                        maybe
+                                    } else {
+                                        Maybe::No
+                                    }
+                                }
+                                // `A ||| B`, a value bound elsewhere.
+                                Arg::Other => Maybe::Possibly,
+                            };
+                            marks.module_suffix = marks.module_suffix.or(suffix);
+                        }
+                        Marker::AutoOpen | Marker::Measure | Marker::TypeProviderAssembly => {}
+                    }
                 }
-            };
+            }
+        }
+        Ok(marks)
+    }
+
+    /// The declaration list `decls` in `scope`.
+    fn decls(&mut self, scope: &Scope, decls: &Decls, is_rec: bool) -> Result<(), ExistenceUnread> {
+        let type_names = type_names(decls, self.routes);
         match decls {
             Decls::Impl(ds) => {
-                for (i, d) in ds.iter().enumerate() {
+                for d in ds {
                     match d {
+                        ModuleDecl::NestedModule(m) => {
+                            let inner = Decls::Impl(m.decls().collect());
+                            self.nested_module(
+                                scope,
+                                m.syntax(),
+                                m.long_id(),
+                                &m.attributes().collect::<Vec<_>>(),
+                                &inner,
+                                m.is_rec() || is_rec,
+                                &type_names,
+                            )?;
+                        }
                         ModuleDecl::Types(t) => {
                             for defn in t.defns() {
-                                types(i, &defn, &mut ctx);
+                                self.type_defn(scope, &defn)?;
                             }
                         }
-                        ModuleDecl::Exception(e) => exception(i, e, &mut ctx),
-                        ModuleDecl::Open(_) | ModuleDecl::NestedModule(_) => ctx.barriers.push(i),
+                        ModuleDecl::Exception(e) => self.exception(scope, e)?,
+                        // Extension members, `let`s and `extern`s are A's
+                        // `ExtensionNames`'; the rest declares no entity.
                         ModuleDecl::Let(_)
                         | ModuleDecl::Extern(_)
                         | ModuleDecl::Expr(_)
+                        | ModuleDecl::Open(_)
                         | ModuleDecl::ModuleAbbrev(_)
                         | ModuleDecl::Attributes(_)
                         | ModuleDecl::HashDirective(_) => {}
@@ -1475,194 +1483,92 @@ impl FileWalk<'_> {
                 }
             }
             Decls::Sig(ds) => {
-                for (i, d) in ds.iter().enumerate() {
+                for d in ds {
                     match d {
+                        SigDecl::NestedModule(m) => {
+                            let inner = Decls::Sig(m.sig_decls().collect());
+                            self.nested_module(
+                                scope,
+                                m.syntax(),
+                                m.long_id(),
+                                &m.attributes().collect::<Vec<_>>(),
+                                &inner,
+                                m.is_rec() || is_rec,
+                                &type_names,
+                            )?;
+                        }
                         SigDecl::Types(t) => {
                             for defn in t.defns() {
-                                types(i, &defn, &mut ctx);
+                                self.type_defn(scope, &defn)?;
                             }
                         }
-                        SigDecl::Exception(e) => exception(i, e, &mut ctx),
-                        SigDecl::Open(_) | SigDecl::NestedModule(_) => ctx.barriers.push(i),
-                        SigDecl::Val(_) | SigDecl::ModuleAbbrev(_) | SigDecl::HashDirective(_) => {}
+                        SigDecl::Exception(e) => self.exception(scope, e)?,
+                        SigDecl::Val(_)
+                        | SigDecl::Open(_)
+                        | SigDecl::ModuleAbbrev(_)
+                        | SigDecl::HashDirective(_) => {}
                     }
-                }
-            }
-        }
-        ctx
-    }
-
-    /// The declaration list `decls` in `scope`.
-    fn decls(&mut self, scope: &Scope, decls: &Decls, is_rec: bool) -> Result<(), ExistenceUnread> {
-        let ctx = self.list_ctx(decls, is_rec);
-        match decls {
-            Decls::Impl(ds) => {
-                for (i, d) in ds.iter().enumerate() {
-                    self.visit()?;
-                    self.impl_decl(scope, d, i, &ctx, is_rec)?;
-                    self.within_budget()?;
-                }
-            }
-            Decls::Sig(ds) => {
-                for (i, d) in ds.iter().enumerate() {
-                    self.visit()?;
-                    self.sig_decl(scope, d, i, &ctx, is_rec)?;
-                    self.within_budget()?;
                 }
             }
         }
         Ok(())
     }
 
-    fn impl_decl(
+    /// `module M = …` in a declaration list whose types are `type_names`.
+    #[allow(clippy::too_many_arguments)]
+    fn nested_module(
         &mut self,
         scope: &Scope,
-        d: &ModuleDecl,
-        position: usize,
-        ctx: &ListCtx,
+        node: &SyntaxNode,
+        long_id: Option<LongIdent>,
+        attrs: &[AttributeList],
+        decls: &Decls,
         is_rec: bool,
+        type_names: &BTreeMap<String, Maybe>,
     ) -> Result<(), ExistenceUnread> {
-        match d {
-            ModuleDecl::NestedModule(m) => {
-                let name = long_id_segments(m.long_id())
-                    .and_then(|s| s.last().cloned())
-                    .ok_or(ExistenceUnread::UnnamedDeclaration(self.index))?;
-                let attrs: Vec<AttributeList> = m.attributes().collect();
-                self.module(
-                    scope,
-                    &name,
-                    &attrs,
-                    &Decls::Impl(m.decls().collect()),
-                    m.is_rec() || is_rec,
+        if !consumed(
+            node,
+            |n| {
+                LongIdent::can_cast(n.kind())
+                    || AttributeList::can_cast(n.kind())
+                    || ModuleDecl::can_cast(n.kind())
+                    || SigDecl::can_cast(n.kind())
+            },
+            |k| {
+                matches!(
+                    k,
+                    SyntaxKind::MODULE_TOK
+                        | SyntaxKind::ACCESS_TOK
+                        | SyntaxKind::REC_TOK
+                        | SyntaxKind::EQUALS_TOK
+                        | SyntaxKind::BEGIN_TOK
+                        | SyntaxKind::END_TOK
+                        | SyntaxKind::SEMI_TOK
+                        | SyntaxKind::SEMISEMI_TOK
                 )
-            }
-            ModuleDecl::Types(t) => {
-                for defn in t.defns() {
-                    self.type_defn(scope, &defn, position, ctx)?;
-                }
-                Ok(())
-            }
-            ModuleDecl::Exception(e) => {
-                let name = e
-                    .union_case()
-                    .and_then(|c| c.ident())
-                    .map(|t| id_text(&t).into_owned())
-                    .ok_or(ExistenceUnread::UnnamedDeclaration(self.index))?;
-                let attrs: Vec<AttributeList> = e.attributes().collect();
-                let marks = self.routes.entity_marks(&attrs);
-                let members: Vec<MemberDefn> = e.members().collect();
-                self.members(&scope.inner(&name), &members, None)?;
-                self.type_bodies(&scope.inner(&name), None, &members)?;
-                self.entity(
-                    scope,
-                    &name,
-                    &[PickledEntityKind::Exception],
-                    &marks,
-                    false,
-                    &BTreeSet::new(),
-                )
-            }
-            ModuleDecl::Let(l) => {
-                let lists: Vec<AttributeList> = l.attributes().collect();
-                for (k, b) in l.bindings().enumerate() {
-                    let mut own: Vec<AttributeList> = b.attributes().collect();
-                    if k == 0 {
-                        own.extend(lists.iter().cloned());
-                    }
-                    self.binding_extension(scope, &own, b.pat())?;
-                }
-                Ok(())
-            }
-            ModuleDecl::Extern(x) => {
-                let lists: Vec<AttributeList> = x.attributes().collect();
-                let marks = self.routes.marks(&lists);
-                if !marks.may(Marker::Extension) {
-                    return Ok(());
-                }
-                let name = x
-                    .name()
-                    .and_then(|li| li.idents().last())
-                    .map(|t| id_text(&t).into_owned())
-                    .ok_or(ExistenceUnread::UnnamedDeclaration(self.index))?;
-                self.csharp_row(scope, &name, &marks)
-            }
-            ModuleDecl::Expr(_)
-            | ModuleDecl::Open(_)
-            | ModuleDecl::ModuleAbbrev(_)
-            | ModuleDecl::Attributes(_)
-            | ModuleDecl::HashDirective(_) => Ok(()),
+            },
+        ) {
+            return Err(self.unreadable(Leaf::NestedModule));
         }
+        let names = self.name(long_id)?;
+        let [name] = names.as_slice() else {
+            return Err(self.unreadable(Leaf::NestedModule));
+        };
+        let has_decls = match decls {
+            Decls::Impl(ds) => !ds.is_empty(),
+            Decls::Sig(ds) => !ds.is_empty(),
+        };
+        self.forms.insert(if has_decls {
+            Form::NestedModule
+        } else {
+            Form::EmptyNestedModule
+        });
+        let beside_type = type_names.get(name).copied().unwrap_or(Maybe::No);
+        self.module(scope, name, attrs, decls, is_rec, beside_type)
     }
 
-    fn sig_decl(
-        &mut self,
-        scope: &Scope,
-        d: &SigDecl,
-        position: usize,
-        ctx: &ListCtx,
-        is_rec: bool,
-    ) -> Result<(), ExistenceUnread> {
-        match d {
-            SigDecl::NestedModule(m) => {
-                let name = long_id_segments(m.long_id())
-                    .and_then(|s| s.last().cloned())
-                    .ok_or(ExistenceUnread::UnnamedDeclaration(self.index))?;
-                let attrs: Vec<AttributeList> = m.attributes().collect();
-                self.module(
-                    scope,
-                    &name,
-                    &attrs,
-                    &Decls::Sig(m.sig_decls().collect()),
-                    m.is_rec() || is_rec,
-                )
-            }
-            SigDecl::Types(t) => {
-                for defn in t.defns() {
-                    self.type_defn(scope, &defn, position, ctx)?;
-                }
-                Ok(())
-            }
-            SigDecl::Exception(e) => {
-                let name = e
-                    .union_case()
-                    .and_then(|c| c.ident())
-                    .map(|t| id_text(&t).into_owned())
-                    .ok_or(ExistenceUnread::UnnamedDeclaration(self.index))?;
-                let attrs: Vec<AttributeList> = e.attributes().collect();
-                let marks = self.routes.entity_marks(&attrs);
-                let members: Vec<MemberDefn> = e.members().collect();
-                self.members(&scope.inner(&name), &members, None)?;
-                self.type_bodies(&scope.inner(&name), None, &members)?;
-                self.entity(
-                    scope,
-                    &name,
-                    &[PickledEntityKind::Exception],
-                    &marks,
-                    false,
-                    &BTreeSet::new(),
-                )
-            }
-            SigDecl::Val(v) => {
-                let lists: Vec<AttributeList> = v.attributes().collect();
-                let marks = self.routes.entity_marks(&lists);
-                if !marks.may(Marker::Extension) {
-                    return Ok(());
-                }
-                let name = v
-                    .val_sig()
-                    .and_then(|s| val_sig_name(&s))
-                    .ok_or(ExistenceUnread::UnnamedDeclaration(self.index))?;
-                self.csharp_row(scope, &name, &marks)
-            }
-            SigDecl::Open(_) | SigDecl::ModuleAbbrev(_) | SigDecl::HashDirective(_) => Ok(()),
-        }
-    }
-
-    /// A module entity, and its contents. FCS may give the module a
-    /// `Module` suffix; the set's canonical spelling strips it, so a module
-    /// takes it unseen, but for a name already ending in `Module`
-    /// (`FooModule` may be `FooModuleModule`, canonically `FooModule`), whose
-    /// both readings the walk emits.
+    /// A module entity named `name` (`beside_type`: whether a type of its
+    /// name in its own list may suffix it), and its contents.
     fn module(
         &mut self,
         scope: &Scope,
@@ -1670,29 +1576,23 @@ impl FileWalk<'_> {
         attrs: &[AttributeList],
         decls: &Decls,
         is_rec: bool,
+        beside_type: Maybe,
     ) -> Result<(), ExistenceUnread> {
-        let marks = self.routes.entity_marks(attrs);
-        let mut readings = vec![name.to_owned()];
-        if name.len() > "Module".len() && name.ends_with("Module") {
-            self.out.approximations.insert(Approximation::ModuleSuffix);
-            readings.push(format!("{name}Module"));
-        }
-        for logical in &readings {
-            self.within_budget()?;
-            let mut inner = scope.inner(logical);
-            inner.suffixed |= logical != name;
-            self.decls(&inner, decls, is_rec)?;
-            // `[<CompiledName>]` does not rename a module.
-            self.entity(
-                scope,
-                logical,
-                &[PickledEntityKind::Module],
-                &marks,
-                false,
-                &BTreeSet::new(),
-            )?;
-        }
-        Ok(())
+        let marks = self.marks(attrs)?;
+        // Canonical spelling strips one `Module`, so the suffix moves a fact
+        // only on a name already ending in it.
+        let logical = if name.len() > "Module".len() && name.ends_with("Module") {
+            match marks.module_suffix.or(beside_type) {
+                Maybe::Yes => format!("{name}Module"),
+                Maybe::No => name.to_owned(),
+                Maybe::Possibly => return Err(ExistenceUnread::ModuleSuffix(self.index)),
+            }
+        } else {
+            name.to_owned()
+        };
+        self.decls(&scope.inner(&logical), decls, is_rec)?;
+        // `[<CompiledName>]` does not rename a module.
+        self.entity(scope, &logical, &[PickledEntityKind::Module], &marks, false)
     }
 
     /// Emit an entity's rows: one per kind and compiled-name reading. Its
@@ -1705,7 +1605,6 @@ impl FileWalk<'_> {
         kinds: &[PickledEntityKind],
         marks: &Marks,
         honours_compiled_name: bool,
-        abbreviation_sources: &BTreeSet<Approximation>,
     ) -> Result<(), ExistenceUnread> {
         if honours_compiled_name && marks.compiled_name_unreadable {
             return Err(ExistenceUnread::UnreadableCompiledName(self.index));
@@ -1717,96 +1616,91 @@ impl FileWalk<'_> {
             compiled.extend(marks.compiled_names.iter().cloned());
         }
         let auto_open = marks.get(Marker::AutoOpen);
-        let extension = marks.get(Marker::Extension);
         if marks.uncertain
             && (auto_open == Maybe::Possibly
-                || extension == Maybe::Possibly
                 || (compiled.len() > 1 && marks.get(Marker::CompiledName) == Maybe::Possibly))
         {
             self.out
                 .approximations
                 .insert(Approximation::UncertainAttribute);
         }
-        // A row that may lend, with what may have made it one.
-        if kinds.contains(&PickledEntityKind::Abbreviation)
-            && (auto_open != Maybe::No || extension != Maybe::No)
-        {
-            let mut approximations = abbreviation_sources.clone();
-            if marks.uncertain && (auto_open == Maybe::Possibly || extension == Maybe::Possibly) {
-                approximations.insert(Approximation::UncertainAttribute);
-            }
-            if scope.suffixed {
-                approximations.insert(Approximation::ModuleSuffix);
-            }
-            if self.paired {
-                approximations.insert(Approximation::SignaturePair);
-            }
-            self.charge(scope, 1, 0)?;
-            self.out.lender_sources.push(LenderSource {
-                namespace: scope.namespace.clone(),
-                enclosing: scope.enclosing.clone(),
-                approximations,
-            });
-        }
-        let names = logical.len() + compiled.iter().map(String::len).max().unwrap_or(0);
-        self.charge(scope, kinds.len() * compiled.len(), names)?;
+        let enclosing = scope.enclosing();
         for &kind in kinds {
             for c in &compiled {
                 self.out.entities.push(PickledEntityRow {
-                    namespace: scope.namespace.clone(),
-                    enclosing: scope.enclosing.clone(),
+                    namespace: scope.namespace.to_vec(),
+                    enclosing: enclosing.clone(),
                     logical_name: logical.to_owned(),
                     compiled_name: c.clone(),
                     kind,
                     public: true,
                     auto_open: auto_open != Maybe::No,
-                    extension: extension != Maybe::No,
+                    extension: false,
                 });
             }
         }
         Ok(())
     }
 
-    fn type_defn(
-        &mut self,
-        scope: &Scope,
-        defn: &TypeDefn,
-        position: usize,
-        ctx: &ListCtx,
-    ) -> Result<(), ExistenceUnread> {
+    fn type_defn(&mut self, scope: &Scope, defn: &TypeDefn) -> Result<(), ExistenceUnread> {
+        // The head's keyword, access, name, type parameters, constraints,
+        // attributes and primary constructor; the representation and members
+        // (read only for an abbreviation's target), and `with … end`.
+        if !consumed(
+            defn.syntax(),
+            |n| {
+                let k = n.kind();
+                AttributeList::can_cast(k)
+                    || LongIdent::can_cast(k)
+                    || TyparDecls::can_cast(k)
+                    || k == SyntaxKind::TYPAR_CONSTRAINTS
+                    || ImplicitCtor::can_cast(k)
+                    || TupleTypeExtensionHead::can_cast(k)
+                    || TypeDefnRepr::can_cast(k)
+                    || MemberDefn::can_cast(k)
+            },
+            |k| {
+                matches!(
+                    k,
+                    SyntaxKind::TYPE_TOK
+                        | SyntaxKind::AND_TOK
+                        | SyntaxKind::ACCESS_TOK
+                        | SyntaxKind::EQUALS_TOK
+                        | SyntaxKind::WITH_TOK
+                        | SyntaxKind::END_TOK
+                )
+            },
+        ) {
+            return Err(self.unreadable(Leaf::TypeDefinition));
+        }
+        if defn.tuple_type_head().is_some() {
+            self.forms.insert(Form::TupleAugmentation);
+            return Ok(());
+        }
         if is_augmentation(defn) {
-            return self.augmentation(scope, defn, position, ctx);
+            self.forms.insert(Form::Augmentation);
+            return Ok(());
         }
-        // `type X.Y = …` (FS0925, recovered as `X`) is outside the domain.
-        if defn.long_id().is_some_and(|li| li.idents().count() > 1) {
-            return Err(ExistenceUnread::OutsideDomain(self.index, Leaf::TypeHead));
-        }
-        let name = defn
-            .long_id()
-            .and_then(|li| li.idents().last())
-            .map(|t| id_text(&t).into_owned())
-            .ok_or(ExistenceUnread::UnnamedDeclaration(self.index))?;
-        let attrs: Vec<AttributeList> = defn.attributes().collect();
-        let marks = self.routes.entity_marks(&attrs);
+        let names = self.name(defn.long_id())?;
+        let [name] = names.as_slice() else {
+            self.forms.insert(Form::DottedType);
+            return Err(self.unreadable(Leaf::TypeDefinition));
+        };
         let generic = defn
             .typar_decls()
             .is_some_and(|d| d.typars().next().is_some());
-        let mut abbreviation_sources: BTreeSet<Approximation> = BTreeSet::new();
+        self.forms.insert(if generic {
+            Form::GenericType
+        } else {
+            Form::Type
+        });
+        let attrs: Vec<AttributeList> = defn.attributes().collect();
+        let marks = self.marks(&attrs)?;
         let kinds: Vec<PickledEntityKind> = match defn.repr() {
-            Some(TypeDefnRepr::Abbrev(a)) => {
-                let target = a.ty();
-                let provided = |t: &Type| {
-                    has_static_argument(t)
-                        || (self.providers == ProviderReferences::Possible && may_be_provided(t))
-                };
-                if target.as_ref().is_some_and(provided) {
-                    return Err(ExistenceUnread::TypeProvider(self.index));
-                }
-                let (kinds, source) =
-                    self.abbreviation_kinds(&name, generic, target.as_ref(), &marks);
-                abbreviation_sources.extend(source);
-                kinds
-            }
+            Some(TypeDefnRepr::Abbrev(a)) => match a.ty() {
+                Some(target) => self.abbreviation_kinds(name, generic, &target, &marks)?,
+                None => return Err(self.unreadable(Leaf::AbbreviationTarget)),
+            },
             Some(
                 TypeDefnRepr::Record(_)
                 | TypeDefnRepr::Union(_)
@@ -1817,653 +1711,169 @@ impl FileWalk<'_> {
             )
             | None => vec![PickledEntityKind::Type],
         };
-        // The type's own members, which are C#-style extensions when marked.
-        let mut members: Vec<MemberDefn> = defn.members().collect();
-        if let Some(TypeDefnRepr::ObjectModel(om)) = defn.repr() {
-            members.extend(om.members());
-        }
-        let inner = scope.inner(&name);
-        self.members(&inner, &members, None)?;
-        self.type_bodies(&inner, defn.implicit_ctor(), &members)?;
-        self.entity(scope, &name, &kinds, &marks, true, &abbreviation_sources)
+        self.entity(scope, name, &kinds, &marks, true)
     }
 
     /// What `type name = target` may be: an abbreviation, or (`target` one
     /// identifier) FCS's single-case union when it names no type in scope,
-    /// or itself (`type X = X`, a union unless a unit of measure). Only an
-    /// abbreviation lends what an `[<AutoOpen>]` or `[<Extension>]` on it
-    /// brings, and one surplus lender makes every name a possible extension,
-    /// so the abbreviation reading is emitted alone only where FCS's is
-    /// certain: a target FSharp.Core declares (open in every file).
+    /// or itself (`type X = X`, a union unless a unit of measure). The
+    /// abbreviation reading is emitted alone only where FCS's is certain: a
+    /// target FSharp.Core declares (open in every file).
     fn abbreviation_kinds(
         &mut self,
         name: &str,
         generic: bool,
-        target: Option<&Type>,
+        target: &Type,
         marks: &Marks,
-    ) -> (Vec<PickledEntityKind>, Option<Approximation>) {
+    ) -> Result<Vec<PickledEntityKind>, ExistenceUnread> {
+        let target = abbreviation_target(target, name, generic);
+        self.forms.insert(target.form());
+        let abbreviation = vec![PickledEntityKind::Abbreviation];
+        let either = vec![PickledEntityKind::Abbreviation, PickledEntityKind::Type];
         let measure = marks.get(Marker::Measure);
-        let (kinds, source) = match target.and_then(abbrev_single_ident) {
-            // `type Foo<'a> = Foo` may abbreviate another `Foo` of no arity.
-            Some(t) if t == name && !generic => match measure {
-                Maybe::No => (vec![PickledEntityKind::Type], None),
-                Maybe::Yes => (vec![PickledEntityKind::Abbreviation], None),
-                Maybe::Possibly => (
-                    vec![PickledEntityKind::Abbreviation, PickledEntityKind::Type],
-                    Some(Approximation::UncertainAttribute),
-                ),
-            },
-            Some(t) if FSHARP_CORE_TYPE_NAMES.contains(&t.as_str()) => {
-                (vec![PickledEntityKind::Abbreviation], None)
+        let provider = self.providers == ProviderReferences::Possible;
+        Ok(match target {
+            Target::StaticArgument => return Err(ExistenceUnread::TypeProvider(self.index)),
+            Target::Named | Target::SingleIdent | Target::SelfNamed | Target::FSharpCore
+                if provider =>
+            {
+                return Err(ExistenceUnread::TypeProvider(self.index));
             }
-            Some(_) if measure != Maybe::Yes => (
-                vec![PickledEntityKind::Abbreviation, PickledEntityKind::Type],
-                Some(Approximation::AbbreviationOrUnion),
-            ),
-            _ => (vec![PickledEntityKind::Abbreviation], None),
-        };
-        if let Some(a) = source {
-            self.out.approximations.insert(a);
-        }
-        (kinds, source)
-    }
-
-    /// The rows of what a type, an augmentation or an exception declares
-    /// beside its members (`ctor` its primary constructor): a primary
-    /// constructor and class `let`s under `[<Extension>]` are pickled as
-    /// C#-style rows; a marked interface implementation's member has an
-    /// interface-qualified compiled name the walk does not spell. Every
-    /// caller of [`Self::members`] runs this too, so between them every
-    /// member kind is read.
-    fn type_bodies(
-        &mut self,
-        inner: &Scope,
-        ctor: Option<ImplicitCtor>,
-        members: &[MemberDefn],
-    ) -> Result<(), ExistenceUnread> {
-        if let Some(ctor) = &ctor {
-            let lists: Vec<AttributeList> = ctor.attributes().collect();
-            let marks = self.routes.entity_marks(&lists);
-            if marks.may(Marker::Extension) {
-                self.csharp_row(inner, ".ctor", &marks)?;
-            }
-        }
-        self.class_lets(inner, ctor.as_ref(), members)?;
-        for m in members {
-            if let MemberDefn::Interface(i) = m {
-                for im in i.members() {
-                    let (lists, shape) = member_shape(&im);
-                    let mut all = lists;
-                    if let MemberShape::Named { vals, .. } = shape {
-                        for v in vals {
-                            all.extend(v.own_lists);
-                        }
-                    }
-                    if self.routes.marks(&all).may(Marker::Extension) {
-                        return Err(ExistenceUnread::UnnamedDeclaration(self.index));
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// The C#-style rows of a type's `let`s under `[<Extension>]`. FCS
-    /// compiles a `let` that takes arguments to a method val under the name
-    /// it takes, which is its own unless an earlier name of the type took
-    /// it: then `basic@line`, with `-k` for the `k`th earlier fresh name of
-    /// the same `basic` (the name before its first `@`), `line` the
-    /// binder's. Every binder of the type (constructor argument, self
-    /// identifier, `let` binder, a pattern's matched value) takes at most
-    /// one fresh name, so their count bounds `k`; and a `let` that is a
-    /// value has no val. The walk emits every one of those names for every
-    /// marked `let`, whatever its arity, and for every line its head spans
-    /// ([`head_lines`]) rather than the binder's alone: which token FCS
-    /// takes the binder's range from is a parser rule the walk need not
-    /// model, and no query names a mangled name but a backticked one.
-    fn class_lets(
-        &mut self,
-        inner: &Scope,
-        ctor: Option<&ImplicitCtor>,
-        members: &[MemberDefn],
-    ) -> Result<(), ExistenceUnread> {
-        let lets: Vec<&MemberLetBindings> = members
-            .iter()
-            .filter_map(|m| {
-                if let MemberDefn::LetBindings(l) = m {
-                    Some(l)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        // Each binding with its attribute lists: a group's own lists mark
-        // its first binding.
-        let bindings: Vec<(Binding, Vec<AttributeList>)> = lets
-            .iter()
-            .flat_map(|l| {
-                let lists: Vec<AttributeList> = l.attributes().collect();
-                l.bindings().enumerate().map(move |(k, b)| {
-                    let mut own: Vec<AttributeList> = b.attributes().collect();
-                    if k == 0 {
-                        own.extend(lists.iter().cloned());
-                    }
-                    (b, own)
-                })
-            })
-            .collect();
-        if !bindings
-            .iter()
-            .any(|(_, lists)| self.routes.marks(lists).may(Marker::Extension))
-        {
-            return Ok(());
-        }
-        let Some(lines) = self.lines.clone() else {
-            return Err(ExistenceUnread::LineDirective(self.index));
-        };
-        // An upper bound on the type's binders: every identifier or
-        // wildcard of the constructor's arguments, its self identifier, and
-        // each binding's identifiers and matched value.
-        let ctor_binders = ctor.and_then(|c| c.args()).map_or(0, |p| {
-            p.syntax()
-                .descendants_with_tokens()
-                .filter_map(|el| el.into_token())
-                .filter(|t| matches!(t.kind(), SyntaxKind::IDENT_TOK | SyntaxKind::UNDERSCORE_TOK))
-                .count()
-        });
-        let binders = ctor_binders
-            + usize::from(ctor.and_then(|c| c.self_id()).is_some())
-            + bindings
-                .iter()
-                .map(|(b, _)| b.pat().map_or(0, |p| pattern_idents(&p).len()) + 1)
-                .sum::<usize>();
-        for (b, lists) in &bindings {
-            let marks = self.routes.marks(lists);
-            if !marks.may(Marker::Extension) {
-                continue;
-            }
-            let Some(pat) = b.pat() else {
-                return Err(ExistenceUnread::UnnamedDeclaration(self.index));
-            };
-            let named: Vec<String> = match binding_head(&pat) {
-                Some(Head::Named(name)) => vec![name],
-                Some(Head::Pattern(names)) => {
-                    self.out
-                        .approximations
-                        .insert(Approximation::BindingPattern);
-                    names
-                }
-                None => {
-                    return Err(ExistenceUnread::OutsideDomain(
-                        self.index,
-                        Leaf::BindingHead,
-                    ));
-                }
-            };
-            if named.is_empty() {
-                return Err(ExistenceUnread::UnnamedDeclaration(self.index));
-            }
-            self.out.approximations.insert(Approximation::ClassLetName);
-            // FCS mangles a taken name by its binder's line, which some token
-            // of the head holds: so every line the head spans, from its
-            // node's first byte (any trivia it holds included) to its last
-            // token's end. No query names a mangled name but a backticked
-            // one, so the span's surplus costs nothing a consumer reads.
-            let span =
-                head_lines(&pat, &lines).ok_or(ExistenceUnread::UnnamedDeclaration(self.index))?;
-            // Each name is a row per line, binder and compiled name: charged
-            // before expanding.
-            let rows = named.len()
-                * span.clone().count()
-                * (binders + 1)
-                * (marks.compiled_names.len() + 1);
-            if self.out.entities.len() + self.out.extensions.len() + rows > MAX_ROWS {
-                return Err(ExistenceUnread::TooManyReadings);
-            }
-            // And their bytes: each a name, an `@`, a line and a count.
-            let longest = named.iter().map(String::len).max().unwrap_or(0);
-            self.charge(inner, rows, longest + 24)?;
-            for name in named {
-                let basic = match name.find('@') {
-                    None | Some(0) => name.as_str(),
-                    Some(n) => &name[..n],
-                };
-                let mut taken = vec![name.clone()];
-                for line in span.clone() {
-                    for k in 0..binders {
-                        taken.push(if k == 0 {
-                            format!("{basic}@{line}")
-                        } else {
-                            format!("{basic}@{line}-{k}")
-                        });
-                    }
-                }
-                for n in taken {
-                    self.csharp_row(inner, &n, &marks)?;
-                }
-                // Marked `let`s by binders is quadratic in the type.
-                self.within_budget()?;
-            }
-        }
-        Ok(())
-    }
-
-    /// The extension rows of members `members` of a type (or of an
-    /// augmentation, `augmented`: the names the extended type's logical name
-    /// may have): an optional extension's every member, and any member that
-    /// may carry `[<Extension>]`.
-    fn members(
-        &mut self,
-        scope: &Scope,
-        members: &[MemberDefn],
-        augmented: Option<&[String]>,
-    ) -> Result<(), ExistenceUnread> {
-        for m in members {
-            // A member's rows multiply its compiled names by the type's.
-            self.within_budget()?;
-            let (lists, shape) = member_shape(m);
-            let (vals, role) = match shape {
-                MemberShape::NoVal => match m {
-                    // A `do` binds nothing; a `let` and an interface
-                    // implementation are [`Self::type_bodies`]'s, which
-                    // every caller runs.
-                    MemberDefn::Do(_) | MemberDefn::LetBindings(_) | MemberDefn::Interface(_) => {
-                        continue;
-                    }
-                    MemberDefn::Member(_)
-                    | MemberDefn::ValField(_)
-                    | MemberDefn::Inherit(_)
-                    | MemberDefn::GetSetMember(_)
-                    | MemberDefn::AutoProperty(_)
-                    | MemberDefn::AbstractSlot(_)
-                    | MemberDefn::MemberSig(_) => {
-                        return Err(ExistenceUnread::UnnamedDeclaration(self.index));
-                    }
-                },
-                MemberShape::Inherit => {
-                    if augmented.is_some() {
-                        self.out.approximations.insert(Approximation::RejectedShape);
-                    }
-                    continue;
-                }
-                MemberShape::Unnamed => {
-                    // A member no attribute marks, outside an augmentation,
-                    // has no row whatever its name.
-                    if augmented.is_none() && !self.routes.marks(&lists).may(Marker::Extension) {
-                        continue;
-                    }
-                    return Err(ExistenceUnread::UnnamedDeclaration(self.index));
-                }
-                // A `val` field is no method: `[<Extension>]` on it makes no
-                // row.
-                MemberShape::Named {
-                    role: MemberRole::Field,
-                    ..
-                } => {
-                    if augmented.is_some() {
-                        self.out.approximations.insert(Approximation::RejectedShape);
-                    }
-                    continue;
-                }
-                MemberShape::Named {
-                    vals,
-                    rejected,
-                    role,
-                    ..
-                } => {
-                    // An abstract slot FCS rejects in an augmentation: its
-                    // rows are read as written.
-                    if rejected && augmented.is_some() {
-                        self.out.approximations.insert(Approximation::RejectedShape);
-                    }
-                    (vals, role)
-                }
-            };
-            // A signature keeps its `return:` attributes.
-            let signature = matches!(m, MemberDefn::AbstractSlot(_) | MemberDefn::MemberSig(_));
-            for v in vals {
-                let mut all = lists.clone();
-                all.extend(v.own_lists.iter().cloned());
-                let marks = self.routes.marks_on(&all, !signature);
-                let marked = marks.get(Marker::Extension);
-                if augmented.is_none() && marked == Maybe::No {
-                    continue;
-                }
-                if marks.uncertain && marked == Maybe::Possibly && augmented.is_none() {
+            Target::SelfNamed => match measure {
+                Maybe::No => vec![PickledEntityKind::Type],
+                Maybe::Yes => abbreviation,
+                Maybe::Possibly => {
                     self.out
                         .approximations
                         .insert(Approximation::UncertainAttribute);
+                    either
                 }
-                // A `[<CompiledName>]` renames a method, never a property's
-                // accessor (`CheckExpressions.fs`, `compiledNameIsOnProp`).
-                // A signature's getter reading may be a method whose type the
-                // walk does not classify (`'T -> bool when 'T: equality`), so
-                // an unreadable one declines there too.
-                if marks.compiled_name_unreadable && (v.accessor.is_none() || signature) {
-                    return Err(ExistenceUnread::UnreadableCompiledName(self.index));
-                }
-                if augmented.is_some() && role == MemberRole::Constructor {
-                    // FCS rejects a constructor in an optional augmentation,
-                    // and keeps it in its recovery (`String..ctor`).
-                    self.out.approximations.insert(Approximation::RejectedShape);
-                }
-                let instance = match augmented {
-                    Some(_) => (role != MemberRole::Constructor).then_some(!v.is_static),
-                    None => None,
-                };
-                self.val_row(scope, &v, &marks, augmented, instance)?;
-            }
-        }
-        Ok(())
-    }
-
-    /// The extension row of a val `v`: every spelling FCS's formulas could
-    /// give it ([`val_spellings`]), with, for an optional extension
-    /// (`augmented`: the names the extended type's logical name may have),
-    /// every compiled name `T.name` its suffixes could make. `instance`:
-    /// the row's staticness (`None` for either).
-    fn val_row(
-        &mut self,
-        scope: &Scope,
-        v: &MemberVal,
-        marks: &Marks,
-        augmented: Option<&[String]>,
-        instance: Option<bool>,
-    ) -> Result<(), ExistenceUnread> {
-        self.uncertain_renames(marks);
-        let types = augmented.map_or(0, <[String]>::len);
-        let longest_type = augmented
-            .into_iter()
-            .flatten()
-            .map(String::len)
-            .max()
-            .unwrap_or(0);
-        let longest_name = marks
-            .compiled_names
-            .iter()
-            .map(String::len)
-            .chain([v.logical.len()])
-            .max()
-            .unwrap_or(0);
-        // Charged before any is made: every spelling, and for each type name
-        // and suffix a compiled name of it.
-        let spellings = (2 + ACCESSOR_PREFIXES.len()) * (1 + marks.compiled_names.len());
-        let compiled = types * spellings * EXTENSION_SUFFIXES.len();
-        let bytes = spellings * (longest_name + 8)
-            + compiled * (longest_type + longest_name + 8 + ".Static.Override".len());
-        self.charge(scope, 1, bytes)?;
-        let names = val_spellings(v, marks);
-        let mut all: BTreeSet<String> = names.iter().cloned().collect();
-        for t in augmented.into_iter().flatten() {
-            for n in &names {
-                for suffix in EXTENSION_SUFFIXES {
-                    all.insert(format!("{t}.{n}{suffix}"));
-                }
-            }
-        }
-        self.out.extensions.push(ExtensionRow {
-            layer: IndexLayer::Pickle,
-            namespace: scope.namespace.clone(),
-            enclosing: scope.enclosing.clone(),
-            names: all.into_iter().collect(),
-            instance,
-        });
-        Ok(())
-    }
-
-    /// Name the surplus of a compiled name an attribute only may give.
-    fn uncertain_renames(&mut self, marks: &Marks) {
-        if !marks.compiled_names.is_empty() && marks.get(Marker::CompiledName) == Maybe::Possibly {
-            self.out
-                .approximations
-                .insert(Approximation::UncertainAttribute);
-        }
-    }
-
-    /// A C#-style extension row for a value `name` bound by a `let`.
-    fn csharp_row(
-        &mut self,
-        scope: &Scope,
-        name: &str,
-        marks: &Marks,
-    ) -> Result<(), ExistenceUnread> {
-        if marks.compiled_name_unreadable {
-            return Err(ExistenceUnread::UnreadableCompiledName(self.index));
-        }
-        if marks.uncertain && marks.get(Marker::Extension) == Maybe::Possibly {
-            self.out
-                .approximations
-                .insert(Approximation::UncertainAttribute);
-        }
-        let v = MemberVal {
-            logical: name.to_owned(),
-            accessor: None,
-            is_static: true,
-            own_lists: Vec::new(),
-        };
-        self.val_row(scope, &v, marks, None, None)
-    }
-
-    /// A module `let` binding under `lists`: a C#-style row per bound value
-    /// when it may carry `[<Extension>]`.
-    fn binding_extension(
-        &mut self,
-        scope: &Scope,
-        lists: &[AttributeList],
-        pat: Option<Pat>,
-    ) -> Result<(), ExistenceUnread> {
-        let marks = self.routes.marks(lists);
-        if !marks.may(Marker::Extension) {
-            return Ok(());
-        }
-        let Some(pat) = pat.as_ref() else {
-            return Err(ExistenceUnread::UnnamedDeclaration(self.index));
-        };
-        match binding_head(pat) {
-            Some(Head::Named(name)) => self.csharp_row(scope, &name, &marks),
-            None => Err(ExistenceUnread::OutsideDomain(
-                self.index,
-                Leaf::BindingHead,
-            )),
-            Some(Head::Pattern(names)) => {
-                // A pattern binding names several values, each carrying the
-                // attribute: every name the pattern spells.
-                if names.is_empty() {
-                    return Err(ExistenceUnread::UnnamedDeclaration(self.index));
-                }
-                // A row per name: charged before expanding.
-                if self.out.entities.len() + self.out.extensions.len() + names.len() > MAX_ROWS {
-                    return Err(ExistenceUnread::TooManyReadings);
-                }
+            },
+            Target::SingleIdent if measure != Maybe::Yes => {
                 self.out
                     .approximations
-                    .insert(Approximation::BindingPattern);
-                for n in names {
-                    self.csharp_row(scope, &n, &marks)?;
-                }
-                Ok(())
+                    .insert(Approximation::AbbreviationOrUnion);
+                either
             }
-        }
+            Target::FSharpCore | Target::SingleIdent | Target::Structural | Target::Named => {
+                abbreviation
+            }
+        })
     }
 
-    /// A `type T with …` augmentation's extension rows. An intrinsic one's
-    /// members are the type's own, rows only where marked; an optional one's
-    /// every member is a row. The walk takes it as intrinsic only where FCS
-    /// certainly does, as optional only where no type of its name is in its
-    /// list, and both otherwise.
-    fn augmentation(
-        &mut self,
-        scope: &Scope,
-        defn: &TypeDefn,
-        position: usize,
-        ctx: &ListCtx,
-    ) -> Result<(), ExistenceUnread> {
-        let mut members: Vec<MemberDefn> = defn.members().collect();
-        if let Some(TypeDefnRepr::ObjectModel(om)) = defn.repr() {
-            members.extend(om.members());
+    fn exception(&mut self, scope: &Scope, e: &ExceptionDefnDecl) -> Result<(), ExistenceUnread> {
+        if !consumed(
+            e.syntax(),
+            |n| {
+                let k = n.kind();
+                AttributeList::can_cast(k)
+                    || UnionCase::can_cast(k)
+                    || LongIdent::can_cast(k)
+                    || MemberDefn::can_cast(k)
+            },
+            |k| {
+                matches!(
+                    k,
+                    SyntaxKind::EXCEPTION_TOK
+                        | SyntaxKind::ACCESS_TOK
+                        | SyntaxKind::EQUALS_TOK
+                        | SyntaxKind::WITH_TOK
+                        | SyntaxKind::END_TOK
+                )
+            },
+        ) {
+            return Err(self.unreadable(Leaf::Exception));
         }
-        let arity = defn.typar_decls().map_or(0, |d| d.typars().count());
-        let head: Option<Vec<String>> = defn
-            .long_id()
-            .map(|li| li.idents().map(|t| id_text(&t).into_owned()).collect());
-        let Some(head) = head.filter(|h| !h.is_empty()) else {
-            // A tuple type extension (`type (int * int) with`), which FCS
-            // rejects and recovers as an extension of its tuple type:
-            // ``Tuple`n``, or ``ValueTuple`n`` for a struct tuple, `n` its
-            // elements' count (one beyond seven nest, so ``Tuple`8`` too).
-            self.out.approximations.insert(Approximation::RejectedShape);
-            // Every tycon `mkCompiledTupleTyconRef` may choose
-            // (`TypedTreeOps.Remap.fs:835`): `n` elements up to seven, the
-            // eighth for more, reference or struct.
-            let mut names = Vec::new();
-            for family in ["Tuple", "ValueTuple"] {
-                names.push(family.to_owned());
-                names.extend((1..=8).map(|k| format!("{family}`{k}")));
-            }
-            // Its `let`s, which FCS rejects here, kept in the container.
-            self.type_bodies(scope, None, &members)?;
-            return self.members(scope, &members, Some(&names));
+        let Some(name) = e.union_case().and_then(|c| c.ident()) else {
+            return Err(self.unreadable(Leaf::Exception));
         };
-        if head.first().is_some_and(|h| h == "global") {
-            return Err(ExistenceUnread::OutsideDomain(
-                self.index,
-                Leaf::AugmentationHead,
-            ));
-        }
-        let last = head.last().expect("not empty").clone();
-        // A qualified head names a type of this list only through a path to
-        // the list's own container.
-        let qualifier = &head[..head.len() - 1];
-        let container: Vec<&String> = scope.namespace.iter().chain(&scope.enclosing).collect();
-        // A qualifier names this list's container through a suffix of its
-        // path, or through a module abbreviation (`module Alias = D`, then
-        // `type Alias.T with`), which the walk does not resolve: with one
-        // anywhere in the project, any qualifier may.
-        let intrinsic = if qualifier.is_empty() {
-            intrinsic_in(ctx, &last, arity, position)
-        } else if self.module_abbreviations
-            || (qualifier.len() <= container.len()
-                && container[container.len() - qualifier.len()..]
-                    .iter()
-                    .zip(qualifier)
-                    .all(|(a, b)| *a == b))
-        {
-            Maybe::Possibly
+        let name = id_text(&name).into_owned();
+        self.forms.insert(if e.abbrev_path().is_some() {
+            Form::ExceptionAbbreviation
         } else {
+            Form::Exception
+        });
+        let attrs: Vec<AttributeList> = e.attributes().collect();
+        let marks = self.marks(&attrs)?;
+        self.entity(scope, &name, &[PickledEntityKind::Exception], &marks, false)
+    }
+}
+
+/// The type names of a declaration list that suffix a module of the same
+/// name (`TypeNamesInNonMutRecDecls`, `TypeNamesInMutRecDecls`,
+/// `TypeNamesInNonMutRecSigDecls`, `CheckDeclarations.fs:2773-2809`): every
+/// type that is no augmentation, in an implementation only when each of its
+/// type parameters is a unit of measure (one with an attribute may be), in a
+/// signature only with none.
+fn type_names(decls: &Decls, routes: &MarkerRoutes) -> BTreeMap<String, Maybe> {
+    let mut names: BTreeMap<String, Maybe> = BTreeMap::new();
+    let mut add = |defn: TypeDefn, signature: bool| {
+        if is_augmentation(&defn) {
+            return;
+        }
+        let Some(name) = defn.long_id().and_then(|li| li.idents().last()) else {
+            return;
+        };
+        let typars: Vec<_> = defn
+            .typar_decls()
+            .map(|d| d.typars().collect())
+            .unwrap_or_default();
+        let counts = if typars.is_empty() {
+            Maybe::Yes
+        } else if signature {
             Maybe::No
+        } else {
+            // Each must be `[<Measure>]`.
+            typars
+                .iter()
+                .map(|t| {
+                    t.attributes()
+                        .flat_map(|l| l.attributes().collect::<Vec<_>>())
+                        .filter_map(|a| a.type_name().map(|li| names_of(&li)))
+                        .map(|n| routes.may_be(&n, Marker::Measure))
+                        .fold(Maybe::No, Maybe::or)
+                })
+                .fold(Maybe::Yes, |all, t| match (all, t) {
+                    (Maybe::No, _) | (_, Maybe::No) => Maybe::No,
+                    (Maybe::Yes, Maybe::Yes) => Maybe::Yes,
+                    _ => Maybe::Possibly,
+                })
         };
-        // An extension's compiled names carry the extended type's arity
-        // (``list`1.M``). A head that writes no parameters bounds it only
-        // for a type the walk knows: FCS rejects such a head on a generic
-        // type and imports the extension under the type's own arity.
-        if arity == 0 && intrinsic != Maybe::Yes {
-            return Err(ExistenceUnread::OutsideDomain(
-                self.index,
-                Leaf::AugmentationHead,
-            ));
-        }
-        if intrinsic == Maybe::Possibly {
-            self.out
-                .approximations
-                .insert(Approximation::AugmentationKind);
-        }
-        // A `let` compiles into the type where the augmentation is
-        // intrinsic; elsewhere FCS rejects it, and its recovery keeps the
-        // val in the augmentation's own container.
-        self.type_bodies(&scope.inner(&last), None, &members)?;
-        if intrinsic != Maybe::Yes {
-            self.type_bodies(scope, None, &members)?;
-        }
-        if intrinsic != Maybe::No {
-            self.members(&scope.inner(&last), &members, None)?;
-            if intrinsic == Maybe::Yes {
-                return Ok(());
+        let slot = names
+            .entry(id_text(&name).into_owned())
+            .or_insert(Maybe::No);
+        *slot = slot.or(counts);
+    };
+    match decls {
+        Decls::Impl(ds) => {
+            for d in ds {
+                if let ModuleDecl::Types(t) = d {
+                    t.defns().for_each(|defn| add(defn, false));
+                }
             }
         }
-        // The extended type's logical name: its name, with an arity suffix
-        // of at most the head's parameter count (units of measure are not
-        // counted, and the head need not repeat the type's measures).
-        self.charge(scope, arity + 1, last.len() + 24)?;
-        let mut type_names = vec![last.clone()];
-        type_names.extend((1..=arity).map(|n| format!("{last}`{n}")));
-        self.members(scope, &members, Some(&type_names))
-    }
-}
-
-/// Whether an augmentation of `name` with `arity` type parameters at
-/// `position` of a declaration list is intrinsic: the name resolves to a type
-/// of the same list (FCS's `isInSameModuleOrNamespace`) that is not an
-/// interface, delegate, enum or abbreviation. `Yes` only for the latest
-/// earlier class-like definition of that name and arity with nothing
-/// between that may bring another of its name; `No` when the list declares
-/// no type of that name at all.
-fn intrinsic_in(ctx: &ListCtx, name: &str, arity: usize, position: usize) -> Maybe {
-    let Some(same_name) = ctx.locals.get(name) else {
-        return Maybe::No;
-    };
-    // The definitions in scope, in position order: every one in a `rec`
-    // list, else those at or before the augmentation.
-    let earlier = if ctx.is_rec {
-        same_name.len()
-    } else {
-        same_name.partition_point(|t| t.position <= position)
-    };
-    let Some(t) = earlier.checked_sub(1).map(|i| &same_name[i]) else {
-        return Maybe::Possibly;
-    };
-    let clear = |from: usize| {
-        if ctx.is_rec {
-            ctx.barriers.is_empty()
-        } else {
-            // The first barrier after `from`, by binary search: none may sit
-            // before `position`.
-            let next = ctx.barriers.partition_point(|&b| b <= from);
-            ctx.barriers.get(next).is_none_or(|&b| b >= position)
+        Decls::Sig(ds) => {
+            for d in ds {
+                if let SigDecl::Types(t) = d {
+                    t.defns().for_each(|defn| add(defn, true));
+                }
+            }
         }
-    };
-    let only_one = earlier == 1;
-    if t.class_like && t.arity == arity && clear(t.position) && only_one {
-        Maybe::Yes
-    } else {
-        Maybe::Possibly
     }
-}
-
-/// Whether `defn` is certainly a class, struct, record or union. An
-/// attribute may change the kind FCS infers (`[<Interface>]`,
-/// `[<AbstractClass>]`, `[<Struct>]`, `[<Class>]`, `[<Measure>]`), so an
-/// attributed type is not certainly one.
-fn certainly_class_like(defn: &TypeDefn) -> bool {
-    if defn.attributes().next().is_some() {
-        return false;
-    }
-    match defn.repr() {
-        Some(TypeDefnRepr::Record(_)) | Some(TypeDefnRepr::Union(_)) => true,
-        Some(TypeDefnRepr::ObjectModel(om)) => {
-            !om.is_interface()
-                && !om.is_augmentation()
-                && (om.is_class() || om.is_struct() || defn.implicit_ctor().is_some())
-        }
-        _ => false,
-    }
+    names
 }
 
 fn is_augmentation(defn: &TypeDefn) -> bool {
     matches!(defn.repr(), Some(TypeDefnRepr::ObjectModel(om)) if om.is_augmentation())
         || defn.tuple_type_head().is_some()
-        // A signature's `type T with member …`: no representation, its
-        // `with` directly on the definition.
+        // A signature's augmentation (`type T with member …`) has no
+        // representation, just the `with` directly on the definition.
         || (defn.repr().is_none()
             && defn
                 .syntax()
                 .children_with_tokens()
                 .filter_map(|el| el.into_token())
                 .any(|t| t.kind() == SyntaxKind::WITH_TOK))
-}
-
-fn long_id_segments(li: Option<LongIdent>) -> Option<Vec<String>> {
-    let segs: Vec<String> = li?.idents().map(|t| id_text(&t).into_owned()).collect();
-    (!segs.is_empty()).then_some(segs)
 }
 
 /// The type abbreviations and types FSharp.Core declares under a name with
@@ -2501,28 +1911,34 @@ pub(crate) const FSHARP_CORE_TYPE_NAMES: &[&str] = &[
     "voidptr",
 ];
 
-/// The single identifier an abbreviation's target names, parentheses
-/// stripped: the shape FCS may read as a union case.
-fn abbrev_single_ident(ty: &Type) -> Option<String> {
-    if let Type::Paren(p) = ty {
-        return p.inner().as_ref().and_then(abbrev_single_ident);
-    }
-    let Type::LongIdent(t) = ty else {
-        return None;
-    };
-    let li = t.long_ident()?;
-    let mut idents = li.idents();
-    let first = idents.next()?;
-    idents
-        .next()
-        .is_none()
-        .then(|| id_text(&first).into_owned())
+/// What an abbreviation's target is, as its kinds read it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Target {
+    SelfNamed,
+    FSharpCore,
+    SingleIdent,
+    Structural,
+    Named,
+    StaticArgument,
 }
 
-/// Whether a type holds a static argument (a type provider's): a constant
-/// in type-argument position.
-fn has_static_argument(ty: &Type) -> bool {
-    ty.syntax().descendants().any(|n| {
+impl Target {
+    fn form(self) -> Form {
+        match self {
+            Target::SelfNamed => Form::SelfNamedTarget,
+            Target::FSharpCore => Form::FSharpCoreTarget,
+            Target::SingleIdent => Form::SingleIdentTarget,
+            Target::Structural => Form::StructuralTarget,
+            Target::Named => Form::NamedTarget,
+            Target::StaticArgument => Form::StaticArgumentTarget,
+        }
+    }
+}
+
+/// An abbreviation target's reading (`name` the abbreviation's own,
+/// `generic` whether it has type parameters).
+fn abbreviation_target(ty: &Type, name: &str, generic: bool) -> Target {
+    let static_argument = ty.syntax().descendants().any(|n| {
         matches!(
             n.kind(),
             SyntaxKind::STATIC_CONST_TYPE
@@ -2530,26 +1946,35 @@ fn has_static_argument(ty: &Type) -> bool {
                 | SyntaxKind::STATIC_CONST_NAMED_TYPE
                 | SyntaxKind::STATIC_CONST_NULL_TYPE
         )
-    })
-}
-
-/// Whether an abbreviation's target may be a generative provider's type,
-/// where a reference may be a provider ([`Leaf::ProvidedTarget`]): any
-/// named type, applied or not, prefix or postfix (FCS hands a provider any
-/// `SynType.App` or bare name, and an opened provider namespace may shadow
-/// even FSharp.Core's names). Only a structural type (a tuple, a function,
-/// an array, a variable, an anonymous record) is no provider's.
-fn may_be_provided(ty: &Type) -> bool {
+    });
+    if static_argument {
+        return Target::StaticArgument;
+    }
     match ty {
-        Type::Paren(p) => p.inner().as_ref().is_none_or(may_be_provided),
+        Type::Paren(p) => match p.inner() {
+            Some(inner) => abbreviation_target(&inner, name, generic),
+            None => Target::Named,
+        },
+        Type::LongIdent(t) => {
+            let Some((_, names)) = t.long_ident().as_ref().and_then(long_ident) else {
+                return Target::Named;
+            };
+            match names.as_slice() {
+                // `type Foo<'a> = Foo` may abbreviate another `Foo` of no
+                // arity.
+                [single] if single == name && !generic => Target::SelfNamed,
+                [single] if FSHARP_CORE_TYPE_NAMES.contains(&single.as_str()) => Target::FSharpCore,
+                [_] => Target::SingleIdent,
+                _ => Target::Named,
+            }
+        }
         Type::Tuple(_)
         | Type::Fun(_)
         | Type::Array(_)
         | Type::Var(_)
         | Type::Anon(_)
-        | Type::AnonRecd(_) => false,
-        Type::LongIdent(_)
-        | Type::App(_)
+        | Type::AnonRecd(_) => Target::Structural,
+        Type::App(_)
         | Type::LongIdentApp(_)
         | Type::Hash(_)
         | Type::WithNull(_)
@@ -2560,401 +1985,17 @@ fn may_be_provided(ty: &Type) -> bool {
         | Type::StaticConstExpr(_)
         | Type::StaticConstNamed(_)
         | Type::StaticConstNull(_)
-        | Type::SignatureParameter(_) => true,
+        | Type::SignatureParameter(_) => Target::Named,
     }
-}
-
-/// The 1-based line of each offset of one file, in FCS's sense: a line
-/// starts after every `\n` (`newline = '\n' | '\r' '\n'`), wherever it
-/// sits.
-struct Lines {
-    /// The offset of each `\n`, ascending.
-    newlines: Vec<TextSize>,
-}
-
-impl Lines {
-    /// The table of `root`'s file, or `None` when a `#line` directive may
-    /// move the lines FCS reports.
-    fn of(root: &SyntaxNode) -> Option<Lines> {
-        let mut newlines = Vec::new();
-        for el in root.descendants_with_tokens() {
-            let Some(t) = el.into_token() else { continue };
-            if t.kind() == SyntaxKind::HASH_LINE {
-                return None;
-            }
-            let start = t.fcs_range().start();
-            for (i, _) in t.text().match_indices('\n') {
-                // In range: a file is under 4 GiB.
-                newlines.push(start + TextSize::new(i as u32));
-            }
-        }
-        Some(Lines { newlines })
-    }
-
-    fn line(&self, at: TextSize) -> u32 {
-        // In range: a file is under 4 GiB.
-        self.newlines.partition_point(|&n| n < at) as u32 + 1
-    }
-}
-
-/// Every identifier in `pat`: a superset of the binders of a certified
-/// pattern ([`certified_pattern`]), none of which holds an active pattern.
-fn pattern_idents(pat: &Pat) -> Vec<String> {
-    pat.syntax()
-        .descendants_with_tokens()
-        .filter_map(|el| el.into_token())
-        .filter(|t| t.kind() == SyntaxKind::IDENT_TOK)
-        .map(|t| id_text(&t).into_owned())
-        .collect()
-}
-
-/// Every line binding head `pat` spans: from its node's first byte, any
-/// trivia the node holds included, to the end of its last token. The only
-/// positions the walk reads.
-/// `None` for a head that holds no token, which names nothing.
-fn head_lines(pat: &Pat, lines: &Lines) -> Option<std::ops::RangeInclusive<u32>> {
-    let tokens = || {
-        pat.syntax()
-            .descendants_with_tokens()
-            .filter_map(|el| el.into_token())
-    };
-    let first = tokens().next()?.fcs_range().start();
-    let last = tokens().last()?.fcs_range().end();
-    Some(lines.line(first)..=lines.line(last))
-}
-
-/// Whether a binding's pattern, when it names no single value
-/// ([`binding_name_at`]), is a certified form ([`Leaf::BindingHead`]): a tuple
-/// of names and wildcards, or a head that may be a union case
-/// (`let Q (s: string) = …`, `let X = …`), under parentheses or a type
-/// annotation. Its identifiers then hold its binders. Any other pattern (an
-/// `as`, a record, a list, a cons, an `|`, a qualified case) is outside the
-/// domain.
-fn certified_pattern(pat: &Pat, forms: &mut BTreeSet<HeadForm>) -> bool {
-    let simple = |p: &Pat| match p {
-        Pat::Named(n) => n.active_pat_name().is_none(),
-        Pat::Wildcard(_) => true,
-        Pat::LongIdent(l) => {
-            l.active_pat_name().is_none()
-                && l.args().next().is_none()
-                && l.name_pat_pairs().is_none()
-                && l.head().is_some_and(|h| h.idents().count() == 1)
-        }
-        Pat::Paren(_)
-        | Pat::Typed(_)
-        | Pat::Const(_)
-        | Pat::MeasureLit(_)
-        | Pat::Null(_)
-        | Pat::Tuple(_)
-        | Pat::As(_)
-        | Pat::ArrayOrList(_)
-        | Pat::Record(_)
-        | Pat::IsInst(_)
-        | Pat::ListCons(_)
-        | Pat::Ands(_)
-        | Pat::Or(_)
-        | Pat::Attrib(_)
-        | Pat::OptionalVal(_)
-        | Pat::Quote(_) => false,
-    };
-    match pat {
-        Pat::Paren(p) => {
-            forms.insert(HeadForm::ParenthesisedTyped);
-            p.inner()
-                .as_ref()
-                .is_some_and(|p| certified_pattern(p, forms))
-        }
-        Pat::Typed(t) => {
-            forms.insert(HeadForm::ParenthesisedTyped);
-            t.pat()
-                .as_ref()
-                .is_some_and(|p| certified_pattern(p, forms))
-        }
-        Pat::Tuple(t) => {
-            forms.insert(HeadForm::Tuple);
-            t.elements().all(|e| simple(&e))
-        }
-        // A head that may be a union case, its arguments simple names.
-        Pat::LongIdent(l) => {
-            forms.insert(HeadForm::UpperCaseHead);
-            l.active_pat_name().is_none()
-                && l.name_pat_pairs().is_none()
-                && l.head().is_some_and(|h| h.idents().count() == 1)
-                && l.args().all(|a| {
-                    // Through parentheses and annotations: `(s: string)`.
-                    let mut a = a;
-                    loop {
-                        let inner = match &a {
-                            Pat::Paren(p) => {
-                                forms.insert(HeadForm::ParenthesisedTyped);
-                                p.inner()
-                            }
-                            Pat::Typed(t) => {
-                                forms.insert(HeadForm::ParenthesisedTyped);
-                                t.pat()
-                            }
-                            Pat::Named(_)
-                            | Pat::LongIdent(_)
-                            | Pat::Wildcard(_)
-                            | Pat::Const(_)
-                            | Pat::MeasureLit(_)
-                            | Pat::Null(_)
-                            | Pat::Tuple(_)
-                            | Pat::As(_)
-                            | Pat::ArrayOrList(_)
-                            | Pat::Record(_)
-                            | Pat::IsInst(_)
-                            | Pat::ListCons(_)
-                            | Pat::Ands(_)
-                            | Pat::Or(_)
-                            | Pat::Attrib(_)
-                            | Pat::OptionalVal(_)
-                            | Pat::Quote(_) => break simple(&a),
-                        };
-                        match inner {
-                            Some(i) => a = i,
-                            None => break false,
-                        }
-                    }
-                })
-        }
-        // `let _ = …` binds nothing: certified, and then unnamed.
-        Pat::Wildcard(_) => {
-            forms.insert(HeadForm::Value);
-            true
-        }
-        Pat::Named(_)
-        | Pat::Const(_)
-        | Pat::MeasureLit(_)
-        | Pat::Null(_)
-        | Pat::As(_)
-        | Pat::ArrayOrList(_)
-        | Pat::Record(_)
-        | Pat::IsInst(_)
-        | Pat::ListCons(_)
-        | Pat::Ands(_)
-        | Pat::Or(_)
-        | Pat::Attrib(_)
-        | Pat::OptionalVal(_)
-        | Pat::Quote(_) => false,
-    }
-}
-
-/// A certified binding head's binders ([`Leaf::BindingHead`]): one value's
-/// name ([`binding_name_at`]), or a certified pattern's identifiers
-/// ([`certified_pattern`]). `None` outside the domain: a head read through
-/// any form whose `LEAF_FORMS` row does not say [`Verdict::Read`], or that
-/// has no row.
-fn binding_head(pat: &Pat) -> Option<Head> {
-    let mut forms = BTreeSet::new();
-    let head = match binding_name_at(pat, true, &mut forms) {
-        Some(name) => Head::Named(name),
-        None => {
-            forms.clear();
-            if !certified_pattern(pat, &mut forms) {
-                return None;
-            }
-            Head::Pattern(pattern_idents(pat))
-        }
-    };
-    forms
-        .iter()
-        .all(|f| f.row().is_some_and(|r| r.verdict == Verdict::Read))
-        .then_some(head)
-}
-
-/// What a certified binding head binds.
-enum Head {
-    /// One value.
-    Named(String),
-    /// A pattern's identifiers: a superset of its binders.
-    Pattern(Vec<String>),
-}
-
-/// The binding-head constructs the walk reads through, each named by a
-/// `LEAF_FORMS` row of [`Leaf::BindingHead`] whose verdict decides whether a
-/// head read through it is read. `binding_head_forms_are_table_rows` holds
-/// the list and the table to each other.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum HeadForm {
-    Value,
-    Function,
-    Operator,
-    ActivePattern,
-    NullaryActivePattern,
-    ParenthesisedTyped,
-    Attributed,
-    UpperCaseHead,
-    Tuple,
-}
-
-impl HeadForm {
-    /// Every form, in [`Self::index`] order.
-    #[cfg(test)]
-    pub(crate) const ALL: [HeadForm; 9] = [
-        HeadForm::Value,
-        HeadForm::Function,
-        HeadForm::Operator,
-        HeadForm::ActivePattern,
-        HeadForm::NullaryActivePattern,
-        HeadForm::ParenthesisedTyped,
-        HeadForm::Attributed,
-        HeadForm::UpperCaseHead,
-        HeadForm::Tuple,
-    ];
-
-    /// The form's position in [`Self::ALL`]: a new form must take one.
-    #[cfg(test)]
-    pub(crate) fn index(self) -> usize {
-        match self {
-            HeadForm::Value => 0,
-            HeadForm::Function => 1,
-            HeadForm::Operator => 2,
-            HeadForm::ActivePattern => 3,
-            HeadForm::NullaryActivePattern => 4,
-            HeadForm::ParenthesisedTyped => 5,
-            HeadForm::Attributed => 6,
-            HeadForm::UpperCaseHead => 7,
-            HeadForm::Tuple => 8,
-        }
-    }
-
-    /// Its `LEAF_FORMS` row's `form`.
-    pub(crate) fn name(self) -> &'static str {
-        match self {
-            HeadForm::Value => "value",
-            HeadForm::Function => "function",
-            HeadForm::Operator => "operator",
-            HeadForm::ActivePattern => "active_pattern",
-            HeadForm::NullaryActivePattern => "nullary_active_pattern",
-            HeadForm::ParenthesisedTyped => "parenthesised_typed",
-            HeadForm::Attributed => "attributed",
-            HeadForm::UpperCaseHead => "upper_case_head",
-            HeadForm::Tuple => "tuple",
-        }
-    }
-
-    /// Its `LEAF_FORMS` row, if the table has one.
-    pub(crate) fn row(self) -> Option<&'static LeafForm> {
-        LEAF_FORMS
-            .iter()
-            .find(|f| f.leaf == Leaf::BindingHead && f.form == self.name())
-    }
-}
-
-/// A binding head's single name (`let f …`, `let x`, `let (|A|_|) …`, an
-/// operator), recording each form it reads through in `forms`; `top` when
-/// `pat` is the binding's whole pattern. A long-ident head names a value only when spelled as no union case can be
-/// (lower case first), and, with arguments, only at the top, where it is a
-/// function: `let Some x = …`, `let None = …` and `let (f x) = …` do not.
-fn binding_name_at(pat: &Pat, top: bool, forms: &mut BTreeSet<HeadForm>) -> Option<String> {
-    // A value's own name: an operator's is its compiled name (`op_PlusDot`),
-    // which is what `id_text` gives.
-    let mut value = |name: String, function: bool| {
-        forms.insert(if name.starts_with("op_") {
-            HeadForm::Operator
-        } else if function {
-            HeadForm::Function
-        } else {
-            HeadForm::Value
-        });
-        name
-    };
-    match pat {
-        // `let (|Zero|_|) = …`: a nullary active pattern, named by its
-        // recognizer.
-        Pat::Named(n) => match n.active_pat_name() {
-            Some(ap) => {
-                forms.insert(HeadForm::NullaryActivePattern);
-                Some(active_pattern_name(&ap))
-            }
-            None => n.ident().map(|t| value(id_text(&t).into_owned(), false)),
-        },
-        Pat::LongIdent(l) => {
-            if let Some(ap) = l.active_pat_name() {
-                forms.insert(HeadForm::ActivePattern);
-                return Some(active_pattern_name(&ap));
-            }
-            let li = l.head()?;
-            let mut idents = li.idents();
-            let first = idents.next()?;
-            if idents.next().is_some() {
-                return None;
-            }
-            let name = id_text(&first).into_owned();
-            let function_like = name.chars().next().is_some_and(char::is_lowercase);
-            // An upper-case head may be a union case binding nothing.
-            let no_args = l.args().next().is_none() && l.name_pat_pairs().is_none();
-            (function_like && (no_args || top) && l.name_pat_pairs().is_none())
-                .then(|| value(name, !no_args))
-        }
-        Pat::Paren(p) => {
-            forms.insert(HeadForm::ParenthesisedTyped);
-            p.inner()
-                .as_ref()
-                .and_then(|p| binding_name_at(p, false, forms))
-        }
-        Pat::Typed(t) => {
-            forms.insert(HeadForm::ParenthesisedTyped);
-            t.pat()
-                .as_ref()
-                .and_then(|p| binding_name_at(p, top, forms))
-        }
-        Pat::Attrib(a) => {
-            forms.insert(HeadForm::Attributed);
-            a.pat()
-                .as_ref()
-                .and_then(|p| binding_name_at(p, top, forms))
-        }
-        // A pattern binding no single name, or several.
-        Pat::Wildcard(_)
-        | Pat::Const(_)
-        | Pat::MeasureLit(_)
-        | Pat::Null(_)
-        | Pat::Tuple(_)
-        | Pat::As(_)
-        | Pat::ArrayOrList(_)
-        | Pat::Record(_)
-        | Pat::IsInst(_)
-        | Pat::ListCons(_)
-        | Pat::Ands(_)
-        | Pat::Or(_)
-        | Pat::OptionalVal(_)
-        | Pat::Quote(_) => None,
-    }
-}
-
-/// Every spelling FCS's formulas could give val `v` (its name as written
-/// stripped of any accessor prefix, `bare`): `bare`, its logical name, each
-/// accessor's (`get_`/`set_`, `add_`/`remove_`: `CheckExpressions.fs`,
-/// `ComputeLogicalName` and the `[<CLIEvent>]` accessors), and each
-/// `[<CompiledName>]` literal an attribute may give, with each accessor's.
-/// Which accessors a member has is not modelled: every one is emitted.
-fn val_spellings(v: &MemberVal, marks: &Marks) -> BTreeSet<String> {
-    let bare = v
-        .accessor
-        .and_then(|p| v.logical.strip_prefix(p))
-        .unwrap_or(&v.logical);
-    let mut names = BTreeSet::new();
-    names.insert(v.logical.clone());
-    for base in std::iter::once(bare).chain(marks.compiled_names.iter().map(String::as_str)) {
-        names.insert(base.to_owned());
-        for prefix in ACCESSOR_PREFIXES {
-            names.insert(format!("{prefix}{base}"));
-        }
-    }
-    names
 }
 
 /// Certify `routes` from spelling: each written name in `files` denotes
 /// the marker whose type name it spells (with or without the `Attribute`
 /// suffix) under a qualifier that is a suffix of that marker's namespace
 /// path, and nothing else. A name some type of A's own is declared as is
-/// omitted, so it reads as under [`MarkerRoutes::Unknown`].
-///
-/// This is the certificate exactly when A's references neither alias nor
-/// shadow a marker in a scope A opens: a caller that knows that (a test
-/// whose references it wrote) may use it; any other caller must resolve.
+/// omitted: it may resolve to A's type, whose full name the walk does not
+/// know. A test's certificate and the corpus's: sound for the tests' own
+/// producers, which reference no abbreviation of a marker.
 pub fn certify_by_spelling(files: &[&ProjectFile]) -> MarkerRoutes {
     let mut declared: BTreeSet<String> = BTreeSet::new();
     let mut written: BTreeSet<Vec<String>> = BTreeSet::new();
@@ -2965,18 +2006,18 @@ pub fn certify_by_spelling(files: &[&ProjectFile]) -> MarkerRoutes {
                 declared.insert(id_text(&t).into_owned());
             }
         }
-        for e in root
-            .descendants()
-            .filter_map(borzoi_cst::syntax::ExceptionDefnDecl::cast)
-        {
+        for e in root.descendants().filter_map(ExceptionDefnDecl::cast) {
             if let Some(t) = e.union_case().and_then(|c| c.ident()) {
                 declared.insert(id_text(&t).into_owned());
             }
         }
         for list in root.descendants().filter_map(AttributeList::cast) {
             for attr in list.attributes() {
-                if let Some(name) = written_name(&attr) {
-                    written.insert(name);
+                if let Some(li) = attr.type_name() {
+                    let name = names_of(&li);
+                    if !name.is_empty() {
+                        written.insert(name);
+                    }
                 }
             }
         }

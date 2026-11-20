@@ -39,7 +39,7 @@ set -euo pipefail
 repo="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$repo"
 
-steps=(resolution corpus-diff-tests assembly-projection existence-index source-existence restore-graph restore-cone xml-doc-source)
+steps=(resolution corpus-diff-tests assembly-projection existence-index restore-graph restore-cone xml-doc-source)
 
 # Each step is a single command, so its status is the step's.
 run_step() { # name
@@ -76,14 +76,11 @@ run_step() { # name
       # except those that take projects from the environment and the
       # hand-run sweeps: `project_corpus_resolution_diff` is the `resolution`
       # step in a debug build (and would read BORZOI_PROJECT_LIST),
-      # `source_existence_covers_fcs_over_the_pinned_projects` is the
-      # `source-existence` step,
       # `explain_token_at_position` is a hand-run trace, and each `deep_` test
       # is a wider run of a differential whose default run is here.
       nix develop --command cargo test -p borzoi-corpus-diff --features surface-reference -- \
         --include-ignored \
         --skip project_corpus_resolution_diff \
-        --skip source_existence_covers_fcs_over_the_pinned_projects \
         --skip explain_token_at_position \
         --skip deep_
       ;;
@@ -126,19 +123,6 @@ run_step() { # name
         cargo test -p borzoi-sema --test all \
         assembly_entities_diff::the_existence_index_is_what_both_readers_report_over_a_package_cache \
         -- --ignored --nocapture
-      ;;
-    source-existence)
-      # Each project's existence surface read from its source
-      # (`borzoi_sema::source_existence`, under the certificate a caller
-      # without the project's environment gives), held to FCS's reading of
-      # the project handed to a consumer from source: every row FCS has must
-      # be one of ours, or ours declines. Each project's verdict, and its
-      # verdict certified by spelling (a measurement, asserting nothing), is
-      # pinned in `crates/corpus-diff/manifests/source_existence_projects.txt`.
-      nix develop --command env \
-        BORZOI_PROJECT_LIST="$BORZOI_PROJECT_LIST" \
-        cargo test -p borzoi-corpus-diff --test project_resolution \
-        source_existence_corpus:: -- --ignored --nocapture
       ;;
     restore-graph)
       # Stages 2 to 4 of docs/nuget-dgspec-boundary-plan.md over the same

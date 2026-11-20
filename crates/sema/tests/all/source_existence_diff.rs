@@ -43,14 +43,14 @@ use borzoi_cst::syntax::{AstNode, ImplFile, SigFile};
 use borzoi_oracle_harness::assembly_entities::{ExtensionStyle, FcsExtensionMember};
 use borzoi_oracle_harness::manifest::Manifest;
 use borzoi_oracle_harness::project_graph::{
-    CompileResponse, FixtureFile, FixtureProject, PlainName, ProjectGraphFixture,
+    CompileResponse, FixtureFile, FixtureProject, PlainName, ProjectGraphFixture, ReferenceSet,
     ReferencedResponse, Target, framework_references, parse_response,
 };
 use borzoi_sema::test_support::{ExistenceFacts, existence_facts};
 use borzoi_sema::{
-    Approximation, CompileItem, ExistenceUnread, Marker, MarkerRoutes, Producer, ProjectFile,
-    ProviderReferences, SourceExistence, SourceFile, SyntaxRecovery, certify_by_spelling,
-    qualified_names, source_existence,
+    CompileItem, ExistenceUnread, Marker, MarkerRoutes, Producer, ProjectFile, ProviderReferences,
+    SourceExistence, SourceFile, SyntaxRecovery, certify_by_spelling, qualified_names,
+    source_existence,
 };
 
 use crate::common::corpus_manifest::{check_manifest, regenerate};
@@ -287,7 +287,14 @@ pub fn fcs(cell: &Cell) -> Fcs {
         &BTreeMap::new(),
     );
     let line = graph
-        .referenced_line(&plain(PRODUCER))
+        .referenced_line(
+            &plain(PRODUCER),
+            if cell.refs.is_empty() {
+                ReferenceSet::Framework
+            } else {
+                ReferenceSet::Other
+            },
+        )
         .expect("the consumer references the producer");
     let response: ReferencedResponse = match request(&line) {
         Ok(r) => r,
@@ -655,14 +662,15 @@ pub fn grade(cell: &Cell, fcs: &Fcs, ours: &SourceExistence) -> Result<String, S
         SourceExistence::Unread(why) => return Ok(format!("unread {why:?}")),
         SourceExistence::Read(s) => s,
     };
-    // Both sides as the existence questions read them: the facts of the set
-    // each index builds, by the code every question runs.
-    let mine = existence_facts(&surface.index, &surface.assembly_auto_opens);
+    // Both sides as the entity questions read them: the facts of the set
+    // each index builds, by the code every question runs. The extension
+    // facts are A's `ExtensionNames`', graded by the gate grids, not here.
+    let mine = existence_facts(&surface.index(), &surface.assembly_auto_opens);
     let theirs = existence_facts(
         &ExistenceIndex {
             il: Vec::new(),
             pickle: PickleLayer::Read(fcs.memory.entities.clone()),
-            extensions: fcs.memory.extensions.clone(),
+            extensions: Vec::new(),
         },
         &fcs.memory.auto_opens,
     );
@@ -696,63 +704,6 @@ pub fn grade(cell: &Cell, fcs: &Fcs, ours: &SourceExistence) -> Result<String, S
         }
     }
     let surplus = Surplus::of(&mine, &theirs);
-    // A surplus abbreviation lender makes every name a possible extension:
-    // on a producer FCS accepts and the walk read whole, each one must come
-    // from an abbreviation row at its own path that an approximation that
-    // can make a lender accounts for. The paths a row lends at are the
-    // existence set's own, from a set of that row alone.
-    let lender_approximations = [
-        Approximation::UncertainAttribute,
-        Approximation::AbbreviationOrUnion,
-        Approximation::SignaturePair,
-        // A module's suffixed reading is a second path for every
-        // abbreviation under it.
-        Approximation::ModuleSuffix,
-    ];
-    if fcs.clean && !fcs.undecodable && surplus.lenders > 0 {
-        let excused: BTreeSet<Vec<String>> = surface
-            .lender_sources
-            .iter()
-            .filter(|l| {
-                lender_approximations
-                    .iter()
-                    .any(|a| l.approximations.contains(a))
-            })
-            .flat_map(|l| {
-                let row = PickledEntityRow {
-                    namespace: l.namespace.clone(),
-                    enclosing: l.enclosing.clone(),
-                    logical_name: "Lender".to_owned(),
-                    compiled_name: "Lender".to_owned(),
-                    kind: borzoi_assembly::existence::PickledEntityKind::Abbreviation,
-                    public: true,
-                    auto_open: false,
-                    extension: true,
-                };
-                existence_facts(
-                    &ExistenceIndex {
-                        il: Vec::new(),
-                        pickle: PickleLayer::Read(vec![row]),
-                        extensions: Vec::new(),
-                    },
-                    &[],
-                )
-                .abbreviation_lenders
-            })
-            .collect();
-        let unexcused: Vec<String> = mine
-            .abbreviation_lenders
-            .difference(&theirs.abbreviation_lenders)
-            .filter(|p| !excused.contains(*p))
-            .map(|p| p.join("."))
-            .collect();
-        if !unexcused.is_empty() {
-            return Err(format!(
-                "{}: surplus abbreviation lender(s) {unexcused:?} no approximation at their path accounts for ({:?})",
-                cell.name, surface.lender_sources
-            ));
-        }
-    }
     let state = match (fcs.clean, fcs.undecodable) {
         (true, false) => "",
         (true, true) => ", FCS's signature undecodable (#1081)",
@@ -771,7 +722,8 @@ pub fn grade(cell: &Cell, fcs: &Fcs, ours: &SourceExistence) -> Result<String, S
     }
 }
 
-/// Every fact of `theirs` that `mine` lacks.
+/// Every entity fact of `theirs` that `mine` lacks: the facts open
+/// certification reads.
 fn facts_lacking(mine: &ExistenceFacts, theirs: &ExistenceFacts) -> Vec<String> {
     fn paths(
         kind: &str,
@@ -806,33 +758,20 @@ fn facts_lacking(mine: &ExistenceFacts, theirs: &ExistenceFacts) -> Vec<String> 
         &theirs.lends_anything,
     ));
     lacking.extend(paths(
-        "abbreviation-lender",
-        &mine.abbreviation_lenders,
-        &theirs.abbreviation_lenders,
-    ));
-    lacking.extend(paths(
         "auto-open",
         &mine.auto_open_bases,
         &theirs.auto_open_bases,
     ));
-    lacking.extend(
-        theirs
-            .extensions
-            .difference(&mine.extensions)
-            .map(|f| format!("extension {f:?}")),
-    );
     lacking
 }
 
-/// How many facts ours holds beyond FCS's, per kind: what the superset costs
-/// the gate.
+/// How many entity facts ours holds beyond FCS's, per kind: what the
+/// superset costs open certification.
 struct Surplus {
     prefixes: usize,
     entities: usize,
     lends: usize,
-    lenders: usize,
     auto_opens: usize,
-    extensions: usize,
 }
 
 impl Surplus {
@@ -843,20 +782,12 @@ impl Surplus {
             entities: n(&mine.entities, &theirs.entities),
             lends: n(&mine.lends_children, &theirs.lends_children)
                 + n(&mine.lends_anything, &theirs.lends_anything),
-            lenders: n(&mine.abbreviation_lenders, &theirs.abbreviation_lenders),
             auto_opens: n(&mine.auto_open_bases, &theirs.auto_open_bases),
-            extensions: mine.extensions.difference(&theirs.extensions).count(),
         }
     }
 
     fn is_zero(&self) -> bool {
-        self.prefixes
-            + self.entities
-            + self.lends
-            + self.lenders
-            + self.auto_opens
-            + self.extensions
-            == 0
+        self.prefixes + self.entities + self.lends + self.auto_opens == 0
     }
 }
 
@@ -864,13 +795,8 @@ impl std::fmt::Display for Surplus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "surplus(prefix {}, entity {}, lends {}, lender {}, auto-open {}, extension {})",
-            self.prefixes,
-            self.entities,
-            self.lends,
-            self.lenders,
-            self.auto_opens,
-            self.extensions
+            "surplus(prefix {}, entity {}, lends {}, auto-open {})",
+            self.prefixes, self.entities, self.lends, self.auto_opens
         )
     }
 }
@@ -1063,7 +989,7 @@ fn the_referenced_op_refuses_a_producer_checked_against_other_references() {
     )
     .expect("a valid graph request");
     let line = request
-        .referenced_line(&plain("Producer"))
+        .referenced_line(&plain("Producer"), ReferenceSet::Other)
         .expect("the consumer references the producer");
     let answer = request_referenced(&line);
     assert!(

@@ -1462,9 +1462,6 @@ jobs:
       - name: Gate on the existence index over the corpus's packages
         run: bash tools/ci/project-corpus-gate.sh existence-index
 
-      - name: Gate on source existence over the corpus's projects
-        run: bash tools/ci/project-corpus-gate.sh source-existence
-
       - name: Gate on the restore-graph oracle
         run: bash tools/ci/project-corpus-gate.sh restore-graph
 

@@ -99,8 +99,8 @@ pub use resolve::{
 // `TyVid` is re-exported because it appears in the public `TyKind::Var` variant;
 // it is an inference-internal handle that never surfaces in `infer_file` output.
 pub use source_existence::{
-    Approximation, Channel, CompileItem, ExistenceUnread, LEAF_FORMS, Leaf, LeafForm, LenderSource,
-    MAX_ROW_BYTES, MAX_ROWS, Marker, MarkerRoutes, Producer, ProviderReferences, SourceExistence,
+    Approximation, Channel, CompileItem, ExistenceUnread, Form, Leaf, MAX_DECLARATIONS, MAX_DEPTH,
+    MAX_NAME_BYTES, Marker, MarkerRoutes, Producer, ProviderReferences, RAW_SCANS, SourceExistence,
     SourceSurface, Treatment, Verdict, certify_by_spelling, source_existence,
 };
 pub use ty::{

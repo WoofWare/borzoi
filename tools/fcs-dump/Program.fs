@@ -9359,11 +9359,22 @@ let private extensionMembersOf (checkResults: FSharpCheckFileResults) (target: s
 /// A target FCS would read from its DLL instead (a type provider) is
 /// refused: there is no source reading to report.
 let private respondGraphReferenced (checker: FSharpChecker) (root: JsonElement) =
-    let graph = parseGraphCheckWith [ "target" ] root
+    let graph = parseGraphCheckWith [ "target"; "referenceSet" ] root
     let target =
         match root.TryGetProperty "target" with
         | true, v -> strictString "target" v
         | _ -> failwith "request: missing field target"
+    // Whether every reference outside the request's projects is the fixed
+    // framework set, which holds no type provider and no alias of its
+    // attribute: the caller's statement, held to the request below.
+    let frameworkOnly =
+        match root.TryGetProperty "referenceSet" with
+        | true, v ->
+            match strictString "referenceSet" v with
+            | "framework" -> true
+            | "other" -> false
+            | other -> failwithf "request: referenceSet %s is neither framework nor other" other
+        | _ -> failwith "request: missing field referenceSet"
     let referencesTarget =
         graph.Check.References
         |> List.exists (function
@@ -9396,6 +9407,8 @@ let private respondGraphReferenced (checker: FSharpChecker) (root: JsonElement) 
                     | ProjectRef q -> visit graph.ById.[q]
                     | Dll _ -> ()
         visit producer
+        if frameworkOnly && reached.Count > 1 then
+            failwithf "request: referenceSet framework, but %s reads another project from source" target
         for p in reached do
             let results =
                 if p.Id = target then
@@ -9415,18 +9428,13 @@ let private respondGraphReferenced (checker: FSharpChecker) (root: JsonElement) 
             | Ok None when failed ->
                 // FCS answers `Unavailable` alike for a type-provider
                 // producer and for one whose assembly data failed to build
-                // (`IncrementalBuild.fs`, `tcAssemblyDataOpt`), so a failed
-                // producer that may be a type provider is refused as read
-                // from its DLL rather than graded as empty. Naming the
-                // attribute, or a provider, spells it in some source of the
-                // producer or of a project it reads (the framework
-                // references hold no provider).
-                let mayProvide =
-                    reached
-                    |> Seq.exists (fun p ->
-                        p.Sources |> Array.exists (fun path -> File.ReadAllText(path).Contains "TypeProvider"))
-                if mayProvide then
-                    failwithf "project %s: FCS may read it from its DLL: its check fails, and it may be a type provider" target
+                // (`IncrementalBuild.fs`, `tcAssemblyDataOpt`). Over the
+                // framework set alone, no reference supplies a provider or an
+                // alias of its attribute, so the failure is A's own errors;
+                // over anything else, which it is cannot be told, and the
+                // producer is not graded.
+                if not frameworkOnly then
+                    failwithf "project %s: FCS may read it from its DLL: its check fails, and its references are not the framework set" target
                 {| Streams = [||]; InternalsVisibleTo = [||]; AutoOpens = [||] |}
             | Ok None -> failwithf "project %s: FCS reads it from its DLL, not from source" target
             | Error why -> failwithf "project %s: cannot read its assembly data: %s" target why
@@ -9464,7 +9472,8 @@ let private respondGraphReferenced (checker: FSharpChecker) (root: JsonElement) 
 ///   → { Files: [{Path, Diagnostics, Uses}], Diagnostics, Referenced: [{Id, AssemblyName, Diagnostics}] }
 /// { "op": "compile", "project": project, "outDir": <abs path> }
 ///   → { Diagnostics, Output: <the DLL>, or null when the compile failed }
-/// { "op": "referenced", "projects": [project…], "check": <id>, "target": <id> }
+/// { "op": "referenced", "projects": [project…], "check": <id>, "target": <id>,
+///   "referenceSet": "framework"|"other" }
 ///   → { Imported, Entities, ExtensionMembers, ReadErrors, FcsExtensionMembers,
 ///       Signature: { Streams: [{Ccu, Primary, B}], InternalsVisibleTo, AutoOpens },
 ///       Diagnostics }   (streams in hex; see [`respondGraphReferenced`])

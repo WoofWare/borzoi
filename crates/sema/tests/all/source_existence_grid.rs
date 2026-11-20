@@ -570,6 +570,17 @@ pub fn cells() -> Vec<Cell> {
             "quoted_load_directive",
             "module QuotedLoad\n#``load`` \"y.fsx\"\nlet x = 1\n",
         ),
+        // The raw scans' cells (`RAW_SCANS`): a directive inside a nested
+        // module, and an attribute FCS reads as the assembly's for standing
+        // alone, with no `assembly:` target.
+        one(
+            "hash_reference_nested",
+            "module HashNested\nmodule Inner =\n    #r \"x.dll\"\n    let x = 1\n",
+        ),
+        one(
+            "standalone_assembly_attribute",
+            "namespace StandaloneAo\nmodule M =\n    let x = 1\n[<AutoOpen(\"StandaloneAo.M\")>]\ndo ()\n",
+        ),
         // A signature pair in one file excuses no lender in another: the
         // per-path accounting's witness.
         Cell::new(
@@ -719,6 +730,19 @@ pub fn cells() -> Vec<Cell> {
     ];
     // Reference environments that route an attribute name to a marker, or
     // away from one.
+    // The same failing type-provider producer, with a project reference:
+    // its references are not the framework set, so FCS's `Unavailable` may
+    // be a provider's (a reference may alias the attribute), and the oracle
+    // grades nothing.
+    cells.push(with_ref(
+        one(
+            "type_provider_assembly_failing_referenced",
+            "namespace TpFailRef\n[<assembly: Microsoft.FSharp.Core.CompilerServices.TypeProviderAssembly>]\ndo ()\nmodule M =\n    let x: int = \"s\"\n",
+        ),
+        "TpFailRefLib",
+        "namespace TpFailRefLib\ntype T = int\n",
+        Certificate::BySpelling,
+    ));
     cells.push(with_ref(
         one(
             "route_alias_auto_open",
@@ -727,15 +751,6 @@ pub fn cells() -> Vec<Cell> {
         "RefAliasLib",
         "namespace RefAlias\ntype AO = Microsoft.FSharp.Core.AutoOpenAttribute\n",
         Certificate::Override(vec![("AO", vec![Marker::AutoOpen])]),
-    ));
-    cells.push(with_ref(
-        one(
-            "route_alias_extension",
-            "namespace RouteAliasExt\nopen RefAliasExt\n[<Ex>]\ntype T =\n    [<Ex>]\n    static member Twice(s: string) = s + s\n",
-        ),
-        "RefAliasExtLib",
-        "namespace RefAliasExt\ntype Ex = System.Runtime.CompilerServices.ExtensionAttribute\n",
-        Certificate::Override(vec![("Ex", vec![Marker::Extension])]),
     ));
     cells.push(with_ref(
         one(
@@ -780,4 +795,16 @@ fn local_marker_aliases() -> Vec<Cell> {
         }
     }
     cells
+}
+
+/// Every raw scan the walk makes has its cell in the grid.
+#[test]
+fn every_raw_scan_has_a_cell() {
+    let names: Vec<String> = cells().into_iter().map(|c| c.name).collect();
+    for (scan, cell) in borzoi_sema::RAW_SCANS {
+        assert!(
+            names.iter().any(|n| n == cell),
+            "the raw scan \"{scan}\" names no grid cell {cell}"
+        );
+    }
 }

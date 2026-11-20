@@ -23,6 +23,17 @@ pub fn fsharp_core_type_names() -> &'static [&'static str] {
 
 pub use crate::assembly_env::existence::{ExistenceFacts, ExtensionFact};
 
+/// [`crate::source_existence`], with every [`crate::Form`] the walk
+/// classified before it finished or declined.
+pub fn source_existence_forms(
+    producer: crate::Producer<'_>,
+) -> (
+    crate::SourceExistence,
+    std::collections::BTreeSet<crate::Form>,
+) {
+    crate::source_existence::read(producer)
+}
+
 /// What the existence questions hold of one assembly whose index is `index`
 /// and whose assembly-level `[<AutoOpen("…")>]` arguments are
 /// `auto_opens`: the facts of the `assembly_env::existence` set

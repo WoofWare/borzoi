@@ -5,12 +5,10 @@
 //! every explicit target and with none.
 //!
 //! [`templates`] holds one producer per node kind, with the attribute's
-//! place marked: the fixed ones in [`BASE`], and for every member node the
-//! product of the contexts a member sits in ([`MEMBER_CONTEXTS`]: a class,
-//! an optional augmentation of a named, tuple or struct-tuple type, an
-//! intrinsic augmentation, an exception, an interface implementation) with
-//! its snippets, and of every signature node with the shapes a signature's
-//! type takes ([`SIGNATURE_TYPES`]). `every_attribute_bearing_node_has_a_template` holds the table to
+//! place marked: the fixed ones in [`BASE`], every member node in a class
+//! ([`MEMBER_CONTEXTS`]), and every signature node ([`SIGNATURE_TYPES`]). A
+//! member's attributes decide no entity fact but through an `assembly:`
+//! target, which the walk reads wherever it sits. `every_attribute_bearing_node_has_a_template` holds the table to
 //! the grammar: a node kind the parser gains attributes on fails it until it
 //! has a template, and a template whose attribute does not land on its node
 //! kind fails it too. The grid is then the product, graded like every other
@@ -213,46 +211,11 @@ const BASE: &[StaticTemplate] = &[
 
 /// Where a member sits: the file's head, the member's indent, and a value of
 /// the declaring type a constructor may return. `None` for a context that
-/// takes no constructor.
-const MEMBER_CONTEXTS: &[(&str, &str, &str, Option<&str>)] = &[
-    ("class", "module G\ntype T() =\n", "    ", Some("T()")),
-    (
-        "optional_augmentation",
-        "module G\ntype System.Collections.Generic.List<'T> with\n",
-        "    ",
-        Some("\"\""),
-    ),
-    (
-        "tuple_augmentation",
-        "module G\ntype (int * int) with\n",
-        "    ",
-        Some("(1, 2)"),
-    ),
-    (
-        "struct_tuple_augmentation",
-        "module G\ntype struct (int * string * bool) with\n",
-        "    ",
-        Some("struct (1, \"\", true)"),
-    ),
-    (
-        "intrinsic_augmentation",
-        "module G\ntype R = { X: int }\ntype R with\n",
-        "    ",
-        Some("{ X = 1 }"),
-    ),
-    (
-        "exception",
-        "module G\nexception E of string\n    with\n",
-        "        ",
-        None,
-    ),
-    (
-        "interface_implementation",
-        "module G\ntype I =\n    abstract M: string -> string\n    abstract P: int\n    abstract Ev: IEvent<int>\ntype T() =\n    interface I with\n",
-        "        ",
-        None,
-    ),
-];
+/// takes no constructor. One context holds every member node kind; which
+/// context a member sits in decides only its extension rows, which the walk
+/// does not emit (A's `ExtensionNames` carry them).
+const MEMBER_CONTEXTS: &[(&str, &str, &str, Option<&str>)] =
+    &[("class", "module G\ntype T() =\n", "    ", Some("T()"))];
 
 /// The member snippets every context takes: the node, a label, and the
 /// snippet (`{I}` the indent, `{A}` the attribute, `{C}` the constructor's
@@ -308,15 +271,10 @@ const MEMBER_SNIPPETS: &[(&str, &str, &str)] = &[
     ),
 ];
 
-/// The shapes a signature's type takes, which decide whether its member is
-/// a method or a property.
-const SIGNATURE_TYPES: &[(&str, &str)] = &[
-    ("function", "s: string -> string"),
-    ("constrained", "s: 'T -> bool when 'T: equality"),
-    ("tupled", "a: int * b: int -> int"),
-    ("property", "int"),
-    ("property_get_set", "int with get, set"),
-];
+/// The shapes a signature's type takes. One holds every signature node kind;
+/// whether a member is a method or a property decides only its extension
+/// rows.
+const SIGNATURE_TYPES: &[(&str, &str)] = &[("function", "s: string -> string")];
 
 /// Every template: [`BASE`], each member snippet in each context, and each
 /// signature node under each signature type.
@@ -412,14 +370,16 @@ fn templates() -> Vec<Template> {
 const ATTRIBUTES: &[(&str, &str)] = &[
     ("auto_open", "AutoOpen"),
     ("auto_open_path", "AutoOpen(\"G\")"),
-    ("extension", "System.Runtime.CompilerServices.Extension"),
     ("measure", "Measure"),
     ("compiled_name", "CompiledName(\"Renamed\")"),
+    (
+        "module_suffix",
+        "CompilationRepresentation(CompilationRepresentationFlags.ModuleSuffix)",
+    ),
     (
         "type_provider_assembly",
         "Microsoft.FSharp.Core.CompilerServices.TypeProviderAssembly",
     ),
-    ("cli_event", "CLIEvent"),
     ("other", "System.Obsolete(\"G\")"),
 ];
 

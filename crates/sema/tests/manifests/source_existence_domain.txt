@@ -1,37 +1,35 @@
 # Generated; do not edit by hand. One line per graded item, sorted.
 # Regenerate with:
-#   BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-sema --test all source_existence_domain::every_leaf_form_is_read_or_declined_as_the_table_says
-domain_AugmentationHead_arity_less_generic	certified: unread OutsideDomain(0, AugmentationHead); unknown: unread OutsideDomain(0, AugmentationHead) [FCS: FS964,FS895,FS875]
-domain_AugmentationHead_generic	certified: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 43) []; unknown: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 43) []
-domain_AugmentationHead_global	certified: unread OutsideDomain(0, AugmentationHead); unknown: unread OutsideDomain(0, AugmentationHead)
-domain_AugmentationHead_local	certified: exact []; unknown: exact []
-domain_AugmentationHead_module_alias	certified: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 53) [AugmentationKind]; unknown: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 53) [UncertainAttribute,AugmentationKind]
-domain_AugmentationHead_qualified	certified: unread OutsideDomain(0, AugmentationHead); unknown: unread OutsideDomain(0, AugmentationHead)
-domain_AugmentationHead_qualified_generic	certified: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 43) []; unknown: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 43) []
-domain_AugmentationHead_tuple	certified: covers, FCS rejects surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 363) [RejectedShape]; unknown: covers, FCS rejects surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 363) [RejectedShape] [FCS: FS3350]
-domain_AugmentationHead_under_written_arity	certified: covers, FCS rejects surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 45) []; unknown: covers, FCS rejects surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 45) [] [FCS: FS957]
-domain_BindingHead_active_pattern	certified: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 8) []; unknown: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 8) [UncertainAttribute]
-domain_BindingHead_as	certified: unread OutsideDomain(0, BindingHead); unknown: unread OutsideDomain(0, BindingHead)
-domain_BindingHead_attributed	certified: unread OutsideDomain(0, BindingHead); unknown: unread OutsideDomain(0, BindingHead) [FCS: FS683]
-domain_BindingHead_function	certified: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 8) []; unknown: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 8) [UncertainAttribute]
-domain_BindingHead_list	certified: unread OutsideDomain(0, BindingHead); unknown: unread OutsideDomain(0, BindingHead)
-domain_BindingHead_named_fields	certified: unread OutsideDomain(0, BindingHead); unknown: unread OutsideDomain(0, BindingHead)
-domain_BindingHead_nested_tuple	certified: unread OutsideDomain(0, BindingHead); unknown: unread OutsideDomain(0, BindingHead)
-domain_BindingHead_nullary_active_pattern	certified: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 8) []; unknown: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 8) [UncertainAttribute]
-domain_BindingHead_operator	certified: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 8) []; unknown: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 8) [UncertainAttribute]
-domain_BindingHead_parenthesised_typed	certified: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 8) []; unknown: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 8) [UncertainAttribute]
-domain_BindingHead_record	certified: unread OutsideDomain(0, BindingHead); unknown: unread OutsideDomain(0, BindingHead)
-domain_BindingHead_tuple	certified: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 16) [BindingPattern]; unknown: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 16) [UncertainAttribute,BindingPattern]
-domain_BindingHead_upper_case_head	certified: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 28) [BindingPattern]; unknown: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 28) [UncertainAttribute,BindingPattern]
-domain_BindingHead_value	certified: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 8) []; unknown: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 8) [UncertainAttribute]
-domain_ProvidedTarget_anonymous_record	certified: exact []; unknown: exact []
-domain_ProvidedTarget_array	certified: exact []; unknown: exact []
-domain_ProvidedTarget_function	certified: exact []; unknown: exact []
-domain_ProvidedTarget_named	certified: unread TypeProvider(0); unknown: unread TypeProvider(0)
-domain_ProvidedTarget_postfix	certified: unread TypeProvider(0); unknown: unread TypeProvider(0)
-domain_ProvidedTarget_prefix	certified: unread TypeProvider(0); unknown: unread TypeProvider(0)
-domain_ProvidedTarget_tuple	certified: exact []; unknown: exact []
-domain_ProvidedTarget_variable	certified: exact []; unknown: exact []
-domain_ProvidedTarget_wildcard	certified: exact, FCS rejects, its signature undecodable []; unknown: exact, FCS rejects, its signature undecodable [] [FCS: FS715,FS715]
-domain_TypeHead_dotted	certified: unread OutsideDomain(0, TypeHead); unknown: unread OutsideDomain(0, TypeHead) [FCS: FS925]
-domain_TypeHead_single	certified: exact []; unknown: exact []
+#   BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-sema --test all source_existence_domain::every_form_is_read_or_declined_as_its_verdict_says
+domain_AbbreviationTarget_FSharpCoreTarget	certified: exact []; unknown: exact []
+domain_AbbreviationTarget_NamedTarget	certified: exact []; unknown: exact []
+domain_AbbreviationTarget_SelfNamedTarget	certified: exact []; unknown: exact []
+domain_AbbreviationTarget_SingleIdentTarget	certified: exact [AbbreviationOrUnion]; unknown: exact [AbbreviationOrUnion]
+domain_AbbreviationTarget_StaticArgumentTarget	certified: unread TypeProvider(0); unknown: unread TypeProvider(0) [FCS: FS39,FS39]
+domain_AbbreviationTarget_StructuralTarget	certified: exact []; unknown: exact []
+domain_Attribute_AssemblyTarget	certified: exact []; unknown: unread TypeProvider(0)
+domain_Attribute_AttributeLongIdentArgument	certified: exact []; unknown: covers surplus(prefix 0, entity 0, lends 1, auto-open 0) [UncertainAttribute]
+domain_Attribute_AttributeNoArgument	certified: exact []; unknown: exact [UncertainAttribute]
+domain_Attribute_AttributeOtherArgument	certified: exact []; unknown: unread UnreadableCompiledName(0)
+domain_Attribute_AttributeStringArgument	certified: exact []; unknown: covers surplus(prefix 0, entity 0, lends 2, auto-open 0) [UncertainAttribute]
+domain_Attribute_AttributeTripleQuotedArgument	certified: exact []; unknown: covers surplus(prefix 0, entity 0, lends 2, auto-open 0) [UncertainAttribute]
+domain_Attribute_AttributeUnitArgument	certified: exact []; unknown: exact [UncertainAttribute]
+domain_Attribute_AttributeVerbatimArgument	certified: exact []; unknown: covers surplus(prefix 0, entity 0, lends 2, auto-open 0) [UncertainAttribute]
+domain_Attribute_CarrierTarget	certified: exact []; unknown: covers surplus(prefix 0, entity 0, lends 2, auto-open 0) [UncertainAttribute]
+domain_Exception_Exception	certified: exact []; unknown: exact []
+domain_Exception_ExceptionAbbreviation	certified: exact []; unknown: exact []
+domain_FileHeader_AnonymousModule	certified: exact []; unknown: exact []
+domain_FileHeader_GlobalNamespace	certified: exact []; unknown: exact []
+domain_FileHeader_NamedModule	certified: exact []; unknown: exact []
+domain_FileHeader_Namespace	certified: exact []; unknown: exact []
+domain_HashDirective_OtherDirective	certified: exact, FCS rejects []; unknown: exact, FCS rejects [] [FCS: FS76]
+domain_HashDirective_ReferenceDirective	certified: unread HashReference(0); unknown: unread HashReference(0) [FCS: FS76]
+domain_Name_PlainName	certified: exact []; unknown: exact []
+domain_Name_RootedName	certified: exact []; unknown: exact [UncertainAttribute]
+domain_NestedModule_EmptyNestedModule	certified: exact []; unknown: exact []
+domain_NestedModule_NestedModule	certified: exact []; unknown: exact []
+domain_TypeDefinition_Augmentation	certified: exact []; unknown: exact []
+domain_TypeDefinition_DottedType	certified: unread Unreadable(0, TypeDefinition); unknown: unread Unreadable(0, TypeDefinition) [FCS: FS925]
+domain_TypeDefinition_GenericType	certified: exact []; unknown: exact []
+domain_TypeDefinition_TupleAugmentation	certified: exact, FCS rejects []; unknown: exact, FCS rejects [] [FCS: FS3350]
+domain_TypeDefinition_Type	certified: exact []; unknown: exact []

@@ -306,8 +306,13 @@ impl GraphRequest {
 
     /// The `referenced` request asking what crosses the `FSharpReference`
     /// boundary from `target`, a project the checked project references,
-    /// as one line of JSON ([`ReferencedResponse`]).
-    pub fn referenced_line(&self, target: &PlainName) -> Result<String, String> {
+    /// as one line of JSON ([`ReferencedResponse`]). `references` states
+    /// what the producer's references outside the request's projects are.
+    pub fn referenced_line(
+        &self,
+        target: &PlainName,
+        references: ReferenceSet,
+    ) -> Result<String, String> {
         let checked = self
             .projects
             .iter()
@@ -325,9 +330,25 @@ impl GraphRequest {
             "projects": projects,
             "check": self.check.as_str(),
             "target": target.as_str(),
+            "referenceSet": match references {
+                ReferenceSet::Framework => "framework",
+                ReferenceSet::Other => "other",
+            },
         })
         .to_string())
     }
+}
+
+/// What a `referenced` request's producer references beyond the projects of
+/// the request: whether FCS's `Unavailable` for a producer whose check fails
+/// can be told from a type provider's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReferenceSet {
+    /// The fixed framework set ([`framework_references`]) and no project:
+    /// nothing in it is a type provider or an alias of its attribute.
+    Framework,
+    /// Anything else.
+    Other,
 }
 
 /// A project on a cycle of `edges`, if there is one.

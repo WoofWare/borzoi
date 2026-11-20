@@ -1,5 +1,6 @@
 //! The walk's own cases, FCS-free: what each input channel declines or
-//! approximates, and what an incomplete certificate does.
+//! approximates, what each form classifies, the module suffix, the input
+//! bound, and what an incomplete certificate does.
 
 // The walk's syntax dispatch is what the parent module's lint holds; a test's
 // match over its own outcomes reports the rest.
@@ -14,44 +15,6 @@ use std::path::PathBuf;
 /// The project of `files` (name, text), parsed with no defines.
 fn project(files: &[(&str, &str)]) -> Vec<ProjectFile> {
     project_with(files, &[])
-}
-
-/// Our reading of `files` under `routes`, or certified by spelling.
-fn read_with(files: &[(&str, &str)], routes: Option<MarkerRoutes>) -> SourceExistence {
-    let project = project(files);
-    let refs: Vec<&ProjectFile> = project.iter().collect();
-    let routes = routes.unwrap_or_else(|| certify_by_spelling(&refs));
-    let items: Vec<CompileItem<'_>> = project.iter().map(CompileItem::Parsed).collect();
-    source_existence(Producer::Evaluated {
-        items: &items,
-        routes: &routes,
-        providers: ProviderReferences::None,
-    })
-}
-
-fn read(files: &[(&str, &str)]) -> SourceExistence {
-    read_with(files, None)
-}
-
-/// Every member head shape the generator met is named: a static property
-/// with no receiver (a bare-name pattern), backticked names, an indexer, and
-/// names that are keywords.
-#[test]
-fn bare_member_heads_are_named() {
-    for src in [
-        "module M\nexception internal Item of string\n",
-        "module M\ntype System.Collections.Generic.List<'T> with\n    member x.Item with get () = 1 and set (v: int) = ()\n",
-        "module M\ntype System.Collections.Generic.List<'T> with\n    member x.ToString = 1\n",
-        "module M\nmodule internal ``member`` =\n    let x = 1\n",
-        "exception internal Item of string\nmodule X =\n    let y = 1\n",
-        "module M\ntype public ``member`` = delegate of int -> int\n",
-        "module M\ntype System.Collections.Generic.List<'T> with\n    static member ``odd member`` = 2\n",
-        "module M\ntype System.Collections.Generic.List<'T> with\n    member x.``odd member``() = 1\n",
-        "module M\ntype System.Collections.Generic.HashSet<'T> with\n    static member ``odd member``() = 1\n",
-    ] {
-        let r = read(&[("A.fs", src)]);
-        assert!(matches!(r, SourceExistence::Read(_)), "{src}: {r:?}");
-    }
 }
 
 /// [`project`] with `defines` defined.
@@ -93,13 +56,36 @@ fn project_with(files: &[(&str, &str)], defines: &[&str]) -> Vec<ProjectFile> {
         .collect()
 }
 
-/// The pickle rows of a `Read`, or a panic naming `what`.
+/// Our reading of `files` under `routes` (or certified by spelling) and
+/// `providers`, with the forms the walk classified.
+fn read_full(
+    files: &[(&str, &str)],
+    routes: Option<MarkerRoutes>,
+    providers: ProviderReferences,
+) -> (SourceExistence, BTreeSet<Form>) {
+    let project = project(files);
+    let refs: Vec<&ProjectFile> = project.iter().collect();
+    let routes = routes.unwrap_or_else(|| certify_by_spelling(&refs));
+    let items: Vec<CompileItem<'_>> = project.iter().map(CompileItem::Parsed).collect();
+    super::read(Producer::Evaluated {
+        items: &items,
+        routes: &routes,
+        providers,
+    })
+}
+
+fn read_with(files: &[(&str, &str)], routes: Option<MarkerRoutes>) -> SourceExistence {
+    read_full(files, routes, ProviderReferences::None).0
+}
+
+fn read(files: &[(&str, &str)]) -> SourceExistence {
+    read_with(files, None)
+}
+
+/// The rows of a `Read`, or a panic naming `what`.
 fn rows(r: &SourceExistence, what: &str) -> Vec<PickledEntityRow> {
     match r {
-        SourceExistence::Read(s) => match &s.index.pickle {
-            PickleLayer::Read(rows) => rows.clone(),
-            other => panic!("{what}: pickle {other:?}"),
-        },
+        SourceExistence::Read(s) => s.entities.clone(),
         SourceExistence::Unread(why) => panic!("{what}: unread {why:?}"),
     }
 }
@@ -109,13 +95,6 @@ fn has_entity(r: &SourceExistence, logical: &str, compiled: &str, kind: PickledE
         && rows(r, logical).iter().any(|row| {
             row.logical_name == logical && row.compiled_name == compiled && row.kind == kind
         })
-}
-
-fn extension_names(r: &SourceExistence) -> Vec<Vec<String>> {
-    match r {
-        SourceExistence::Read(s) => s.index.extensions.iter().map(|e| e.names.clone()).collect(),
-        SourceExistence::Unread(_) => Vec::new(),
-    }
 }
 
 /// What a witness observed of the walk.
@@ -141,7 +120,7 @@ fn observe(r: SourceExistence, holds: impl Fn(&SourceExistence) -> bool) -> Obse
             Observed::Approximated(s.approximations.clone())
         }
         SourceExistence::Read(_) if holds(&r) => Observed::Exact,
-        SourceExistence::Read(s) => Observed::Wrong(format!("{:#?}", s.index)),
+        SourceExistence::Read(s) => Observed::Wrong(format!("{:#?}", s.entities)),
     }
 }
 
@@ -260,20 +239,24 @@ fn witness(channel: Channel) -> Observed {
                     .any(|row| row.logical_name == "Alias")
             },
         ),
-        // `FooModule` may be `FooModuleModule`, which canonical spelling
-        // keeps apart.
+        // Beside a type of its name, `FooModule` is `FooModuleModule`.
         Channel::ModuleSuffix => observe(
-            one("namespace N\nmodule FooModule =\n    let x = 1\n"),
+            one("namespace N\ntype FooModule = int\nmodule FooModule =\n    let x = 1\n"),
+            |r| has_entity(r, "FooModuleModule", "FooModuleModule", K::Module),
+        ),
+        Channel::UncertainModuleSuffix => observe(
+            read_with(
+                &[(
+                    "Lib.fs",
+                    "namespace N\n[<CompilationRepresentation(CompilationRepresentationFlags.ModuleSuffix)>]\nmodule FooModule =\n    let x = 1\n",
+                )],
+                Some(MarkerRoutes::Unknown),
+            ),
             |_| true,
         ),
         Channel::TypeDefinition => observe(
             one("namespace N\ntype C() = member _.X = 1\ntype U = A | B\n"),
             |r| has_entity(r, "C", "C", K::Type) && has_entity(r, "U", "U", K::Type),
-        ),
-        // Canonical spelling strips the arity: the walk writes none.
-        Channel::GenericArity => observe(
-            one("namespace N\ntype G<'a, [<Measure>] 'u> = { X: 'a }\n"),
-            |r| has_entity(r, "G", "G", K::Type),
         ),
         Channel::Abbreviation => observe(one("namespace N\ntype I = int\n"), |r| {
             has_entity(r, "I", "I", K::Abbreviation)
@@ -302,33 +285,17 @@ fn witness(channel: Channel) -> Observed {
                     .any(|row| row.logical_name == "M" && row.auto_open)
             },
         ),
-        Channel::ExtensionAttribute => observe(
-            one(
-                "namespace N\n[<System.Runtime.CompilerServices.Extension>]\ntype E =\n    static member X = 1\n",
-            ),
-            |r| {
-                rows(r, "ext")
-                    .iter()
-                    .any(|row| row.logical_name == "E" && row.extension)
-            },
-        ),
         Channel::CompiledNameAttribute => observe(
             one("namespace N\n[<CompiledName(\"R\")>]\ntype T() = class end\n"),
             |r| has_entity(r, "T", "R", K::Type),
         ),
+        // An entity keeps every attribute of its lists, whatever its target.
         Channel::AttributeTarget => observe(
-            one(
-                "module M\ntype System.Collections.Generic.List<'T> with\n    [<return: CompiledName(\"Q\")>]\n    member s.Orig() = 1\n",
-            ),
+            one("namespace N\n[<return: AutoOpen>]\nmodule M =\n    let x = 1\n"),
             |r| {
-                // A `return:` target gives the return value the name, not
-                // the member.
-                let names: BTreeSet<String> = extension_names(r).into_iter().flatten().collect();
-                names.contains("List`1.Orig")
-                    && names.contains("Orig")
-                    && !names
-                        .iter()
-                        .any(|n| n == "Q" || n.ends_with("_Q") || n.ends_with(".Q"))
+                rows(r, "target")
+                    .iter()
+                    .any(|row| row.logical_name == "M" && row.auto_open)
             },
         ),
         Channel::UnreadableCompiledName => observe(
@@ -359,99 +326,41 @@ fn witness(channel: Channel) -> Observed {
             ),
             |_| true,
         ),
-        Channel::OptionalExtensionMember => observe(
+        // A target FCS does not know: a child no classifier reads.
+        Channel::Unreadable => observe(
+            one("namespace N\n[<bogus: AutoOpen>]\nmodule M =\n    let x = 1\n"),
+            |_| true,
+        ),
+        Channel::InputBound => observe(
+            one(&format!(
+                "namespace N\ntype {} = int\n",
+                "T".repeat(MAX_NAME_BYTES + 1)
+            )),
+            |_| true,
+        ),
+        // An extension member of any shape adds no row and no flag.
+        Channel::ExtensionMembers => observe(
             one(
-                "module M\ntype System.Collections.Generic.List<'T> with\n    member s.Shout = s\n",
+                "namespace Ns\nopen System.Runtime.CompilerServices\n[<Extension>]\ntype E =\n    [<Extension>]\n    static member M(s: string) = s\ntype System.Collections.Generic.List<'T> with\n    member l.N = 1\n",
             ),
             |r| {
-                let names: BTreeSet<String> = extension_names(r).into_iter().flatten().collect();
-                ["List`1.get_Shout", "Shout", "get_Shout"]
+                rows(r, "extension")
                     .iter()
-                    .all(|n| names.contains(*n))
+                    .all(|row| !row.extension && row.logical_name != "N")
             },
-        ),
-        Channel::IntrinsicAugmentation => observe(
-            one("module M\ntype R = { X: int }\ntype R with\n    member r.Y = 1\n"),
-            |r| extension_names(r).is_empty(),
-        ),
-        Channel::AugmentationKind => observe(
-            one(
-                "module M\ntype T<'a> =\n    inherit System.Object\n    abstract M: int\ntype T<'a> with\n    member t.N = 1\n",
-            ),
-            |_| true,
-        ),
-        Channel::CSharpExtensionMember => observe(
-            one(
-                "module M\ntype E =\n    [<System.Runtime.CompilerServices.Extension>]\n    static member Twice(s: string) = s\n",
-            ),
-            |r| extension_names(r).iter().flatten().any(|n| n == "Twice"),
-        ),
-        Channel::ExtensionBinding => observe(
-            one(
-                "module M\n[<System.Runtime.CompilerServices.Extension>]\nlet shout (s: string) = s\n",
-            ),
-            |r| extension_names(r).iter().flatten().any(|n| n == "shout"),
-        ),
-        Channel::BindingPattern => observe(
-            one("module M\n[<System.Runtime.CompilerServices.Extension>]\nlet (a, b) = (1, 2)\n"),
-            |_| true,
-        ),
-        Channel::ImpliedExtensionAttribute => observe(
-            one(
-                "namespace N\nmodule M =\n    [<System.Runtime.CompilerServices.Extension>]\n    let shout (s: string) = s\n",
-            ),
-            |r| {
-                rows(r, "implied")
-                    .iter()
-                    .any(|row| row.logical_name == "M" && !row.extension)
-            },
-        ),
-        Channel::UnnamedDeclaration => observe(
-            one("module M\n[<System.Runtime.CompilerServices.Extension>]\nlet _ = 1\n"),
-            |_| true,
-        ),
-        Channel::ReadingsBudget => {
-            // Twenty nested modules whose names end in `Module`: each
-            // doubles the paths under it.
-            let mut src = String::from("namespace N\n");
-            for depth in 0..20 {
-                let indent = "    ".repeat(depth);
-                src.push_str(&format!("{indent}module M{depth}Module =\n"));
-            }
-            src.push_str(&format!("{}let x = 1\n", "    ".repeat(20)));
-            observe(read(&[("Lib.fs", &src)]), |_| true)
-        }
-        Channel::RejectedShape => observe(
-            one("module M\ntype System.Collections.Generic.List<'T> with\n    abstract M: int\n"),
-            |_| true,
-        ),
-        // The second `f` takes `f@7`: the walk emits every name it may.
-        Channel::ClassLet => observe(
-            one(
-                "module M\nopen System.Runtime.CompilerServices\ntype T() =\n    [<Extension>]\n    static let f (s: string) = s\n    [<Extension>]\n    static let f (s: string) = s\n    member _.G = f \"x\"\n",
-            ),
-            |_| true,
-        ),
-        Channel::OutsideDomain => observe(one("module M\ntype X.Y = { N: int }\n"), |_| true),
-        Channel::LineDirective => observe(
-            one(
-                "module M\n# 10 \"Other.fs\"\ntype T() =\n    [<System.Runtime.CompilerServices.Extension>]\n    static let f (s: string) = s\n    member _.G = f \"x\"\n",
-            ),
-            |_| true,
         ),
     }
 }
 
 /// Every channel's witness does what the inventory says the walk does with
-/// it. A channel added to [`Channel`] fails to compile until it has a
-/// treatment and a witness.
+/// it.
 #[test]
 fn the_inventory_is_what_the_walk_does() {
     let mut failures = Vec::new();
     for &channel in Channel::ALL {
         let observed = witness(channel);
         let agrees = match (channel.treatment(), &observed) {
-            (Treatment::Modelled, Observed::Exact) => true,
+            (Treatment::Modelled | Treatment::ExtensionNames, Observed::Exact) => true,
             (Treatment::Approximated(a), Observed::Approximated(names)) => names.contains(&a),
             (Treatment::Declined, Observed::Unread(_)) => true,
             (Treatment::Caller, Observed::CallerDecides) => true,
@@ -488,22 +397,12 @@ fn every_decline_and_approximation_is_a_channel() {
         Approximation::SignaturePair,
         Approximation::UncertainAttribute,
         Approximation::AbbreviationOrUnion,
-        Approximation::AugmentationKind,
-        Approximation::ModuleSuffix,
-        Approximation::BindingPattern,
-        Approximation::RejectedShape,
-        Approximation::ClassLetName,
     ] {
         // An exhaustive match: a new approximation must be listed here.
         match a {
             Approximation::SignaturePair
             | Approximation::UncertainAttribute
-            | Approximation::AbbreviationOrUnion
-            | Approximation::AugmentationKind
-            | Approximation::ModuleSuffix
-            | Approximation::BindingPattern
-            | Approximation::RejectedShape
-            | Approximation::ClassLetName => {}
+            | Approximation::AbbreviationOrUnion => {}
         }
         assert!(approximations.contains(&a), "{a:?} is no channel's");
     }
@@ -532,18 +431,17 @@ fn every_decline_and_approximation_is_a_channel() {
             Channel::UnreadableCompiledName,
         ),
         (
-            ExistenceUnread::UnnamedDeclaration(0),
-            Channel::UnnamedDeclaration,
-        ),
-        (
             ExistenceUnread::AnonymousModuleName(0),
             Channel::AnonymousModuleName,
         ),
-        (ExistenceUnread::TooManyReadings, Channel::ReadingsBudget),
-        (ExistenceUnread::LineDirective(0), Channel::LineDirective),
         (
-            ExistenceUnread::OutsideDomain(0, Leaf::TypeHead),
-            Channel::OutsideDomain,
+            ExistenceUnread::ModuleSuffix(0),
+            Channel::UncertainModuleSuffix,
+        ),
+        (ExistenceUnread::TooManyReadings, Channel::InputBound),
+        (
+            ExistenceUnread::Unreadable(0, Leaf::Attribute),
+            Channel::Unreadable,
         ),
     ];
     for (why, channel) in &declines {
@@ -556,11 +454,10 @@ fn every_decline_and_approximation_is_a_channel() {
             | ExistenceUnread::TypeProvider(_)
             | ExistenceUnread::UnreadableAutoOpen(_)
             | ExistenceUnread::UnreadableCompiledName(_)
-            | ExistenceUnread::UnnamedDeclaration(_)
             | ExistenceUnread::AnonymousModuleName(_)
+            | ExistenceUnread::ModuleSuffix(_)
             | ExistenceUnread::TooManyReadings
-            | ExistenceUnread::LineDirective(_)
-            | ExistenceUnread::OutsideDomain(..) => {}
+            | ExistenceUnread::Unreadable(..) => {}
         }
         assert_eq!(channel.treatment(), Treatment::Declined, "{why:?}");
         match witness(*channel) {
@@ -572,6 +469,32 @@ fn every_decline_and_approximation_is_a_channel() {
             other => panic!("{channel:?}'s witness: {other:?}"),
         }
     }
+}
+
+/// Every form's witness is classified as that form, and the walk reads or
+/// declines it as the form's verdict says: the FCS-free half of
+/// `source_existence_domain`.
+#[test]
+fn every_form_witness_is_classified_as_its_form() {
+    let mut failures = Vec::new();
+    for &form in Form::ALL {
+        let (r, forms) = read_full(
+            &[("Lib.fs", form.witness())],
+            None,
+            ProviderReferences::None,
+        );
+        if !forms.contains(&form) {
+            failures.push(format!("{form:?}: its witness classifies {forms:?}"));
+        }
+        let read = matches!(r, SourceExistence::Read(_));
+        if read != (form.verdict() == Verdict::Read) {
+            failures.push(format!(
+                "{form:?}: verdict {:?}, walk {r:?}",
+                form.verdict()
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 /// A certificate that omits a written name reads that name as under
@@ -590,22 +513,19 @@ fn an_omitted_name_widens_to_unknown() {
     let certified = read_with(&src, Some(MarkerRoutes::Certified(map)));
     let omitted = read_with(&src, Some(MarkerRoutes::Certified(BTreeMap::new())));
     let unknown = read_with(&src, Some(MarkerRoutes::Unknown));
-    let flags = |r: &SourceExistence| -> BTreeSet<(bool, bool)> {
+    let flags = |r: &SourceExistence| -> BTreeSet<bool> {
         rows(r, "flags")
             .iter()
             .filter(|row| row.logical_name == "M")
-            .map(|row| (row.auto_open, row.extension))
+            .map(|row| row.auto_open)
             .collect()
     };
-    assert_eq!(flags(&certified), BTreeSet::from([(true, false)]));
+    assert_eq!(flags(&certified), BTreeSet::from([true]));
     assert_eq!(
         flags(&omitted),
         flags(&unknown),
         "an omitted name reads as Unknown"
     );
-    // Every reading's facts: the attribute may be `[<AutoOpen>]` and
-    // `[<Extension>]` both.
-    assert_eq!(flags(&omitted), BTreeSet::from([(true, true)]));
     let SourceExistence::Read(s) = &omitted else {
         panic!("{omitted:?}")
     };
@@ -638,193 +558,163 @@ fn a_certified_shadow_is_no_marker() {
     );
 }
 
-/// A certificate that vouches for `[<Extension>]` but omits another
-/// attribute of the same binding: the other may be `[<CompiledName>]`, so
-/// the walk emits both names and says it approximated.
+/// A named type in an abbreviation's target may be a generative provider's
+/// only where a reference may be one: with one, the walk cannot tell it from
+/// one and declines; with none, it is no provider.
 #[test]
-fn a_partial_certificate_loses_exactness() {
-    let src = [(
-        "Lib.fs",
-        "module M\n[<System.Runtime.CompilerServices.Extension; System.Obsolete(\"Old\")>]\nlet f (x: string) = x\n",
-    )];
-    let mut map = BTreeMap::new();
-    map.insert(
-        ["System", "Runtime", "CompilerServices", "Extension"]
-            .map(str::to_owned)
-            .to_vec(),
-        BTreeSet::from([Marker::Extension]),
-    );
-    let r = read_with(&src, Some(MarkerRoutes::Certified(map)));
-    let SourceExistence::Read(s) = &r else {
-        panic!("{r:?}")
-    };
-    assert!(
-        s.approximations
-            .contains(&Approximation::UncertainAttribute),
-        "{:?}",
-        s.approximations
-    );
-    // The written name, and the one the uncertain attribute may give.
-    let names: BTreeSet<String> = extension_names(&r).into_iter().flatten().collect();
-    assert!(names.contains("f") && names.contains("Old"), "{names:?}");
-}
-
-/// Each reading of a module whose name ends in `Module` walks its contents
-/// again, rows or none: twelve such nested modules over a hundred `let`s
-/// emit few rows but visit hundreds of thousands of declarations, which the
-/// walk charges and declines.
-#[test]
-fn repeated_readings_are_charged_by_the_declarations_they_visit() {
-    let mut src = String::from("namespace N\n");
-    for depth in 0..12 {
-        src.push_str(&format!(
-            "{}module M{depth}Module =\n",
-            "    ".repeat(depth)
-        ));
-    }
-    for k in 0..100 {
-        src.push_str(&format!("{}let v{k} = 1\n", "    ".repeat(12)));
-    }
-    let r = read(&[("Lib.fs", &src)]);
-    assert!(
-        matches!(r, SourceExistence::Unread(ExistenceUnread::TooManyReadings)),
-        "{r:?}"
-    );
-}
-
-/// The binding-head forms the walk reads through and the table certify each
-/// other: every form has a row (its verdict decides the walk's), and every
-/// row the table says is read is a form the walk reads.
-#[test]
-fn binding_head_forms_are_table_rows() {
-    for (i, form) in HeadForm::ALL.iter().enumerate() {
-        assert_eq!(form.index(), i, "{form:?} is out of place in HeadForm::ALL");
-        assert!(form.row().is_some(), "{form:?} has no LEAF_FORMS row");
-    }
-    for row in LEAF_FORMS
-        .iter()
-        .filter(|r| r.leaf == Leaf::BindingHead && r.verdict == Verdict::Read)
-    {
-        assert!(
-            HeadForm::ALL.iter().any(|f| f.name() == row.form),
-            "the binding-head row {} names no form the walk reads",
-            row.form
-        );
-    }
-}
-
-/// Each row repeats every name enclosing it, so long names under nested
-/// modules whose names end in `Module` copy far more bytes than they have
-/// rows: the walk charges the bytes and declines, where the same shape with
-/// short names is read.
-#[test]
-fn copied_path_bytes_are_charged_apart_from_rows() {
-    let shape = |pad: usize| {
-        let mut src = String::from("namespace N\n");
-        for depth in 0..12 {
-            src.push_str(&format!(
-                "{}module M{depth}{}Module =\n",
-                "    ".repeat(depth),
-                "x".repeat(pad)
-            ));
-        }
-        src.push_str(&format!("{}type T = int\n", "    ".repeat(12)));
-        src
-    };
-    let short = shape(1);
-    assert!(
-        matches!(read(&[("Lib.fs", &short)]), SourceExistence::Read(_)),
-        "the shape is within the row and visit budgets"
-    );
-    let long = shape(1000);
-    let r = read(&[("Lib.fs", &long)]);
-    assert!(
-        matches!(r, SourceExistence::Unread(ExistenceUnread::TooManyReadings)),
-        "{r:?}"
-    );
-}
-
-/// A marked class `let`'s mangled names are every line its head spans, by
-/// every binder count, and no more: a head on one line names one line, and
-/// a head broken across two names both.
-#[test]
-fn class_let_names_are_the_head_span_and_no_more() {
-    let names = |head: &str| -> BTreeSet<String> {
-        let src = format!(
-            "module S\nopen System.Runtime.CompilerServices\ntype T() =\n    [<Extension>]\n    static let {head} = x\n    member _.G = f 1\n"
-        );
-        let r = read(&[("Lib.fs", &src)]);
-        assert!(matches!(r, SourceExistence::Read(_)), "{head}: {r:?}");
-        extension_names(&r)
-            .into_iter()
-            .flatten()
-            .filter(|n| n.starts_with("f@"))
-            .collect()
-    };
-    let set = |xs: &[&str]| xs.iter().map(|s| (*s).to_owned()).collect::<BTreeSet<_>>();
-    // The binder bound counts every identifier of the head (`f`, `x`,
-    // `int`) and the binding's matched value.
-    assert_eq!(
-        names("f (x: int)"),
-        set(&["f@5", "f@5-1", "f@5-2", "f@5-3"])
-    );
-    assert_eq!(
-        names("f\n        (x: int)"),
-        set(&[
-            "f@5", "f@5-1", "f@5-2", "f@5-3", "f@6", "f@6-1", "f@6-2", "f@6-3"
-        ])
-    );
-}
-
-/// A provider applied to a literal-bound identifier parses as an ordinary
-/// type application: with a reference that may be a provider, the walk
-/// cannot tell it from one and declines; with none, it is no provider.
-#[test]
-fn a_type_application_may_be_a_provider_only_where_a_reference_may_be_one() {
+fn a_named_target_may_be_a_provider_only_where_a_reference_may_be_one() {
     let src = [(
         "Lib.fs",
         "namespace N\nmodule C =\n    [<Literal>]\n    let N = 2\ntype T = Gen<C.N>\ntype L = int list\n",
     )];
+    let (possible, _) = read_full(&src, None, ProviderReferences::Possible);
+    assert!(
+        matches!(
+            possible,
+            SourceExistence::Unread(ExistenceUnread::TypeProvider(0))
+        ),
+        "{possible:?}"
+    );
+    let (none, _) = read_full(&src, None, ProviderReferences::None);
+    assert!(matches!(none, SourceExistence::Read(_)), "{none:?}");
     // A bare name: FCS hands a provider an empty argument list.
     let bare = [(
         "Lib.fs",
-        "namespace N\ntype T = Provider.Generated\ntype I = int\n",
+        "namespace N\ntype T = Provider.Generated\ntype I = int * int\n",
     )];
-    let bare_project = project(&bare);
-    let bare_refs: Vec<&ProjectFile> = bare_project.iter().collect();
-    let bare_routes = certify_by_spelling(&bare_refs);
-    let bare_items: Vec<CompileItem<'_>> = bare_project.iter().map(CompileItem::Parsed).collect();
+    let (bare_possible, _) = read_full(&bare, None, ProviderReferences::Possible);
     assert!(
         matches!(
-            source_existence(Producer::Evaluated {
-                items: &bare_items,
-                routes: &bare_routes,
-                providers: ProviderReferences::Possible,
-            }),
+            bare_possible,
             SourceExistence::Unread(ExistenceUnread::TypeProvider(0))
         ),
-        "a possible provider's bare type declines"
+        "{bare_possible:?}"
     );
-    let project = project(&src);
-    let refs: Vec<&ProjectFile> = project.iter().collect();
-    let routes = certify_by_spelling(&refs);
-    let items: Vec<CompileItem<'_>> = project.iter().map(CompileItem::Parsed).collect();
-    let read = |providers| {
-        source_existence(Producer::Evaluated {
-            items: &items,
-            routes: &routes,
-            providers,
-        })
+    // A structural target is no provider's.
+    let structural = [("Lib.fs", "namespace N\ntype I = int * int\n")];
+    let (r, _) = read_full(&structural, None, ProviderReferences::Possible);
+    assert!(matches!(r, SourceExistence::Read(_)), "{r:?}");
+}
+
+/// The `Module` suffix on a name ending in `Module`: decided by the
+/// attribute and by a type of the module's name in its own list, read
+/// exactly where both are certain, declined where one is not. A name not
+/// ending in `Module` is read either way, since canonical spelling strips
+/// the suffix.
+#[test]
+fn the_module_suffix_is_decided_or_declined() {
+    use PickledEntityKind as K;
+    let attr = "[<CompilationRepresentation(CompilationRepresentationFlags.ModuleSuffix)>]";
+    let certified = |src: &str| read(&[("Lib.fs", src)]);
+    let unknown = |src: &str| read_with(&[("Lib.fs", src)], Some(MarkerRoutes::Unknown));
+    // The attribute, certified.
+    let r = certified(&format!(
+        "namespace N\n{attr}\nmodule FooModule =\n    let x = 1\n"
+    ));
+    assert!(
+        has_entity(&r, "FooModuleModule", "FooModuleModule", K::Module),
+        "{r:?}"
+    );
+    assert!(
+        !has_entity(&r, "FooModule", "FooModule", K::Module),
+        "{r:?}"
+    );
+    // No attribute, no type: the name as written.
+    let r = certified("namespace N\nmodule FooModule =\n    let x = 1\n");
+    assert!(has_entity(&r, "FooModule", "FooModule", K::Module), "{r:?}");
+    // A type of its name in its list, before or after.
+    for src in [
+        "namespace N\ntype FooModule = int\nmodule FooModule =\n    let x = 1\n",
+        "namespace N\nmodule FooModule =\n    let x = 1\ntype FooModule = int\n",
+    ] {
+        let r = certified(src);
+        assert!(
+            has_entity(&r, "FooModuleModule", "FooModuleModule", K::Module),
+            "{src}: {r:?}"
+        );
+    }
+    // A generic type of its name does not count in an implementation.
+    let r =
+        certified("namespace N\ntype FooModule<'a> = 'a list\nmodule FooModule =\n    let x = 1\n");
+    assert!(has_entity(&r, "FooModule", "FooModule", K::Module), "{r:?}");
+    // An uncertain attribute declines on a `…Module` name, and reads any
+    // other name.
+    let r = unknown(&format!(
+        "namespace N\n{attr}\nmodule FooModule =\n    let x = 1\n"
+    ));
+    assert!(
+        matches!(r, SourceExistence::Unread(ExistenceUnread::ModuleSuffix(0))),
+        "{r:?}"
+    );
+    let r = unknown(&format!(
+        "namespace N\n{attr}\nmodule Foo =\n    let x = 1\n"
+    ));
+    assert!(matches!(r, SourceExistence::Read(_)), "{r:?}");
+    // A top-level module takes the suffix from the attribute alone.
+    let r = certified("module N.FooModule\ntype FooModule = int\n");
+    assert!(has_entity(&r, "FooModule", "FooModule", K::Module), "{r:?}");
+}
+
+/// Past each bound of the input the walk declines before it walks; at the
+/// bound it reads.
+#[test]
+fn the_input_bound_declines_past_each_limit() {
+    let bound = |r: &SourceExistence| {
+        matches!(r, SourceExistence::Unread(ExistenceUnread::TooManyReadings))
     };
+    // A name.
+    let at = read(&[(
+        "Lib.fs",
+        &format!("namespace N\ntype {} = int\n", "T".repeat(MAX_NAME_BYTES)),
+    )]);
+    assert!(matches!(at, SourceExistence::Read(_)), "{at:?}");
+    let past = read(&[(
+        "Lib.fs",
+        &format!(
+            "namespace N\ntype {} = int\n",
+            "T".repeat(MAX_NAME_BYTES + 1)
+        ),
+    )]);
+    assert!(bound(&past), "{past:?}");
+    // The depth: namespace segments, then nested modules.
+    let nested = |depth: usize| {
+        let mut src = String::from("namespace N\n");
+        for d in 0..depth {
+            src.push_str(&format!("{}module M{d} =\n", "    ".repeat(d)));
+        }
+        src.push_str(&format!("{}let x = 1\n", "    ".repeat(depth)));
+        read(&[("Lib.fs", &src)])
+    };
+    assert!(matches!(nested(MAX_DEPTH - 1), SourceExistence::Read(_)));
+    assert!(bound(&nested(MAX_DEPTH)), "{:?}", nested(MAX_DEPTH));
+    // The declarations.
+    let many = |n: usize| {
+        let mut src = String::from("namespace N\n");
+        for k in 0..n {
+            src.push_str(&format!("type T{k} = int\n"));
+        }
+        read(&[("Lib.fs", &src)])
+    };
+    assert!(matches!(
+        many(MAX_DECLARATIONS - 1),
+        SourceExistence::Read(_)
+    ));
+    assert!(bound(&many(MAX_DECLARATIONS)), "past the declarations");
+}
+
+/// A child no classifier names declines with its leaf: an attribute target
+/// FCS does not know.
+#[test]
+fn an_unconsumed_child_declines_with_its_leaf() {
+    let r = read(&[(
+        "Lib.fs",
+        "namespace N\n[<bogus: AutoOpen>]\nmodule M =\n    let x = 1\n",
+    )]);
     assert!(
         matches!(
-            read(ProviderReferences::Possible),
-            SourceExistence::Unread(ExistenceUnread::TypeProvider(0))
+            r,
+            SourceExistence::Unread(ExistenceUnread::Unreadable(0, Leaf::Attribute))
         ),
-        "a possible provider's application declines"
-    );
-    assert!(
-        matches!(read(ProviderReferences::None), SourceExistence::Read(_)),
-        "with no provider referenced, an application is a type"
+        "{r:?}"
     );
 }

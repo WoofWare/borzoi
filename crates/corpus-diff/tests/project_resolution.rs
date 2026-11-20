@@ -35,8 +35,6 @@ use tempfile::TempDir;
 
 // Under this binary's own directory, so Cargo does not take them for test
 // targets of their own.
-#[path = "project_resolution/source_existence_corpus.rs"]
-mod source_existence_corpus;
 #[path = "project_resolution/source_reference_gen.rs"]
 mod source_reference_gen;
 #[path = "project_resolution/source_references.rs"]

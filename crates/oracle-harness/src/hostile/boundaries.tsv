@@ -336,11 +336,11 @@ crates/sema/tests/all/resolve_self_qualifier_gen_diff.rs	pending	3
 crates/sema/tests/all/resolve_straddle_gen_diff.rs	pending	3
 crates/sema/tests/all/resolve_target_fold.rs	pending	3
 crates/sema/tests/all/silent_region_sweep.rs	pending	3
-crates/sema/tests/all/source_existence_budget.rs	not-applicable	three hand-built producers whose long names multiply past the byte budget, walked under a memory limit; the hostile source states reach the same walk through source_existence_gen's census
+crates/sema/tests/all/source_existence_budget.rs	not-applicable	the corner of the walk's input bound, walked and built into the existence set under a memory limit; the hostile source states reach the same walk through source_existence_gen's census
+crates/sema/tests/all/source_existence_census.rs	not-applicable	the pinned corpus walked file by file, an FCS-free measurement of what the walk declines; the hostile source states reach the same walk through source_existence_gen's census
 crates/sema/tests/all/source_existence_domain.rs	not-applicable	the certified leaf forms of source_existence, one producer per LEAF_FORMS row; the hostile source states reach the same walk through source_existence_gen's census
 crates/sema/tests/all/source_existence_gen.rs	draws	source_existence_gen=source
 crates/sema/tests/all/source_existence_grid.rs	not-applicable	a hand-written table of producer cells, one per form; the hostile source states reach the same walk through source_existence_gen's census
-crates/sema/tests/all/source_existence_layout.rs	not-applicable	the grid's cells with layout trivia inserted at every place; the hostile source states reach the same walk through source_existence_gen's census
 crates/sema/tests/all/source_existence_placement.rs	not-applicable	attribute placements enumerated from the grammar's attribute-bearing nodes; the source states it could carry reach the walk through source_existence_gen's census
 crates/sema/tests/all/tier_order_diff.rs	pending	3
 crates/sema/tests/all/type_arity_route_grid.rs	pending	3

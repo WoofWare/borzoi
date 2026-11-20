@@ -1,26 +1,31 @@
-//! The certified domain of `source_existence`: every form of every leaf the
-//! walk interprets ([`borzoi_sema::LEAF_FORMS`]), each a producer graded
-//! like any other cell, and the walk held to the row's verdict. A form the
-//! table says is read must be read and covered; one it says is declined
-//! must decline. The table is the predicate's specification, so a change to
-//! either alone fails here.
+//! The domain of `source_existence`: every [`Form`] of every leaf the walk
+//! interprets, its witness graded against FCS like any other cell, and the
+//! walk held to the form's verdict. A form whose verdict is `Read` must be
+//! read and covered; one whose verdict is `Declined` must decline. The forms
+//! are the classifiers' closed list, so this grid is the enum: a form added
+//! without a witness FCS grades, or a verdict the walk does not keep, fails
+//! here.
 
 use borzoi_oracle_harness::manifest::Manifest;
-use borzoi_sema::{LEAF_FORMS, ProviderReferences, Verdict};
+use borzoi_oracle_harness::project_graph::Target;
+use borzoi_sema::{Form, Verdict};
 
 use crate::common::corpus_manifest::{check_manifest, regenerate};
 use crate::source_existence_diff::{Cell, grade_cells};
 
 #[test]
-fn every_leaf_form_is_read_or_declined_as_the_table_says() {
-    let cells: Vec<Cell> = LEAF_FORMS
+fn every_form_is_read_or_declined_as_its_verdict_says() {
+    let cells: Vec<Cell> = Form::ALL
         .iter()
         .map(|f| {
             let mut cell = Cell::new(
-                format!("domain_{:?}_{}", f.leaf, f.form),
-                &[("Lib.fs", f.source)],
+                format!("domain_{:?}_{:?}", f.leaf(), f),
+                &[("Lib.fs", f.witness())],
             );
-            cell.providers_possible = f.providers == ProviderReferences::Possible;
+            // A headerless file is the last of an executable.
+            if *f == Form::AnonymousModule {
+                cell.target = Target::Exe;
+            }
             cell
         })
         .collect();
@@ -32,18 +37,18 @@ fn every_leaf_form_is_read_or_declined_as_the_table_says() {
         failures.join("\n")
     );
     let mut wrong = Vec::new();
-    for (form, cell) in LEAF_FORMS.iter().zip(&cells) {
+    for (form, cell) in Form::ALL.iter().zip(&cells) {
         let verdict = entries
             .iter()
             .find(|(name, _)| *name == cell.name)
             .map(|(_, v)| v.as_str())
             .unwrap_or("");
         let read = !verdict.starts_with("certified: unread");
-        let expected = form.verdict == Verdict::Read;
-        if read != expected {
+        if read != (form.verdict() == Verdict::Read) {
             wrong.push(format!(
-                "{}: the table says {:?}, the walk gave {verdict}",
-                cell.name, form.verdict
+                "{}: the form says {:?}, the walk gave {verdict}",
+                cell.name,
+                form.verdict()
             ));
         }
     }
@@ -52,8 +57,6 @@ fn every_leaf_form_is_read_or_declined_as_the_table_says() {
     check_manifest(
         "source_existence_domain",
         &manifest,
-        &regenerate(
-            "source_existence_domain::every_leaf_form_is_read_or_declined_as_the_table_says",
-        ),
+        &regenerate("source_existence_domain::every_form_is_read_or_declined_as_its_verdict_says"),
     );
 }
