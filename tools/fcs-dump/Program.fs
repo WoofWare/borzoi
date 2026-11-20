@@ -9359,22 +9359,11 @@ let private extensionMembersOf (checkResults: FSharpCheckFileResults) (target: s
 /// A target FCS would read from its DLL instead (a type provider) is
 /// refused: there is no source reading to report.
 let private respondGraphReferenced (checker: FSharpChecker) (root: JsonElement) =
-    let graph = parseGraphCheckWith [ "target"; "referenceSet" ] root
+    let graph = parseGraphCheckWith [ "target" ] root
     let target =
         match root.TryGetProperty "target" with
         | true, v -> strictString "target" v
         | _ -> failwith "request: missing field target"
-    // Whether every reference outside the request's projects is the fixed
-    // framework set, which holds no type provider and no alias of its
-    // attribute: the caller's statement, held to the request below.
-    let frameworkOnly =
-        match root.TryGetProperty "referenceSet" with
-        | true, v ->
-            match strictString "referenceSet" v with
-            | "framework" -> true
-            | "other" -> false
-            | other -> failwithf "request: referenceSet %s is neither framework nor other" other
-        | _ -> failwith "request: missing field referenceSet"
     let referencesTarget =
         graph.Check.References
         |> List.exists (function
@@ -9407,8 +9396,6 @@ let private respondGraphReferenced (checker: FSharpChecker) (root: JsonElement) 
                     | ProjectRef q -> visit graph.ById.[q]
                     | Dll _ -> ()
         visit producer
-        if frameworkOnly && reached.Count > 1 then
-            failwithf "request: referenceSet framework, but %s reads another project from source" target
         for p in reached do
             let results =
                 if p.Id = target then
@@ -9427,15 +9414,12 @@ let private respondGraphReferenced (checker: FSharpChecker) (root: JsonElement) 
             | Ok(Some data) -> rawSignatureOf data
             | Ok None when failed ->
                 // FCS answers `Unavailable` alike for a type-provider
-                // producer and for one whose assembly data failed to build
-                // (`IncrementalBuild.fs`, `tcAssemblyDataOpt`). Over the
-                // framework set alone, no reference supplies a provider or an
-                // alias of its attribute, so the failure is A's own errors;
-                // over anything else, which it is cannot be told, and the
-                // producer is not graded.
-                if not frameworkOnly then
-                    failwithf "project %s: FCS may read it from its DLL: its check fails, and its references are not the framework set" target
-                {| Streams = [||]; InternalsVisibleTo = [||]; AutoOpens = [||] |}
+                // producer (A's own attribute, or a reference's alias of it)
+                // and for one whose assembly data failed to build
+                // (`IncrementalBuild.fs`, `tcAssemblyDataOpt`), and it then
+                // may read A from disk: which it is cannot be told, so the
+                // producer is not graded, whatever its references.
+                failwithf "project %s: FCS may read it from its DLL: its check fails, and FCS built it no assembly data" target
             | Ok None -> failwithf "project %s: FCS reads it from its DLL, not from source" target
             | Error why -> failwithf "project %s: cannot read its assembly data: %s" target why
         let imported =
@@ -9472,8 +9456,7 @@ let private respondGraphReferenced (checker: FSharpChecker) (root: JsonElement) 
 ///   → { Files: [{Path, Diagnostics, Uses}], Diagnostics, Referenced: [{Id, AssemblyName, Diagnostics}] }
 /// { "op": "compile", "project": project, "outDir": <abs path> }
 ///   → { Diagnostics, Output: <the DLL>, or null when the compile failed }
-/// { "op": "referenced", "projects": [project…], "check": <id>, "target": <id>,
-///   "referenceSet": "framework"|"other" }
+/// { "op": "referenced", "projects": [project…], "check": <id>, "target": <id> }
 ///   → { Imported, Entities, ExtensionMembers, ReadErrors, FcsExtensionMembers,
 ///       Signature: { Streams: [{Ccu, Primary, B}], InternalsVisibleTo, AutoOpens },
 ///       Diagnostics }   (streams in hex; see [`respondGraphReferenced`])

@@ -570,6 +570,37 @@ pub fn cells() -> Vec<Cell> {
             "quoted_load_directive",
             "module QuotedLoad\n#``load`` \"y.fsx\"\nlet x = 1\n",
         ),
+        // The `Module` suffix, by every route FCS has to it: a flag value
+        // passed through a literal, an exception of the module's name in a
+        // recursive group, A's own namesake of the attribute (which FCS does
+        // not obey), and the attribute itself over a nested module, which
+        // the fold places under the written name. Each module ends in
+        // `Module`, so the walk emits both readings.
+        one(
+            "module_suffix_literal_flag",
+            "module LitSuffix\nmodule C =\n    [<Literal>]\n    let flags = CompilationRepresentationFlags.ModuleSuffix\n[<CompilationRepresentation(C.flags)>]\nmodule FooModule =\n    type T = int\n",
+        ),
+        one(
+            "module_suffix_rec_group_exception",
+            "module rec RecExnSuffix\nexception FooModule of int\nmodule FooModule =\n    type T = int\n",
+        ),
+        Cell::new(
+            "module_suffix_namesake_attribute",
+            &[
+                (
+                    "Namesake.fs",
+                    "namespace Microsoft.FSharp.Core\ntype CompilationRepresentationAttribute(flags: CompilationRepresentationFlags) =\n    inherit System.Attribute()\n",
+                ),
+                (
+                    "Use.fs",
+                    "module NamesakeSuffix\n[<CompilationRepresentation(CompilationRepresentationFlags.ModuleSuffix)>]\nmodule TestModule =\n    type T = int\n",
+                ),
+            ],
+        ),
+        one(
+            "module_suffix_over_nested_module",
+            "namespace FoldSuffix\n[<CompilationRepresentation(CompilationRepresentationFlags.ModuleSuffix)>]\nmodule FooModule =\n    module Inner =\n        let x = 1\n",
+        ),
         // The raw scans' cells (`RAW_SCANS`): a directive inside a nested
         // module, and an attribute FCS reads as the assembly's for standing
         // alone, with no `assembly:` target.

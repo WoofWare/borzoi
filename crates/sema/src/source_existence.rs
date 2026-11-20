@@ -58,15 +58,15 @@
 //! Every name the walk emits is written in A's source, but for these:
 //!
 //! - **A module's `Module` suffix** (`ComputeModuleOrNamespaceKind` and
-//!   `AdjustModuleName`, `CheckDeclarations.fs:2731-2738`): a nested module
-//!   takes it under `[<CompilationRepresentation(ModuleSuffix)>]` or beside a
-//!   type of its name in its own declaration list (`TypeNamesInNonMutRecDecls`
-//!   and kin, `CheckDeclarations.fs:2773-2809`); a top-level module only under
-//!   the attribute (FCS reads `module A.M` as a namespace holding one module,
-//!   `CheckDeclarations.fs:5903-5917`). Canonical spelling strips one
-//!   `Module`, so the suffix moves a fact only on a name already ending in
-//!   `Module`, where the walk decides it exactly or declines
-//!   ([`ExistenceUnread::ModuleSuffix`]).
+//!   `AdjustModuleName`, `CheckDeclarations.fs:2731-2738`): FCS adds it under
+//!   `[<CompilationRepresentation(ModuleSuffix)>]` (whose flag may be any
+//!   expression of its value, and whose attribute must be FSharp.Core's own,
+//!   not a namesake), or beside a type or exception of the module's name in
+//!   its declaration group. Canonical spelling strips one `Module`, so the
+//!   suffix moves a fact only on a name already ending in `Module`; there the
+//!   walk emits both readings, whatever the module's attributes or
+//!   neighbours ([`Approximation::ModuleSuffix`]). The preflight declines a
+//!   path with two such modules, so no declaration is walked more than twice.
 //! - **A type's `[<CompiledName>]`**: the literal, beside the logical name.
 //!   One the walk cannot read declines.
 //! - **Generic arity on an entity's name** (``Map`2``): erased by canonical
@@ -74,8 +74,8 @@
 //!
 //! # Attributes
 //!
-//! Whether an attribute is `[<AutoOpen>]`, `[<Measure>]`, `[<CompiledName>]`,
-//! `[<CompilationRepresentation>]` or `[<TypeProviderAssembly>]` depends on
+//! Whether an attribute is `[<AutoOpen>]`, `[<Measure>]`, `[<CompiledName>]`
+//! or `[<TypeProviderAssembly>]` depends on
 //! what its name resolves to, and A's references can route any name to any of
 //! them (an abbreviation) or away from them (a shadow). The walk does not
 //! resolve: the caller states what each written name denotes
@@ -87,7 +87,10 @@
 //!
 //! Before it walks, the walk bounds its input ([`MAX_NAME_BYTES`],
 //! [`MAX_DEPTH`], [`MAX_DECLARATIONS`]) and declines past it
-//! ([`ExistenceUnread::TooManyReadings`]). Inside the bound every row is one
+//! ([`ExistenceUnread::TooManyReadings`]). A declaration is a namespace
+//! segment, a module, a type, an exception, or a literal an attribute that
+//! may be `[<CompiledName>]` or `[<AutoOpen>]` passes, and one under a module
+//! named `…Module` counts twice. Inside the bound every row is one
 //! declaration's, and its path at most [`MAX_DEPTH`] names of at most
 //! [`MAX_NAME_BYTES`]: the memory the rows take is bounded by the input, with
 //! no metering to forget.
@@ -175,20 +178,16 @@ pub enum Marker {
     Measure,
     /// `Microsoft.FSharp.Core.CompiledNameAttribute`, on a type.
     CompiledName,
-    /// `Microsoft.FSharp.Core.CompilationRepresentationAttribute`, whose
-    /// `ModuleSuffix` flag suffixes a module.
-    CompilationRepresentation,
     /// `Microsoft.FSharp.Core.CompilerServices.TypeProviderAssemblyAttribute`.
     TypeProviderAssembly,
 }
 
 impl Marker {
     /// Every marker.
-    pub const ALL: [Marker; 5] = [
+    pub const ALL: [Marker; 4] = [
         Marker::AutoOpen,
         Marker::Measure,
         Marker::CompiledName,
-        Marker::CompilationRepresentation,
         Marker::TypeProviderAssembly,
     ];
 
@@ -198,12 +197,6 @@ impl Marker {
             Marker::AutoOpen => &["Microsoft", "FSharp", "Core", "AutoOpenAttribute"],
             Marker::Measure => &["Microsoft", "FSharp", "Core", "MeasureAttribute"],
             Marker::CompiledName => &["Microsoft", "FSharp", "Core", "CompiledNameAttribute"],
-            Marker::CompilationRepresentation => &[
-                "Microsoft",
-                "FSharp",
-                "Core",
-                "CompilationRepresentationAttribute",
-            ],
             Marker::TypeProviderAssembly => &[
                 "Microsoft",
                 "FSharp",
@@ -266,12 +259,9 @@ pub enum ExistenceUnread {
     UnreadableCompiledName(usize),
     /// A headerless file whose implicit module name the walk cannot spell.
     AnonymousModuleName(usize),
-    /// A module whose name ends in `Module` under an attribute that may
-    /// suffix it, or beside a type of its name that may count: whether FCS
-    /// spells it `…ModuleModule` is unknown.
-    ModuleSuffix(usize),
     /// The input exceeds the walk's bound ([`MAX_NAME_BYTES`],
-    /// [`MAX_DEPTH`], [`MAX_DECLARATIONS`]).
+    /// [`MAX_DEPTH`], [`MAX_DECLARATIONS`]), or a path holds two modules
+    /// named `…Module`.
     TooManyReadings,
     /// A node of this leaf the walk cannot classify: a shape outside every
     /// [`Form`], or a child no classifier accounts for.
@@ -450,6 +440,10 @@ pub enum Approximation {
     /// `type A = B` with `B` a single identifier: FCS reads a single-case
     /// union when `B` names no type in scope.
     AbbreviationOrUnion,
+    /// A module whose name ends in `Module`: FCS may add the suffix
+    /// (`FooModuleModule`), which canonical spelling does not strip, so both
+    /// readings' paths.
+    ModuleSuffix,
 }
 
 /// What [`source_existence`] read.
@@ -546,8 +540,6 @@ channels! {
     /// The `Module` suffix FCS adds to a module beside a type of its name,
     /// or under `[<CompilationRepresentation(ModuleSuffix)>]`.
     ModuleSuffix,
-    /// A suffix the walk cannot decide on a name ending in `Module`.
-    UncertainModuleSuffix,
     /// Class, struct, interface, record, union, enum, delegate, measure.
     TypeDefinition,
     /// `type A = T`.
@@ -603,7 +595,6 @@ impl Channel {
             | Channel::Recovered
             | Channel::HashReference
             | Channel::AnonymousModuleName
-            | Channel::UncertainModuleSuffix
             | Channel::TypeProviderUse
             | Channel::UnreadableCompiledName
             | Channel::AssemblyAutoOpenUnreadable
@@ -615,6 +606,7 @@ impl Channel {
             }
             Channel::SignaturePair => Treatment::Approximated(A::SignaturePair),
             Channel::AbbreviationOrUnion => Treatment::Approximated(A::AbbreviationOrUnion),
+            Channel::ModuleSuffix => Treatment::Approximated(A::ModuleSuffix),
             Channel::UncertifiedAttribute => Treatment::Approximated(A::UncertainAttribute),
             Channel::ExtensionMembers => Treatment::ExtensionNames,
             Channel::Accessibility | Channel::EntityKind => Treatment::Unconsumed,
@@ -622,7 +614,6 @@ impl Channel {
             | Channel::Namespace
             | Channel::Module
             | Channel::ModuleAbbreviation
-            | Channel::ModuleSuffix
             | Channel::TypeDefinition
             | Channel::Abbreviation
             | Channel::Exception
@@ -717,7 +708,7 @@ fn walk_project(
             return Err(ExistenceUnread::Recovered(i));
         }
     }
-    preflight(&files)?;
+    preflight(&files, routes)?;
     let partners = signature_partners(&files);
     let mut out = Out::default();
     for (i, pf) in files.iter().enumerate() {
@@ -775,42 +766,91 @@ fn walk_project(
 
 /// Hold the input to the walk's bound before anything is walked: every
 /// entity name at most [`MAX_NAME_BYTES`], every path at most
-/// [`MAX_DEPTH`] deep, at most [`MAX_DECLARATIONS`] declarations.
-fn preflight(files: &[ProjectFile]) -> Result<(), ExistenceUnread> {
+/// [`MAX_DEPTH`] deep, at most [`MAX_DECLARATIONS`] declarations (a literal
+/// an attribute that may be `[<CompiledName>]` or `[<AutoOpen>]` passes, and
+/// a headerless file's implicit module path, included; a declaration under a
+/// module named `…Module`, which the walk reads twice, counted twice), and
+/// no path holding two modules named `…Module`.
+fn preflight(files: &[ProjectFile], routes: &MarkerRoutes) -> Result<(), ExistenceUnread> {
     let mut declarations = 0usize;
-    let mut count = |names: &[String], depth: usize| -> Result<(), ExistenceUnread> {
-        declarations += names.len().max(1);
-        if depth > MAX_DEPTH
-            || declarations > MAX_DECLARATIONS
-            || names.iter().any(|n| n.len() > MAX_NAME_BYTES)
-        {
-            Err(ExistenceUnread::TooManyReadings)
-        } else {
-            Ok(())
-        }
-    };
+    let mut count =
+        |names: &[String], depth: usize, weight: usize| -> Result<(), ExistenceUnread> {
+            declarations = declarations.saturating_add(weight.saturating_mul(names.len().max(1)));
+            if depth > MAX_DEPTH
+                || declarations > MAX_DECLARATIONS
+                || names.iter().any(|n| n.len() > MAX_NAME_BYTES)
+            {
+                Err(ExistenceUnread::TooManyReadings)
+            } else {
+                Ok(())
+            }
+        };
     for pf in files {
+        let root = pf.file.syntax();
+        // The literals that may become a compiled name or an auto-open path.
+        for list in root.descendants().filter_map(AttributeList::cast) {
+            for attr in list.attributes() {
+                let (Some((_, name)), Some(arg)) =
+                    (attr.type_name().as_ref().and_then(long_ident), attr.arg())
+                else {
+                    continue;
+                };
+                let named = routes.may_be(&name, Marker::CompiledName) != Maybe::No
+                    || routes.may_be(&name, Marker::AutoOpen) != Maybe::No;
+                if let (true, (_, Arg::Literal(literal))) = (named, argument(&arg)) {
+                    count(&[literal], 0, 1)?;
+                }
+            }
+        }
         let modules: Vec<ModuleOrNamespace> = match &pf.file {
             SourceFile::Impl(f) => f.modules().collect(),
             SourceFile::Sig(f) => f.modules().collect(),
         };
         for m in modules {
-            let header = m.long_id().map(|li| names_of(&li)).unwrap_or_default();
-            count(&header, header.len())?;
+            let header = match m.kind() {
+                ModuleOrNamespaceKind::Anon => {
+                    pf.qnof.anonymous_module_segments().unwrap_or_default()
+                }
+                ModuleOrNamespaceKind::GlobalNamespace
+                | ModuleOrNamespaceKind::DeclaredNamespace
+                | ModuleOrNamespaceKind::NamedModule => {
+                    m.long_id().map(|li| names_of(&li)).unwrap_or_default()
+                }
+            };
+            // A module header's last segment is the module.
+            let suffixed = matches!(
+                m.kind(),
+                ModuleOrNamespaceKind::NamedModule | ModuleOrNamespaceKind::Anon
+            ) && header.last().is_some_and(|n| suffixable(n));
+            let weight = if suffixed { 2 } else { 1 };
+            count(&header, header.len(), weight)?;
             let decls = match &pf.file {
                 SourceFile::Impl(_) => Decls::Impl(m.decls().collect()),
                 SourceFile::Sig(_) => Decls::Sig(m.sig_decls().collect()),
             };
-            preflight_decls(&decls, header.len(), &mut count)?;
+            preflight_decls(&decls, header.len(), suffixed, &mut count)?;
         }
     }
     Ok(())
 }
 
+/// Whether a module named `name` may take FCS's `Module` suffix to a path
+/// canonical spelling does not strip: its name already ends in `Module`.
+fn suffixable(name: &str) -> bool {
+    name.len() > "Module".len() && name.ends_with("Module")
+}
+
+/// [`preflight`]'s count of the declarations `decls` at `depth`, under a
+/// module named `…Module` when `suffixed`.
+/// [`preflight`]'s counter: names, the depth of their path, and how many
+/// times the walk reads them.
+type Count<'c> = dyn FnMut(&[String], usize, usize) -> Result<(), ExistenceUnread> + 'c;
+
 fn preflight_decls(
     decls: &Decls,
     depth: usize,
-    count: &mut impl FnMut(&[String], usize) -> Result<(), ExistenceUnread>,
+    suffixed: bool,
+    count: &mut Count<'_>,
 ) -> Result<(), ExistenceUnread> {
     let type_names = |defns: &mut dyn Iterator<Item = TypeDefn>| -> Vec<String> {
         defns
@@ -818,17 +858,26 @@ fn preflight_decls(
             .flat_map(|li| names_of(&li))
             .collect()
     };
+    let weight = if suffixed { 2 } else { 1 };
+    let module =
+        |names: Vec<String>, inner: &Decls, count: &mut Count<'_>| -> Result<(), ExistenceUnread> {
+            let this = names.last().is_some_and(|n| suffixable(n));
+            if suffixed && this {
+                return Err(ExistenceUnread::TooManyReadings);
+            }
+            count(&names, depth + 1, if this { 2 } else { weight })?;
+            preflight_decls(inner, depth + 1, suffixed || this, count)
+        };
     match decls {
         Decls::Impl(ds) => {
             for d in ds {
                 match d {
                     ModuleDecl::NestedModule(m) => {
                         let names = m.long_id().map(|li| names_of(&li)).unwrap_or_default();
-                        count(&names, depth + 1)?;
-                        preflight_decls(&Decls::Impl(m.decls().collect()), depth + 1, count)?;
+                        module(names, &Decls::Impl(m.decls().collect()), count)?;
                     }
-                    ModuleDecl::Types(t) => count(&type_names(&mut t.defns()), depth + 1)?,
-                    ModuleDecl::Exception(e) => count(&exception_names(e), depth + 1)?,
+                    ModuleDecl::Types(t) => count(&type_names(&mut t.defns()), depth + 1, weight)?,
+                    ModuleDecl::Exception(e) => count(&exception_names(e), depth + 1, weight)?,
                     ModuleDecl::Let(_)
                     | ModuleDecl::Extern(_)
                     | ModuleDecl::Expr(_)
@@ -844,11 +893,10 @@ fn preflight_decls(
                 match d {
                     SigDecl::NestedModule(m) => {
                         let names = m.long_id().map(|li| names_of(&li)).unwrap_or_default();
-                        count(&names, depth + 1)?;
-                        preflight_decls(&Decls::Sig(m.sig_decls().collect()), depth + 1, count)?;
+                        module(names, &Decls::Sig(m.sig_decls().collect()), count)?;
                     }
-                    SigDecl::Types(t) => count(&type_names(&mut t.defns()), depth + 1)?,
-                    SigDecl::Exception(e) => count(&exception_names(e), depth + 1)?,
+                    SigDecl::Types(t) => count(&type_names(&mut t.defns()), depth + 1, weight)?,
+                    SigDecl::Exception(e) => count(&exception_names(e), depth + 1, weight)?,
                     SigDecl::Val(_)
                     | SigDecl::Open(_)
                     | SigDecl::ModuleAbbrev(_)
@@ -1129,9 +1177,6 @@ struct Marks {
     /// An attribute that may be `[<CompiledName>]` whose argument is no
     /// literal.
     compiled_name_unreadable: bool,
-    /// Whether an attribute that may be `[<CompilationRepresentation>]` may
-    /// pass `ModuleSuffix`.
-    module_suffix: Maybe,
     /// Some denotation was uncertain and some marker possible because of it.
     uncertain: bool,
 }
@@ -1283,16 +1328,7 @@ impl FileWalk<'_> {
                     let attrs: Vec<AttributeList> = m.attributes().collect();
                     let (name, ns) = segments.split_last().expect("a name is not empty");
                     self.namespace(ns);
-                    // FCS reads `module A.M` as a namespace holding one
-                    // module: no type shares its list.
-                    self.module(
-                        &Scope::root(ns),
-                        name,
-                        &attrs,
-                        &decls,
-                        m.is_rec(),
-                        Maybe::No,
-                    )?;
+                    self.module(&Scope::root(ns), name, &attrs, &decls, m.is_rec())?;
                 }
                 ModuleOrNamespaceKind::Anon => {
                     self.forms.insert(Form::AnonymousModule);
@@ -1302,7 +1338,7 @@ impl FileWalk<'_> {
                         .ok_or(ExistenceUnread::AnonymousModuleName(self.index))?;
                     let (name, ns) = segments.split_last().expect("a name is not empty");
                     self.namespace(ns);
-                    self.module(&Scope::root(ns), name, &[], &decls, m.is_rec(), Maybe::No)?;
+                    self.module(&Scope::root(ns), name, &[], &decls, m.is_rec())?;
                 }
             }
         }
@@ -1395,7 +1431,6 @@ impl FileWalk<'_> {
             markers: BTreeMap::new(),
             compiled_names: Vec::new(),
             compiled_name_unreadable: false,
-            module_suffix: Maybe::No,
             uncertain: false,
         };
         for list in lists {
@@ -1419,24 +1454,6 @@ impl FileWalk<'_> {
                             Arg::None => {}
                             Arg::LongIdent(_) | Arg::Other => marks.compiled_name_unreadable = true,
                         },
-                        Marker::CompilationRepresentation => {
-                            let suffix = match &read.arg {
-                                Arg::None | Arg::Literal(_) => Maybe::No,
-                                // `CompilationRepresentationFlags.ModuleSuffix`,
-                                // or an alias of it: a flag named anything
-                                // else is no suffix.
-                                Arg::LongIdent(names) => {
-                                    if names.last().is_some_and(|n| n == "ModuleSuffix") {
-                                        maybe
-                                    } else {
-                                        Maybe::No
-                                    }
-                                }
-                                // `A ||| B`, a value bound elsewhere.
-                                Arg::Other => Maybe::Possibly,
-                            };
-                            marks.module_suffix = marks.module_suffix.or(suffix);
-                        }
                         Marker::AutoOpen | Marker::Measure | Marker::TypeProviderAssembly => {}
                     }
                 }
@@ -1447,7 +1464,6 @@ impl FileWalk<'_> {
 
     /// The declaration list `decls` in `scope`.
     fn decls(&mut self, scope: &Scope, decls: &Decls, is_rec: bool) -> Result<(), ExistenceUnread> {
-        let type_names = type_names(decls, self.routes);
         match decls {
             Decls::Impl(ds) => {
                 for d in ds {
@@ -1461,7 +1477,6 @@ impl FileWalk<'_> {
                                 &m.attributes().collect::<Vec<_>>(),
                                 &inner,
                                 m.is_rec() || is_rec,
-                                &type_names,
                             )?;
                         }
                         ModuleDecl::Types(t) => {
@@ -1494,7 +1509,6 @@ impl FileWalk<'_> {
                                 &m.attributes().collect::<Vec<_>>(),
                                 &inner,
                                 m.is_rec() || is_rec,
-                                &type_names,
                             )?;
                         }
                         SigDecl::Types(t) => {
@@ -1514,8 +1528,7 @@ impl FileWalk<'_> {
         Ok(())
     }
 
-    /// `module M = …` in a declaration list whose types are `type_names`.
-    #[allow(clippy::too_many_arguments)]
+    /// `module M = …` in a declaration list.
     fn nested_module(
         &mut self,
         scope: &Scope,
@@ -1524,7 +1537,6 @@ impl FileWalk<'_> {
         attrs: &[AttributeList],
         decls: &Decls,
         is_rec: bool,
-        type_names: &BTreeMap<String, Maybe>,
     ) -> Result<(), ExistenceUnread> {
         if !consumed(
             node,
@@ -1563,12 +1575,12 @@ impl FileWalk<'_> {
         } else {
             Form::EmptyNestedModule
         });
-        let beside_type = type_names.get(name).copied().unwrap_or(Maybe::No);
-        self.module(scope, name, attrs, decls, is_rec, beside_type)
+        self.module(scope, name, attrs, decls, is_rec)
     }
 
-    /// A module entity named `name` (`beside_type`: whether a type of its
-    /// name in its own list may suffix it), and its contents.
+    /// A module entity named `name`, and its contents, under each reading of
+    /// its name: as written, and, for a name ending in `Module`, with the
+    /// suffix FCS may add (see the module docs).
     fn module(
         &mut self,
         scope: &Scope,
@@ -1576,23 +1588,19 @@ impl FileWalk<'_> {
         attrs: &[AttributeList],
         decls: &Decls,
         is_rec: bool,
-        beside_type: Maybe,
     ) -> Result<(), ExistenceUnread> {
         let marks = self.marks(attrs)?;
-        // Canonical spelling strips one `Module`, so the suffix moves a fact
-        // only on a name already ending in it.
-        let logical = if name.len() > "Module".len() && name.ends_with("Module") {
-            match marks.module_suffix.or(beside_type) {
-                Maybe::Yes => format!("{name}Module"),
-                Maybe::No => name.to_owned(),
-                Maybe::Possibly => return Err(ExistenceUnread::ModuleSuffix(self.index)),
-            }
-        } else {
-            name.to_owned()
-        };
-        self.decls(&scope.inner(&logical), decls, is_rec)?;
-        // `[<CompiledName>]` does not rename a module.
-        self.entity(scope, &logical, &[PickledEntityKind::Module], &marks, false)
+        let mut readings = vec![name.to_owned()];
+        if suffixable(name) {
+            self.out.approximations.insert(Approximation::ModuleSuffix);
+            readings.push(format!("{name}Module"));
+        }
+        for logical in &readings {
+            self.decls(&scope.inner(logical), decls, is_rec)?;
+            // `[<CompiledName>]` does not rename a module.
+            self.entity(scope, logical, &[PickledEntityKind::Module], &marks, false)?;
+        }
+        Ok(())
     }
 
     /// Emit an entity's rows: one per kind and compiled-name reading. Its
@@ -1797,70 +1805,6 @@ impl FileWalk<'_> {
         let marks = self.marks(&attrs)?;
         self.entity(scope, &name, &[PickledEntityKind::Exception], &marks, false)
     }
-}
-
-/// The type names of a declaration list that suffix a module of the same
-/// name (`TypeNamesInNonMutRecDecls`, `TypeNamesInMutRecDecls`,
-/// `TypeNamesInNonMutRecSigDecls`, `CheckDeclarations.fs:2773-2809`): every
-/// type that is no augmentation, in an implementation only when each of its
-/// type parameters is a unit of measure (one with an attribute may be), in a
-/// signature only with none.
-fn type_names(decls: &Decls, routes: &MarkerRoutes) -> BTreeMap<String, Maybe> {
-    let mut names: BTreeMap<String, Maybe> = BTreeMap::new();
-    let mut add = |defn: TypeDefn, signature: bool| {
-        if is_augmentation(&defn) {
-            return;
-        }
-        let Some(name) = defn.long_id().and_then(|li| li.idents().last()) else {
-            return;
-        };
-        let typars: Vec<_> = defn
-            .typar_decls()
-            .map(|d| d.typars().collect())
-            .unwrap_or_default();
-        let counts = if typars.is_empty() {
-            Maybe::Yes
-        } else if signature {
-            Maybe::No
-        } else {
-            // Each must be `[<Measure>]`.
-            typars
-                .iter()
-                .map(|t| {
-                    t.attributes()
-                        .flat_map(|l| l.attributes().collect::<Vec<_>>())
-                        .filter_map(|a| a.type_name().map(|li| names_of(&li)))
-                        .map(|n| routes.may_be(&n, Marker::Measure))
-                        .fold(Maybe::No, Maybe::or)
-                })
-                .fold(Maybe::Yes, |all, t| match (all, t) {
-                    (Maybe::No, _) | (_, Maybe::No) => Maybe::No,
-                    (Maybe::Yes, Maybe::Yes) => Maybe::Yes,
-                    _ => Maybe::Possibly,
-                })
-        };
-        let slot = names
-            .entry(id_text(&name).into_owned())
-            .or_insert(Maybe::No);
-        *slot = slot.or(counts);
-    };
-    match decls {
-        Decls::Impl(ds) => {
-            for d in ds {
-                if let ModuleDecl::Types(t) = d {
-                    t.defns().for_each(|defn| add(defn, false));
-                }
-            }
-        }
-        Decls::Sig(ds) => {
-            for d in ds {
-                if let SigDecl::Types(t) = d {
-                    t.defns().for_each(|defn| add(defn, true));
-                }
-            }
-        }
-    }
-    names
 }
 
 fn is_augmentation(defn: &TypeDefn) -> bool {

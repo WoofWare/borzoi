@@ -61,7 +61,8 @@
 //! (`Kind/Relation/Placement/open=Shape`) contains it.
 
 use crate::common::ext_scope::{
-    Call, CallOutcome, PRODUCER, check, check_referenced, declared_by_producer,
+    Call, CallOutcome, PRODUCER, an_extension_through_the_producer, check, check_referenced,
+    declared_by_producer,
 };
 use borzoi_oracle_harness::par_map::par_map;
 use borzoi_sema::{GateInput, Incomplete, NamesUnknowable};
@@ -713,6 +714,20 @@ const FCS_BINDS_KINDS: &[Kind] = &[
     Kind::ExtAttrOnAbbrev,
     Kind::AutoOpenOnAbbrev,
 ];
+/// The kinds FCS binds an extension for when a project reference read from
+/// source declares it (a referenced placement): pinned as
+/// [`FCS_BINDS_KINDS`] is, so a referenced cell that stops discriminating
+/// fails.
+const FCS_BINDS_REFERENCED_KINDS: &[Kind] = &[
+    Kind::FsMethod,
+    Kind::CsStyle,
+    Kind::CsNoTypeAttr,
+    Kind::CsAbbrevAttr,
+    Kind::CsAliasEarlierFile,
+    Kind::CompiledNameTo,
+    Kind::ExtAttrOnAbbrev,
+    Kind::AutoOpenOnAbbrev,
+];
 const FCS_BINDS_OPENS: &[OpenShape] = &[
     OpenShape::NamespaceWithExtension,
     OpenShape::FixtureModule,
@@ -1002,19 +1017,28 @@ fn extension_scope_grid() {
     let outcomes = par_map(cells.len(), |i| {
         let checked = if cells[i].placement.referenced() {
             let (producer, consumer) = referenced_sources(cells[i]);
-            check_referenced(&producer, &consumer, &CALLS, &declared_by_producer)
+            check_referenced(
+                &producer,
+                &consumer,
+                &CALLS,
+                &an_extension_through_the_producer,
+            )
         } else {
             check(&sources(cells[i]), &CALLS)
         };
         grade(cells[i], &checked.unsound, &checked.calls)
     });
     let mut binds_kinds: Vec<String> = Vec::new();
+    let mut binds_referenced: Vec<String> = Vec::new();
     let mut binds_opens: Vec<String> = Vec::new();
     let mut report = String::new();
     let mut failed = 0usize;
     for (cell, o) in cells.iter().zip(&outcomes) {
         if o.fcs_bound.iter().any(|b| *b) {
             let k = format!("{:?}", cell.kind);
+            if cell.placement.referenced() && !binds_referenced.contains(&k) {
+                binds_referenced.push(k.clone());
+            }
             if cell.open == OpenShape::None && !binds_kinds.contains(&k) {
                 binds_kinds.push(k);
             }
@@ -1032,6 +1056,7 @@ fn extension_scope_grid() {
         }
     }
     binds_kinds.sort();
+    binds_referenced.sort();
     binds_opens.sort();
     eprintln!(
         "extension-scope grid: {} cells, {failed} failing; FCS binds an extension for kinds \
@@ -1055,6 +1080,15 @@ fn extension_scope_grid() {
         assert_eq!(
             binds_opens, pinned,
             "the open shapes FCS binds an extension through moved"
+        );
+        let mut pinned: Vec<String> = FCS_BINDS_REFERENCED_KINDS
+            .iter()
+            .map(|k| format!("{k:?}"))
+            .collect();
+        pinned.sort();
+        assert_eq!(
+            binds_referenced, pinned,
+            "the kinds FCS binds an extension for through a referenced project moved"
         );
     }
 }

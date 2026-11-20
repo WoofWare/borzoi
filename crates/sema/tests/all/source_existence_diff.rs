@@ -43,7 +43,7 @@ use borzoi_cst::syntax::{AstNode, ImplFile, SigFile};
 use borzoi_oracle_harness::assembly_entities::{ExtensionStyle, FcsExtensionMember};
 use borzoi_oracle_harness::manifest::Manifest;
 use borzoi_oracle_harness::project_graph::{
-    CompileResponse, FixtureFile, FixtureProject, PlainName, ProjectGraphFixture, ReferenceSet,
+    CompileResponse, FixtureFile, FixtureProject, PlainName, ProjectGraphFixture,
     ReferencedResponse, Target, framework_references, parse_response,
 };
 use borzoi_sema::test_support::{ExistenceFacts, existence_facts};
@@ -287,14 +287,7 @@ pub fn fcs(cell: &Cell) -> Fcs {
         &BTreeMap::new(),
     );
     let line = graph
-        .referenced_line(
-            &plain(PRODUCER),
-            if cell.refs.is_empty() {
-                ReferenceSet::Framework
-            } else {
-                ReferenceSet::Other
-            },
-        )
+        .referenced_line(&plain(PRODUCER))
         .expect("the consumer references the producer");
     let response: ReferencedResponse = match request(&line) {
         Ok(r) => r,
@@ -518,6 +511,13 @@ pub fn fcs(cell: &Cell) -> Fcs {
             auto_opens: assembly.assembly_auto_opens().expect("auto-opens"),
         }
         .sorted();
+        // The assembly-level auto-opens are read apart from the pickle, so
+        // they are held to each other even where neither pickle decodes.
+        assert_eq!(
+            dll_rows.auto_opens, memory.auto_opens,
+            "{}: D1: the compiled DLL's assembly auto-opens and the in-memory signature's differ",
+            cell.name
+        );
         assert!(
             decode_error.is_some() || dll_rows == memory,
             "{}: D1 in rows: the compiled DLL and the in-memory signature differ\n  DLL: {dll_rows:#?}\n  memory: {memory:#?}",
@@ -1000,7 +1000,7 @@ fn the_referenced_op_refuses_a_producer_checked_against_other_references() {
     )
     .expect("a valid graph request");
     let line = request
-        .referenced_line(&plain("Producer"), ReferenceSet::Other)
+        .referenced_line(&plain("Producer"))
         .expect("the consumer references the producer");
     let answer = request_referenced(&line);
     assert!(

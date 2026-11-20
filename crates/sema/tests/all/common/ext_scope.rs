@@ -491,3 +491,16 @@ pub fn check_referenced(
 pub fn declared_by_producer(binding: &serde_json::Value) -> bool {
     binding["Assembly"].as_str() == Some(PRODUCER)
 }
+
+/// Whether a binding is an extension a scope-grid cell can reach through
+/// its producer: a member the producer declares, or one of the
+/// extension-universe fixture's, which the producer's abbreviation of a
+/// fixture class (`[<Extension>] type A = ExtUniverse.Cs.CsExts`) brings in.
+/// The grid's receivers are the BCL's, so a binding into the fixture is no
+/// intrinsic.
+pub fn an_extension_through_the_producer(binding: &serde_json::Value) -> bool {
+    matches!(
+        binding["Assembly"].as_str(),
+        Some(a) if a == PRODUCER || a == "SemaExtUniverseFixture"
+    )
+}

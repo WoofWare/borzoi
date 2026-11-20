@@ -239,19 +239,9 @@ fn witness(channel: Channel) -> Observed {
                     .any(|row| row.logical_name == "Alias")
             },
         ),
-        // Beside a type of its name, `FooModule` is `FooModuleModule`.
+        // `FooModule` may be `FooModuleModule`: both readings.
         Channel::ModuleSuffix => observe(
-            one("namespace N\ntype FooModule = int\nmodule FooModule =\n    let x = 1\n"),
-            |r| has_entity(r, "FooModuleModule", "FooModuleModule", K::Module),
-        ),
-        Channel::UncertainModuleSuffix => observe(
-            read_with(
-                &[(
-                    "Lib.fs",
-                    "namespace N\n[<CompilationRepresentation(CompilationRepresentationFlags.ModuleSuffix)>]\nmodule FooModule =\n    let x = 1\n",
-                )],
-                Some(MarkerRoutes::Unknown),
-            ),
+            one("namespace N\nmodule FooModule =\n    let x = 1\n"),
             |_| true,
         ),
         Channel::TypeDefinition => observe(
@@ -397,12 +387,14 @@ fn every_decline_and_approximation_is_a_channel() {
         Approximation::SignaturePair,
         Approximation::UncertainAttribute,
         Approximation::AbbreviationOrUnion,
+        Approximation::ModuleSuffix,
     ] {
         // An exhaustive match: a new approximation must be listed here.
         match a {
             Approximation::SignaturePair
             | Approximation::UncertainAttribute
-            | Approximation::AbbreviationOrUnion => {}
+            | Approximation::AbbreviationOrUnion
+            | Approximation::ModuleSuffix => {}
         }
         assert!(approximations.contains(&a), "{a:?} is no channel's");
     }
@@ -434,10 +426,6 @@ fn every_decline_and_approximation_is_a_channel() {
             ExistenceUnread::AnonymousModuleName(0),
             Channel::AnonymousModuleName,
         ),
-        (
-            ExistenceUnread::ModuleSuffix(0),
-            Channel::UncertainModuleSuffix,
-        ),
         (ExistenceUnread::TooManyReadings, Channel::InputBound),
         (
             ExistenceUnread::Unreadable(0, Leaf::Attribute),
@@ -455,7 +443,6 @@ fn every_decline_and_approximation_is_a_channel() {
             | ExistenceUnread::UnreadableAutoOpen(_)
             | ExistenceUnread::UnreadableCompiledName(_)
             | ExistenceUnread::AnonymousModuleName(_)
-            | ExistenceUnread::ModuleSuffix(_)
             | ExistenceUnread::TooManyReadings
             | ExistenceUnread::Unreadable(..) => {}
         }
@@ -596,63 +583,75 @@ fn a_named_target_may_be_a_provider_only_where_a_reference_may_be_one() {
     assert!(matches!(r, SourceExistence::Read(_)), "{r:?}");
 }
 
-/// The `Module` suffix on a name ending in `Module`: decided by the
-/// attribute and by a type of the module's name in its own list, read
-/// exactly where both are certain, declined where one is not. A name not
-/// ending in `Module` is read either way, since canonical spelling strips
-/// the suffix.
+/// A module whose name ends in `Module` has both readings, the written
+/// name and the suffixed one FCS may give it, whatever its attributes and
+/// neighbours, its contents under each; a module whose name does not end in
+/// `Module` has one, since canonical spelling strips the suffix. A path
+/// holding two such modules declines, so nothing is walked more than twice.
 #[test]
-fn the_module_suffix_is_decided_or_declined() {
+fn a_module_ending_in_module_has_both_readings() {
     use PickledEntityKind as K;
     let attr = "[<CompilationRepresentation(CompilationRepresentationFlags.ModuleSuffix)>]";
-    let certified = |src: &str| read(&[("Lib.fs", src)]);
-    let unknown = |src: &str| read_with(&[("Lib.fs", src)], Some(MarkerRoutes::Unknown));
-    // The attribute, certified.
-    let r = certified(&format!(
-        "namespace N\n{attr}\nmodule FooModule =\n    let x = 1\n"
-    ));
-    assert!(
-        has_entity(&r, "FooModuleModule", "FooModuleModule", K::Module),
-        "{r:?}"
-    );
-    assert!(
-        !has_entity(&r, "FooModule", "FooModule", K::Module),
-        "{r:?}"
-    );
-    // No attribute, no type: the name as written.
-    let r = certified("namespace N\nmodule FooModule =\n    let x = 1\n");
-    assert!(has_entity(&r, "FooModule", "FooModule", K::Module), "{r:?}");
-    // A type of its name in its list, before or after.
-    for src in [
-        "namespace N\ntype FooModule = int\nmodule FooModule =\n    let x = 1\n",
-        "namespace N\nmodule FooModule =\n    let x = 1\ntype FooModule = int\n",
+    for (routes, src) in [
+        (
+            None,
+            format!("namespace N\n{attr}\nmodule FooModule =\n    type T = int\n"),
+        ),
+        (
+            None,
+            "namespace N\nmodule FooModule =\n    type T = int\n".to_owned(),
+        ),
+        (
+            None,
+            "namespace N\ntype FooModule = int\nmodule FooModule =\n    type T = int\n".to_owned(),
+        ),
+        (
+            Some(MarkerRoutes::Unknown),
+            format!("namespace N\n{attr}\nmodule FooModule =\n    type T = int\n"),
+        ),
+        (None, "module N.FooModule\ntype T = int\n".to_owned()),
     ] {
-        let r = certified(src);
+        let r = read_with(&[("Lib.fs", &src)], routes);
+        let SourceExistence::Read(surface) = &r else {
+            panic!("{src}: {r:?}")
+        };
         assert!(
-            has_entity(&r, "FooModuleModule", "FooModuleModule", K::Module),
-            "{src}: {r:?}"
+            surface
+                .approximations
+                .contains(&Approximation::ModuleSuffix),
+            "{src}"
         );
+        for reading in ["FooModule", "FooModuleModule"] {
+            assert!(
+                has_entity(&r, reading, reading, K::Module),
+                "{src}: {reading}"
+            );
+            assert!(
+                rows(&r, reading).iter().any(|row| row.logical_name == "T"
+                    && row.enclosing.last().map(String::as_str) == Some(reading)),
+                "{src}: `T` under {reading}"
+            );
+        }
     }
-    // A generic type of its name does not count in an implementation.
-    let r =
-        certified("namespace N\ntype FooModule<'a> = 'a list\nmodule FooModule =\n    let x = 1\n");
-    assert!(has_entity(&r, "FooModule", "FooModule", K::Module), "{r:?}");
-    // An uncertain attribute declines on a `…Module` name, and reads any
-    // other name.
-    let r = unknown(&format!(
-        "namespace N\n{attr}\nmodule FooModule =\n    let x = 1\n"
-    ));
+    let r = read(&[("Lib.fs", "namespace N\nmodule Foo =\n    type T = int\n")]);
+    let SourceExistence::Read(surface) = &r else {
+        panic!("{r:?}")
+    };
     assert!(
-        matches!(r, SourceExistence::Unread(ExistenceUnread::ModuleSuffix(0))),
+        !surface
+            .approximations
+            .contains(&Approximation::ModuleSuffix)
+    );
+    assert!(!has_entity(&r, "FooModule", "FooModule", K::Module));
+    // Two on one path.
+    let r = read(&[(
+        "Lib.fs",
+        "namespace N\nmodule OuterModule =\n    module InnerModule =\n        type T = int\n",
+    )]);
+    assert!(
+        matches!(r, SourceExistence::Unread(ExistenceUnread::TooManyReadings)),
         "{r:?}"
     );
-    let r = unknown(&format!(
-        "namespace N\n{attr}\nmodule Foo =\n    let x = 1\n"
-    ));
-    assert!(matches!(r, SourceExistence::Read(_)), "{r:?}");
-    // A top-level module takes the suffix from the attribute alone.
-    let r = certified("module N.FooModule\ntype FooModule = int\n");
-    assert!(has_entity(&r, "FooModule", "FooModule", K::Module), "{r:?}");
 }
 
 /// Past each bound of the input the walk declines before it walks; at the
@@ -700,6 +699,28 @@ fn the_input_bound_declines_past_each_limit() {
         SourceExistence::Read(_)
     ));
     assert!(bound(&many(MAX_DECLARATIONS)), "past the declarations");
+    // A literal that may become a compiled name, or an assembly auto-open
+    // path, is a name.
+    for src in [
+        format!(
+            "namespace N\n[<CompiledName(\"{}\")>]\ntype T = int\n",
+            "R".repeat(MAX_NAME_BYTES + 1)
+        ),
+        format!(
+            "namespace N\n[<assembly: AutoOpen(\"{}\")>]\ndo ()\n",
+            "R".repeat(MAX_NAME_BYTES + 1)
+        ),
+    ] {
+        let r = read(&[("Lib.fs", &src)]);
+        assert!(bound(&r), "a long literal: {r:?}");
+    }
+    // A headerless file's implicit module path, from its name, is a path.
+    let name: String = (0..=MAX_DEPTH)
+        .map(|k| format!("P{k}."))
+        .collect::<String>()
+        + "fs";
+    let r = read(&[(name.as_str(), "let x = 1\n")]);
+    assert!(bound(&r), "a deep implicit module path: {r:?}");
 }
 
 /// A child no classifier names declines with its leaf: an attribute target

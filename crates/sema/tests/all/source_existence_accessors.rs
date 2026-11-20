@@ -51,18 +51,6 @@ const UNREAD: &[(&str, &str)] = &[
         "members declare no entity; extension members are A's ExtensionNames'",
     ),
     (
-        "TyparDecl::ident",
-        "a type parameter's name moves no path: canonical spelling erases arity",
-    ),
-    (
-        "TyparDecl::intersection_constraints",
-        "a constraint declares no entity",
-    ),
-    (
-        "TyparDecl::is_head_type",
-        "where a type parameter is written moves no path",
-    ),
-    (
         "TyparDecls::constraint_clause",
         "a constraint declares no entity",
     ),
