@@ -567,9 +567,9 @@ fn wide_undecided_choose(width: usize) -> String {
     format!("<Choose>{whens}</Choose>")
 }
 
-/// The `<When>` gates `rejection::arm_is_dead` decides over `body`, on a 2 MiB
-/// stack.
-fn arm_gate_decisions(body: String) -> u64 {
+/// The work the walk does over `body` ([`borzoi_msbuild::test_support::WalkCosts`]),
+/// on a 2 MiB stack.
+fn walk_costs(body: String) -> borzoi_msbuild::test_support::WalkCosts {
     on_small_stack("parse_fsproj", move || {
         let source = format!("<Project>{body}</Project>");
         let (_, costs) = borzoi_msbuild::test_support::count_walk_costs(|| {
@@ -581,7 +581,7 @@ fn arm_gate_decisions(body: String) -> u64 {
             )
             .expect("well-formed XML evaluates")
         });
-        costs.arm_gate_decisions
+        costs
     })
 }
 
@@ -593,7 +593,7 @@ fn arm_gate_decisions(body: String) -> u64 {
 #[test]
 fn a_wide_undecided_choose_decides_each_when_once() {
     for width in [1, 2, 500, 2_000] {
-        let decisions = arm_gate_decisions(wide_undecided_choose(width));
+        let decisions = walk_costs(wide_undecided_choose(width)).arm_gate_decisions;
         assert_eq!(
             decisions, width as u64,
             "{width} arms took {decisions} decisions"
@@ -636,25 +636,20 @@ fn wide_parameter_group(width: usize) -> String {
     )
 }
 
-/// A `<UsingTask>`'s parameters are registered, and their names checked for a
-/// case-folded collision, in one pass: four times the parameters cost about
-/// four times the time, where checking each against every earlier one costs
-/// sixteen. Timed as a ratio, as [`wide_unheld_reads_are_struck_in_one_pass`]
-/// is.
+/// A `<UsingTask>`'s parameter names are checked for a repeat, as the loader
+/// keys them and as the registration folds them, by sorting them
+/// (`loader::first_repeat`): `n` parameters cost `O(n log n)` comparisons,
+/// where checking each against every earlier one costs `n(n - 1) / 2`.
+/// Counted, so no load on the machine moves it.
 #[test]
 fn a_wide_parameter_group_is_registered_in_one_pass() {
-    let time = |width: usize| {
-        let body = wide_parameter_group(width);
-        let start = std::time::Instant::now();
-        evaluate_project(body);
-        start.elapsed()
-    };
-    time(1_000);
-    let narrow = time(5_000);
-    let wide = time(20_000);
-    let ratio = wide.as_secs_f64() / narrow.as_secs_f64().max(1e-6);
-    assert!(
-        ratio < 10.0,
-        "4× the parameters took {ratio:.1}× the time ({narrow:?} → {wide:?})"
-    );
+    for width in [500_u64, 2_000] {
+        let comparisons = walk_costs(wide_parameter_group(width as usize)).name_comparisons;
+        let log = u64::from(width.ilog2()) + 1;
+        assert!(comparisons > 0, "{width} parameters made no comparison");
+        assert!(
+            comparisons <= 4 * width * log,
+            "{width} parameters took {comparisons} comparisons"
+        );
+    }
 }
