@@ -3,7 +3,7 @@
 #   BORZOI_UPDATE_MANIFESTS=1 BORZOI_PROJECT_LIST=… nix develop -c cargo test -p borzoi-corpus-diff --test project_resolution source_existence_corpus:: -- --ignored
 TypeEquality/TypeEquality/TypeEquality.fsproj	unknown: covers surplus(prefix 0, entity 0, lends 2, lender 0, auto-open 0, extension 0) [SignaturePair,UncertainAttribute]; by spelling: exact [SignaturePair]
 WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj	unknown: unread TypeProvider(0); by spelling: exact []
-WoofWare.Incremental/WoofWare.Incremental/WoofWare.Incremental.fsproj	unknown: unread TypeProvider(0); by spelling: covers surplus(prefix 7, entity 7, lends 0, lender 0, auto-open 0, extension 1) [SignaturePair]
+WoofWare.Incremental/WoofWare.Incremental/WoofWare.Incremental.fsproj	unknown: unread TypeProvider(0); by spelling: unread OutsideDomain(26, AugmentationHead)
 WoofWare.LiangHyphenation/WoofWare.LiangHyphenation/WoofWare.LiangHyphenation.fsproj	unknown: covers surplus(prefix 0, entity 0, lends 14, lender 0, auto-open 0, extension 0) [UncertainAttribute]; by spelling: exact []
 WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj	unknown: covers surplus(prefix 0, entity 0, lends 57, lender 0, auto-open 0, extension 16) [UncertainAttribute,BindingPattern]; by spelling: exact []
 WoofWare.WeakHashTable/WoofWare.WeakHashTable/WoofWare.WeakHashTable.fsproj	unknown: covers surplus(prefix 0, entity 0, lends 3, lender 0, auto-open 0, extension 0) [UncertainAttribute]; by spelling: exact []
