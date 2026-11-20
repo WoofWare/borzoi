@@ -792,6 +792,30 @@ pub fn cells() -> Vec<Cell> {
         "namespace RefShadow\ntype AutoOpenAttribute() =\n    inherit System.Attribute()\n",
         Certificate::Override(vec![("AutoOpen", vec![])]),
     ));
+    // A's own type at `Microsoft.FSharp.Core.AutoOpenAttribute`: FCS's
+    // in-memory list takes an assembly attribute for `AutoOpen` by its
+    // owner's identity, its reader of a DLL by the owner's name.
+    cells.push(Cell::new(
+        "assembly_auto_open_local_namesake",
+        &[
+            (
+                "Attr.fs",
+                "namespace Microsoft.FSharp.Core
+type AutoOpenAttribute(path: string) =
+    inherit System.Attribute()
+    member _.Path = path
+",
+            ),
+            (
+                "Lib.fs",
+                "namespace N
+[<assembly: Microsoft.FSharp.Core.AutoOpen(\"N\")>]
+do ()
+type T = { X: int }
+",
+            ),
+        ],
+    ));
     cells.extend(local_marker_aliases());
     cells
 }

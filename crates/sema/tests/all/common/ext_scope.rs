@@ -17,9 +17,9 @@ use borzoi_oracle_harness::project_graph::{
     framework_references, parse_response,
 };
 use borzoi_sema::{
-    CompileItem, GateInput, Incomplete, Producer, ProjectFile, ProviderReferences, SourceFile,
-    SyntaxRecovery, certify_by_spelling, infer_project, qualified_names, resolve_project_files,
-    source_existence,
+    BuiltOutput, CompileItem, GateInput, Incomplete, Producer, ProjectFile, ProviderReferences,
+    SourceFile, SyntaxRecovery, certify_by_spelling, infer_project, qualified_names,
+    resolve_project_files, source_existence,
 };
 
 /// A probed call of the last file: the binder of the binding it is the body
@@ -35,7 +35,10 @@ pub struct Call {
 pub struct CallOutcome {
     /// The type inference committed for the call's node, rendered.
     pub ours: Option<String>,
-    /// The type FCS reports for it.
+    /// The type FCS reports for it. Under [`check_referenced`]:
+    /// `System.Int64` where FCS binds the extension, the binding's assembly
+    /// where it binds another member, and `None` where it reports no use of
+    /// the method at the call.
     pub fcs: Option<String>,
     /// The census of the call's binding.
     pub census: Vec<Incomplete>,
@@ -287,6 +290,9 @@ pub fn check_files(
 /// from source.
 pub const PRODUCER: &str = "ExtProducer";
 
+/// The assembly name of [`check_referenced`]'s consumer.
+pub const CONSUMER: &str = "ExtConsumer";
+
 /// `sources` (Compile order; implementation files only) as one project's
 /// files.
 fn project_files(sources: &[(&str, String)]) -> Vec<ProjectFile> {
@@ -348,6 +354,7 @@ pub fn check_referenced(
         items: &items,
         routes: &routes,
         providers: ProviderReferences::None,
+        output: BuiltOutput::Absent,
     });
     let base = ext_universe_env();
     let a_names = resolve_project_files(&a_files, base).extension_names();
@@ -368,7 +375,7 @@ pub fn check_referenced(
             .collect()
     };
     let a_name = PlainName::new(PRODUCER).expect("a plain name");
-    let b_name = PlainName::new("ExtConsumer").expect("a plain name");
+    let b_name = PlainName::new(CONSUMER).expect("a plain name");
     let a = FixtureProject::new(a_name.clone(), fixture_files(producer));
     let mut b = FixtureProject::new(b_name.clone(), fixture_files(consumer));
     b.project_refs = vec![a_name];
@@ -450,22 +457,34 @@ pub fn check_referenced(
             u["Range"]["End"]["Line"].as_u64() == Some(line)
                 && u["Range"]["End"]["Col"].as_u64() == Some(col)
         });
-        let assembly = binding.and_then(|u| u["Assembly"].as_str());
-        let bound_to_extension = binding.is_some_and(|u| extension(u));
         let ours = file.type_at(range).map(|t| t.render(&env));
-        if bound_to_extension && ours.is_some() {
-            unsound.push(format!(
-                "`{}`: committed {ours:?}, where FCS binds the extension",
-                call.text
-            ));
-        }
+        // What FCS bound the call to: the extension, another member (named
+        // by its assembly), or nothing it reports. A commit is graded only
+        // against a binding: one FCS reports no use for is no intrinsic.
+        let fcs = match binding {
+            None => {
+                if ours.is_some() {
+                    unsound.push(format!(
+                        "`{}`: committed {ours:?}, where FCS reports no use of the method",
+                        call.text
+                    ));
+                }
+                None
+            }
+            Some(u) if extension(u) => {
+                if ours.is_some() {
+                    unsound.push(format!(
+                        "`{}`: committed {ours:?}, where FCS binds the extension",
+                        call.text
+                    ));
+                }
+                Some("System.Int64".to_owned())
+            }
+            Some(u) => Some(u["Assembly"].as_str().unwrap_or("<no assembly>").to_owned()),
+        };
         outcomes.push(CallOutcome {
             ours,
-            fcs: if bound_to_extension {
-                Some("System.Int64".to_owned())
-            } else {
-                assembly.map(str::to_owned)
-            },
+            fcs,
             census: tail[j].clone(),
             gate: borzoi_sema::test_support::extension_gate_decline(
                 resolved.file(last),
@@ -492,15 +511,16 @@ pub fn declared_by_producer(binding: &serde_json::Value) -> bool {
     binding["Assembly"].as_str() == Some(PRODUCER)
 }
 
-/// Whether a binding is an extension a scope-grid cell can reach through
-/// its producer: a member the producer declares, or one of the
+/// Whether a binding is an extension a scope-grid cell declares with a
+/// producer in play: a member the producer declares; one of the
 /// extension-universe fixture's, which the producer's abbreviation of a
-/// fixture class (`[<Extension>] type A = ExtUniverse.Cs.CsExts`) brings in.
-/// The grid's receivers are the BCL's, so a binding into the fixture is no
+/// fixture class (`[<Extension>] type A = ExtUniverse.Cs.CsExts`) brings in;
+/// or the consumer's own, marked through what the producer declares. The
+/// grid's receivers are the BCL's, so a binding into any of the three is no
 /// intrinsic.
 pub fn an_extension_through_the_producer(binding: &serde_json::Value) -> bool {
     matches!(
         binding["Assembly"].as_str(),
-        Some(a) if a == PRODUCER || a == "SemaExtUniverseFixture"
+        Some(a) if a == PRODUCER || a == CONSUMER || a == "SemaExtUniverseFixture"
     )
 }

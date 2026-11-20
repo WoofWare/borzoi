@@ -71,6 +71,7 @@ fn read_full(
         items: &items,
         routes: &routes,
         providers,
+        output: BuiltOutput::Absent,
     })
 }
 
@@ -142,11 +143,71 @@ fn witness(channel: Channel) -> Observed {
                     items: &items,
                     routes: &routes,
                     providers: ProviderReferences::None,
+                    output: BuiltOutput::Absent,
                 }),
                 |_| true,
             )
         }
         Channel::FoldRefused => observe(source_existence(Producer::FoldRefused("why")), |_| true),
+        // A stale build's module and auto-open, which the source lacks, are
+        // in the surface beside the source's own.
+        Channel::BuiltOutput => {
+            let project = project(&[("A.fs", "module A\nlet x = 1\n")]);
+            let routes = MarkerRoutes::Certified(BTreeMap::new());
+            let items: Vec<CompileItem<'_>> = project.iter().map(CompileItem::Parsed).collect();
+            let stale = PickledEntityRow {
+                namespace: Vec::new(),
+                enclosing: Vec::new(),
+                logical_name: "Stale".to_owned(),
+                compiled_name: "Stale".to_owned(),
+                kind: K::Module,
+                public: true,
+                auto_open: false,
+                extension: false,
+            };
+            let index = ExistenceIndex {
+                il: Vec::new(),
+                pickle: PickleLayer::Read(vec![stale.clone()]),
+                extensions: Vec::new(),
+            };
+            let auto_opens = ["Stale".to_owned()];
+            let r = source_existence(Producer::Evaluated {
+                items: &items,
+                routes: &routes,
+                providers: ProviderReferences::None,
+                output: BuiltOutput::Read {
+                    index: &index,
+                    assembly_auto_opens: &auto_opens,
+                },
+            });
+            let holds = |r: &SourceExistence| match r {
+                SourceExistence::Read(s) => {
+                    matches!(s.index().pickle, PickleLayer::Read(rows)
+                        if rows.contains(&stale) && rows.iter().any(|row| row.logical_name == "A"))
+                        && s.assembly_auto_opens == ["Stale"]
+                }
+                SourceExistence::Unread(_) => false,
+            };
+            if holds(&r) {
+                observe(r, |_| true)
+            } else {
+                Observed::Wrong(format!("{r:?}"))
+            }
+        }
+        Channel::UnreadableBuiltOutput => {
+            let project = project(&[("A.fs", "module A\nlet x = 1\n")]);
+            let routes = MarkerRoutes::Certified(BTreeMap::new());
+            let items: Vec<CompileItem<'_>> = project.iter().map(CompileItem::Parsed).collect();
+            observe(
+                source_existence(Producer::Evaluated {
+                    items: &items,
+                    routes: &routes,
+                    providers: ProviderReferences::None,
+                    output: BuiltOutput::Unreadable,
+                }),
+                |_| true,
+            )
+        }
         Channel::UnservedTfm => {
             observe(source_existence(Producer::UnservedTfm("net8.0")), |_| true)
         }
@@ -163,6 +224,7 @@ fn witness(channel: Channel) -> Observed {
                     items: &items,
                     routes: &routes,
                     providers: ProviderReferences::None,
+                    output: BuiltOutput::Absent,
                 })
             };
             let (a, b) = (read_under(&["A_ONLY"]), read_under(&[]));
@@ -388,13 +450,15 @@ fn every_decline_and_approximation_is_a_channel() {
         Approximation::UncertainAttribute,
         Approximation::AbbreviationOrUnion,
         Approximation::ModuleSuffix,
+        Approximation::BuiltOutput,
     ] {
         // An exhaustive match: a new approximation must be listed here.
         match a {
             Approximation::SignaturePair
             | Approximation::UncertainAttribute
             | Approximation::AbbreviationOrUnion
-            | Approximation::ModuleSuffix => {}
+            | Approximation::ModuleSuffix
+            | Approximation::BuiltOutput => {}
         }
         assert!(approximations.contains(&a), "{a:?} is no channel's");
     }
@@ -431,6 +495,10 @@ fn every_decline_and_approximation_is_a_channel() {
             ExistenceUnread::Unreadable(0, Leaf::Attribute),
             Channel::Unreadable,
         ),
+        (
+            ExistenceUnread::UnreadableOutput,
+            Channel::UnreadableBuiltOutput,
+        ),
     ];
     for (why, channel) in &declines {
         match why {
@@ -444,7 +512,8 @@ fn every_decline_and_approximation_is_a_channel() {
             | ExistenceUnread::UnreadableCompiledName(_)
             | ExistenceUnread::AnonymousModuleName(_)
             | ExistenceUnread::TooManyReadings
-            | ExistenceUnread::Unreadable(..) => {}
+            | ExistenceUnread::Unreadable(..)
+            | ExistenceUnread::UnreadableOutput => {}
         }
         assert_eq!(channel.treatment(), Treatment::Declined, "{why:?}");
         match witness(*channel) {

@@ -83,6 +83,17 @@
 //! to), or nothing at all ([`MarkerRoutes::Unknown`]), in which case every
 //! attribute may denote every marker.
 //!
+//! # A built output
+//!
+//! FCS reads a project reference from source only while it can build the
+//! reference's assembly data; where it cannot (A's check fails), it reads
+//! A's output assembly from disk, as written by whatever build last wrote
+//! it. So the caller states whether that assembly exists
+//! ([`BuiltOutput`]), and supplies its existence index when it does: the
+//! surface is then the union of the source's rows and the assembly's
+//! ([`Approximation::BuiltOutput`]), which holds whichever FCS reads. An
+//! assembly that exists and cannot be read leaves A unread.
+//!
 //! # The input bound
 //!
 //! Before it walks, the walk bounds its input ([`MAX_NAME_BYTES`],
@@ -134,6 +145,7 @@ pub enum Producer<'a> {
         items: &'a [CompileItem<'a>],
         routes: &'a MarkerRoutes,
         providers: ProviderReferences,
+        output: BuiltOutput<'a>,
     },
     /// A's fold is refused (an untrusted Compile set, untrusted defines, an
     /// untrusted language version on a file whose parse it decides).
@@ -141,6 +153,28 @@ pub enum Producer<'a> {
     /// The producer TFM the dependant is paired with is not the one A was
     /// evaluated at.
     UnservedTfm(&'a str),
+}
+
+/// Whether A has a built output assembly FCS may read in place of its
+/// source: the caller's to state, as it states [`MarkerRoutes`]. FCS reads a
+/// project reference from source only while it can build the reference's
+/// assembly data; where it cannot (A's check fails), it falls back to the
+/// output assembly on disk, whose contents are those of whatever build last
+/// wrote it, not of A's source. So the set holds that assembly's rows too.
+#[derive(Debug, Clone, Copy)]
+pub enum BuiltOutput<'a> {
+    /// No output assembly of A exists.
+    Absent,
+    /// One exists, and was read: its existence index, and the arguments of
+    /// its assembly-level `[<AutoOpen("…")>]` attributes. The surface is the
+    /// union of its rows and the source's ([`Approximation::BuiltOutput`]).
+    Read {
+        index: &'a ExistenceIndex,
+        assembly_auto_opens: &'a [String],
+    },
+    /// One exists, and could not be read: A is unread
+    /// ([`ExistenceUnread::UnreadableOutput`]).
+    Unreadable,
 }
 
 /// Whether one of A's references may be a type provider: the caller's to
@@ -266,6 +300,9 @@ pub enum ExistenceUnread {
     /// A node of this leaf the walk cannot classify: a shape outside every
     /// [`Form`], or a child no classifier accounts for.
     Unreadable(usize, Leaf),
+    /// A's built output assembly exists and could not be read
+    /// ([`BuiltOutput::Unreadable`]).
+    UnreadableOutput,
 }
 
 /// A syntax node the walk interprets.
@@ -444,6 +481,9 @@ pub enum Approximation {
     /// (`FooModuleModule`), which canonical spelling does not strip, so both
     /// readings' paths.
     ModuleSuffix,
+    /// A's built output assembly's rows ([`BuiltOutput::Read`]), which FCS
+    /// reads only when it falls back to that assembly.
+    BuiltOutput,
 }
 
 /// What [`source_existence`] read.
@@ -465,16 +505,37 @@ pub struct SourceSurface {
     pub assembly_auto_opens: Vec<String>,
     /// Where the rows may hold more than FCS's.
     pub approximations: BTreeSet<Approximation>,
+    /// A's built output assembly's index ([`BuiltOutput::Read`]), whose
+    /// rows join the source's in [`Self::index`]; its assembly auto-opens
+    /// are already in [`Self::assembly_auto_opens`].
+    pub built: Option<ExistenceIndex>,
 }
 
 impl SourceSurface {
-    /// The rows as an existence index: an empty IL layer, the entity rows,
-    /// and no extension rows.
+    /// The rows as an existence index. From source alone: an empty IL
+    /// layer, the entity rows, and no extension rows. With a built output,
+    /// the union of the two: its IL layer and extension rows, and its pickle
+    /// rows beside the source's (an unreadable pickle leaves the whole
+    /// index unknowable, as it does a DLL's).
     pub fn index(&self) -> ExistenceIndex {
-        ExistenceIndex {
-            il: Vec::new(),
-            pickle: PickleLayer::Read(self.entities.clone()),
-            extensions: Vec::new(),
+        let source = PickleLayer::Read(self.entities.clone());
+        match &self.built {
+            None => ExistenceIndex {
+                il: Vec::new(),
+                pickle: source,
+                extensions: Vec::new(),
+            },
+            Some(built) => ExistenceIndex {
+                il: built.il.clone(),
+                pickle: match &built.pickle {
+                    PickleLayer::Read(rows) => {
+                        PickleLayer::Read(self.entities.iter().chain(rows).cloned().collect())
+                    }
+                    PickleLayer::NotFSharp => source,
+                    PickleLayer::Unreadable(why) => PickleLayer::Unreadable(why.clone()),
+                },
+                extensions: built.extensions.clone(),
+            },
         }
     }
 }
@@ -575,6 +636,10 @@ channels! {
     Unreadable,
     /// An input past the walk's bound.
     InputBound,
+    /// A built output assembly of A FCS may read in place of its source.
+    BuiltOutput,
+    /// A built output assembly of A that exists and cannot be read.
+    UnreadableBuiltOutput,
     /// Extension members, under any attribute and in any shape: A's
     /// `ExtensionNames`, which the gate reads.
     ExtensionMembers,
@@ -600,13 +665,15 @@ impl Channel {
             | Channel::AssemblyAutoOpenUnreadable
             | Channel::TypeProviderAssembly
             | Channel::Unreadable
-            | Channel::InputBound => Treatment::Declined,
+            | Channel::InputBound
+            | Channel::UnreadableBuiltOutput => Treatment::Declined,
             Channel::Defines | Channel::LanguageVersion | Channel::GeneratedItems => {
                 Treatment::Caller
             }
             Channel::SignaturePair => Treatment::Approximated(A::SignaturePair),
             Channel::AbbreviationOrUnion => Treatment::Approximated(A::AbbreviationOrUnion),
             Channel::ModuleSuffix => Treatment::Approximated(A::ModuleSuffix),
+            Channel::BuiltOutput => Treatment::Approximated(A::BuiltOutput),
             Channel::UncertifiedAttribute => Treatment::Approximated(A::UncertainAttribute),
             Channel::ExtensionMembers => Treatment::ExtensionNames,
             Channel::Accessibility | Channel::EntityKind => Treatment::Unconsumed,
@@ -674,13 +741,36 @@ pub(crate) fn read(producer: Producer<'_>) -> (SourceExistence, BTreeSet<Form>) 
             BTreeSet::new(),
         ),
         Producer::Evaluated {
+            output: BuiltOutput::Unreadable,
+            ..
+        } => (
+            SourceExistence::Unread(ExistenceUnread::UnreadableOutput),
+            BTreeSet::new(),
+        ),
+        Producer::Evaluated {
             items,
             routes,
             providers,
+            output,
         } => {
             let mut forms = BTreeSet::new();
             let read = match walk_project(items, routes, providers, &mut forms) {
-                Ok(surface) => SourceExistence::Read(surface),
+                Ok(mut surface) => {
+                    if let BuiltOutput::Read {
+                        index,
+                        assembly_auto_opens,
+                    } = output
+                    {
+                        surface.approximations.insert(Approximation::BuiltOutput);
+                        for path in assembly_auto_opens {
+                            if !surface.assembly_auto_opens.contains(path) {
+                                surface.assembly_auto_opens.push(path.clone());
+                            }
+                        }
+                        surface.built = Some(index.clone());
+                    }
+                    SourceExistence::Read(surface)
+                }
                 Err(why) => SourceExistence::Unread(why),
             };
             (read, forms)
@@ -761,6 +851,7 @@ fn walk_project(
         entities,
         assembly_auto_opens: out.auto_opens,
         approximations: out.approximations,
+        built: None,
     })
 }
 

@@ -126,10 +126,29 @@ enum Kind {
     PlainAbbrev,
     /// `#r "Nowhere.dll"`: an assembly outside the project's references.
     HashReference,
+    /// The producer/consumer split: the calling file declares the C#-style
+    /// member, marked `[<ReflectedDefinition>]`, and a project reference read
+    /// from source declares `ReflectedDefinitionAttribute` as an
+    /// abbreviation of `ExtensionAttribute` in the calling module's
+    /// namespace. The resolver does not see the reference's entities and
+    /// reads FSharp.Core's attribute; FCS strips the abbreviation and reads
+    /// the marker. Referenced placements only.
+    CsProducerAlias,
+    /// The same split through a type, not an abbreviation: the reference
+    /// declares `ExtensionAttribute` at
+    /// `System.Runtime.CompilerServices` (an `[<AutoOpen>]` module of
+    /// `System.Runtime`), which FCS takes for the marker by its path; the
+    /// calling file marks its member `[<Extension>]` with a type of its own
+    /// of that name in scope until it opens `System.Runtime`.
+    CsProducerNamesake,
+    /// The same split through a type at no marker's path: the reference
+    /// declares `ReflectedDefinitionAttribute` as a subclass of
+    /// `System.Attribute`, which is no marker, so FCS binds nothing.
+    CsProducerUnrelatedNamesake,
 }
 
 impl Kind {
-    const ALL: [Kind; 21] = [
+    const ALL: [Kind; 24] = [
         Kind::None,
         Kind::FsMethod,
         Kind::FsProperty,
@@ -151,7 +170,20 @@ impl Kind {
         Kind::AutoOpenOnAbbrev,
         Kind::PlainAbbrev,
         Kind::HashReference,
+        Kind::CsProducerAlias,
+        Kind::CsProducerNamesake,
+        Kind::CsProducerUnrelatedNamesake,
     ];
+
+    /// Whether the marker's meaning comes from a project reference read from
+    /// source while the member is the calling file's
+    /// ([`referenced_sources`]).
+    fn marks_from_producer(self) -> bool {
+        matches!(
+            self,
+            Kind::CsProducerAlias | Kind::CsProducerNamesake | Kind::CsProducerUnrelatedNamesake
+        )
+    }
 
     /// A `type R with` augmentation, which must name a concrete type.
     fn is_augmentation(self) -> bool {
@@ -202,7 +234,7 @@ impl Kind {
     }
 
     fn relations(self) -> &'static [Relation] {
-        if self.relation_blind() {
+        if self.relation_blind() || self.marks_from_producer() {
             &[Relation::Exact]
         } else if self.is_augmentation() {
             &[
@@ -314,6 +346,18 @@ impl Kind {
             ],
             Kind::PlainAbbrev => vec!["type A = ExtUniverse.Cs.CsExts".into()],
             Kind::HashReference => vec!["#r \"Nowhere.dll\"".into()],
+            Kind::CsProducerAlias | Kind::CsProducerUnrelatedNamesake => vec![
+                "[<ReflectedDefinition>]".into(),
+                "type E =".into(),
+                "    [<ReflectedDefinition>]".into(),
+                format!("    static member {n}(x: {r}, i: int) = 0L"),
+            ],
+            Kind::CsProducerNamesake => vec![
+                "[<Extension>]".into(),
+                "type E =".into(),
+                "    [<Extension>]".into(),
+                format!("    static member {n}(x: {r}, i: int) = 0L"),
+            ],
         };
         lines
     }
@@ -338,6 +382,8 @@ impl Kind {
                 | Kind::CsInstanceMember
                 | Kind::DeferredAttrOnStatic
                 | Kind::CompiledNameTo
+                | Kind::CsProducerAlias
+                | Kind::CsProducerNamesake
         )
     }
 
@@ -460,6 +506,7 @@ impl Placement {
         match self {
             Placement::EarlierOpenType => kind.declares_type_e(),
             _ if kind == Kind::None => self == Placement::OwnTop,
+            _ if kind.marks_from_producer() => self.referenced(),
             // The graph oracle refuses a source naming code it does not read.
             Placement::ReferencedOpened | Placement::ReferencedUnopened => {
                 kind != Kind::HashReference
@@ -642,9 +689,13 @@ fn expected(cell: Cell) -> [Option<GateInput>; 5] {
                     .any(|word| word == method)
             })
     };
-    let not_enumerated = cell.placement.opens_unenumerated() || cell.open.not_enumerated();
-    // A source reference's names are its own input, after the project's.
-    let referenced = cell.placement.referenced();
+    // A producer-marked kind's calling file reaches the reference through
+    // its namespace, with no `open` of it.
+    let not_enumerated = (cell.placement.opens_unenumerated() && !cell.kind.marks_from_producer())
+        || cell.open.not_enumerated();
+    // A source reference's names are its own input, after the project's;
+    // a producer-marked kind's member is the calling file's own.
+    let referenced = cell.placement.referenced() && !cell.kind.marks_from_producer();
     METHODS.map(|method| {
         let named = (cell.kind.contributes_instance_name() && method == cell.relation.name())
             || spelled(method);
@@ -727,6 +778,8 @@ const FCS_BINDS_REFERENCED_KINDS: &[Kind] = &[
     Kind::CompiledNameTo,
     Kind::ExtAttrOnAbbrev,
     Kind::AutoOpenOnAbbrev,
+    Kind::CsProducerAlias,
+    Kind::CsProducerNamesake,
 ];
 const FCS_BINDS_OPENS: &[OpenShape] = &[
     OpenShape::NamespaceWithExtension,
@@ -787,6 +840,9 @@ fn indent(lines: &[String], n: usize) -> Vec<String> {
 type Projects = (Vec<(&'static str, String)>, Vec<(&'static str, String)>);
 
 fn referenced_sources(cell: Cell) -> Projects {
+    if cell.kind.marks_from_producer() {
+        return producer_marked_sources(cell);
+    }
     let mut producer = Vec::new();
     if cell.kind == Kind::CsAliasEarlierFile {
         producer.push((
@@ -812,6 +868,60 @@ fn referenced_sources(cell: Cell) -> Projects {
             .map(|c| format!("let {} x = {}", c.binder, c.text)),
     );
     (producer, vec![("Use.fs", u.join("\n") + "\n")])
+}
+
+/// A producer-marked kind's projects: the reference declares what the
+/// marker's name means, and the calling file declares the member. Opened,
+/// the calling module sits in the reference's namespace (`ExtNs`), or opens
+/// `System.Runtime` after its own `ExtensionAttribute`; unopened, it does
+/// neither.
+fn producer_marked_sources(cell: Cell) -> Projects {
+    let producer = match cell.kind {
+        Kind::CsProducerAlias => {
+            "namespace ExtNs\n\
+             type ReflectedDefinitionAttribute = System.Runtime.CompilerServices.ExtensionAttribute\n"
+        }
+        Kind::CsProducerUnrelatedNamesake => {
+            "namespace ExtNs\n\
+             type ReflectedDefinitionAttribute() =\n    inherit System.Attribute()\n"
+        }
+        Kind::CsProducerNamesake => {
+            "namespace System.Runtime\n\
+             [<AutoOpen>]\n\
+             module CompilerServices =\n    \
+             type ExtensionAttribute() =\n        \
+             inherit System.Attribute()\n"
+        }
+        other => unreachable!("{other:?} is not producer-marked"),
+    };
+    let opened = cell.placement == Placement::ReferencedOpened;
+    let mut u: Vec<String> = Vec::new();
+    if opened && cell.kind != Kind::CsProducerNamesake {
+        u.push("module ExtNs.Use".into());
+    } else {
+        u.push("module Use".into());
+    }
+    u.push(PREAMBLE.into());
+    if cell.kind == Kind::CsProducerNamesake {
+        u.extend([
+            "type ExtensionAttribute() =".into(),
+            "    inherit System.Attribute()".into(),
+        ]);
+        if opened {
+            u.push("open System.Runtime".into());
+        }
+    }
+    u.extend(cell.open.line().map(String::from));
+    u.extend(cell.kind.decl(cell.relation));
+    u.extend(
+        CALLS
+            .iter()
+            .map(|c| format!("let {} x = {}", c.binder, c.text)),
+    );
+    (
+        vec![("Ext.fs", producer.to_owned())],
+        vec![("Use.fs", u.join("\n") + "\n")],
+    )
 }
 
 /// The cell's files, in Compile order: `Aliases.fs` for a kind that marks

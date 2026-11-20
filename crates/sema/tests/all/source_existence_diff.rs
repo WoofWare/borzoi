@@ -12,7 +12,9 @@
 //!   `borzoi_assembly::unpickle_signature`, and the `AutoOpen` strings that
 //!   travel beside them;
 //! - **the DLL FCS compiles** from the same argument vector, read through
-//!   `Ecma335Assembly::existence_index` (D1 in rows: the two must agree);
+//!   `Ecma335Assembly::existence_index` (D1 in rows: the two must agree on
+//!   entity and extension rows; their assembly-level auto-opens can split,
+//!   and the cell's verdict pins the split, `Fcs::auto_open_split`);
 //! - **ours**: `source_existence` over A's files parsed under A's defines.
 //!
 //! FCS's own view of the in-memory assembly (`FSharpAssembly.Contents`, the
@@ -48,9 +50,9 @@ use borzoi_oracle_harness::project_graph::{
 };
 use borzoi_sema::test_support::{ExistenceFacts, existence_facts};
 use borzoi_sema::{
-    CompileItem, ExistenceUnread, Marker, MarkerRoutes, Producer, ProjectFile, ProviderReferences,
-    SourceExistence, SourceFile, SyntaxRecovery, certify_by_spelling, qualified_names,
-    source_existence,
+    BuiltOutput, CompileItem, ExistenceUnread, Marker, MarkerRoutes, Producer, ProjectFile,
+    ProviderReferences, SourceExistence, SourceFile, SyntaxRecovery, certify_by_spelling,
+    qualified_names, source_existence,
 };
 
 use crate::common::corpus_manifest::{check_manifest, regenerate};
@@ -138,6 +140,14 @@ pub struct Fcs {
     pub compile_errors: Vec<String>,
     /// The entities of a clean A whose members FCS's view could not read.
     pub view_unread: Vec<String>,
+    /// The assembly-level auto-opens of the DLL FCS compiles and of its
+    /// in-memory signature, where they differ: FCS takes an assembly
+    /// attribute for `AutoOpen` by its owner's identity in memory
+    /// (`classifyAssemblyAttrib`) and by its owner's name in a DLL
+    /// (`TryFindAutoOpenAttr`), so a type of A's own at FSharp.Core's
+    /// attribute's path splits them. What a dependant reads from the DLL is
+    /// a built output's ([`BuiltOutput`]), which the set unions in.
+    pub auto_open_split: Option<(Vec<String>, Vec<String>)>,
     /// Why the oracle describes no CCU for A, where it refuses.
     pub refused: Option<Refusal>,
 }
@@ -206,6 +216,38 @@ fn fcs_row(e: &borzoi_oracle_harness::assembly_entities::FcsEntity) -> PickledEn
         auto_open: e.auto_open,
         extension: e.extension,
     }
+}
+
+/// FCS's own view of a producer's entities as rows, for a signature the
+/// decoder cannot read. The view lists no namespace, so each namespace
+/// fragment an entity sits in is a row of its own; a fragment holding no
+/// entity is in no row, so the fallback grades no empty namespace (the
+/// verdict says so).
+fn view_entity_rows(
+    entities: &[borzoi_oracle_harness::assembly_entities::FcsEntity],
+) -> Vec<PickledEntityRow> {
+    use borzoi_assembly::existence::PickledEntityKind;
+    let mut rows: Vec<PickledEntityRow> = entities.iter().map(fcs_row).collect();
+    let mut namespaces = BTreeSet::new();
+    for row in &rows {
+        for k in 0..row.namespace.len() {
+            namespaces.insert(row.namespace[..=k].to_vec());
+        }
+    }
+    for path in namespaces {
+        let (name, parent) = path.split_last().expect("a non-empty path");
+        rows.push(PickledEntityRow {
+            namespace: parent.to_vec(),
+            enclosing: Vec::new(),
+            logical_name: name.clone(),
+            compiled_name: name.clone(),
+            kind: PickledEntityKind::Namespace,
+            public: true,
+            auto_open: false,
+            extension: false,
+        });
+    }
+    rows
 }
 
 /// The producer's assembly name: fixed, so no generated name can collide
@@ -310,6 +352,7 @@ pub fn fcs(cell: &Cell) -> Fcs {
                 errors: Vec::new(),
                 compile_errors: Vec::new(),
                 view_unread: Vec::new(),
+                auto_open_split: None,
                 refused: Some(if e.contains("FCS reads it from its DLL") {
                     Refusal::ReadsDll
                 } else if e.contains("FCS may read it from its DLL") {
@@ -365,7 +408,7 @@ pub fn fcs(cell: &Cell) -> Fcs {
                     }
                     undecodable = true;
                     (
-                        response.entities.iter().map(fcs_row).collect(),
+                        view_entity_rows(&response.entities),
                         view_extension_rows(&response.extension_members),
                     )
                 }
@@ -464,6 +507,7 @@ pub fn fcs(cell: &Cell) -> Fcs {
     // compiled name): there is then no DLL to hold the signature to.
     let mut compile_errors = Vec::new();
     let mut compile_output: Option<PathBuf> = None;
+    let mut auto_open_split = None;
     // The compile op refuses a source that may hold a line directive (its
     // diagnostics' ranges would move): such a producer has no DLL to hold the
     // signature to, and its D1 is not checked.
@@ -512,14 +556,15 @@ pub fn fcs(cell: &Cell) -> Fcs {
         }
         .sorted();
         // The assembly-level auto-opens are read apart from the pickle, so
-        // they are held to each other even where neither pickle decodes.
-        assert_eq!(
-            dll_rows.auto_opens, memory.auto_opens,
-            "{}: D1: the compiled DLL's assembly auto-opens and the in-memory signature's differ",
-            cell.name
-        );
+        // they are compared even where neither pickle decodes; where they
+        // differ, the cell's verdict pins both.
+        if dll_rows.auto_opens != memory.auto_opens {
+            auto_open_split = Some((dll_rows.auto_opens.clone(), memory.auto_opens.clone()));
+        }
         assert!(
-            decode_error.is_some() || dll_rows == memory,
+            decode_error.is_some()
+                || (dll_rows.entities == memory.entities
+                    && dll_rows.extensions == memory.extensions),
             "{}: D1 in rows: the compiled DLL and the in-memory signature differ\n  DLL: {dll_rows:#?}\n  memory: {memory:#?}",
             cell.name
         );
@@ -541,6 +586,7 @@ pub fn fcs(cell: &Cell) -> Fcs {
         errors,
         compile_errors,
         view_unread,
+        auto_open_split,
         refused: None,
     }
 }
@@ -625,6 +671,7 @@ pub fn ours_with(
             items: &items,
             routes: &routes,
             providers,
+            output: BuiltOutput::Absent,
         })
     });
     (read, routes)
@@ -717,9 +764,9 @@ pub fn grade(cell: &Cell, fcs: &Fcs, ours: &SourceExistence) -> Result<String, S
     let surplus = Surplus::of(&mine, &theirs);
     let state = match (fcs.clean, fcs.undecodable) {
         (true, false) => "",
-        (true, true) => ", FCS's signature undecodable (#1081)",
+        (true, true) => ", FCS's signature undecodable (#1081), empty namespaces ungraded",
         (false, false) => ", FCS rejects",
-        (false, true) => ", FCS rejects, its signature undecodable",
+        (false, true) => ", FCS rejects, its signature undecodable, empty namespaces ungraded",
     };
     let names: Vec<String> = surface
         .approximations
@@ -828,6 +875,11 @@ pub fn grade_cells(cells: &[Cell]) -> (Vec<(String, String)>, Vec<String>) {
             let mut errors = fcs.errors.clone();
             errors.extend(fcs.compile_errors.iter().map(|e| format!("compile {e}")));
             errors.extend(fcs.view_unread.iter().map(|e| format!("view-unread {e}")));
+            errors.extend(
+                fcs.auto_open_split
+                    .iter()
+                    .map(|(dll, memory)| format!("auto-opens DLL {dll:?} memory {memory:?}")),
+            );
             (c, u, errors)
         }));
         match graded {
@@ -1011,4 +1063,107 @@ fn the_referenced_op_refuses_a_producer_checked_against_other_references() {
 
 fn request_referenced(line: &str) -> Result<ReferencedResponse, String> {
     request(line)
+}
+
+/// A's output assembly, as an earlier build of A wrote it, holds what A's
+/// source no longer declares: a type, an assembly-level auto-open, and a
+/// C#-style extension. FCS reads that assembly wherever it cannot build A's
+/// assembly data from source, so every fact of it stays in the set, and the
+/// gate declines a call of the extension's name that the source alone would
+/// let it commit.
+#[test]
+fn a_stale_build_keeps_its_facts_in_the_set() {
+    let v1 = "namespace Stale\n\
+              [<assembly: AutoOpen(\"Stale\")>]\n\
+              do ()\n\
+              type Gone = { X: int }\n\
+              [<System.Runtime.CompilerServices.Extension>]\n\
+              type E =\n\
+              \x20   [<System.Runtime.CompilerServices.Extension>]\n\
+              \x20   static member Shout(s: string) = 1L\n";
+    let v2 = "namespace Stale\ntype Kept = { Y: int }\n";
+    let fixture = ProjectGraphFixture::materialise(vec![FixtureProject::new(
+        plain(PRODUCER),
+        files_of(&[("Lib.fs".to_owned(), v1.to_owned())]),
+    )])
+    .expect("materialise the earlier build");
+    let line = fixture.compile_request(&plain(PRODUCER), framework_references(), &BTreeMap::new());
+    let out: CompileResponse = request(line.as_line()).expect("compile the earlier build");
+    let dll = out
+        .output
+        .unwrap_or_else(|| panic!("the earlier build failed: {:?}", out.diagnostics));
+    let bytes = std::fs::read(&dll).expect("read the DLL");
+    let assembly = Ecma335Assembly::parse(&bytes).expect("parse the DLL");
+    let index = assembly.existence_index().expect("existence index");
+    let auto_opens = assembly.assembly_auto_opens().expect("auto-opens");
+    assert_eq!(auto_opens, ["Stale"], "the earlier build's auto-open");
+
+    let cell = Cell::new("stale_build", &[("Lib.fs", v2)]);
+    let project = project_files(&cell);
+    let refs: Vec<&ProjectFile> = project.iter().collect();
+    let routes = certify_by_spelling(&refs);
+    let items: Vec<CompileItem<'_>> = project.iter().map(CompileItem::Parsed).collect();
+    let read = |output| {
+        source_existence(Producer::Evaluated {
+            items: &items,
+            routes: &routes,
+            providers: ProviderReferences::None,
+            output,
+        })
+    };
+    let surface = |r: &SourceExistence| match r {
+        SourceExistence::Read(s) => s.clone(),
+        SourceExistence::Unread(why) => panic!("unread {why:?}"),
+    };
+    let alone = surface(&read(BuiltOutput::Absent));
+    let with = surface(&read(BuiltOutput::Read {
+        index: &index,
+        assembly_auto_opens: &auto_opens,
+    }));
+    let facts =
+        |s: &borzoi_sema::SourceSurface| existence_facts(&s.index(), &s.assembly_auto_opens);
+    let built = existence_facts(&index, &auto_opens);
+    // The earlier build holds facts the source lacks (the cell is live), and
+    // the union holds every fact of each.
+    assert!(
+        !facts_lacking(&facts(&alone), &built).is_empty(),
+        "the earlier build holds nothing the source lacks"
+    );
+    for (what, theirs) in [
+        ("the earlier build", &built),
+        ("the source", &facts(&alone)),
+    ] {
+        let lacking = facts_lacking(&facts(&with), theirs);
+        assert!(
+            lacking.is_empty(),
+            "the union lacks facts of {what}: {lacking:?}"
+        );
+    }
+    assert!(
+        with.approximations
+            .contains(&borzoi_sema::Approximation::BuiltOutput)
+    );
+
+    // The gate, from a consumer in the extension's namespace.
+    let consumer = Cell::new(
+        "stale_consumer",
+        &[("Use.fs", "namespace Stale\nmodule Use =\n    let x = 1\n")],
+    );
+    let consumer_files = project_files(&consumer);
+    let gate = |existence: &SourceExistence| {
+        let mut env = borzoi_sema::AssemblyEnv::default();
+        env.add_source_existence(existence, &borzoi_sema::ExtensionNames::default());
+        let resolved = borzoi_sema::resolve_project_files(&consumer_files, &env);
+        borzoi_sema::test_support::extension_gate_decline(resolved.file(0), &env, "Shout", false)
+    };
+    assert_eq!(gate(&SourceExistence::Read(alone)), None);
+    assert!(
+        gate(&SourceExistence::Read(with)).is_some(),
+        "the earlier build's extension is in scope"
+    );
+    // A build that exists and cannot be read leaves A unread.
+    assert!(matches!(
+        read(BuiltOutput::Unreadable),
+        SourceExistence::Unread(ExistenceUnread::UnreadableOutput)
+    ));
 }

@@ -54,7 +54,18 @@ through `common::ext_scope::check_referenced` and FCS's graph oracle).
 calls that license that: a backticked compiled spelling, an `[<Extension>]`
 module `let` and an `[<Extension>]` class `let` bind nothing of the
 reference. `AssemblyEnv::add_source_existence` takes both halves; an unread
-entity half makes the set unknowable whatever the names say. Fields no
+entity half makes the set unknowable whatever the names say. The resolver
+does not index a source reference's entities (#1103), so a consumer's
+attribute verdict cannot see one shadowing it: until it does,
+`AssemblyEnv::source_reference_may_denote` answers "may be" for a written
+name `N` when a source reference declares an abbreviation named `N` or
+`NAttribute` (FCS strips it to its target), or a type of that name at a
+path where the marker sits (FCS classifies a well-known attribute of
+another assembly by its path, `resolveAttribPath`); the scope grid's
+`CsProducer*` kinds grade both routes, and a type at no marker's path. FCS
+falls back to A's output assembly where it cannot build A from source, so
+the caller states whether one exists (`BuiltOutput`), and the set is then
+the union of its rows and the source's. Fields no
 entity question reads (accessibility, kinds beyond abbreviation, the
 `[<Extension>]` flag) are constants: **a stage that reads more of a source
 producer derives and grades those itself.** The walk's input enumerates

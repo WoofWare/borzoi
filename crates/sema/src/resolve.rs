@@ -1550,6 +1550,7 @@ fn resolve_project_files_impl(
     surface_reference::assert_surface_fold_agrees(files, assemblies, &folded.files);
     ResolvedProject {
         files: folded.files,
+        complete: horizon == files.len(),
     }
 }
 
@@ -1881,7 +1882,7 @@ fn signature_slot(
     // as possibly `[<Extension>]` or `[<AutoOpen>]`. Later files see the
     // signature's declarations, so its extension names are what they read.
     rf.surface.extension_names =
-        extension_names::file_extension_names(sig.syntax(), false, &|_, _| true);
+        extension_names::file_extension_names(sig.syntax(), false, &|_, _, _| true);
     rf.surface.damage = extension_names::damage(sig.syntax(), &pf.recovery);
     rf.recovery = pf.recovery.clone();
     rf
@@ -2178,6 +2179,7 @@ fn resolve_project_files_incremental_impl(
     (
         ResolvedProject {
             files: folded.files,
+            complete: horizon == new_files.len(),
         },
         folded.reused,
     )

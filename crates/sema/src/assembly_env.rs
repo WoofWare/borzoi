@@ -21,7 +21,8 @@ use std::path::{Path, PathBuf};
 use borzoi_assembly::doc_id::DocIdDialect;
 use borzoi_assembly::{
     AbbreviationTarget, Access, AssemblyIdentity, Augmentation, EcmaView, Entity, EntityKind,
-    ImportError, Member, MemberMeasures, MethodLike, NamedTypeHead, TypeRef, UnionCases,
+    ImportError, Member, MemberMeasures, MethodLike, NamedTypeHead, PickleLayer, PickledEntityKind,
+    TypeRef, UnionCases,
 };
 
 use crate::def::SemanticClass;
@@ -258,6 +259,76 @@ fn container_may_hold_accessor_extensions(entity: &Entity) -> bool {
             .members
             .iter()
             .any(|m| matches!(m, Member::Property(_) | Member::Event(_)))
+}
+
+/// The entities of the project references read from source, by logical
+/// name ([`AssemblyEnv::source_reference_may_denote`]).
+#[derive(Debug, Clone, Default)]
+struct SourceEntityNames {
+    /// Some source reference's entities are unknown.
+    unknowable: bool,
+    /// Each entity a logical name names.
+    by_name: HashMap<String, Vec<SourceEntity>>,
+}
+
+/// One entity of a project reference read from source, as far as what an
+/// attribute naming it denotes.
+#[derive(Debug, Clone)]
+enum SourceEntity {
+    /// A type abbreviation: an attribute naming it denotes its target, which
+    /// the rows do not record.
+    Abbreviation,
+    /// Any other entity, by the path of its container (its namespace and
+    /// enclosing entities' logical names): it is its own type.
+    Type(Vec<String>),
+}
+
+impl SourceEntityNames {
+    /// Add one source reference's index: its pickle rows by logical name,
+    /// and the IL rows of a built output beside it, by metadata name with
+    /// the arity suffix stripped.
+    fn add(&mut self, input: &ExistenceInput) {
+        let index = match input {
+            ExistenceInput::Read(index) => index,
+            ExistenceInput::Unread | ExistenceInput::Synthetic => {
+                self.unknowable = true;
+                return;
+            }
+        };
+        let bare = |name: &str| name.split('`').next().unwrap_or(name).to_owned();
+        for row in &index.il {
+            let mut container = row.namespace.clone();
+            container.extend(row.enclosing.iter().map(|n| bare(n)));
+            self.by_name
+                .entry(bare(&row.name))
+                .or_default()
+                .push(SourceEntity::Type(container));
+        }
+        match &index.pickle {
+            PickleLayer::NotFSharp => {}
+            PickleLayer::Unreadable(_) => self.unknowable = true,
+            PickleLayer::Read(rows) => {
+                for row in rows {
+                    let entity = match row.kind {
+                        PickledEntityKind::Namespace => continue,
+                        PickledEntityKind::Abbreviation => SourceEntity::Abbreviation,
+                        PickledEntityKind::Module
+                        | PickledEntityKind::Exception
+                        | PickledEntityKind::Measure
+                        | PickledEntityKind::Type => {
+                            let mut container = row.namespace.clone();
+                            container.extend(row.enclosing.iter().cloned());
+                            SourceEntity::Type(container)
+                        }
+                    };
+                    self.by_name
+                        .entry(row.logical_name.clone())
+                        .or_default()
+                        .push(entity);
+                }
+            }
+        }
+    }
 }
 
 /// See [`AssemblyEnv::augmentation_member_names`].
@@ -1103,6 +1174,11 @@ pub struct AssemblyEnv {
     /// source ([`Self::add_source_existence`]): the gate reads them as it
     /// reads the project's own files', scope-blind.
     referenced_extension_names: crate::resolve::ExtensionNames,
+    /// The entities of every project reference read from its source, by
+    /// logical name: what a written attribute name may denote that name
+    /// resolution, which does not index them, cannot see
+    /// ([`Self::source_reference_may_denote`]).
+    source_entity_names: SourceEntityNames,
     /// **Namespace** paths the referenced assemblies' assembly-level
     /// `[<assembly: AutoOpen("…")>]` attributes implicitly open — what drives
     /// the resolver's implicit opens (plan
@@ -5406,7 +5482,9 @@ impl AssemblyEnv {
         existence: &crate::SourceExistence,
         names: &crate::resolve::ExtensionNames,
     ) {
-        self.existence.add(&existence.existence_input(), &[]);
+        let input = existence.existence_input();
+        self.source_entity_names.add(&input);
+        self.existence.add(&input, &[]);
         if let crate::SourceExistence::Read(surface) = existence {
             for path in &surface.assembly_auto_opens {
                 if let Some(segments) = existence::auto_open_segments(path) {
@@ -5417,6 +5495,46 @@ impl AssemblyEnv {
         self.referenced_extension_names.absorb(names);
         self.invalidate_bare_value_index();
         self.invalidate_fold_surfaces();
+    }
+
+    /// Whether an attribute whose written name ends in `written` (its last
+    /// identifier, unquoted) may denote, through an entity of a project
+    /// reference read from source, a type `is_target` picks out. Name
+    /// resolution does not index those entities, so its verdict on the
+    /// attribute cannot see one shadowing it; this asks the rows instead,
+    /// position-blind. FCS tries both `written` and `writtenAttribute`
+    /// (`ResolveAttributeType`), and an entity of either name:
+    ///
+    /// - an **abbreviation** may denote anything: FCS strips it to its target
+    ///   before it compares (`IsMatchingFSharpAttribute`'s `tyconRefEq`);
+    /// - any other entity is its own type, which FCS takes for a well-known
+    ///   attribute by its **path** when it lives in another assembly
+    ///   (`resolveAttribPath`, `TypedTreeOps.Attributes.fs`): so it may
+    ///   denote the target exactly when a type `is_target` picks out sits at
+    ///   the same path here.
+    ///
+    /// Some reference's entities being unknown, every name may denote
+    /// anything.
+    pub(crate) fn source_reference_may_denote(
+        &self,
+        written: &str,
+        is_target: &dyn Fn(EntityHandle) -> bool,
+    ) -> bool {
+        let names = &self.source_entity_names;
+        if names.unknowable {
+            return true;
+        }
+        let suffixed = format!("{written}Attribute");
+        [written, suffixed.as_str()].into_iter().any(|name| {
+            names.by_name.get(name).is_some_and(|entities| {
+                entities.iter().any(|entity| match entity {
+                    SourceEntity::Abbreviation => true,
+                    SourceEntity::Type(container) => {
+                        self.lookup_type(container, name, 0).is_some_and(is_target)
+                    }
+                })
+            })
+        })
     }
 
     /// Record that some project reference has no built output yet (see

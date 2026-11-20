@@ -272,6 +272,7 @@ mod tests {
             entities: Vec::new(),
             assembly_auto_opens: Vec::new(),
             approximations: Default::default(),
+            built: None,
         });
         let mut instance = crate::hash::HashSet::default();
         instance.insert("Shout".to_string());

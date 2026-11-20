@@ -8,7 +8,7 @@ gen_11	certified: exact []; unknown: unread TypeProvider(0)
 gen_12	certified: covers, FCS rejects surplus(prefix 0, entity 0, lends 1, auto-open 0) [AbbreviationOrUnion]; unknown: covers, FCS rejects surplus(prefix 1, entity 1, lends 7, auto-open 0) [UncertainAttribute,AbbreviationOrUnion] [FCS: FS35]
 gen_13	certified: exact []; unknown: unread TypeProvider(1)
 gen_14	certified: covers, FCS rejects surplus(prefix 10, entity 10, lends 1, auto-open 0) []; unknown: unread TypeProvider(1) [FCS: FS39]
-gen_15	certified: covers, FCS rejects, its signature undecodable surplus(prefix 0, entity 0, lends 1, auto-open 0) [AbbreviationOrUnion]; unknown: covers, FCS rejects, its signature undecodable surplus(prefix 0, entity 0, lends 8, auto-open 0) [UncertainAttribute,AbbreviationOrUnion] [FCS: FS35,FS964,FS895,FS927,FS927,FS927,FS927,FS927,FS927,FS39]
+gen_15	certified: covers, FCS rejects, its signature undecodable, empty namespaces ungraded surplus(prefix 0, entity 0, lends 1, auto-open 0) [AbbreviationOrUnion]; unknown: covers, FCS rejects, its signature undecodable, empty namespaces ungraded surplus(prefix 0, entity 0, lends 8, auto-open 0) [UncertainAttribute,AbbreviationOrUnion] [FCS: FS35,FS964,FS895,FS927,FS927,FS927,FS927,FS927,FS927,FS39]
 gen_16	certified: covers, FCS rejects surplus(prefix 0, entity 0, lends 1, auto-open 0) [AbbreviationOrUnion]; unknown: covers, FCS rejects surplus(prefix 0, entity 0, lends 8, auto-open 0) [UncertainAttribute,AbbreviationOrUnion] [FCS: FS37,FS928,FS927,FS940,FS33,FS33]
 gen_17	certified: exact, FCS rejects [UncertainAttribute]; unknown: unread UnreadableCompiledName(2) [FCS: FS928,FS927,FS940]
 gen_18	certified: exact []; unknown: exact []
@@ -39,12 +39,12 @@ gen_4	certified: exact []; unknown: unread TypeProvider(1)
 gen_40	certified: unread TypeProvider(1); unknown: unread TypeProvider(1) [FCS: FS927,FS940,FS849,FS849,FS841,FS849,FS849,FS53]
 gen_41	certified: exact []; unknown: exact [UncertainAttribute]
 gen_42	certified: exact, FCS rejects [AbbreviationOrUnion]; unknown: covers, FCS rejects surplus(prefix 0, entity 0, lends 2, auto-open 0) [UncertainAttribute,AbbreviationOrUnion] [FCS: FS35,FS39]
-gen_43	certified: exact, FCS rejects, its signature undecodable [AbbreviationOrUnion]; unknown: unread TypeProvider(1) [FCS: FS37,FS35,FS249,FS365,FS54]
+gen_43	certified: exact, FCS rejects, its signature undecodable, empty namespaces ungraded [AbbreviationOrUnion]; unknown: unread TypeProvider(1) [FCS: FS37,FS35,FS249,FS365,FS54]
 gen_44	certified: exact, FCS rejects []; unknown: covers, FCS rejects surplus(prefix 0, entity 0, lends 3, auto-open 0) [UncertainAttribute] [FCS: FS927,FS927,FS927,FS927,FS927,FS927]
 gen_45	certified: exact, FCS rejects []; unknown: unread TypeProvider(2) [FCS: FS3350]
 gen_46	certified: exact []; unknown: covers surplus(prefix 0, entity 0, lends 1, auto-open 0) [UncertainAttribute]
 gen_47	certified: exact []; unknown: unread TypeProvider(1)
-gen_48	certified: covers, FCS rejects, its signature undecodable surplus(prefix 0, entity 0, lends 1, auto-open 0) [AbbreviationOrUnion]; unknown: unread UnreadableCompiledName(0) [FCS: FS39,FS39,FS841]
+gen_48	certified: covers, FCS rejects, its signature undecodable, empty namespaces ungraded surplus(prefix 0, entity 0, lends 1, auto-open 0) [AbbreviationOrUnion]; unknown: unread UnreadableCompiledName(0) [FCS: FS39,FS39,FS841]
 gen_49	certified: exact, FCS rejects []; unknown: covers, FCS rejects surplus(prefix 0, entity 0, lends 3, auto-open 0) [UncertainAttribute] [FCS: FS410,FS410,FS410]
 gen_5	certified: covers, FCS rejects surplus(prefix 0, entity 0, lends 2, auto-open 0) [AbbreviationOrUnion]; unknown: unread TypeProvider(1) [FCS: FS3350,FS3350,FS35,FS3350,FS37]
 gen_50	certified: exact, FCS rejects []; unknown: covers, FCS rejects surplus(prefix 0, entity 0, lends 3, auto-open 0) [UncertainAttribute] [FCS: FS37]

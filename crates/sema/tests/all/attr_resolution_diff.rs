@@ -1035,11 +1035,13 @@ fn file_module_attribute_is_reported_once() {
 }
 
 /// Whether some attribute of the file resolved to (or may be) the
-/// `[<Extension>]` marker, by the per-attribute verdicts.
+/// `[<Extension>]` marker, by the per-attribute verdicts. The env reads no
+/// project reference from source, so no written name moves a verdict, and
+/// none is passed.
 fn some_attribute_may_mark(rf: &borzoi_sema::ResolvedFile, env: &AssemblyEnv) -> bool {
     rf.attribute_resolutions()
         .keys()
-        .any(|&range| rf.attribute_may_be(range, env, |h| env.is_extension_attribute(h)))
+        .any(|&range| rf.attribute_may_be(range, "", env, |h| env.is_extension_attribute(h)))
 }
 
 /// Whether an attribute may be the marker, derived from the per-attribute
@@ -1122,7 +1124,7 @@ fn an_assembly_abbreviation_of_an_attribute_may_be_its_target() {
                 u32::try_from(start + written.len()).unwrap().into(),
             );
             assert!(
-                rf.attribute_may_be(span, &env, |h| env.is_entry_point_attribute(h)),
+                rf.attribute_may_be(span, written, &env, |h| env.is_entry_point_attribute(h)),
                 "`[<{written}>]` may be `EntryPoint`"
             );
         }

@@ -4771,9 +4771,9 @@ impl ResolvedFile {
         root: &borzoi_cst::syntax::SyntaxNode,
         env: &AssemblyEnv,
     ) -> ExtensionNames {
-        super::extension_names::file_extension_names(root, false, &|range, question| {
+        super::extension_names::file_extension_names(root, false, &|range, written, question| {
             !self.attribute_resolutions.contains_key(&range)
-                || self.attribute_may_be(range, env, |h| {
+                || self.attribute_may_be(range, written, env, |h| {
                     env.is_extension_attribute(h)
                         || (question == MarkerQuestion::ExtensionOrAutoOpen
                             && env.is_auto_open_attribute(h))
@@ -4782,8 +4782,10 @@ impl ResolvedFile {
     }
 
     /// Whether the attribute written at `range` (its name's range, the
-    /// [`Self::attribute_resolutions`] key) may denote a type `is_target`
-    /// picks out:
+    /// [`Self::attribute_resolutions`] key), whose last identifier is
+    /// `written`, may denote a type `is_target` picks out. An entity of a
+    /// project reference read from source may (the resolver does not index
+    /// those: [`AssemblyEnv::source_reference_may_denote`]); otherwise:
     ///
     /// - a [`Resolution::Deferred`] verdict may be anything;
     /// - a committed [`Resolution::Entity`] is the target exactly when
@@ -4799,9 +4801,13 @@ impl ResolvedFile {
     pub fn attribute_may_be(
         &self,
         range: TextRange,
+        written: &str,
         env: &AssemblyEnv,
         is_target: impl Fn(EntityHandle) -> bool,
     ) -> bool {
+        if env.source_reference_may_denote(written, &is_target) {
+            return true;
+        }
         match self.attribute_resolutions.get(&range) {
             None => false,
             Some(Resolution::Deferred(_)) => true,
@@ -5125,6 +5131,10 @@ impl ResolvedFile {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedProject {
     pub(super) files: Vec<Arc<ResolvedFile>>,
+    /// The fold reached the last Compile item: what the whole project
+    /// declares is the last file's surface and its preceding files'. A
+    /// prefix fold ([`crate::resolve_project_files_prefix`]) is not.
+    pub(super) complete: bool,
 }
 
 impl ResolvedProject {
@@ -5147,6 +5157,7 @@ impl ResolvedProject {
             other => other.clone(),
         };
         ResolvedProject {
+            complete: self.complete,
             files: self
                 .files
                 .iter()
@@ -5196,7 +5207,14 @@ impl ResolvedProject {
     /// file's preceding names and its own. What a project that references
     /// this one from source reads of its extensions
     /// ([`AssemblyEnv::add_source_existence`](crate::AssemblyEnv::add_source_existence)).
+    /// A prefix fold has not read the files past its horizon, so its names
+    /// are [`NamesUnknowable::PartialFold`](super::extension_names::NamesUnknowable::PartialFold).
     pub fn extension_names(&self) -> ExtensionNames {
+        if !self.complete {
+            return ExtensionNames::Unknowable(
+                super::extension_names::NamesUnknowable::PartialFold,
+            );
+        }
         match self.files.last() {
             Some(last) => {
                 let mut names = last.preceding_extension_names().clone();

@@ -12,6 +12,7 @@ access_inherited	certified: exact []; unknown: exact []
 active_pattern_in_compound_binding	certified: exact []; unknown: exact []
 assembly_auto_open	certified: exact []; unknown: unread TypeProvider(0)
 assembly_auto_open_constant	certified: unread UnreadableAutoOpen(0); unknown: unread TypeProvider(0)
+assembly_auto_open_local_namesake	certified: unread TypeProvider(1); unknown: unread TypeProvider(1) [FCS: auto-opens DLL ["N"] memory []]
 assembly_auto_open_no_argument	certified: exact []; unknown: unread TypeProvider(0)
 assembly_auto_open_without_target	certified: exact []; unknown: unread TypeProvider(0)
 assembly_auto_open_without_target_in_module	certified: exact []; unknown: unread TypeProvider(0)
@@ -138,7 +139,7 @@ namespace_two_files	certified: exact []; unknown: exact []
 nullary_active_pattern_let	certified: exact []; unknown: exact []
 quoted_load_directive	certified: unread HashReference(0); unknown: unread HashReference(0) [FCS: FS76]
 rec_module_class_with_constructor	certified: exact []; unknown: exact []
-rec_module_class_with_constructor_and_let	certified: exact, FCS's signature undecodable (#1081) []; unknown: exact, FCS's signature undecodable (#1081) [] [FCS: view-unread Outer/Inner/T. (namespace RecCtorLet)]
+rec_module_class_with_constructor_and_let	certified: exact, FCS's signature undecodable (#1081), empty namespaces ungraded []; unknown: exact, FCS's signature undecodable (#1081), empty namespaces ungraded [] [FCS: view-unread Outer/Inner/T. (namespace RecCtorLet)]
 rec_module_class_with_constructor_nested	certified: exact []; unknown: exact []
 route_alias_auto_open	certified: exact []; unknown: exact [UncertainAttribute]
 route_shadow_auto_open	certified: exact []; unknown: covers surplus(prefix 0, entity 0, lends 1, auto-open 0) [UncertainAttribute]

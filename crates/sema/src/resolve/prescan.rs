@@ -421,14 +421,15 @@ pub(super) fn declares_core_attribute_alias(root: &SyntaxNode) -> bool {
 /// The written name of every attribute on a type **abbreviation** in the file
 /// rooted at `root`, an implementation or a signature, keyed as
 /// [`ResolvedFile::attribute_resolutions`](super::model::ResolvedFile::attribute_resolutions)
-/// keys an attribute's verdict (first ident to last), or `None` for an
-/// attribute whose name has no ident to key it by.
+/// keys an attribute's verdict (first ident to last), with its last
+/// identifier unquoted, or `None` for an attribute whose name has no ident
+/// to key it by.
 ///
 /// An abbreviation carrying `[<AutoOpen>]` or `[<Extension>]` brings the
 /// extension members of the type it abbreviates into scope (#831): FCS reads
 /// either attribute off the abbreviation's own type and then works on its
 /// target. [`super::extension_names::file_extension_names`] reads these.
-pub(super) fn abbreviation_attributes(root: &SyntaxNode) -> Vec<Option<TextRange>> {
+pub(super) fn abbreviation_attributes(root: &SyntaxNode) -> Vec<Option<(TextRange, String)>> {
     root.descendants_of::<TypeDefn>()
         .filter(|defn| matches!(defn.repr(), Some(TypeDefnRepr::Abbrev(_))))
         .flat_map(|defn| {
@@ -441,9 +442,9 @@ pub(super) fn abbreviation_attributes(root: &SyntaxNode) -> Vec<Option<TextRange
                         .map(|name| name.idents().collect())
                         .unwrap_or_default();
                     match (toks.first(), toks.last()) {
-                        (Some(first), Some(last)) => Some(TextRange::new(
-                            first.fcs_range().start(),
-                            last.fcs_range().end(),
+                        (Some(first), Some(last)) => Some((
+                            TextRange::new(first.fcs_range().start(), last.fcs_range().end()),
+                            crate::def::id_text(last).into_owned(),
                         )),
                         _ => None,
                     }

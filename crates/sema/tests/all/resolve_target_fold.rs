@@ -493,3 +493,35 @@ fn surfaces_of_a_prefix_are_a_prefix_of_the_surfaces() {
         }
     }
 }
+
+/// What a whole project declares is read only off a fold that reached its
+/// last Compile item: a prefix fold's extension names are unknowable, and a
+/// fold to the end (prefix-shaped or not) reads them. The extension named
+/// in the last file is what a prefix would miss.
+#[test]
+fn only_a_complete_fold_answers_for_the_whole_project() {
+    use borzoi_sema::{ExtensionNames, NamesUnknowable};
+    let sources = vec![
+        ("A.fs".to_owned(), "module A\nlet x = 1\n".to_owned()),
+        (
+            "B.fs".to_owned(),
+            "module B\ntype System.String with\n    member s.Shout() = 1\n".to_owned(),
+        ),
+    ];
+    let files = project_files(&sources);
+    let env = AssemblyEnv::default();
+    for len in 0..files.len() {
+        assert_eq!(
+            resolve_project_files_prefix(&files, len, &env).extension_names(),
+            ExtensionNames::Unknowable(NamesUnknowable::PartialFold),
+            "the {len}-prefix"
+        );
+    }
+    for whole in [
+        resolve_project_files_prefix(&files, files.len(), &env),
+        resolve_project_files(&files, &env),
+    ] {
+        assert!(whole.extension_names().may_have("Shout", false));
+        assert!(whole.extension_names().unknowable().is_none());
+    }
+}
