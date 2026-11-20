@@ -450,10 +450,16 @@ fn gen_point(
             // Half the time, at the edge of the value's fields as written: the
             // world that keeps every `\` has that many, and one that respells
             // a `\` has more, so the indexer is past the end in some worlds.
+            // Counted with the fixture's root one segment, so that the index,
+            // which the document spells, is the same on every host.
             let index = if rng.below(2) == 0 {
                 rng.below(6)
             } else {
-                let fields = template.replace("{v}", &value).split('/').count();
+                let fields = template
+                    .replace("{v}", &value)
+                    .replace(world.root_text(), "{ROOT}")
+                    .split('/')
+                    .count();
                 fields - 1 + rng.below(3)
             };
             // Beside a name the walk holds no value of (`U`, through a

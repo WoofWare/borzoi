@@ -12492,6 +12492,70 @@ fn a_capped_body_with_a_discarded_throw_may_reject() {
     );
 }
 
+/// An item group the walk does not walk, under a gate that turns on the
+/// startup directory, may feed MSBuild's batch of `Update`s: where it runs,
+/// `A.fs;A.fs` joins and leaves the batch, and the later `B.fs;A.fs` strands
+/// `B.fs`, which then takes `CompileFirst` (MSBuild orders `B.fs` first).
+#[test]
+#[cfg(not(windows))]
+fn an_unwalked_groups_updates_leave_the_batch_unknown() {
+    let p = parse(
+        r#"<Project><PropertyGroup><S>seg\a</S></PropertyGroup>
+  <ItemGroup Condition="'$(S)' == 'seg/a'"><Compile Update="A.fs;A.fs" Link="a" /></ItemGroup>
+  <ItemGroup>
+    <Compile Update="B.fs;A.fs" CompileOrder="CompileFirst" />
+    <Compile Include="A.fs;B.fs" />
+  </ItemGroup></Project>"#,
+    );
+    assert!(p.items_uncertain || p.rejection.is_some(), "{:#?}", p.items);
+}
+
+/// `Exists`'s argument is respelled before it is expanded with no file
+/// system too: `S.Split('\')` splits on `/` on Unix, and `[1]` is `b`.
+#[test]
+#[cfg(not(windows))]
+fn exists_without_a_file_system_respells_its_argument() {
+    let p = parse(
+        r#"<Project><PropertyGroup><S>a/b</S></PropertyGroup>
+  <PropertyGroup Condition="Exists('$(S.Split(`\`)[1])')"><M>m</M></PropertyGroup>
+  <PropertyGroup><After>ok</After></PropertyGroup></Project>"#,
+    );
+    assert!(p.rejection.is_none(), "{:#?}", p.rejection);
+}
+
+/// After a startup decline, an item's condition reads a name only at a leaf
+/// MSBuild reaches: `false And …` never expands `$(X)`.
+#[test]
+#[cfg(not(windows))]
+fn an_unreached_leaf_after_a_startup_decline_reads_nothing() {
+    let p = parse(
+        r#"<Project><PropertyGroup>
+    <S>seg\a</S>
+    <X Condition="'$(S)' != 'seg/a'">on</X>
+  </PropertyGroup>
+  <ItemGroup><Foo Include="y" Condition="false And '$(X)' == 'on'" /></ItemGroup>
+  <PropertyGroup><After>ok</After></PropertyGroup></Project>"#,
+    );
+    assert!(p.rejection.is_none(), "{:#?}", p.rejection);
+}
+
+/// A name the walk holds no value of, read only by a plain splice beside a
+/// function of certain names, is no throw: `$(U)` cannot throw, and
+/// `$(K.Length)` reads only `K`.
+#[test]
+#[cfg(not(windows))]
+fn an_unheld_splice_beside_a_certain_function_is_no_throw() {
+    let p = parse(
+        r#"<Project><PropertyGroup>
+    <U>$([System.IO.Path]::GetFileName('x/y'))</U>
+    <K>abc</K>
+    <B>$(U);seg\x;$(K.Length)</B>
+  </PropertyGroup>
+  <PropertyGroup><After>ok</After></PropertyGroup></Project>"#,
+    );
+    assert!(p.rejection.is_none(), "{:#?}", p.rejection);
+}
+
 /// `Q` is `./seg/a//` where `seg` is a directory under MSBuild's startup
 /// directory, and `./seg/a/` elsewhere: the whole value's pass respells it
 /// only where `S`'s `\` survived. Each reader below that would act on one of

@@ -665,6 +665,9 @@ fn evaluate_item_group(node: Node<'_, '_>, state: &mut State<'_>) {
             }
         }
         CondGate::Skip => {
+            if group_reads_untrusted {
+                doubt_update_batches_of(node, state);
+            }
             // Skipped only on an untrusted false: a hidden mutation may run
             // in the real build against the list we captured. Skipped
             // Includes are at worst missed references — but they leave the
@@ -678,6 +681,7 @@ fn evaluate_item_group(node: Node<'_, '_>, state: &mut State<'_>) {
             restore(state);
         }
         CondGate::Unsupported => {
+            doubt_update_batches_of(node, state);
             // Record the carve-outs while both contexts are still set.
             emit_unsupported_condition(node, &state.entry_project_dir.clone(), state);
             // An unsupported gate is untrusted by construction: probed
@@ -692,6 +696,26 @@ fn evaluate_item_group(node: Node<'_, '_>, state: &mut State<'_>) {
                 state.project_reference_includes_hidden = true;
             }
             restore(state);
+        }
+    }
+}
+
+/// An `<ItemGroup>` the walk does not walk, which MSBuild may run: each
+/// child of a type whose `Update`s the walk batches ([`update_strands_late`])
+/// may join or leave that batch, so the batch may hold any key and none is
+/// pending.
+fn doubt_update_batches_of(node: Node<'_, '_>, state: &mut State<'_>) {
+    for child in node.children().filter(Node::is_element) {
+        let batched = match package_item_kind_for_element(child) {
+            Some(PackageItemKind::PackageReference) => Some("PackageReference"),
+            Some(_) => None,
+            None => (modelled_item_kind_for_element(child) == Some(ItemKind::Compile))
+                .then_some("Compile"),
+        };
+        if let Some(item_type) = batched {
+            let run = state.update_batches.entry(item_key(item_type)).or_default();
+            run.unknown = true;
+            run.pending = false;
         }
     }
 }

@@ -440,10 +440,10 @@ pub(super) fn import_failure_certainty(
 /// walk that has declined a property write for MSBuild's startup directory
 /// (`State::startup_directory_declined`): that write holds, in some world, a
 /// value the walk does not, under any name it is copied to, so there a
-/// condition that may throw on any value of a name the walk is not certain of
-/// ([`condition::may_throw`]) is a Possible site, whatever the condition's
-/// outcome on the values held, and so is any condition past the property pass
-/// that reads such a name, which may hold an item expression's `@` itself. No
+/// condition that may throw on any value of a name the walk is not certain
+/// of, past the property pass by holding an item expression's `@` itself, at
+/// a leaf MSBuild reaches ([`condition::may_throw_forming_items`]), is a
+/// Possible site, whatever the condition's outcome on the values held. No
 /// SDK write is declined so.
 pub(super) fn judge_condition_rejection(
     state: &mut State<'_>,
@@ -483,18 +483,15 @@ pub(super) fn judge_condition_rejection(
         );
         return;
     }
-    // Past the property pass, such a name may itself hold the `@` or `%` of
-    // an item or metadata expression MSBuild then expands.
     if state.startup_directory_declined
         && properties::property_references(condition).any(uncertain)
-        && (state.condition_site() != condition::Site::PropertyPass
-            || condition::may_throw(
-                condition,
-                &state.lookup,
-                probes,
-                state.condition_site(),
-                &uncertain,
-            ))
+        && condition::may_throw_forming_items(
+            condition,
+            &state.lookup,
+            probes,
+            state.condition_site(),
+            &uncertain,
+        )
     {
         state.note_rejection(
             RejectionCertainty::Possible,
@@ -694,15 +691,13 @@ pub(super) fn judge_text_after_startup_decline_and_unheld(
 /// followed a world other than one MSBuild throws in, so it is a Possible
 /// site.
 fn judge_unheld_text_beside_startup(state: &mut State<'_>, text: &str, span: Range<usize>) {
-    if condition::plain_references_only(text)
-        || !properties::property_references(text)
-            .any(|name| !holds_a_value_msbuild_may(state, name))
-        || !properties::expansion_turns_on_startup_directory(
-            text,
-            &state.lookup,
-            state.follow_imports.then_some(state.observer),
-        )
-    {
+    if !condition::has_unplain_expression_reading(text, &|name| {
+        !holds_a_value_msbuild_may(state, name)
+    }) || !properties::expansion_turns_on_startup_directory(
+        text,
+        &state.lookup,
+        state.follow_imports.then_some(state.observer),
+    ) {
         return;
     }
     state.note_rejection(
@@ -718,7 +713,8 @@ fn judge_unheld_text_beside_startup(state: &mut State<'_>, text: &str, span: Ran
 /// (`State::startup_directory_declined`), `text` may throw on another value
 /// of a name the walk is not certain of: an expression in it beyond a plain
 /// reference (a method, an indexer), where it reads such a name, is a
-/// Possible site, as a condition's leaf is ([`condition::may_throw`]). That
+/// Possible site, as a condition's leaf is
+/// ([`condition::may_throw_forming_items`]). That
 /// is #1009's second stage, which this stands in for where a startup
 /// decline left the value.
 pub(super) fn judge_text_after_startup_decline(
@@ -727,9 +723,9 @@ pub(super) fn judge_text_after_startup_decline(
     span: Range<usize>,
 ) {
     if !state.startup_directory_declined
-        || condition::plain_references_only(text)
-        || !properties::property_references(text)
-            .any(|name| !directory_build::is_certain(state, name))
+        || !condition::has_unplain_expression_reading(text, &|name| {
+            !directory_build::is_certain(state, name)
+        })
     {
         return;
     }

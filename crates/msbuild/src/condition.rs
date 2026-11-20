@@ -125,6 +125,10 @@ struct Ctx<'a> {
     probes: Option<Probes<'a>>,
     site: Site,
     world: Option<&'a World<'a>>,
+    /// Whether a value the caller is not certain of may itself hold the `@`
+    /// or `%` of an item or metadata expression, which MSBuild expands past
+    /// the property pass ([`may_throw_forming_items`]).
+    uncertain_forms_items: bool,
 }
 
 impl<'a> Ctx<'a> {
@@ -133,6 +137,7 @@ impl<'a> Ctx<'a> {
             probes,
             site,
             world: None,
+            uncertain_forms_items: false,
         }
     }
 
@@ -154,6 +159,7 @@ impl<'a> Ctx<'a> {
             probes: self.probes,
             site: self.site,
             world: Some(world),
+            uncertain_forms_items: self.uncertain_forms_items,
         }
     }
 
@@ -696,6 +702,7 @@ pub fn throws_whatever(
 /// names unknown: `judge`'s throw verdict other than [`Throws::Never`],
 /// found without evaluating (or probing the file system for) any operand past
 /// the first that may throw.
+#[cfg(test)]
 pub fn may_throw(
     source: &str,
     props: &PropertyMap,
@@ -704,6 +711,25 @@ pub fn may_throw(
     uncertain: &dyn Fn(&str) -> bool,
 ) -> bool {
     let fs = Ctx::new(probes, site);
+    may_throw_walked(source, props, fs, uncertain, None)
+}
+
+/// `may_throw`, where a value of a name `uncertain` names may itself hold
+/// the `@` or `%` of an item or metadata expression: past the property pass
+/// MSBuild expands one, which may throw, at any leaf it reaches that reads
+/// such a name. A leaf it does not reach (past an operand that decides the
+/// chain) reads nothing.
+pub fn may_throw_forming_items(
+    source: &str,
+    props: &PropertyMap,
+    probes: Option<Probes<'_>>,
+    site: Site,
+    uncertain: &dyn Fn(&str) -> bool,
+) -> bool {
+    let fs = Ctx {
+        uncertain_forms_items: true,
+        ..Ctx::new(probes, site)
+    };
     may_throw_walked(source, props, fs, uncertain, None)
 }
 
@@ -873,7 +899,8 @@ fn judge_leaf(
                                 .value(props, name)
                                 .is_some_and(|value| value.as_escaped().contains(['@', '%']))
                     });
-                    let throws = if leaf_may_throw_on_some_value(expr) || completes {
+                    let forms = fs.uncertain_forms_items && fs.site != Site::PropertyPass;
+                    let throws = if leaf_may_throw_on_some_value(expr) || completes || forms {
                         Throws::Maybe
                     } else {
                         Throws::Never
@@ -1081,6 +1108,32 @@ fn uncertain_spans(text: &str, uncertain: &dyn Fn(&str) -> bool) -> Vec<Range<us
     }
     found.sort_by_key(|span| span.start);
     found
+}
+
+/// Whether `text` has an expression beyond a plain reference (a method, an
+/// indexer) that reads, anywhere within it, a name `uncertain` names: one
+/// MSBuild may throw evaluating on another value of that name. A plain
+/// reference to such a name beside a function of certain names is none.
+pub(crate) fn has_unplain_expression_reading(text: &str, uncertain: &dyn Fn(&str) -> bool) -> bool {
+    let mut at = 0;
+    while let Some(open) = text[at..].find("$(") {
+        let start = at + open;
+        let Some(close) = find_balanced_property_expression_close(&text[start + 2..]) else {
+            return false;
+        };
+        let end = start + 2 + close + 1;
+        let expression = &text[start..end];
+        if !plain_references_only(expression) {
+            let mut names = Vec::new();
+            explicit_references(expression, &mut names);
+            implicit_references(expression, &mut names);
+            if names.iter().any(|name| uncertain(name)) {
+                return true;
+            }
+        }
+        at = end;
+    }
+    false
 }
 
 /// `text` with each of `spans` (disjoint, in order: those
@@ -2378,12 +2431,12 @@ fn eval_bool(
         BoolExpr::Exists(raw) => {
             // MSBuild expands the argument, which may throw, and then asks
             // the file system, which does not (`FileOrDirectoryExistsNoThrow`).
+            // A `\` written in the argument is a `/` before it is expanded.
+            let raw = &path_fixup::fix_file_path(raw);
             let Some(probes) = fs.probes else {
                 expand_for_condition(raw, props, fs, undefined)?;
                 return Err(Reject::Undecided);
             };
-            // A `\` written in the argument is a `/` before it is expanded.
-            let raw = &path_fixup::fix_file_path(raw);
             let value = expand_for_condition(raw, props, fs, undefined)?;
             // MSBuild expands the argument into an item list and asks about
             // every entry: true when each exists, false for an empty list
