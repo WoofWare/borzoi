@@ -298,7 +298,8 @@ pub(super) fn replay_deferred_item_groups(entry_doc: &Document<'_>, state: &mut 
             state.judge_from_path(group.written.as_ref(), |state| {
                 rejection::judge_deferred(node, dir, group.reach_certain, state);
             });
-            if group.kind == DeferredGroupKind::ItemGroup && !group.in_dead_arm {
+            if group.kind == DeferredGroupKind::ItemGroup && group.judge_only && !group.in_dead_arm
+            {
                 taint_group_references_on_doubted_reads(node, state);
             }
         };
@@ -674,6 +675,7 @@ fn evaluate_item_group(node: Node<'_, '_>, state: &mut State<'_>) {
             }
             restore(state);
             for child in node.children().filter(Node::is_element) {
+                taint_walked_reference_on_doubted_reads(child, state);
                 walk_item_child(child, state);
             }
         }
@@ -688,6 +690,9 @@ fn evaluate_item_group(node: Node<'_, '_>, state: &mut State<'_>) {
             if group_reads_untrusted && reference_risk.list_op {
                 state.project_reference_includes_hidden = true;
             }
+            // One the build makes there holds items the list lacks where it
+            // reads a name the walk doubts.
+            taint_group_references_on_doubted_reads(node, state);
             restore(state);
         }
         CondGate::Unsupported => {
@@ -704,38 +709,73 @@ fn evaluate_item_group(node: Node<'_, '_>, state: &mut State<'_>) {
             if reference_risk.list_op {
                 state.project_reference_includes_hidden = true;
             }
+            taint_group_references_on_doubted_reads(node, state);
             restore(state);
         }
     }
 }
 
-/// [`taint_reference_list_on_doubted_reads`] for every `<ProjectReference>`
-/// `Include` of the `<ItemGroup>` at `node` the real build may make: every
-/// one but those behind a gate, the group's or its own, that is false
-/// whatever the names the walk is not certain of hold. Called on every
-/// group the item pass replays, walked or judged only (an arm of a
-/// `<Choose>` the walk could not decide), before the walk does anything
-/// with it, so that no route by which the walk keeps, drops or skips a
-/// reference decides whether its read is checked.
-fn taint_group_references_on_doubted_reads(node: Node<'_, '_>, state: &mut State<'_>) {
+/// Whether the gate of `element` (a reference, or its group) is false
+/// whatever the names the walk doubts hold
+/// ([`State::reference_gate_decision`]).
+fn reference_gate_is_dead(element: Node<'_, '_>, state: &State<'_>) -> bool {
     let dir = state.entry_project_dir.clone();
-    // False whatever the names the walk doubts hold
-    // ([`State::reference_gate_decision`]).
-    let dead = |element: Node<'_, '_>, state: &State<'_>| {
-        attribute(element, "Condition")
-            .is_some_and(|condition| state.reference_gate_decision(&condition, &dir) == Some(false))
-    };
-    if dead(node, state) {
+    attribute(element, "Condition")
+        .is_some_and(|condition| state.reference_gate_decision(&condition, &dir) == Some(false))
+}
+
+/// Whether `node` is a `<ProjectReference>` `Include` whose `Include` or
+/// `Exclude` reads a name the walk doubts ([`State::raw_reads_a_doubted_name`]:
+/// unpinned, SDK-tainted, or held as no value it can show undefined), read as
+/// an item spec reads it, off its text alone, so that asking probes nothing.
+///
+/// Such a reference the build makes leaves the reference list uncertain
+/// ([`ParsedProject::project_references_uncertain`]). A value the walk
+/// computes from such a name may name a different target (`Include`) or strip
+/// one it kept (`Exclude`): a phantom edge for a reference-semantics consumer.
+/// One it does not compute, it drops with the element, though MSBuild holds
+/// items there that the list then lacks (#1098). So the list is flagged
+/// whatever the walk then does with the element.
+fn reads_a_doubted_name(node: Node<'_, '_>, state: &State<'_>) -> bool {
+    node.is_element()
+        && modelled_item_kind_for_element(node) == Some(ItemKind::ProjectReference)
+        && node.has_attribute("Include")
+        && ["Include", "Exclude"].into_iter().any(|name| {
+            attribute(node, name).is_some_and(|raw| state.raw_reads_a_doubted_name(&raw))
+        })
+}
+
+/// Flag the reference list for the `<ProjectReference>` at
+/// `node`, which the item pass reaches in a group it walks, unless its own
+/// gate is dead: asked as the walk reaches it, so that an item read of
+/// `@(ProjectReference)` before it in the group sees the list as it stood.
+/// Its gate is probed only for a spec that reads a doubted name.
+fn taint_walked_reference_on_doubted_reads(node: Node<'_, '_>, state: &mut State<'_>) {
+    if reads_a_doubted_name(node, state) && !reference_gate_is_dead(node, state) {
+        state.project_references_uncertain = true;
+    }
+}
+
+/// [`taint_walked_reference_on_doubted_reads`] for every `<ProjectReference>`
+/// of the `<ItemGroup>` at `node`, a group the real build may make and the
+/// walk does not walk: one under a gate it skipped or could not evaluate, or
+/// judged only (an arm of a `<Choose>` it could not decide). A group whose
+/// own gate is dead holds none the build makes. Gates are probed only where
+/// a reference's spec reads a doubted name, so a group with none adds
+/// nothing to the read set.
+fn taint_group_references_on_doubted_reads(node: Node<'_, '_>, state: &mut State<'_>) {
+    let doubted: Vec<Node<'_, '_>> = node
+        .children()
+        .filter(|child| reads_a_doubted_name(*child, state))
+        .collect();
+    if doubted.is_empty() || reference_gate_is_dead(node, state) {
         return;
     }
-    for child in node.children().filter(|child| {
-        child.is_element()
-            && modelled_item_kind_for_element(*child) == Some(ItemKind::ProjectReference)
-            && child.has_attribute("Include")
-    }) {
-        if !dead(child, state) {
-            taint_reference_list_on_doubted_reads(child, state);
-        }
+    if doubted
+        .into_iter()
+        .any(|child| !reference_gate_is_dead(child, state))
+    {
+        state.project_references_uncertain = true;
     }
 }
 
@@ -4040,26 +4080,6 @@ pub(super) fn item_key(name: &str) -> String {
     name.to_ascii_lowercase()
 }
 
-/// Flag [`ParsedProject::project_references_uncertain`] when the `Include` or
-/// `Exclude` of the `<ProjectReference>` at `node`, which MSBuild evaluates,
-/// reads a name the walk doubts ([`State::raw_reads_a_doubted_name`]: unpinned,
-/// SDK-tainted, or held as no value it can show undefined), read as an item
-/// spec reads it. A value the walk computes from one may name a
-/// different target (`Include`) or strip one it kept (`Exclude`): a phantom
-/// edge for a reference-semantics consumer. One it does not compute, it drops
-/// with the element, though MSBuild holds items there that the list then
-/// lacks (#1098). So the list is flagged before the element is walked,
-/// whatever the walk then does with it.
-fn taint_reference_list_on_doubted_reads(node: Node<'_, '_>, state: &mut State<'_>) {
-    for name in ["Include", "Exclude"] {
-        if let Some(raw) = attribute(node, name)
-            && state.raw_reads_a_doubted_name(&raw)
-        {
-            state.project_references_uncertain = true;
-        }
-    }
-}
-
 /// Handle one item element when a [`GlobResolver`] is present.
 ///
 /// Splits the (already `$(...)`-expanded) `Include` into fragments,
@@ -4116,7 +4136,7 @@ fn route_item_through_resolver(
     let mut excludes: Vec<SpecFragment> = Vec::new();
     if let Some(raw) = exclude_attr.as_deref() {
         // The Exclude VALUE's trust was checked with the Include's
-        // ([`taint_reference_list_on_doubted_reads`]); the best-effort
+        // ([`reads_a_doubted_name`]); the best-effort
         // exclusion below applies whatever we did expand.
         let expansion = state.expand(raw, node.range());
         if expansion.had_issue() {

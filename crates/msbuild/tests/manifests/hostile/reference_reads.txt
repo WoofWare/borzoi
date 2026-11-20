@@ -32,7 +32,7 @@ value.long-value	owed
 value.number-spelling	owed
 value.option	owed
 value.option-after-line-break	owed
-value.overwritten-later	excluded: a value a reference reads is its name's last write here, which nothing puts back
+value.overwritten-later	owed
 value.padded	owed
 value.padded-option	owed
 value.path-separator	owed

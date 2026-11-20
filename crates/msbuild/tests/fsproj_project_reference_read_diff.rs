@@ -227,6 +227,31 @@ impl ReadDocument {
         ReadDocument { writes, references }
     }
 
+    /// A document that writes `value` to `P`, copies it to `Q`, puts `P`
+    /// back, and references `Q`: the witness of a value a later write puts
+    /// back, which still reaches the reference.
+    fn copied_before_reset(value: hostile::Drawn<String>) -> Self {
+        let write = |name, body: hostile::Drawn<String>| ReadWrite {
+            name,
+            condition: String::new(),
+            body,
+        };
+        ReadDocument {
+            writes: vec![
+                write("P", value),
+                write("Q", hostile::Drawn::plain("$(P)".to_owned())),
+                write("P", hostile::Drawn::plain("lib".to_owned())),
+            ],
+            references: vec![ReadReference {
+                include: "E0_$(Q).fsproj".to_owned(),
+                reads: vec!["Q"],
+                condition: String::new(),
+                group_condition: String::new(),
+                in_undecided_arm: false,
+            }],
+        }
+    }
+
     /// A document whose one reference reads `value`, the last write of `P`,
     /// beside a name the walk refused: the witness of `value`'s dimension.
     fn witness(value: hostile::Drawn<String>) -> Self {
@@ -353,16 +378,10 @@ struct ReadCensus {
 }
 
 /// The hostile values the doubted-read sweep cannot carry.
-const READ_EXCLUDED: &[(Dimension, &str)] = &[
-    (
-        Dimension::OverwrittenLater,
-        "a value a reference reads is its name's last write here, which nothing puts back",
-    ),
-    (
-        Dimension::NonUtf8,
-        "a property value is text: no project spells bytes that are not UTF-8 (`name::as_text`)",
-    ),
-];
+const READ_EXCLUDED: &[(Dimension, &str)] = &[(
+    Dimension::NonUtf8,
+    "a property value is text: no project spells bytes that are not UTF-8 (`name::as_text`)",
+)];
 
 /// How one doubted-read document went.
 enum ReadOutcome {
@@ -495,6 +514,18 @@ fn doubted_read_sweep(oracle: &mut Oracle, seed: u64, cases: usize) -> ReadCensu
         )
         .chain(read_sweep_names("lib").iter().map(hostile::Drawn::of))
         .map(ReadDocument::witness)
+        // A value a later write puts back reaches a reference through a copy
+        // made before the reset.
+        .chain(
+            value::alphabet()
+                .filtered(|entry| entry.value.write == value::Write::ThenPlain)
+                .iter()
+                .map(|entry| {
+                    ReadDocument::copied_before_reset(
+                        hostile::Drawn::of(entry).map(|v| v.render("lib")),
+                    )
+                }),
+        )
         .collect();
     let mut rng = SplitMix64(seed);
     let mut tally = ReadCensus::default();
@@ -660,24 +691,84 @@ fn a_reference_reading_a_refused_name_is_no_certain_omission() {
     }
 }
 
+/// A reference whose spec reads a doubted name flags the list where the item
+/// pass reaches it: an item read of `@(ProjectReference)` before it in its
+/// group sees the list as it stood, as MSBuild's does, so a package list
+/// built from that read keeps its exact value.
+#[test]
+fn a_doubted_reference_flags_the_list_where_it_stands() {
+    let xml = format!(
+        "<Project><PropertyGroup><U{UNSUPPORTED_TRUE}>u</U></PropertyGroup>\
+         <ItemGroup><Id Include=\"X\" Exclude=\"@(ProjectReference)\" />\
+         <PackageReference Include=\"@(Id)\" Version=\"1\" />\
+         <ProjectReference Include=\"$(U).fsproj\" /></ItemGroup></Project>"
+    );
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let root = borzoi_msbuild::observed::host_fs::canonicalize(dir.path()).expect("canonicalize");
+    let proj = layout(&root);
+    std::fs::write(&proj, &xml).unwrap();
+    let theirs = Oracle::spawn()
+        .items_meta(&xml, &proj, "PackageReference", &[])
+        .expect("MSBuild evaluates this document");
+    let theirs: Vec<&str> = theirs.iter().map(|(id, _)| id.as_str()).collect();
+    assert_eq!(theirs, ["X"], "{xml}");
+    let parsed = parse_fsproj_with_imports(
+        &borzoi_msbuild::ProjectFile::buffer(&proj, &xml)
+            .expect("a project path spelt as its full path"),
+        &HashMap::new(),
+        &common::oracle_environment(),
+        None,
+        None,
+    )
+    .expect("well-formed XML parses");
+    assert!(parsed.project_references_uncertain, "{xml}");
+    assert!(
+        !parsed.package_references_uncertain,
+        "{xml}\n{:#?}",
+        parsed.package_reference_uncertainties
+    );
+    let ours: Vec<&str> = parsed
+        .package_references
+        .iter()
+        .map(|p| p.id.as_str())
+        .collect();
+    assert_eq!(ours, ["X"], "{xml}");
+}
+
 /// The arms after a `<When>` that holds whatever the doubted names hold are
 /// ones MSBuild never evaluates the gates of: deciding which arms are dead
 /// probes none of their files, so the read set holds nothing MSBuild does
 /// not consult.
 #[test]
 fn the_arms_after_a_taken_one_are_not_probed() {
-    let xml = format!(
-        "<Project><Choose><When{UNSUPPORTED_TRUE}><PropertyGroup><X>1</X></PropertyGroup></When>\
-         <When Condition=\"true\"><PropertyGroup><Y>1</Y></PropertyGroup></When>\
-         <When Condition=\"Exists('not-reached')\"><PropertyGroup><Z>1</Z></PropertyGroup></When>\
-         </Choose></Project>"
-    );
+    for xml in [
+        format!(
+            "<Project><Choose><When{UNSUPPORTED_TRUE}><PropertyGroup><X>1</X></PropertyGroup></When>\
+             <When Condition=\"true\"><PropertyGroup><Y>1</Y></PropertyGroup></When>\
+             <When Condition=\"Exists('not-reached')\"><PropertyGroup><Z>1</Z></PropertyGroup></When>\
+             </Choose></Project>"
+        ),
+        // A group with no reference in an arm the walk cannot decide: the
+        // reference check probes none of its gates.
+        format!(
+            "<Project><PropertyGroup><G{UNSUPPORTED_TRUE}>false</G></PropertyGroup>\
+             <Choose><When{UNSUPPORTED_TRUE}><ItemGroup Condition=\"$(G) And Exists('not-reached')\">\
+             <None Include=\"n\" /></ItemGroup></When></Choose></Project>"
+        ),
+    ] {
+        not_probed(&xml);
+    }
+}
+
+/// One document of [`the_arms_after_a_taken_one_are_not_probed`]: its read
+/// set holds nothing of `not-reached`.
+fn not_probed(xml: &str) {
     let dir = tempfile::TempDir::new().expect("tempdir");
     let root = borzoi_msbuild::observed::host_fs::canonicalize(dir.path()).expect("canonicalize");
     let proj = layout(&root);
-    std::fs::write(&proj, &xml).unwrap();
+    std::fs::write(&proj, xml).unwrap();
     let parsed = parse_fsproj_with_imports(
-        &borzoi_msbuild::ProjectFile::buffer(&proj, &xml)
+        &borzoi_msbuild::ProjectFile::buffer(&proj, xml)
             .expect("a project path spelt as its full path"),
         &HashMap::new(),
         &common::oracle_environment(),
@@ -797,14 +888,15 @@ fn a_dead_reference_reading_a_refused_name_costs_no_certainty() {
              <ItemGroup><ProjectReference Include=\"B$( G).fsproj\" /></ItemGroup>"
         ),
     ];
+    let mut oracle = Oracle::spawn();
     for row in rows {
-        dead_reference_row(&row);
+        dead_reference_row(&mut oracle, &row);
     }
 }
 
 /// One row of [`a_dead_reference_reading_a_refused_name_costs_no_certainty`],
 /// beside a refused `P` and a live reference.
-fn dead_reference_row(row: &str) {
+fn dead_reference_row(oracle: &mut Oracle, row: &str) {
     let xml = format!(
         "<Project><PropertyGroup><P>{REFUSED_BODY}</P></PropertyGroup>\
          <ItemGroup><ProjectReference Include=\"A.fsproj\" /></ItemGroup>{row}</Project>"
@@ -813,7 +905,7 @@ fn dead_reference_row(row: &str) {
     let root = borzoi_msbuild::observed::host_fs::canonicalize(dir.path()).expect("canonicalize");
     let proj = layout(&root);
     std::fs::write(&proj, &xml).unwrap();
-    let theirs: Vec<PathBuf> = Oracle::spawn()
+    let theirs: Vec<PathBuf> = oracle
         .items(&xml, &proj, "ProjectReference", &[])
         .expect("MSBuild evaluates this document")
         .iter()

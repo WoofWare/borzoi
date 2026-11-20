@@ -1186,7 +1186,7 @@ struct State<'r> {
     /// fabricates one), so this alone does not raise
     /// [`Self::project_references_uncertain`]; an `Include` whose value read a
     /// name the walk doubts raises it as well, dropped or kept
-    /// (`item_pass::taint_reference_list_on_doubted_reads`). But a list *derived* from
+    /// (`item_pass::reads_a_doubted_name`). But a list *derived* from
     /// `@(ProjectReference)` is then incomplete, and a `Remove` driven by it can
     /// miss an item MSBuild removes. [`item_pass`]'s item-list view reads it.
     project_reference_includes_hidden: bool,
