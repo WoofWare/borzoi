@@ -36,9 +36,11 @@
 pub mod alloc_limit;
 pub mod corpus_key;
 pub mod fcs_position;
+pub mod fsc_args;
 pub mod hostile;
 pub mod manifest;
 pub mod module_tree;
+pub mod msbuild_oracle;
 pub mod nuget_oracle;
 pub mod panic_silence;
 pub mod par_map;

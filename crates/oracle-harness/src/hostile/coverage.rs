@@ -43,7 +43,7 @@ pub const BOUNDARIES: &str = include_str!("boundaries.tsv");
 /// predate the library. `pending` is their status alone, so a new generator
 /// cannot take it: a row added as pending exceeds the ceiling. Lower each
 /// number as its level's retrofit decides rows.
-pub const PENDING_BACKLOG: &[(u8, usize)] = &[(2, 96), (3, 238)];
+pub const PENDING_BACKLOG: &[(u8, usize)] = &[(2, 83), (3, 238)];
 
 /// The library's own sources, which [`scan`] passes over.
 const LIBRARY: &str = "crates/oracle-harness/src/hostile/";

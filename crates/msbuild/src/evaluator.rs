@@ -1149,6 +1149,19 @@ struct State<'r> {
     /// based, so it's independent of *how* a file was reached — a user file
     /// pulled in through the SDK's import chain is still judged by its path.
     in_sdk_subtree: bool,
+    /// Whether the walk is in a document outside the entry .NET SDK's version
+    /// directory and its workload manifests: the entry project, or one it
+    /// imports from outside the install. Writes made here are checked into
+    /// [`Self::foreign_write_failures`].
+    in_foreign_document: bool,
+    /// Surfaced on [`ParsedProject::foreign_write_failures`].
+    foreign_write_failures: std::collections::BTreeMap<String, Option<String>>,
+    /// Surfaced on [`ParsedProject::workload_manifests_outside_install`].
+    workload_manifests_outside_install: BTreeSet<PathBuf>,
+    /// Surfaced on [`ParsedProject::imported_sdk_files`].
+    imported_sdk_files: BTreeSet<PathBuf>,
+    /// Surfaced on [`ParsedProject::workload_manifest_files`].
+    workload_manifest_files: BTreeSet<String>,
     /// Directories under which a file counts as SDK-installed — one per resolved
     /// SDK *root's parent* (e.g. `…/Sdks/Microsoft.NET.Sdk`, which holds both
     /// `Sdk/Sdk.props` and `targets/…DefaultItems…`), canonicalised. A *set*
@@ -1694,6 +1707,11 @@ impl<'r> State<'r> {
             sdk_files_imported_from_outside: BTreeSet::new(),
             compile_context: false,
             in_sdk_subtree: false,
+            in_foreign_document: true,
+            foreign_write_failures: std::collections::BTreeMap::new(),
+            workload_manifests_outside_install: BTreeSet::new(),
+            imported_sdk_files: BTreeSet::new(),
+            workload_manifest_files: BTreeSet::new(),
             sdk_tolerance_roots: Vec::new(),
             items_uncertain: false,
             define_constants_uncertainties: Vec::new(),
@@ -2171,6 +2189,11 @@ impl<'r> State<'r> {
             locally_overridable,
             compile_context: _,
             in_sdk_subtree: _,
+            in_foreign_document: _,
+            foreign_write_failures,
+            workload_manifests_outside_install,
+            imported_sdk_files,
+            workload_manifest_files,
             sdk_tolerance_roots: _,
             items_uncertain,
             define_context: _,
@@ -2392,6 +2415,11 @@ impl<'r> State<'r> {
             foreign_definitions,
             workload_definitions,
             sdk_files_imported_from_outside,
+            foreign_write_failures,
+            workload_manifests_outside_install,
+            imported_sdk_files,
+            workload_manifest_files,
+            auto_response_file: crate::AutoResponseFile::Unread,
             hidden_content,
             rejection,
             diagnostics,
@@ -2761,6 +2789,11 @@ impl<'r> State<'r> {
     /// value (skipped under a gate, or refused after [`PropertyMap::unbind`]).
     /// A write that stores one goes through [`Self::write_property`].
     fn apply_property_provenance(&mut self, name: &str, provenance: PropertyProvenance) {
+        // A write that stored nothing holds a value only if it may have
+        // happened: one under a gate that decided against it holds none.
+        if provenance.is_doubtful() {
+            self.note_foreign_write(name, None);
+        }
         self.directory_build.note_write(name);
         let resolved = self.resolve_provenance(provenance);
         self.lookup.apply_provenance(name, resolved);
@@ -2770,9 +2803,34 @@ impl<'r> State<'r> {
     /// cannot enter the table without the write saying what it does to the
     /// name's trust.
     fn write_property(&mut self, name: &str, value: Escaped, provenance: PropertyProvenance) {
+        let held = (!provenance.is_doubtful()).then_some(&value);
+        self.note_foreign_write(name, held);
         self.directory_build.note_write(name);
         let resolved = self.resolve_provenance(provenance);
         self.lookup.write(name, value, resolved);
+    }
+
+    /// Check a write of `name` made in a document outside the install against
+    /// the grammar the compiled-name derivation holds the name to
+    /// ([`crate::fsc::grammar_of`]): the value it stored, or `None` when the
+    /// walk is not certain of it. Only the first failure of each name is kept,
+    /// and names the derivation does not admit are not looked at, so the record
+    /// stays as small as the lists however often a document writes.
+    fn note_foreign_write(&mut self, name: &str, value: Option<&Escaped>) {
+        if !self.in_foreign_document {
+            return;
+        }
+        let Some(grammar) = crate::fsc::grammar_of(name) else {
+            return;
+        };
+        let lower = name.to_ascii_lowercase();
+        if self.foreign_write_failures.contains_key(&lower) {
+            return;
+        }
+        let value = value.map(Escaped::unescape);
+        if !value.as_deref().is_some_and(|v| grammar.admits(v)) {
+            self.foreign_write_failures.insert(lower, value);
+        }
     }
 
     fn sdk_package_taint_for_raw(&self, raw: &str) -> Option<SdkPackagePropertyTaint> {
@@ -5423,7 +5481,22 @@ fn package_structural_uncertainty_from_compile(
 /// `…/sdk/<version>/Sdks/<name>/Sdk` layout. Only that layout justifies
 /// tolerating shared SDK files outside the specific `Sdks/<name>` subtree (see
 /// [`State::note_sdk_tolerance`]). Case-insensitive, matching the host FS.
-fn dotnet_sdk_version_dir(root: &Path) -> Option<&Path> {
+/// `path` with `.` dropped and `..` popped, without asking the file system.
+fn lexically_normal(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+pub(crate) fn dotnet_sdk_version_dir(root: &Path) -> Option<&Path> {
     if !root
         .file_name()
         .is_some_and(|n| n.eq_ignore_ascii_case("Sdk"))
@@ -7017,6 +7090,54 @@ fn walk_import_file(path: &Path, span: Range<usize>, collapse: bool, state: &mut
             .sdk_files_imported_from_outside
             .insert(path.to_path_buf());
     }
+    // The entry SDK's own file, by its canonical place in the version
+    // directory, however the import spelled it.
+    if let Some(root) = state.entry_sdk_version_dir.as_deref() {
+        let relative = canon
+            .strip_prefix(root)
+            .ok()
+            .map(Path::to_path_buf)
+            .or_else(|| {
+                let parent = reach_parent_canon.as_deref()?.strip_prefix(root).ok()?;
+                Some(parent.join(path.file_name()?))
+            });
+        if let Some(relative) = relative {
+            state.imported_sdk_files.insert(relative);
+        }
+    }
+    // A workload manifest file, by its path under `sdk-manifests`.
+    if workload_manifest {
+        let under: Vec<_> = path
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .skip_while(|c| !c.eq_ignore_ascii_case("sdk-manifests"))
+            .skip(1)
+            .collect();
+        if !under.is_empty() {
+            state.workload_manifest_files.insert(under.join("/"));
+        }
+    }
+    // A workload manifest the resolver found outside the entry SDK's install
+    // (the user's own, behind the install's `userlocal` marker). Installed
+    // manifests sit under `<dotnet root>/sdk-manifests` as the resolver
+    // spells the root, wherever a merged install's links lead (the version
+    // directory and the manifests can be different trees).
+    let installed_manifests = state
+        .resolved_sdk_root
+        .as_deref()
+        .and_then(dotnet_sdk_version_dir)
+        .and_then(|version_dir| version_dir.parent()?.parent())
+        .map(|root| lexically_normal(&root.join("sdk-manifests")));
+    if workload_manifest
+        && !installed_manifests
+            .is_some_and(|manifests| lexically_normal(path).starts_with(manifests))
+    {
+        state
+            .workload_manifests_outside_install
+            .insert(path.to_path_buf());
+    }
+    let saved_in_foreign_document = state.in_foreign_document;
+    state.in_foreign_document = !in_entry_sdk && !workload_manifest;
     if workload_manifest && !in_entry_sdk {
         state
             .workload_definitions
@@ -7096,6 +7217,7 @@ fn walk_import_file(path: &Path, span: Range<usize>, collapse: bool, state: &mut
     }
     state.import_site_span = saved_import_site_span;
     state.in_sdk_subtree = saved_in_sdk_subtree;
+    state.in_foreign_document = saved_in_foreign_document;
     state.depth -= 1;
     state.current_file = saved_current_file;
     state.exit_this_file(frame);

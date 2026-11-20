@@ -217,3 +217,23 @@ pub fn install_host_sdk_of(sdk_root: &std::path::Path) {
         });
     install_host_sdk_dir(version_dir);
 }
+
+/// [`crate::fsc::compiled_assembly_name`] with the SDK whose version directory
+/// is `sdk`, and every workload manifest it loads, counted as graded, whether
+/// or not they are on [`crate::fsc::verified_sdks`] and
+/// [`crate::fsc::verified_manifests`]: the grading run grades them before it
+/// writes the list.
+pub fn compiled_assembly_name_grading(
+    sdk: &str,
+    project_path: &std::path::Path,
+    parsed: &crate::ParsedProject,
+    inputs: &crate::fsc::NameInputs<'_>,
+) -> crate::fsc::CompiledAssemblyName {
+    crate::fsc::compiled_assembly_name_graded(
+        project_path,
+        parsed,
+        inputs,
+        &|version| version == sdk,
+        &|_, _| true,
+    )
+}
