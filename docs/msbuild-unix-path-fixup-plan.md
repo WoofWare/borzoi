@@ -177,7 +177,8 @@ again), so a value whose worlds agree is *committed determinate*, not degraded.
   path; an `Exclude` reads it as written. Once the walk declines a
   property write for the startup directory (skips one under a gate whose
   outcome turns on it or asks past the segment cap, refuses one past the
-  cap, or declines a `DefaultTargets` that turns on it, which it then
+  cap or one some world refuses where the world in which no segment is a
+  directory does not, or declines a `DefaultTargets` that turns on it, which it then
   refuses rather than unsets), a later condition, property body or
   metadatum that may throw on any name the walk is not certain of is a
   possible rejection

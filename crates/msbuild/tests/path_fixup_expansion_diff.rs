@@ -98,7 +98,12 @@ const PROJECTS: [(&str, [usize; 5]); 2] = [
 impl World {
     fn new(seed: u64) -> World {
         let tmp = TempDir::new().unwrap();
-        let root = host_fs::canonicalize(tmp.path()).unwrap();
+        // The root sits one level inside the temporary directory, so that a
+        // value climbing out of it names a directory unique to this run, not
+        // the host's temporary directory, whose spelling a generated literal
+        // may share ([`placeholder`]).
+        let root = host_fs::canonicalize(tmp.path()).unwrap().join("fixture");
+        std::fs::create_dir(&root).unwrap();
         for dir in ["cwd-empty", "proj-empty"] {
             std::fs::create_dir_all(root.join(dir)).unwrap();
         }
@@ -1029,9 +1034,9 @@ const FIXED_SEED: u64 = 0x0993_0000_0000_0001;
 const FIXED_CASES: usize = 900;
 
 /// The text of a generated point, or of a claim on it, with the fixture's
-/// root spelt `{ROOT}`, its parent `{TMP}`, and the host's
-/// `MSBuildUserExtensionsPath` spelt `{UEXT}`, so that it names the same document on any host and in any
-/// checkout.
+/// root spelt `{ROOT}`, its parent (a directory unique to the run) `{TMP}`,
+/// and the host's `MSBuildUserExtensionsPath` `{UEXT}`, so that it names the
+/// same document on any host and in any checkout.
 fn placeholder(text: &str, root: &str) -> String {
     static UEXT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     let uext = UEXT.get_or_init(|| {
@@ -1040,8 +1045,7 @@ fn placeholder(text: &str, root: &str) -> String {
             .cloned()
             .unwrap_or_default()
     });
-    // A value that climbs out of the root names its parent, a host's
-    // temporary directory.
+    // A value that climbs out of the root names its parent.
     let parent = std::path::Path::new(root)
         .parent()
         .and_then(std::path::Path::to_str)
@@ -1104,9 +1108,10 @@ fn read_baseline() -> HashMap<String, BaselineRow> {
         .collect()
 }
 
-/// Write `point` into `dump` for `path_fixup_baseline.rs`: its document and
-/// what the baseline walk needs beside it, the root spelt `{ROOT}`.
-fn dump_point(dump: &std::path::Path, key: &str, point: &Point, root: &str) {
+/// What the baseline walk needs beside `point`'s document, as
+/// `path_fixup_baseline.rs` reads it: the project, the read graded, and the
+/// globals, [`placeholder`]ed.
+fn point_meta(point: &Point, root: &str) -> String {
     let project = point
         .project
         .parent()
@@ -1126,12 +1131,30 @@ fn dump_point(dump: &std::path::Path, key: &str, point: &Point, root: &str) {
             placeholder(value, root).escape_default()
         ));
     }
+    meta
+}
+
+/// A point's key against the baseline: every input its evaluation reads
+/// that the sweep generates (the document, [`point_meta`], and the
+/// environment as `env.txt` spells it), hashed as `path_fixup_baseline.rs`
+/// hashes them.
+fn point_fingerprint(point: &Point, root: &str, environment: &str) -> String {
+    fnv1a(&format!(
+        "{}\n--\n{}\n--\n{environment}",
+        placeholder(&point.xml, root),
+        point_meta(point, root)
+    ))
+}
+
+/// Write `point` into `dump` for `path_fixup_baseline.rs`: its document and
+/// [`point_meta`], the root spelt `{ROOT}`.
+fn dump_point(dump: &std::path::Path, key: &str, point: &Point, root: &str) {
     std::fs::write(
         dump.join(format!("{key}.xml")),
         placeholder(&point.xml, root),
     )
     .unwrap();
-    std::fs::write(dump.join(format!("{key}.meta")), meta).unwrap();
+    std::fs::write(dump.join(format!("{key}.meta")), point_meta(point, root)).unwrap();
 }
 
 /// The landing rule for this change, held mechanically: over a fixed seed's
@@ -1147,16 +1170,14 @@ fn fixed_seed_sweep_regresses_nothing_main_answers() {
     let mut world = World::new(FIXED_SEED);
     let root = world.root_text().to_owned();
     let dump = std::env::var_os("BORZOI_PATH_FIXUP_DUMP").map(PathBuf::from);
+    let env: String = world
+        .environment
+        .iter()
+        .map(|(name, value)| format!("{name}\t{}\n", placeholder(value, &root).escape_default()))
+        .collect();
     if let Some(dump) = &dump {
         std::fs::create_dir_all(dump).unwrap();
-        let env: String = world
-            .environment
-            .iter()
-            .map(|(name, value)| {
-                format!("{name}\t{}\n", placeholder(value, &root).escape_default())
-            })
-            .collect();
-        std::fs::write(dump.join("env.txt"), env).unwrap();
+        std::fs::write(dump.join("env.txt"), &env).unwrap();
     }
     let baseline = read_baseline();
     let (mut pins, mut regressed, mut stale) = (Vec::new(), Vec::new(), Vec::new());
@@ -1182,7 +1203,7 @@ fn fixed_seed_sweep_regresses_nothing_main_answers() {
         }
         let seen = grade(&mut world, &point);
         violations += seen.violations.len();
-        let hash = fnv1a(&placeholder(&point.xml, &root));
+        let hash = point_fingerprint(&point, &root, &env);
         let Some(row) = baseline.get(&key).filter(|row| row.hash == hash) else {
             stale.push(key);
             continue;

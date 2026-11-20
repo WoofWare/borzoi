@@ -51,7 +51,9 @@ fn record_baseline() {
         std::env::var("BORZOI_PATH_FIXUP_DUMP").expect("BORZOI_PATH_FIXUP_DUMP names the dump"),
     );
     let tmp = tempfile::TempDir::new().unwrap();
-    let root = host_fs::canonicalize(tmp.path()).unwrap();
+    // One level inside the temporary directory, as the sweep lays it out.
+    let root = host_fs::canonicalize(tmp.path()).unwrap().join("fixture");
+    std::fs::create_dir(&root).unwrap();
     let root_text = root.to_str().unwrap().to_owned();
     for (dir, segments) in DIRECTORIES {
         std::fs::create_dir_all(root.join(dir)).unwrap();
@@ -74,7 +76,11 @@ fn record_baseline() {
         .and_then(std::path::Path::to_str)
         .unwrap_or(&root_text)
         .to_owned();
-    let unplace = |text: &str| text.replace("{ROOT}", &root_text).replace("{UEXT}", &uext);
+    let unplace = |text: &str| {
+        text.replace("{ROOT}", &root_text)
+            .replace("{TMP}", &parent_text)
+            .replace("{UEXT}", &uext)
+    };
     // A claim is recorded in the sweep's spelling, the root and the host's
     // `MSBuildUserExtensionsPath` placeholders, so that it compares on any
     // host.
@@ -96,10 +102,8 @@ fn record_baseline() {
         })
     };
     let mut env = common::oracle_environment();
-    for line in host_fs::read_to_string(dump.join("env.txt"))
-        .unwrap()
-        .lines()
-    {
+    let env_text = host_fs::read_to_string(dump.join("env.txt")).unwrap();
+    for line in env_text.lines() {
         let (name, value) = line.split_once('\t').expect("a name and a value");
         env.insert(name.to_owned(), unplace(&unescape(value)));
     }
@@ -146,7 +150,9 @@ fn record_baseline() {
         let with_imports = common::parse_fsproj_with_imports(&file, &extra, &env, None, globs).ok();
         let served_reads = parse_fsproj_reads(&file, &extra, &env, None, globs, None, &probe).ok();
         let pure = borzoi_msbuild::parse_fsproj(&file, &extra, &env).ok();
-        let mut row = format!("{key}\t{}", fnv1a(&text));
+        // Every generated input, hashed as the sweep's `point_fingerprint`.
+        let fingerprint = fnv1a(&format!("{text}\n--\n{meta}\n--\n{env_text}"));
+        let mut row = format!("{key}\t{fingerprint}");
         let mut push = |mode: &str, claim: Option<Vec<String>>| {
             row.push_str(&format!("\t{mode} {}", encode_claim(&place(claim))));
         };

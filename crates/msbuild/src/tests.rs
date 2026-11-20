@@ -12198,6 +12198,104 @@ fn a_condition_throwing_in_one_world_is_not_illegal() {
     );
 }
 
+/// An `Include` beside an `Exclude` whose literal keeps a `\` decoded from
+/// `%5c` is matched as written too: MSBuild's `./seg\..\r.fs` is no `r*.fs`,
+/// from any startup directory.
+#[test]
+#[cfg(not(windows))]
+fn a_decoded_backslash_beside_a_wildcard_exclude_is_no_list() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    std::fs::write(root.join("r.fs"), "").unwrap();
+    let source = r#"<Project><ItemGroup><Compile Include="./$(P)..%5cr.fs" Exclude="r*.fs" /></ItemGroup></Project>"#;
+    let p = crate::parse_fsproj_with_imports(
+        &crate::ProjectFile::buffer(&root.join("Demo.fsproj"), source).unwrap(),
+        &[("P".to_owned(), "seg\\".to_owned())].into(),
+        &HashMap::new(),
+        None,
+        Some(&crate::glob_resolver::resolve as &crate::GlobResolver<'_>),
+    )
+    .unwrap();
+    assert!(p.items_uncertain, "{:#?}", p.items);
+}
+
+/// A write refused because its expansion is unsupported in some worlds only
+/// is declined for the startup directory: `Y` decodes to `L` or `\`, and
+/// `$(Y.Length)` is past what the walk models in one of them. MSBuild sets
+/// `P` from either directory, so `X` is `bad`, and coercing it rejects.
+#[test]
+#[cfg(not(windows))]
+fn a_write_unsupported_in_some_worlds_is_a_startup_decline() {
+    let p = parse(
+        r#"<Project><PropertyGroup>
+    <S>x\</S>
+    <Q>./$(S)/</Q>
+    <Y>%$(Q.Length)c</Y>
+    <P>$(Y.Length)</P>
+    <X>true</X>
+    <X Condition="'$(P)' != ''">bad</X>
+  </PropertyGroup>
+  <PropertyGroup Condition="$(X)"><Mid>m</Mid></PropertyGroup>
+  <PropertyGroup><After>ok</After></PropertyGroup></Project>"#,
+    );
+    assert!(
+        p.rejection.is_some(),
+        "{:?} {:#?}",
+        p.property("After"),
+        p.diagnostics
+    );
+}
+
+/// A throw rests on what every world read before it: where `Len` is `9x`
+/// the expression throws at the first `[1]`, and where it is `8x` only after
+/// reading `Bad`, a name the walk is not certain of. MSBuild does not throw
+/// there when `Bad` is `x`, so the rejection is possible, not certain.
+#[test]
+#[cfg(not(windows))]
+fn a_throw_rests_on_every_worlds_reads() {
+    let p = parse(
+        r#"<Project><PropertyGroup>
+    <S>seg\a</S>
+    <Q>./$(S)//</Q>
+    <Len>$(Q.Length)x</Len>
+    <Bad>y</Bad>
+    <Bad Condition="'É' == 'é'">x</Bad>
+    <P>$(Len.Split('8')[1].Split('$(Bad)')[1])</P>
+  </PropertyGroup></Project>"#,
+    );
+    assert_eq!(
+        p.rejection.map(|r| r.certainty),
+        Some(crate::RejectionCertainty::Possible),
+        "{:#?}",
+        p.diagnostics
+    );
+}
+
+/// `evaluate` claims MSBuild rejects a condition only where every world's
+/// rejection is a certain throw: where `seg/` is missing, the condition is
+/// true (`'É' == 'é'` is undecided to the walk, not illegal).
+#[test]
+#[cfg(not(windows))]
+fn a_condition_undecided_in_one_world_is_not_illegal() {
+    let mut props = crate::properties::PropertyMap::default();
+    props.insert_worlds_for_test(
+        "S",
+        crate::properties::Worlds::branch(
+            "seg".into(),
+            crate::properties::Worlds::Same(crate::properties::escaping::Escaped::from_xml(
+                "seg/a",
+            )),
+            crate::properties::Worlds::Same(crate::properties::escaping::Escaped::from_xml(
+                "seg\\a",
+            )),
+        ),
+    );
+    assert_eq!(
+        crate::condition::evaluate("('$(S)' != 'seg/a' And 'É' == 'é') Or maybe", &props).outcome,
+        crate::condition::Outcome::Unsupported
+    );
+}
+
 /// `Q` is `./seg/a//` where `seg` is a directory under MSBuild's startup
 /// directory, and `./seg/a/` elsewhere: the whole value's pass respells it
 /// only where `S`'s `\` survived. Each reader below that would act on one of

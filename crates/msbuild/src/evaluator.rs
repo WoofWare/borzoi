@@ -959,7 +959,9 @@ struct State<'r> {
     /// Whether the walk has declined a property write for MSBuild's startup
     /// directory: skipped one under a gate whose outcome turns on it (or asks
     /// about more of it than the walk enumerates), refused one past the
-    /// segment cap, or declined a `DefaultTargets` that turns on it. Such a
+    /// segment cap or one some world refuses (an expression unsupported in
+    /// it) where the world in which no segment is a directory does not, or
+    /// declined a `DefaultTargets` that turns on it. Such a
     /// write holds, in some world, a value the walk does not, under any name
     /// it is copied to and past any later write the walk is not sure ran, so
     /// a later condition or text that may throw on any name the walk is not
@@ -3760,17 +3762,20 @@ impl<'r> State<'r> {
         } else {
             (self.agreed(expansion, span.clone()), true)
         };
-        // An `Exclude` matches a literal as written, a `\` it keeps a character
-        // of its spelling, which the walk does not model: one that keeps one,
-        // in any world, is declined.
-        let keeps_a_backslash = expansion
-            .value
-            .ignoring_trust()
-            .as_escaped()
-            .split(';')
-            .any(|fragment| {
-                fragment.contains('\\') && !properties::escaping::filespec_has_wildcards(fragment)
-            });
+        // An `Exclude` matches a literal as written, a `\` it keeps (or decodes
+        // from `%5c`) a character of its spelling on Unix, which the walk does
+        // not model: one that keeps one, in any world, is declined. Wildcards
+        // are classified before decoding, the spelling after.
+        let keeps_a_backslash = cfg!(not(windows))
+            && expansion
+                .value
+                .ignoring_trust()
+                .as_escaped()
+                .split(';')
+                .any(|fragment| {
+                    !properties::escaping::filespec_has_wildcards(fragment)
+                        && properties::escaping::unescape(fragment).contains('\\')
+                });
         if has_exclude && keeps_a_backslash && !expansion.had_unsupported {
             self.push(
                 DiagnosticKind::PathAdjustmentUndecided {
@@ -7027,7 +7032,8 @@ fn sdk_project_under_root<'a>(raw: &str, relative: &'a str) -> &'a str {
 /// MSBuild's `..` pops a segment the `\` joins to its neighbour, which the
 /// walk, reading every `\` as a separator, does not model.
 pub(super) fn sdk_import_keeps_a_rooted_backslash(raw: &str, value: &Escaped) -> bool {
-    sdk_project_written_rooted(raw) && value.as_escaped().contains('\\')
+    // On Windows a `\` is a separator MSBuild reads as the walk does.
+    cfg!(not(windows)) && sdk_project_written_rooted(raw) && value.as_escaped().contains('\\')
 }
 
 /// How an SDK import's `Project`, written as `raw`, collapses its worlds:

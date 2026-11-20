@@ -55,7 +55,7 @@ cp "$root/crates/msbuild/tests/path_fixup_baseline.rs" "$base/crates/msbuild/tes
 out="$root/crates/msbuild/tests/manifests/path_fixup_baseline.txt"
 {
   echo "# The walk at $rev over path_fixup_expansion_diff's fixed-seed points:"
-  echo "# case, FNV-1a of its text (root spelt {ROOT}), each mode's claim."
+  echo "# case, FNV-1a of its inputs (document, meta, environment), each mode's claim."
   echo "# Regenerate: bash tools/path-fixup-baseline.sh $rev"
   cat "$dump/baseline.txt"
 } >"$out"

@@ -427,20 +427,27 @@ fn evaluate_inner(source: &str, props: &PropertyMap, fs: Ctx<'_>) -> Eval {
                 undefined_outside_empty_comparison: Vec::new(),
             };
         }
-        // A world that returns a boolean is one MSBuild may start in without
-        // throwing: no claim of a rejection. Where none does, the worst of the
-        // worlds' rejections stands for them.
+        // A world that returns a boolean, or may, is one MSBuild may start in
+        // without throwing: no claim of a rejection. Only where every world
+        // throws, or every one rejects alike, does the worst stand for them.
         (Ok(split), _) => {
             let values = split.values();
             if values.iter().any(|value| value.is_ok()) {
                 return rejected(Reject::Unmodelled);
             }
-            let worst = values
-                .into_iter()
-                .filter_map(|value| value.err())
+            let rejects: Vec<Reject> = values.into_iter().filter_map(|value| value.err()).collect();
+            let worst = *rejects
+                .iter()
                 .max()
                 .expect("a split with a non-boolean world");
-            return rejected(worst);
+            let least = *rejects
+                .iter()
+                .min()
+                .expect("a split with a non-boolean world");
+            if least >= Reject::Throws || least == worst {
+                return rejected(worst);
+            }
+            return rejected(Reject::Unmodelled);
         }
         (Err(worlds::TooManySegments), _) => return rejected(Reject::Unmodelled),
     };

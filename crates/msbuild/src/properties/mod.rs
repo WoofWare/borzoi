@@ -823,21 +823,64 @@ fn expand_in_every_world(
                     }
                 }
             }
-            // A throw some world does not make is one MSBuild may not make.
+            // A throw some world does not make is one MSBuild may not make,
+            // and one rests on what any world read before it threw.
             let thrown_in = |world_issues: &[Issue], thrown: &str| {
                 world_issues.iter().any(|issue| {
                     matches!(issue, Issue::Throws { expression, .. } if expression == thrown)
                 })
             };
-            for issue in &mut issues {
+            let reads_before = |thrown: &str| {
+                let mut all: Vec<String> = Vec::new();
+                for (_, world_issues) in &worlds {
+                    for issue in world_issues {
+                        if let Issue::Throws {
+                            expression, reads, ..
+                        } = issue
+                            && expression == thrown
+                        {
+                            for name in reads {
+                                if !all.contains(name) {
+                                    all.push(name.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+                all
+            };
+            let mut merged: Vec<Issue> = Vec::with_capacity(issues.len());
+            for mut issue in issues {
                 if let Issue::Throws {
                     expression,
+                    reads,
                     everywhere,
-                    ..
-                } = issue
+                } = &mut issue
                 {
                     *everywhere = worlds.iter().all(|(_, w)| thrown_in(w, expression));
+                    *reads = reads_before(expression);
                 }
+                if !merged.contains(&issue) {
+                    merged.push(issue);
+                }
+            }
+            let mut issues = merged;
+            // An expansion some world refuses (an unsupported expression, an
+            // undefined name) that the world where no segment is a directory
+            // does not is declined for the startup directory: knowing that
+            // world is MSBuild's, the walk would have its value. One that
+            // world refuses too is refused whatever the startup directory.
+            let refuses = |issue: &Issue| !matches!(issue, Issue::Throws { .. });
+            let absent = &results.absent_everywhere().1;
+            let refused_for_the_start = worlds.iter().any(|(_, world_issues)| {
+                world_issues
+                    .iter()
+                    .any(|issue| refuses(issue) && !absent.contains(issue))
+            });
+            if refused_for_the_start {
+                issues.push(Issue::PathAdjustmentUndecided {
+                    value: input.to_owned(),
+                });
             }
             (results.map(&mut |(value, _)| value.clone()), issues)
         }
