@@ -418,6 +418,14 @@ pub fn runtime_project_state_in(
 /// A configured `fcs-dump` [`Command`] for `subcommand`, honouring
 /// `BORZOI_FCS_DUMP` (a pre-built binary) or the build-once `.dll` run via
 /// `dotnet`. The caller wires stdin/stdout/env as needed.
+/// The directory of the `fcs-dump` [`fcs_dump_command`] runs, which holds the
+/// assemblies it ships with.
+pub fn fcs_dump_dir() -> PathBuf {
+    let bin = std::env::var_os("BORZOI_FCS_DUMP")
+        .map_or_else(|| ensure_fcs_dump_built().to_path_buf(), PathBuf::from);
+    bin.parent().expect("fcs-dump's directory").to_path_buf()
+}
+
 pub fn fcs_dump_command(subcommand: &str) -> Command {
     if let Some(bin) = std::env::var_os("BORZOI_FCS_DUMP") {
         let mut c = Command::new(bin);
