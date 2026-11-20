@@ -1027,6 +1027,40 @@ fn an_event_member_declines_its_accessor_spellings() {
     }
 }
 
+/// A get/set property whose name is an active pattern
+/// (`member x.(|Pat|_|) with get () = …`, #1100): the head's receiver `x` is
+/// no name of it, and the pass reads no active-pattern member head, so the
+/// project's names are unknowable. FCS binds the backticked call to the
+/// extension, so the gate must decline it.
+#[test]
+fn an_active_pattern_property_declines_its_own_name() {
+    const CALL: Call = Call {
+        binder: "c1",
+        text: "(asR x).``|Pat|_|``(1)",
+    };
+    let src = "module Use\n\
+               let asR (r: ExtUniverse.Recv.Receiver) = r\n\
+               type ExtUniverse.Recv.Receiver with\n    \
+               member x.(|Pat|_|) with get () = fun (i: int) -> 0L\n\
+               let c1 x = (asR x).``|Pat|_|``(1)\n"
+        .to_owned();
+    let checked = check(&[("Use.fs", src)], &[CALL]);
+    let call = &checked.calls[0];
+    assert!(checked.unsound.is_empty(), "{:?}", checked.unsound);
+    assert_eq!(
+        call.fcs.as_deref(),
+        Some("System.Int64"),
+        "FCS must bind the extension property, or this pins nothing"
+    );
+    assert_eq!(
+        call.gate,
+        Some(GateInput::ProjectUnknowable(
+            NamesUnknowable::AugmentationMemberName
+        )),
+        "the property's name is no name of its receiver's"
+    );
+}
+
 /// While a project reference has no built output, the assembly it will build
 /// may declare an extension of any name, in a namespace this project shares:
 /// a file that opens a project module or namespace declines every call
