@@ -75,6 +75,12 @@ pub enum GateInput {
     /// A project file declares an extension member, or a member that may be
     /// one, of the call's name.
     ProjectName,
+    /// A project reference read from source declares something whose
+    /// extension names cannot be read.
+    ReferencedProjectUnknowable(NamesUnknowable),
+    /// A project reference read from source declares an extension member, or
+    /// a member that may be one, of the call's name.
+    ReferencedProjectName,
     /// An `open` the resolver does not enumerate.
     OpenNotEnumerated,
     /// A project `open` while a project reference is not built: the
@@ -123,6 +129,15 @@ impl ExtensionScope {
         }
         if self.project.may_have(name, is_static) {
             return Some(GateInput::ProjectName);
+        }
+        // A project reference read from source: its names, scope-blind, as
+        // the project's own.
+        let referenced = assemblies.referenced_extension_names();
+        if let Some(why) = referenced.unknowable() {
+            return Some(GateInput::ReferencedProjectUnknowable(why));
+        }
+        if referenced.may_have(name, is_static) {
+            return Some(GateInput::ReferencedProjectName);
         }
         if self.project_open && assemblies.references_not_built() {
             return Some(GateInput::ProjectOpenReferencesNotBuilt);
@@ -243,6 +258,60 @@ mod tests {
         assert_eq!(
             project_open.decline(unbuilt.extension_view(), "Substring", false),
             Some(GateInput::ProjectOpenReferencesNotBuilt)
+        );
+    }
+
+    /// A project reference read from source: its names decline their own
+    /// name; an unknowable set of them every name; and an entity half the
+    /// walk could not read makes the assembly side unknowable whatever its
+    /// names say, so no call is committed on an absence it cannot prove.
+    #[test]
+    fn a_source_reference_declines_through_its_names_and_its_entities() {
+        use crate::{ExistenceUnread, SourceExistence, SourceSurface};
+        let read = SourceExistence::Read(SourceSurface {
+            entities: Vec::new(),
+            assembly_auto_opens: Vec::new(),
+            approximations: Default::default(),
+        });
+        let mut instance = crate::hash::HashSet::default();
+        instance.insert("Shout".to_string());
+        let names = ExtensionNames::Known {
+            instance,
+            statics: crate::hash::HashSet::default(),
+        };
+        let scope = ExtensionScope::default();
+
+        let mut env = AssemblyEnv::default();
+        env.add_source_existence(&read, &names);
+        assert_eq!(
+            scope.decline(env.extension_view(), "Shout", false),
+            Some(GateInput::ReferencedProjectName)
+        );
+        assert_eq!(scope.decline(env.extension_view(), "Other", false), None);
+
+        let mut env = AssemblyEnv::default();
+        env.add_source_existence(
+            &read,
+            &ExtensionNames::Unknowable(NamesUnknowable::AttributedAbbreviation),
+        );
+        assert_eq!(
+            scope.decline(env.extension_view(), "Other", false),
+            Some(GateInput::ReferencedProjectUnknowable(
+                NamesUnknowable::AttributedAbbreviation
+            ))
+        );
+
+        // The names are known and lack the call's; the entity half is not.
+        let mut env = AssemblyEnv::default();
+        env.add_source_existence(
+            &SourceExistence::Unread(ExistenceUnread::TooManyReadings),
+            &names,
+        );
+        assert!(
+            scope
+                .decline(env.extension_view(), "Other", false)
+                .is_some(),
+            "an unread entity half declares anything"
         );
     }
 }

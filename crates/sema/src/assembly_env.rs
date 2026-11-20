@@ -234,6 +234,14 @@ impl ExtensionView<'_> {
     }
 }
 
+impl<'a> ExtensionView<'a> {
+    /// The extension-member names of the project references read from
+    /// source ([`AssemblyEnv::add_source_existence`]).
+    pub(crate) fn referenced_extension_names(self) -> &'a crate::resolve::ExtensionNames {
+        &self.0.referenced_extension_names
+    }
+}
+
 /// The accessor spellings an F# property or event compiles to.
 const ACCESSOR_PREFIXES: [&str; 4] = ["get_", "set_", "add_", "remove_"];
 
@@ -1086,9 +1094,15 @@ pub struct AssemblyEnv {
     /// [`Self::has_namespace`]'s historical empty-path behaviour.
     public_namespace_paths: PathIdSet,
     /// Everything the referenced assemblies declare, at every accessibility,
-    /// read from their raw metadata: what the extension gate's existence
-    /// questions read ([`existence`]).
+    /// read from their raw metadata, and the entity half of every project
+    /// reference read from its source ([`Self::add_source_existence`]): what
+    /// open certification and the extension gate's existence questions read
+    /// ([`existence`]).
     existence: ExistenceSet,
+    /// The extension-member names of every project reference read from its
+    /// source ([`Self::add_source_existence`]): the gate reads them as it
+    /// reads the project's own files', scope-blind.
+    referenced_extension_names: crate::resolve::ExtensionNames,
     /// **Namespace** paths the referenced assemblies' assembly-level
     /// `[<assembly: AutoOpen("…")>]` attributes implicitly open — what drives
     /// the resolver's implicit opens (plan
@@ -5378,6 +5392,31 @@ impl AssemblyEnv {
     /// (the LSP), which reads the projection, and by [`Self::from_views`].
     pub fn mark_namespace_unreadable_attribute(&mut self, namespace: Vec<String>) {
         self.namespaces_with_unreadable_attributes.insert(namespace);
+    }
+
+    /// Add a project reference read from its source: its entity half
+    /// (`existence`, which [`crate::source_existence`] read; an unread one
+    /// makes the existence set unknowable, whatever `names` say) joins the
+    /// existence set with its assembly-level auto-opens, and its
+    /// extension-member names (the referenced project's
+    /// [`ResolvedProject::extension_names`](crate::ResolvedProject::extension_names))
+    /// join the gate's ([`ExtensionView::referenced_extension_names`]).
+    pub fn add_source_existence(
+        &mut self,
+        existence: &crate::SourceExistence,
+        names: &crate::resolve::ExtensionNames,
+    ) {
+        self.existence.add(&existence.existence_input(), &[]);
+        if let crate::SourceExistence::Read(surface) = existence {
+            for path in &surface.assembly_auto_opens {
+                if let Some(segments) = existence::auto_open_segments(path) {
+                    self.existence.add_auto_open_base(segments);
+                }
+            }
+        }
+        self.referenced_extension_names.absorb(names);
+        self.invalidate_bare_value_index();
+        self.invalidate_fold_surfaces();
     }
 
     /// Record that some project reference has no built output yet (see

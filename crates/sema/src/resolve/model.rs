@@ -5192,6 +5192,21 @@ impl ResolvedProject {
         &self.files[idx]
     }
 
+    /// The extension-member names the whole project may declare: the last
+    /// file's preceding names and its own. What a project that references
+    /// this one from source reads of its extensions
+    /// ([`AssemblyEnv::add_source_existence`](crate::AssemblyEnv::add_source_existence)).
+    pub fn extension_names(&self) -> ExtensionNames {
+        match self.files.last() {
+            Some(last) => {
+                let mut names = last.preceding_extension_names().clone();
+                names.absorb(&last.extension_names());
+                names
+            }
+            None => ExtensionNames::default(),
+        }
+    }
+
     /// The full path of every module (by its declaration) and every type the
     /// walk placed, outside an anonymous root: what `source_existence`'s
     /// entity paths must hold of the same files. `names` must be the table

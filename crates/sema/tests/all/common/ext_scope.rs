@@ -3,17 +3,23 @@
 //! the extension-scope gate: certain-implies-exact soundness in every file,
 //! and, for each probed call of the last file, what each side made of it.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use super::{
-    GradedDumps, ensure_ext_universe_fixture_built, ext_universe_env,
+    GradedDumps, ensure_ext_universe_fixture_built, ext_universe_env, invoke_fcs_dump_graph,
     invoke_fcs_dump_types_project_with_refs, temp_fs_tree,
 };
 use borzoi_cst::parser::parse;
 use borzoi_cst::syntax::{AstNode, ImplFile, TextRange, TextSize};
+use borzoi_oracle_harness::project_graph::{
+    FixtureFile, FixtureProject, GraphResponse, PlainName, ProjectGraphFixture,
+    framework_references, parse_response,
+};
 use borzoi_sema::{
-    GateInput, Incomplete, ProjectFile, SourceFile, SyntaxRecovery, infer_project, qualified_names,
-    resolve_project_files,
+    CompileItem, GateInput, Incomplete, Producer, ProjectFile, ProviderReferences, SourceFile,
+    SyntaxRecovery, certify_by_spelling, infer_project, qualified_names, resolve_project_files,
+    source_existence,
 };
 
 /// A probed call of the last file: the binder of the binding it is the body
@@ -275,4 +281,213 @@ pub fn check_files(
         unsound,
         calls: outcomes.into_iter().flatten().collect(),
     }
+}
+
+/// The assembly name of the producer [`check_referenced`] hands its consumer
+/// from source.
+pub const PRODUCER: &str = "ExtProducer";
+
+/// `sources` (Compile order; implementation files only) as one project's
+/// files.
+fn project_files(sources: &[(&str, String)]) -> Vec<ProjectFile> {
+    let parsed: Vec<(ImplFile, SyntaxRecovery)> = sources
+        .iter()
+        .map(|(_, s)| {
+            let p = parse(s);
+            let recovery = SyntaxRecovery::of(&p);
+            (ImplFile::cast(p.root).expect("impl file"), recovery)
+        })
+        .collect();
+    let paths: Vec<PathBuf> = sources.iter().map(|(p, _)| (*p).into()).collect();
+    let files: Vec<SourceFile> = parsed
+        .iter()
+        .map(|(f, _)| SourceFile::Impl(f.clone()))
+        .collect();
+    files
+        .iter()
+        .cloned()
+        .zip(parsed.iter().map(|(_, r)| r.clone()))
+        .zip(qualified_names(&files, &paths))
+        .map(|((file, recovery), qnof)| ProjectFile::new(file, qnof, recovery))
+        .collect()
+}
+
+/// The 1-based line and 0-based column of byte offset `at` in `text`, as
+/// FCS's ranges spell a position (the grids' sources are ASCII).
+fn line_col(text: &str, at: usize) -> (u64, u64) {
+    let line = text[..at].matches('\n').count() as u64 + 1;
+    let col = (at - text[..at].rfind('\n').map_or(0, |i| i + 1)) as u64;
+    (line, col)
+}
+
+/// A producer project A, read from source, and a consumer B that references
+/// it, each checked against the extension-universe fixture. Our side reads
+/// A as a project reference from source: its entity half through
+/// `source_existence` (certified by spelling) and its extension names off
+/// its own fold, both into the env
+/// ([`borzoi_sema::AssemblyEnv::add_source_existence`]). FCS checks B with A
+/// handed to it from source (the graph oracle). For each probed call of B's
+/// last file: the gate's input and inference's commit, and FCS's binding,
+/// read off its symbol use at the call's method name: `fcs` is
+/// `System.Int64` where `extension` says the binding is the extension under
+/// test (every extension a grid declares returns a type that is not the
+/// intrinsic's), and names the binding's assembly otherwise. The graph
+/// check reports symbol uses, not types, so B is graded at its probed calls
+/// by that binding: a commit FCS binds to the extension is unsound.
+pub fn check_referenced(
+    producer: &[(&str, String)],
+    consumer: &[(&str, String)],
+    calls: &[Call],
+    extension: &dyn Fn(&serde_json::Value) -> bool,
+) -> Checked {
+    let a_files = project_files(producer);
+    let a_refs: Vec<&ProjectFile> = a_files.iter().collect();
+    let routes = certify_by_spelling(&a_refs);
+    let items: Vec<CompileItem<'_>> = a_files.iter().map(CompileItem::Parsed).collect();
+    let existence = source_existence(Producer::Evaluated {
+        items: &items,
+        routes: &routes,
+        providers: ProviderReferences::None,
+    });
+    let base = ext_universe_env();
+    let a_names = resolve_project_files(&a_files, base).extension_names();
+    let mut env = base.clone();
+    env.add_source_existence(&existence, &a_names);
+    let b_files = project_files(consumer);
+    let resolved = resolve_project_files(&b_files, &env);
+    let inferred = infer_project(&b_files, &resolved, &env);
+
+    let mut unsound = Vec::new();
+    let fixture_files = |sources: &[(&str, String)]| -> Vec<FixtureFile> {
+        sources
+            .iter()
+            .map(|(n, t)| FixtureFile {
+                name: (*n).to_owned(),
+                text: t.clone(),
+            })
+            .collect()
+    };
+    let a_name = PlainName::new(PRODUCER).expect("a plain name");
+    let b_name = PlainName::new("ExtConsumer").expect("a plain name");
+    let a = FixtureProject::new(a_name.clone(), fixture_files(producer));
+    let mut b = FixtureProject::new(b_name.clone(), fixture_files(consumer));
+    b.project_refs = vec![a_name];
+    let fixture = ProjectGraphFixture::materialise(vec![a, b]).expect("materialise the projects");
+    let mut dlls: Vec<PathBuf> = framework_references().to_vec();
+    dlls.push(ensure_ext_universe_fixture_built().to_path_buf());
+    let graph = fixture.request(&b_name, &dlls, &BTreeMap::new());
+    let response: GraphResponse =
+        match parse_response(&invoke_fcs_dump_graph(&graph.to_json_line())) {
+            Ok(r) => r,
+            Err(e) => {
+                return Checked {
+                    unsound: vec![format!("the graph oracle refused the projects: {e:?}")],
+                    calls: Vec::new(),
+                };
+            }
+        };
+    let last = consumer.len() - 1;
+    let (last_name, last_source) = &consumer[last];
+    let last_path = fixture.paths(&b_name)[last].clone();
+    let uses: Vec<&serde_json::Value> = response
+        .files
+        .iter()
+        .filter(|f| f["Path"].as_str().map(Path::new) == Some(last_path.as_path()))
+        .flat_map(|f| f["Uses"].as_array().into_iter().flatten())
+        .collect();
+    let Some(file) = inferred.file(last) else {
+        return Checked {
+            unsound: vec![format!("{last_name} was not inferred")],
+            calls: Vec::new(),
+        };
+    };
+    let census = file.incompleteness();
+    if census.len() < calls.len() {
+        return Checked {
+            unsound: vec![format!(
+                "{last_name}: {} census entries for {} calls",
+                census.len(),
+                calls.len()
+            )],
+            calls: Vec::new(),
+        };
+    }
+    let tail = &census[census.len() - calls.len()..];
+    let mut outcomes = Vec::new();
+    for (j, call) in calls.iter().enumerate() {
+        let probe = Probe {
+            file: last,
+            binder: call.binder.to_string(),
+            text: call.text.to_string(),
+        };
+        let Some(range) = probe_range(last_source, &probe) else {
+            unsound.push(format!("`{}` is not in {last_name}", call.text));
+            continue;
+        };
+        let name = probe_method_name(call.text);
+        // FCS's use of a method spans its whole receiver expression
+        // (`(asR x).M`), so it is found by where it ends: at the end of the
+        // method's name as written. Not by its logical name, which for a call
+        // spelling a compiled name would differ from the spelling.
+        let written = call
+            .text
+            .rfind(&format!(".``{name}``"))
+            .map(|dot| (dot + 1, name.len() + 4))
+            .or_else(|| {
+                call.text
+                    .rfind(&format!(".{name}"))
+                    .map(|dot| (dot + 1, name.len()))
+            });
+        let Some((offset, len)) = written else {
+            unsound.push(format!("`{}` names no method `{name}`", call.text));
+            continue;
+        };
+        let (line, col) = line_col(
+            last_source,
+            u32::from(range.start()) as usize + offset + len,
+        );
+        let binding = uses.iter().find(|u| {
+            u["Range"]["End"]["Line"].as_u64() == Some(line)
+                && u["Range"]["End"]["Col"].as_u64() == Some(col)
+        });
+        let assembly = binding.and_then(|u| u["Assembly"].as_str());
+        let bound_to_extension = binding.is_some_and(|u| extension(u));
+        let ours = file.type_at(range).map(|t| t.render(&env));
+        if bound_to_extension && ours.is_some() {
+            unsound.push(format!(
+                "`{}`: committed {ours:?}, where FCS binds the extension",
+                call.text
+            ));
+        }
+        outcomes.push(CallOutcome {
+            ours,
+            fcs: if bound_to_extension {
+                Some("System.Int64".to_owned())
+            } else {
+                assembly.map(str::to_owned)
+            },
+            census: tail[j].clone(),
+            gate: borzoi_sema::test_support::extension_gate_decline(
+                resolved.file(last),
+                &env,
+                name,
+                false,
+            ),
+            opens_unenumerated: resolved.file(last).opens_unenumerated(),
+        });
+    }
+    Checked {
+        unsound,
+        calls: if outcomes.len() == calls.len() {
+            outcomes
+        } else {
+            Vec::new()
+        },
+    }
+}
+
+/// Whether a binding is a member [`PRODUCER`] declares: the extension, where
+/// the producer declares nothing else a call can bind.
+pub fn declared_by_producer(binding: &serde_json::Value) -> bool {
+    binding["Assembly"].as_str() == Some(PRODUCER)
 }

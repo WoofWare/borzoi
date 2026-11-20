@@ -60,7 +60,7 @@
 
 use std::path::Path;
 
-use crate::common::ext_scope::{Probe, check_files};
+use crate::common::ext_scope::{Call, Probe, check_files, check_referenced};
 use crate::common::{
     ensure_ext_assembly_grid_auto_built, ensure_ext_assembly_grid_auto_internal_built,
     ensure_ext_assembly_grid_built, ensure_ext_assembly_grid_internal_built,
@@ -1628,4 +1628,80 @@ fn turning_an_extension_internal_never_makes_it_absent() {
         failures.len(),
         failures.join("\n")
     );
+}
+
+/// The same extension shapes declared in a project reference read from
+/// source rather than a DLL: its extension names are the gate's
+/// (`AssemblyEnv::add_source_existence`), and wherever FCS binds a call to
+/// the extension, through the graph oracle with the producer handed to it
+/// from source, the gate declines the call. A slice of the grid: every cell
+/// with nothing dropped, homed in the namespace or a module, and reached by
+/// an `open` of its namespace or module. The receiver is the producer's own,
+/// so the extension is a binding whose declaring type is not `Receiver`.
+#[test]
+fn the_gate_declines_every_extension_fcs_binds_through_a_referenced_project() {
+    let cells: Vec<(usize, Cell)> = Cell::all()
+        .into_iter()
+        .enumerate()
+        .filter(|(_, c)| {
+            c.drop == Drop::No
+                && matches!(c.home, Home::Namespace | Home::Module)
+                && matches!(c.reach, Reach::OpenNamespace | Reach::OpenModule)
+        })
+        .collect();
+    let extension = |binding: &serde_json::Value| {
+        binding["Assembly"].as_str() == Some(crate::common::ext_scope::PRODUCER)
+            && binding["DeclaringPath"]
+                .as_array()
+                .and_then(|p| p.last())
+                .and_then(|s| s["Name"].as_str())
+                != Some("Receiver")
+    };
+    let results = par_map(cells.len(), |i| {
+        let (n, cell) = cells[i];
+        let (consumer, probe) = use_source(n, cell);
+        let call = Call {
+            binder: Box::leak(probe.binder.into_boxed_str()),
+            text: Box::leak(probe.text.into_boxed_str()),
+        };
+        let checked = check_referenced(
+            &[("Ext.fs", cell_source(n, cell))],
+            &[("Use.fs", consumer)],
+            &[call],
+            &extension,
+        );
+        (n, cell, checked)
+    });
+    let mut failures = Vec::new();
+    let mut bound = 0usize;
+    for (n, cell, checked) in &results {
+        let label = format!("{n} {cell:?}");
+        failures.extend(checked.unsound.iter().map(|u| format!("{label}: {u}")));
+        let Some(call) = checked.calls.first() else {
+            continue;
+        };
+        if call.fcs.as_deref() == Some("System.Int64") {
+            bound += 1;
+            if call.gate.is_none() {
+                failures.push(format!(
+                    "{label}: FCS binds the extension, and the gate lets the call pass"
+                ));
+            }
+        }
+        if liveness(*cell) && call.fcs.as_deref() != Some("System.Int64") {
+            failures.push(format!(
+                "{label}: FCS binds this extension from a DLL, and not from source ({:?})",
+                call.fcs
+            ));
+        }
+    }
+    eprintln!(
+        "referenced-project slice: {} cells, FCS binds the extension in {bound}",
+        results.len()
+    );
+    assert!(
+        bound > 0,
+        "FCS binds no extension in the slice: it grades nothing"
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

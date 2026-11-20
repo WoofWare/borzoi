@@ -60,7 +60,9 @@
 //! `BORZOI_EXT_GRID_FILTER=<substring>` runs only the cells whose label
 //! (`Kind/Relation/Placement/open=Shape`) contains it.
 
-use crate::common::ext_scope::{Call, CallOutcome, check};
+use crate::common::ext_scope::{
+    Call, CallOutcome, PRODUCER, check, check_referenced, declared_by_producer,
+};
 use borzoi_oracle_harness::par_map::par_map;
 use borzoi_sema::{GateInput, Incomplete, NamesUnknowable};
 
@@ -419,10 +421,17 @@ enum Placement {
     /// As [`Self::EarlierOpened`], with the declaration's last line cut short,
     /// so that the parser has to recover from the earlier file.
     EarlierDamaged,
+    /// In a module of a project reference read from source, which the
+    /// calling file opens. The resolver does not see a source reference's
+    /// entities, so the `open` is not enumerated.
+    ReferencedOpened,
+    /// In a module of a project reference read from source, which the
+    /// calling file never opens.
+    ReferencedUnopened,
 }
 
 impl Placement {
-    const ALL: [Placement; 10] = [
+    const ALL: [Placement; 12] = [
         Placement::OwnTop,
         Placement::OwnRecAfter,
         Placement::OwnNestedUnopened,
@@ -433,12 +442,27 @@ impl Placement {
         Placement::EarlierUnopened,
         Placement::EarlierOpenType,
         Placement::EarlierDamaged,
+        Placement::ReferencedOpened,
+        Placement::ReferencedUnopened,
     ];
+
+    /// Whether the declaration sits in a project reference read from source
+    /// ([`check_referenced`]).
+    fn referenced(self) -> bool {
+        matches!(
+            self,
+            Placement::ReferencedOpened | Placement::ReferencedUnopened
+        )
+    }
 
     fn applies_to(self, kind: Kind) -> bool {
         match self {
             Placement::EarlierOpenType => kind.declares_type_e(),
             _ if kind == Kind::None => self == Placement::OwnTop,
+            // The graph oracle refuses a source naming code it does not read.
+            Placement::ReferencedOpened | Placement::ReferencedUnopened => {
+                kind != Kind::HashReference
+            }
             // A directive must sit at a file's top level.
             _ if kind == Kind::HashReference => {
                 matches!(self, Placement::OwnTop | Placement::EarlierUnopened)
@@ -457,7 +481,7 @@ impl Placement {
     fn opens_unenumerated(self) -> bool {
         matches!(
             self,
-            Placement::EarlierOpenType | Placement::OwnNestedOpened
+            Placement::EarlierOpenType | Placement::OwnNestedOpened | Placement::ReferencedOpened
         )
     }
 }
@@ -618,13 +642,23 @@ fn expected(cell: Cell) -> [Option<GateInput>; 5] {
             })
     };
     let not_enumerated = cell.placement.opens_unenumerated() || cell.open.not_enumerated();
+    // A source reference's names are its own input, after the project's.
+    let referenced = cell.placement.referenced();
     METHODS.map(|method| {
+        let named = (cell.kind.contributes_instance_name() && method == cell.relation.name())
+            || spelled(method);
         if let Some(why) = unknowable {
-            Some(GateInput::ProjectUnknowable(why))
-        } else if (cell.kind.contributes_instance_name() && method == cell.relation.name())
-            || spelled(method)
-        {
-            Some(GateInput::ProjectName)
+            Some(if referenced {
+                GateInput::ReferencedProjectUnknowable(why)
+            } else {
+                GateInput::ProjectUnknowable(why)
+            })
+        } else if named {
+            Some(if referenced {
+                GateInput::ReferencedProjectName
+            } else {
+                GateInput::ProjectName
+            })
         } else if not_enumerated {
             Some(GateInput::OpenNotEnumerated)
         } else if method == "ContainsKey" && cell.open == OpenShape::NamespaceWithExtension {
@@ -732,6 +766,39 @@ fn indent(lines: &[String], n: usize) -> Vec<String> {
     lines.iter().map(|l| format!("{pad}{l}")).collect()
 }
 
+/// A referenced placement's two projects: the producer's files (`Aliases.fs`
+/// for a kind that marks through an earlier file's alias, then `Ext.fs`),
+/// and the consumer's `Use.fs`, whose last bindings are [`CALLS`].
+type Projects = (Vec<(&'static str, String)>, Vec<(&'static str, String)>);
+
+fn referenced_sources(cell: Cell) -> Projects {
+    let mut producer = Vec::new();
+    if cell.kind == Kind::CsAliasEarlierFile {
+        producer.push((
+            "Aliases.fs",
+            "module Aliases\ntype ExtAttrAlias = System.Runtime.CompilerServices.ExtensionAttribute\n"
+                .to_string(),
+        ));
+    }
+    let mut e = vec![
+        "module ExtLib".to_string(),
+        "open System.Runtime.CompilerServices".to_string(),
+    ];
+    e.extend(cell.kind.decl(cell.relation));
+    producer.push(("Ext.fs", e.join("\n") + "\n"));
+    let mut u: Vec<String> = vec!["module Use".into(), PREAMBLE.into()];
+    if cell.placement == Placement::ReferencedOpened {
+        u.push("open ExtLib".into());
+    }
+    u.extend(cell.open.line().map(String::from));
+    u.extend(
+        CALLS
+            .iter()
+            .map(|c| format!("let {} x = {}", c.binder, c.text)),
+    );
+    (producer, vec![("Use.fs", u.join("\n") + "\n")])
+}
+
 /// The cell's files, in Compile order: `Aliases.fs` for a kind that marks
 /// through an earlier file's alias, an optional `Ext.fs`, then `Use.fs`,
 /// whose last bindings are [`CALLS`].
@@ -826,6 +893,9 @@ fn sources(cell: Cell) -> Vec<(&'static str, String)> {
             u.extend(["module Use".into(), PREAMBLE.into(), "open ExtNs".into()]);
             u.extend(open_line);
             u.extend(calls(0));
+        }
+        Placement::ReferencedOpened | Placement::ReferencedUnopened => {
+            unreachable!("a referenced placement's projects are `referenced_sources`'")
         }
         Placement::EarlierSameNamespace => {
             let mut e = vec!["namespace Shared".to_string(), srcs];
@@ -930,7 +1000,12 @@ fn extension_scope_grid() {
         cells.retain(|&c| cell_label(c).contains(filter.as_str()));
     }
     let outcomes = par_map(cells.len(), |i| {
-        let checked = check(&sources(cells[i]), &CALLS);
+        let checked = if cells[i].placement.referenced() {
+            let (producer, consumer) = referenced_sources(cells[i]);
+            check_referenced(&producer, &consumer, &CALLS, &declared_by_producer)
+        } else {
+            check(&sources(cells[i]), &CALLS)
+        };
         grade(cells[i], &checked.unsound, &checked.calls)
     });
     let mut binds_kinds: Vec<String> = Vec::new();
@@ -1093,4 +1168,72 @@ fn an_unbuilt_reference_keeps_every_open_but_an_assembly_namespace_wholesale() {
         cells.len(),
         failures.join("\n")
     );
+}
+
+/// The cells that license reading a project reference's extensions as its
+/// `ExtensionNames` rather than as rows (Stage 1a): FCS binds a call to an
+/// extension by its logical name, so a call spelling an extension's compiled
+/// name (`Receiver.Shout`, backticked), or naming an `[<Extension>]` module
+/// `let` or class `let`, binds nothing of the referenced project. A control
+/// shows the harness sees a binding: a real extension called by its name
+/// binds, and the gate declines it as the referenced project's name.
+#[test]
+fn a_referenced_project_binds_extensions_by_logical_name_only() {
+    const CALL: Call = Call {
+        binder: "c1",
+        text: "(asR x).Shout(1)",
+    };
+    const COMPILED: Call = Call {
+        binder: "c1",
+        text: "(asR x).``Receiver.Shout``(1)",
+    };
+    let use_file = |call: &Call| {
+        (
+            "Use.fs",
+            format!(
+                "module Use\nlet asR (r: ExtUniverse.Recv.Receiver) = r\nopen ExtLib\nlet {} x = {}\n",
+                call.binder, call.text
+            ),
+        )
+    };
+    let augmentation =
+        "module ExtLib\ntype ExtUniverse.Recv.Receiver with\n    member this.Shout(i: int) = 0L\n";
+    let module_let = "module ExtLib\nopen System.Runtime.CompilerServices\n[<Extension>]\nlet Shout (x: ExtUniverse.Recv.Receiver, i: int) = 0L\n";
+    let class_let = "module ExtLib\nopen System.Runtime.CompilerServices\ntype E() =\n    [<Extension>]\n    static let Shout (x: ExtUniverse.Recv.Receiver, i: int) = 0L\n    static member Use = Shout\n";
+    // The control: an extension called by its logical name binds.
+    let control = check_referenced(
+        &[("Ext.fs", augmentation.to_owned())],
+        &[use_file(&CALL)],
+        &[CALL],
+        &declared_by_producer,
+    );
+    assert!(control.unsound.is_empty(), "{:?}", control.unsound);
+    assert_eq!(
+        control.calls[0].fcs.as_deref(),
+        Some("System.Int64"),
+        "the control: FCS binds the extension, or the harness sees no binding"
+    );
+    assert_eq!(
+        control.calls[0].gate,
+        Some(GateInput::ReferencedProjectName)
+    );
+    assert_eq!(control.calls[0].ours, None);
+    for (what, producer, call) in [
+        ("a backticked compiled spelling", augmentation, COMPILED),
+        ("an [<Extension>] module let", module_let, CALL),
+        ("an [<Extension>] class let", class_let, CALL),
+    ] {
+        let checked = check_referenced(
+            &[("Ext.fs", producer.to_owned())],
+            &[use_file(&call)],
+            &[call],
+            &declared_by_producer,
+        );
+        assert!(checked.unsound.is_empty(), "{what}: {:?}", checked.unsound);
+        assert_ne!(
+            checked.calls[0].fcs.as_deref(),
+            Some("System.Int64"),
+            "{what}: FCS binds a call to it through {PRODUCER}, so the lighter claim is wrong here"
+        );
+    }
 }
