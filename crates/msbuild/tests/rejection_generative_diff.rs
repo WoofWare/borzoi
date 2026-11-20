@@ -16,7 +16,8 @@
 //! evaluates one (and some it does not), over certain properties holding
 //! hostile values (`borzoi_oracle_harness::hostile`) and an uncertain one the
 //! walk holds one value of while MSBuild holds another, with operands that
-//! throw in every position of `And`/`Or` chains. Each project is graded
+//! throw in every position of `And`/`Or` chains, and a write after the site
+//! that the item pass reads and the property pass does not. Each project is graded
 //! certain-implies-exact against design-time evaluation, the evaluation the
 //! walk's rejection model follows (`evaluator/rejection.rs`):
 //!
@@ -406,12 +407,56 @@ const SITES: &[&str] = &[
     "<PropertyGroup Condition=\"UNDECIDED_TRUE\"><A>1</A><R>{t}</R></PropertyGroup>",
     "<Choose><When Condition=\"UNDECIDED_TRUE\"><Choose><When Condition=\"UNDECIDED_FALSE\"><PropertyGroup><A>abcdefghijklmnop</A></PropertyGroup></When><Otherwise><ItemGroup><I Include=\"{t}\" /></ItemGroup></Otherwise></Choose></When></Choose>",
     "<Choose><When Condition=\"UNDECIDED_TRUE\"><Choose><When Condition=\"UNDECIDED_FALSE\"><PropertyGroup><B>abcdefghijklmnop</B></PropertyGroup></When><Otherwise><ItemGroup Condition=\"{c}\"><I Include=\"x\" /></ItemGroup></Otherwise></Choose></When></Choose>",
+    // An arm the walk does not take, whose items MSBuild evaluates in its item
+    // pass, against the final table, a write after the `<Choose>` included
+    // (#1092).
+    "<Choose><When Condition=\"UNDECIDED_TRUE\"><ItemGroup><I Include=\"x\" Condition=\"{c}\" /></ItemGroup></When></Choose>",
+    "<Choose><When Condition=\"UNDECIDED_TRUE\"><ItemGroup><I Include=\"x\"><M>{t}</M></I></ItemGroup></When></Choose>",
+    "<Choose><When Condition=\"UNDECIDED_FALSE\" /><Otherwise><ItemGroup><I Include=\"{t}\" /></ItemGroup></Otherwise></Choose>",
+    "<Choose><When Condition=\"UNDECIDED_TRUE\"><PropertyGroup><A>1</A></PropertyGroup><ItemGroup Condition=\"{c}\"><I Include=\"x\" /></ItemGroup></When></Choose>",
 ];
 
 /// Whether `template` puts its text in a metadatum's value, where MSBuild
 /// expands metadata references before properties.
 fn is_metadata_site(template: &str) -> bool {
     template.contains("<M>{t}") || template.contains("M=\"{t}")
+}
+
+/// Whether `template` puts its piece where MSBuild reads it after every
+/// property write: in an `<ItemGroup>`, an `<ItemDefinitionGroup>` or a
+/// `<UsingTask>`, however deep in a `<Choose>`. A condition of a `<When>` or a
+/// property is read by the property pass.
+fn read_in_item_pass(template: &str) -> bool {
+    let at = template
+        .find("{c}")
+        .or_else(|| template.find("{t}"))
+        .expect("a site holds a piece");
+    let before = &template[..at];
+    ["ItemGroup", "ItemDefinitionGroup", "UsingTask"]
+        .iter()
+        .any(|tag| {
+            before.matches(&format!("<{tag}")).count()
+                > before.matches(&format!("</{tag}>")).count()
+        })
+}
+
+#[test]
+fn sites_read_in_the_item_pass_are_the_item_groups_and_tasks() {
+    let item_pass: Vec<&str> = SITES
+        .iter()
+        .copied()
+        .filter(|t| read_in_item_pass(t))
+        .collect();
+    assert!(item_pass.iter().all(|t| !t.starts_with("<PropertyGroup")));
+    assert!(read_in_item_pass(
+        "<Choose><When Condition=\"UNDECIDED_TRUE\"><ItemGroup><I Include=\"{t}\" /></ItemGroup></When></Choose>"
+    ));
+    assert!(!read_in_item_pass(
+        "<ItemGroup><I Include=\"x\" /></ItemGroup><Choose><When Condition=\"{c}\" /></Choose>"
+    ));
+    assert!(read_in_item_pass(
+        "<UsingTask TaskName=\"X\" AssemblyFile=\"y.dll\" Runtime=\"{t}\" />"
+    ));
 }
 
 /// What became of a generated project, as the census counts it.
@@ -611,9 +656,17 @@ fn project_sweep(
         let b = draw_value(rng);
         let held = draw_value(rng);
         let real = draw_value(rng);
+        // A write of `A` or `B` after the site, of a value of its own: a read
+        // of the item pass (and of `UsingTask`'s pass) is of this value, one
+        // of the property pass of the value before it (#1092).
+        let rewritten = draw_value(rng);
+        let rewrite: Option<&str> = *rng.pick(&[None, None, Some("A"), Some("B")]);
         let mut hostile: BTreeSet<Dimension> = BTreeSet::new();
         for drawn in [&a, &b, &held, &real] {
             hostile.extend(drawn.hostile.iter().copied());
+        }
+        if rewrite.is_some() {
+            hostile.extend(rewritten.hostile.iter().copied());
         }
         if hostile.iter().any(|d| excluded.contains(d)) {
             continue;
@@ -631,33 +684,46 @@ fn project_sweep(
         } else {
             &gate
         };
-        let property_pass = ["<PropertyGroup", "<Choose", "<Import"]
-            .iter()
-            .any(|start| template.starts_with(start));
+        let item_pass = read_in_item_pass(template);
         let overwritten_read = [("A", &a), ("B", &b)].into_iter().any(|(name, drawn)| {
             drawn.hostile.contains(&Dimension::OverwrittenLater)
-                && property_pass
+                && !item_pass
                 && property_references(piece).contains(&name)
         });
         if !overwritten_read {
             hostile.remove(&Dimension::OverwrittenLater);
         }
+        // The value of `A` and of `B` the site reads, as drawn.
+        let read_at_site = |name: &str, drawn: &'_ hostile::Drawn<String>| {
+            if item_pass && rewrite == Some(name) {
+                rewritten.clone()
+            } else {
+                drawn.clone()
+            }
+        };
         let site = template
             .replace("{c}", &xml_attribute(&gate))
             .replace("{t}", &xml_attribute(&body))
             .replace("UNDECIDED_TRUE", &xml_attribute(UNDECIDED_TRUE))
             .replace("UNDECIDED_FALSE", &xml_attribute(UNDECIDED_FALSE));
         // A value overwritten later has been read by the site in between.
-        let mut later = String::new();
+        let mut resets = String::new();
         for (name, drawn) in [("A", &a), ("B", &b)] {
             if drawn.hostile.contains(&Dimension::OverwrittenLater) {
-                later.push_str(&format!("<{name}>1</{name}>"));
+                resets.push_str(&format!("<{name}>1</{name}>"));
             }
         }
+        // The writes after the site: the resets, then the rewrite, its body
+        // as given.
+        let after_site = |rewrite_body: &str| match rewrite {
+            Some(name) => format!("{resets}<{name}>{rewrite_body}</{name}>"),
+            None => resets.clone(),
+        };
+        let later = after_site(&xml_text(&rewritten.value));
         // The project, its first group's writes as given: `U` as the walk
         // holds it, then (`real`) as MSBuild holds it, which the walk cannot
         // know.
-        let document = |writes: &str, site: &str| {
+        let document = |(writes, later): &(String, String), site: &str| {
             format!(
                 "<Project>\n  <PropertyGroup>{writes}</PropertyGroup>\n  {ITEMS}\n  {site}\n  \
                  <PropertyGroup><After>ok</After>{later}</PropertyGroup>\n</Project>\n"
@@ -672,7 +738,7 @@ fn project_sweep(
             xml_attribute(UNDECIDED_TRUE),
             xml_text(&real.value),
         );
-        let xml = document(&writes, &site);
+        let xml = document(&(writes.clone(), later.clone()), &site);
         std::fs::write(&project_path, &xml).unwrap();
         let parsed = parse_fsproj_with_imports(
             &borzoi_msbuild::ProjectFile::buffer(&project_path, &xml)
@@ -740,8 +806,9 @@ fn project_sweep(
             // some value, which the walk's judgement leaves to them: a throw
             // on the `""` the walk substitutes is no claim.
             // The walk's reading at the site, before a later write puts a
-            // name's plain value back.
-            let at_site = if later.is_empty() {
+            // name's plain value back: the property pass's. The item pass
+            // reads the final table.
+            let at_site = if later.is_empty() || item_pass {
                 None
             } else {
                 let xml = format!(
@@ -770,16 +837,30 @@ fn project_sweep(
                 };
                 format!("<{name}>{text}</{name}>")
             };
+            // The rewrite the item pass reads, as the walk holds it; one only
+            // the property pass reads past, as given.
             let varied = |unheld: &str| {
-                format!(
+                let writes = format!(
                     "{}{}{}<X>{}</X>",
                     as_held("A", &a, unheld),
                     as_held("B", &b, unheld),
                     as_held("U", &held, unheld),
                     xml_text(unheld)
-                )
+                );
+                let later = match rewrite {
+                    Some(name) if item_pass => {
+                        let held = as_held(name, &rewritten, unheld);
+                        let body = held
+                            .strip_prefix(&format!("<{name}>"))
+                            .and_then(|rest| rest.strip_suffix(&format!("</{name}>")))
+                            .expect("as_held writes one element");
+                        after_site(body)
+                    }
+                    _ => later.clone(),
+                };
+                (writes, later)
             };
-            let evaluates = |oracle: &mut Oracle, writes: &str, site: &str| {
+            let evaluates = |oracle: &mut Oracle, writes: &(String, String), site: &str| {
                 oracle
                     .project_design_time(&document(writes, site), &names, Some(&project_path), &[])
                     .is_some()
@@ -890,8 +971,14 @@ fn project_sweep(
                 (_, None) => String::new(),
             };
             let held_values = property_map(&[
-                ("A".to_owned(), held_value("A", Some(&a))),
-                ("B".to_owned(), held_value("B", Some(&b))),
+                (
+                    "A".to_owned(),
+                    held_value("A", Some(&read_at_site("A", &a))),
+                ),
+                (
+                    "B".to_owned(),
+                    held_value("B", Some(&read_at_site("B", &b))),
+                ),
                 ("U".to_owned(), held_value("U", Some(&held))),
                 ("X".to_owned(), held_value("X", None)),
             ]);

@@ -1327,6 +1327,34 @@ fn an_uncertain_emptiness_reaches_the_other_side() {
     ]);
 }
 
+/// An item's condition in a `<Choose>` arm the walk could not decide is
+/// MSBuild's item pass's: judged against the final property table, so a write
+/// after the `<Choose>` is the value it reads (#1092). `'É' == 'é'` is true to
+/// MSBuild and undecided to the walk.
+#[test]
+fn undecided_choose_arm_items_are_judged_against_the_final_table() {
+    let arm = |before: &str, inner: &str, later: &str| {
+        format!(
+            "<PropertyGroup>{before}</PropertyGroup>\
+             <Choose><When Condition=\"'É' == 'é'\">{inner}</When></Choose>\
+             <PropertyGroup><Later>{later}</Later></PropertyGroup>"
+        )
+    };
+    let item = "<ItemGroup><Compile Include=\"a.fs\" Condition=\"'$(Later)' != '' And $(Later)\" /></ItemGroup>";
+    let nested = format!("<Choose><When Condition=\"'Ä' == 'ä'\">{item}</When></Choose>");
+    let otherwise = format!(
+        "<Choose><When Condition=\"'Ä' == 'ë'\"><PropertyGroup><X>y</X></PropertyGroup></When><Otherwise>{item}</Otherwise></Choose>"
+    );
+    grade_rows_against_design_time(vec![
+        (arm("", item, "bad"), RowVerdict::Rejects),
+        (arm("<Later>true</Later>", item, "bad"), RowVerdict::Rejects),
+        (arm("", item, "true"), RowVerdict::Commits),
+        (arm("<Later>bad</Later>", item, "true"), RowVerdict::Commits),
+        (arm("", &nested, "bad"), RowVerdict::Rejects),
+        (arm("", &otherwise, "bad"), RowVerdict::Rejects),
+    ]);
+}
+
 /// Texts MSBuild reads from markup the walk does not read exactly, each
 /// pinned against design-time evaluation and held to it, certain-implies-
 /// exact: an attribute's metadata holding XML, an inner text whose markup
