@@ -3655,7 +3655,7 @@ pub(super) fn attribute_is_plain(node: Node<'_, '_>, attr: &roxmltree::Attribute
 /// `&lt;![CDATA[a]]&gt;` reads as `a`, ` &lt;!--c--&gt; y` as `"  y"`, and
 /// `x&lt;![CDATA[a]]&gt;` as `x<![CDATA[a]]>`. A value whose parse this crate
 /// does not model ([`crate::document::fragment_content`]) is `None`.
-fn metadata_attribute<'a>(
+pub(super) fn metadata_attribute<'a>(
     node: Node<'a, '_>,
     attr: &roxmltree::Attribute<'a, '_>,
 ) -> Option<std::borrow::Cow<'a, str>> {
@@ -3824,7 +3824,7 @@ pub(super) fn expand_silent(raw: &str, state: &State<'_>) -> Expansion {
     };
     let mut had_undefined = false;
     let mut had_unsupported = false;
-    let throws = super::rejection::first_throw(&issues);
+    let throws = super::rejection::throws_in(&issues);
     let mut unpinned_root = None;
     for issue in issues {
         match issue {
@@ -3840,7 +3840,7 @@ pub(super) fn expand_silent(raw: &str, state: &State<'_>) -> Expansion {
                 }
             }
             Issue::Unsupported { .. }
-            | Issue::Returns { .. }
+            | Issue::ReturnsBoolean { .. }
             | Issue::Throws { .. }
             | Issue::PathAdjustmentUndecided { .. } => {
                 had_unsupported = true;

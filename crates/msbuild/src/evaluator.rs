@@ -1408,10 +1408,10 @@ struct Expansion {
     /// property that is itself unpinned. Recorded when the value is stored
     /// as a property ([`Trust::unpinned`]).
     unpinned_root: Option<UnpinnedRoot>,
-    /// The first `$(…)` MSBuild throws on, on the values the expansion read
-    /// ([`rejection::first_throw`]); `had_unsupported` is set with it. A
+    /// Every `$(…)` MSBuild throws on, on the values the expansion read
+    /// ([`rejection::throws_in`]); `had_unsupported` is set with any. A
     /// rejection wherever MSBuild evaluates the text: the caller judges where.
-    throws: Option<String>,
+    throws: Vec<String>,
 }
 
 impl Expansion {
@@ -3396,7 +3396,7 @@ impl<'r> State<'r> {
         };
         let mut had_undefined = false;
         let mut had_unsupported = false;
-        let throws = rejection::first_throw(&issues);
+        let throws = rejection::throws_in(&issues);
         let mut direct_undefined: Vec<String> = Vec::new();
         // The direct reads whose diagnostic doubted on every axis: the self-
         // append's own read did not doubt the define axis, so a root naming
@@ -3420,7 +3420,7 @@ impl<'r> State<'r> {
                     continue;
                 }
                 Issue::Unsupported { expression }
-                | Issue::Returns { expression }
+                | Issue::ReturnsBoolean { expression }
                 | Issue::Throws { expression } => {
                     had_unsupported = true;
                     DiagnosticKind::UnsupportedPropertyExpression { expression }
@@ -4623,9 +4623,10 @@ fn walk_property_child_inner(
     let value_uses_sdk_taint = state.raw_uses_sdk_package_taint(&raw);
     let expansion = state.expand_property_pass_value(&raw, node.range(), &name);
     state.in_define_value = prev_in_value;
-    if let Some(expression) = expansion.throws.clone() {
+    if !expansion.throws.is_empty() {
         let reached = rejection::reach_is_certain(state) && own_gate_certain(state);
-        rejection::judge_throwing_expression(state, expression, reached, node.range());
+        let expressions = expansion.throws.clone();
+        rejection::judge_throwing_expression(state, expressions, reached, node.range());
     }
     let value_taints_property = condition_taints_property
         || value_uses_sdk_taint

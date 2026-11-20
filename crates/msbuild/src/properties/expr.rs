@@ -427,10 +427,10 @@ pub(super) enum Failure {
     /// throw is [`Failure::Unsupported`], since where the argument scanner
     /// puts a nested expression is a claim of its own.
     Throws,
-    /// MSBuild returns a value we do not compute, and does not throw: a
-    /// function that returns for every argument, whose arguments evaluated.
-    /// Outermost only, as [`Failure::Throws`].
-    Returns,
+    /// MSBuild returns a boolean we do not compute, and does not throw: a
+    /// function that returns one for every argument, whose arguments
+    /// evaluated. Outermost only, as [`Failure::Throws`].
+    ReturnsBoolean,
 }
 
 use Failure::Unsupported;
@@ -601,7 +601,7 @@ fn eval(
     // A step that returns a value we do not compute says nothing of a step
     // after it, which may throw on that value.
     let then = |failure: Failure, last: bool| match failure {
-        Failure::Returns if !last => Unsupported,
+        Failure::ReturnsBoolean if !last => Unsupported,
         other => other,
     };
     let mut value = eval_root(&expr.root, props, fs, issues, depth)
@@ -971,7 +971,7 @@ fn eval_static(
             } else if s.is_ascii() {
                 Ok(Value::Bool(true))
             } else {
-                Err(Failure::Returns)
+                Err(Failure::ReturnsBoolean)
             }
         }
         _ => Err(Unsupported),
@@ -1524,9 +1524,12 @@ fn eval_string_arg_inner(
     // 10.0.401: `TrimStart( vV )` trims `v` and `V`). Only text that can be
     // nothing else is read so: ASCII, no escape (whether MSBuild trims before
     // or after decoding one is not pinned), no delimiter, parenthesis,
-    // separator or expression marker.
+    // separator or expression marker. `null`, in any case, is no string:
+    // MSBuild binds it to a null argument (`IsNullOrEmpty(null)` is true;
+    // probed likewise).
     if !arg.is_empty()
         && arg.is_ascii()
+        && !arg.eq_ignore_ascii_case("null")
         && !arg.contains(['$', '@', '%', '\'', '`', '"', '(', ')', ',', '\\'])
     {
         return Ok(arg.to_owned());

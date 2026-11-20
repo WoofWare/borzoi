@@ -60,10 +60,10 @@ pub enum Issue {
     /// as an unsupported one is. MSBuild rejects the project wherever it
     /// evaluates the text.
     Throws { expression: String },
-    /// `$(...)` MSBuild evaluates without throwing, to a value we do not
-    /// compute (`expr::Failure::Returns`). Left literal in the output, as an
-    /// unsupported one is.
-    Returns { expression: String },
+    /// `$(...)` MSBuild evaluates without throwing, to a boolean we do not
+    /// compute (`expr::Failure::ReturnsBoolean`). Left literal in the output,
+    /// as an unsupported one is.
+    ReturnsBoolean { expression: String },
     /// MSBuild's Unix path adjustment of `value` (escaped text: one piece of
     /// the expansion, or the whole of it) turns on something the evaluation
     /// does not know: a directory relative to MSBuild's working directory, or
@@ -885,7 +885,7 @@ fn substitute_impl(
                         issues.push(match failure {
                             expr::Failure::Unsupported => Issue::Unsupported { expression },
                             expr::Failure::Throws => Issue::Throws { expression },
-                            expr::Failure::Returns => Issue::Returns { expression },
+                            expr::Failure::ReturnsBoolean => Issue::ReturnsBoolean { expression },
                         });
                         out.push(
                             &Escaped::from_xml(format!("$({inner})")),

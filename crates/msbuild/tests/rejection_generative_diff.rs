@@ -75,7 +75,7 @@ fn draw_value(rng: &mut SplitMix64) -> hostile::Drawn<String> {
 fn operand(rng: &mut SplitMix64, names: &[&str]) -> String {
     let name = *rng.pick(names);
     let other = *rng.pick(names);
-    match rng.below(14) {
+    match rng.below(21) {
         0 => format!("'{}'", rng.pick(&["", "1", "2.0", "abc", "true", "x", "É"])),
         1 => format!("'$({name})'"),
         2 => format!("$({name})"),
@@ -94,6 +94,23 @@ fn operand(rng: &mut SplitMix64, names: &[&str]) -> String {
         10 => format!("'$([System.String]::IsNullOrWhiteSpace(\"$({name})\"))'"),
         11 => format!("'$({name}.Trim())'"),
         12 => "'$(Missing)'".to_owned(),
+        // A version function's arguments in each string delimiter.
+        13 => format!(
+            "'$([MSBuild]::VersionLessThan({q}$({name}){q}, {q}2.0{q}))'",
+            q = rng.pick(&["`", "\""])
+        ),
+        // An unquoted literal argument, and the `null` MSBuild binds to none.
+        14 => format!("'$({name}.TrimStart(vV))'"),
+        15 => format!(
+            "'$({name}.Contains({}))'",
+            rng.pick(&["null", "NULL", "ab"])
+        ),
+        16 => "'$([System.String]::IsNullOrEmpty(null))'".to_owned(),
+        // A boolean the walk does not compute (whitespace outside ASCII).
+        17 => "'$([System.String]::IsNullOrWhiteSpace(\"\u{a0}\"))'".to_owned(),
+        // A literal tab, which MSBuild reads as itself in an attribute.
+        18 => format!("'$({name}.Split(\"\t\")[1])'"),
+        19 => format!("'$({name}[0])$({other}[9])'"),
         _ => format!("'$({name}.Split(\";\")[1].Length)'"),
     }
 }
@@ -102,14 +119,16 @@ fn operand(rng: &mut SplitMix64, names: &[&str]) -> String {
 /// coerced scalars, built-ins, nested under `!`, `And` and `Or`.
 fn condition(rng: &mut SplitMix64, names: &[&str], depth: u32) -> String {
     if depth == 0 || rng.below(3) == 0 {
-        return match rng.below(9) {
+        return match rng.below(10) {
             0 => rng.pick(&["true", "false"]).to_string(),
             1 => operand(rng, names),
             2 => format!("HasTrailingSlash({})", operand(rng, names)),
             3 => format!(
-                "$([MSBuild]::VersionLessThan('$({})', '2.0'))",
-                rng.pick(names)
+                "$([MSBuild]::VersionLessThan({q}$({}){q}, {q}2.0{q}))",
+                rng.pick(names),
+                q = rng.pick(&["'", "`", "\""])
             ),
+            9 => "$([System.String]::IsNullOrWhiteSpace('\u{a0}'))".to_owned(),
             4 => format!("Exists({})", operand(rng, names)),
             _ => format!(
                 "{} {} {}",
@@ -148,6 +167,98 @@ fn text(rng: &mut SplitMix64, names: &[&str]) -> String {
         1 => format!("a{}b", piece(rng)),
         _ => format!("{};{}", piece(rng), piece(rng)),
     }
+}
+
+/// What a text's expression on a name the walk is not sure of is struck to:
+/// the values the walk's own judgement tries such an expression as returning
+/// (`condition::RETURNED`), so that a rejection that survives every one is
+/// one the walk claims.
+const STRUCK_AS: &[&str] = &["", "x", "1", "1.2", "true", "false", "a;b"];
+
+/// The ways `n` struck expressions can each take a value of [`STRUCK_AS`]:
+/// all of them, where there are few enough (`n` ≤ 3), else each value for
+/// all and each pair of values split in turn. None for no expression.
+fn assignments(n: usize) -> Vec<Vec<&'static str>> {
+    if n == 0 {
+        return Vec::new();
+    }
+    if n <= 3 {
+        let mut all: Vec<Vec<&'static str>> = vec![Vec::new()];
+        for _ in 0..n {
+            all = all
+                .into_iter()
+                .flat_map(|prefix| {
+                    STRUCK_AS.iter().map(move |value| {
+                        let mut next = prefix.clone();
+                        next.push(*value);
+                        next
+                    })
+                })
+                .collect();
+        }
+        return all;
+    }
+    let mut some: Vec<Vec<&'static str>> = Vec::new();
+    for a in STRUCK_AS {
+        for b in STRUCK_AS {
+            for split in 0..n {
+                some.push((0..n).map(|i| if i == split { *b } else { *a }).collect());
+            }
+        }
+    }
+    some
+}
+
+/// The innermost `$(…)` expressions of a generated `piece` that `reads`
+/// accepts: those holding no other such expression, so that striking each
+/// leaves a function around it standing (`VersionLessThan('$(X)', …)` keeps
+/// its type when `$(X)` is struck).
+fn innermost_expressions(piece: &str, reads: &dyn Fn(&str) -> bool) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut pending = vec![piece.to_owned()];
+    while let Some(text) = pending.pop() {
+        for expression in expressions(&text) {
+            if !reads(expression) {
+                continue;
+            }
+            let inner = &expression[2..expression.len() - 1];
+            if expressions(inner).iter().any(|nested| reads(nested)) {
+                pending.push(inner.to_owned());
+            } else {
+                found.push(expression.to_owned());
+            }
+        }
+    }
+    found
+}
+
+/// The outermost `$(…)` expressions of a generated `piece`, in order. The
+/// generator writes no parenthesis inside a string, so counting them finds
+/// each one's end.
+fn expressions(piece: &str) -> Vec<&str> {
+    let mut found = Vec::new();
+    let mut rest = piece;
+    while let Some(at) = rest.find("$(") {
+        let mut depth = 0usize;
+        let mut end = None;
+        for (i, c) in rest[at + 1..].char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(at + 1 + i + 1);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(end) = end else { break };
+        found.push(&rest[at..end]);
+        rest = &rest[end..];
+    }
+    found
 }
 
 /// `xml` with each line cut to a readable length: a long hostile value
@@ -190,6 +301,16 @@ const SITES: &[&str] = &[
     "<ItemGroup><I Include=\"x\"><M Condition=\"{c}\">m</M></I></ItemGroup>",
     "<ItemGroup><I Include=\"x\" Exclude=\"{t}\" /></ItemGroup>",
     "<ItemDefinitionGroup><I><M>{t}</M></I></ItemDefinitionGroup>",
+    // Metadata MSBuild substitutes before it calls a function on it.
+    "<ItemDefinitionGroup><I><V>1.0</V><M>{t}$([MSBuild]::VersionLessThan('%(V)', '2.0'))</M></I></ItemDefinitionGroup>",
+    "<ItemGroup><I Include=\"x\" V=\"1.0\" M=\"{t}$([MSBuild]::VersionLessThan('%(V)', '2.0'))\" /></ItemGroup>",
+    // Attributes MSBuild does not expand, and metadata it expands only where
+    // an update applies.
+    "<ItemGroup><I Include=\"x\" Label=\"{t}\" /></ItemGroup>",
+    "<UsingTask TaskName=\"X\" AssemblyFile=\"y.dll\" Label=\"{t}\" />",
+    "<UsingTask TaskName=\"X\" AssemblyFile=\"y.dll\" Runtime=\"{t}\" />",
+    "<ItemGroup><I Update=\"nothere\" M=\"{t}\" /></ItemGroup>",
+    "<ItemGroup><I Include=\"x\" /><I Update=\"x\" M=\"{t}\" /></ItemGroup>",
     "<Import Project=\"there.props\" Condition=\"{c}\" />",
     "<Choose><When Condition=\"{c}\"><PropertyGroup><R>x</R></PropertyGroup></When></Choose>",
     "<Choose><When Condition=\"UNDECIDED_FALSE\" /><When Condition=\"{c}\" /></Choose>",
@@ -231,6 +352,17 @@ const PROJECT_EXCLUDED: &[(Dimension, &str)] = &[(
      there, which MSBuild may throw on, is no rejection site yet (#1094)",
 )];
 
+/// The body of `X`, a write the walk refuses to compute (a function it does
+/// not model), so that it holds no value of `X`; MSBuild holds `Debug`, and
+/// throws on nothing.
+const REFUSED: &str = "$([System.String]::Copy('Debug'))";
+
+/// The values the names the walk is not sure of are varied over (beside
+/// `""`), to show that MSBuild's rejection rests on them: a number, a word, a
+/// version, a boolean, and a long value every indexer and separator the
+/// generator uses finds room in.
+const VARIED_VALUES: &[&str] = &["1", "abc", "a;b\tc;d\te;f\tg;h\ti;j;k\tl", "1.2.3", "true"];
+
 /// Generate `cases` projects from `rng` and grade each against MSBuild.
 fn project_sweep(rng: &mut SplitMix64, cases: usize) -> ProjectCensus {
     let census = coverage::open(
@@ -248,7 +380,7 @@ fn project_sweep(rng: &mut SplitMix64, cases: usize) -> ProjectCensus {
     )
     .unwrap();
     let project_path = dir.join("Demo.fsproj");
-    let names: Vec<String> = ["A", "B", "U", "R", "After", "Delta"]
+    let names: Vec<String> = ["A", "B", "U", "X", "R", "After", "Delta"]
         .map(String::from)
         .to_vec();
     let mut tally = ProjectCensus::default();
@@ -264,7 +396,8 @@ fn project_sweep(rng: &mut SplitMix64, cases: usize) -> ProjectCensus {
         if hostile.iter().any(|d| excluded.contains(d)) {
             continue;
         }
-        let operands = ["A", "B", "U"];
+        // `X` is a write the walk refuses to compute: it holds no value of it.
+        let operands = ["A", "B", "U", "X"];
         let template = *rng.pick(SITES);
         let body = text(rng, &operands);
         let gate = condition(rng, &operands, 3);
@@ -280,20 +413,25 @@ fn project_sweep(rng: &mut SplitMix64, cases: usize) -> ProjectCensus {
                 later.push_str(&format!("<{name}>1</{name}>"));
             }
         }
-        // `U` as MSBuild holds it, which the walk cannot know.
-        let real_write = format!(
-            "<U Condition=\"{}\">{}</U>",
-            xml_attribute(UNDECIDED_TRUE),
-            xml_text(&real.value)
-        );
-        let xml = format!(
-            "<Project>\n  <PropertyGroup><A>{}</A><B>{}</B><U>{}</U>{real_write}\
-             </PropertyGroup>\n  {site}\n  \
-             <PropertyGroup><After>ok</After>{later}</PropertyGroup>\n</Project>\n",
-            xml_text(&a.value),
-            xml_text(&b.value),
+        // The project, its first group's writes as given: `U` as the walk
+        // holds it, then (`real`) as MSBuild holds it, which the walk cannot
+        // know.
+        let document = |writes: &str, site: &str| {
+            format!(
+                "<Project>\n  <PropertyGroup>{writes}</PropertyGroup>\n  {site}\n  \
+                 <PropertyGroup><After>ok</After>{later}</PropertyGroup>\n</Project>\n"
+            )
+        };
+        let a_write = format!("<A>{}</A>", xml_text(&a.value));
+        let b_write = format!("<B>{}</B>", xml_text(&b.value));
+        let x_write = format!("<X>{REFUSED}</X>");
+        let writes = format!(
+            "{a_write}{b_write}<U>{}</U><U Condition=\"{}\">{}</U>{x_write}",
             xml_text(&held.value),
+            xml_attribute(UNDECIDED_TRUE),
+            xml_text(&real.value),
         );
+        let xml = document(&writes, &site);
         std::fs::write(&project_path, &xml).unwrap();
         let parsed = parse_fsproj_with_imports(
             &borzoi_msbuild::ProjectFile::buffer(&project_path, &xml)
@@ -321,69 +459,180 @@ fn project_sweep(rng: &mut SplitMix64, cases: usize) -> ProjectCensus {
         let both = oracle.project_both(&xml, &names, Some(&project_path), &[]);
         let Some(theirs) = both.design_time else {
             tally.msbuild_rejects += 1;
-            if !ours.is_empty() {
-                // Where MSBuild evaluates the project with every name as the
-                // walk holds it (`U` without the write the walk could not
-                // decide, a reference the walk does not see through as it
-                // reads it, a write it refused to compute empty, as the walk
-                // substitutes it), it rejects over a value the walk does not
-                // hold.
-                let walk_held =
-                    |name: &str| spelt(parsed.properties.get(name).map_or("", String::as_str));
-                let as_held = format!(
-                    "<Project>\n  <PropertyGroup><A>{}</A><B>{}</B><U>{}</U></PropertyGroup>\n  \
-                     {site}\n  <PropertyGroup><After>ok</After>{later}</PropertyGroup>\n\
-                     </Project>\n",
-                    walk_held("A"),
-                    walk_held("B"),
-                    walk_held("U"),
-                );
-                if oracle
-                    .project_design_time(&as_held, &names, Some(&project_path), &[])
-                    .is_some()
-                {
-                    tally.rejected_on_an_uncertain_value += 1;
-                    census.reached(&hostile, "msbuild-rejects-on-an-uncertain-value");
-                    continue;
-                }
-                // The generated piece reads a name the walk holds no value
-                // of (a write it refused to compute): whether MSBuild's value
-                // makes it throw is the same judgement as for `U`.
-                let piece = if template.contains("{t}") {
-                    &body
-                } else {
-                    &gate
-                };
-                if property_references(piece).iter().any(|name| {
-                    ["A", "B", "U"].contains(name) && !parsed.properties.contains_key(*name)
-                }) {
-                    tally.rejected_on_an_uncertain_value += 1;
-                    census.reached(&hostile, "msbuild-rejects-on-an-uncertain-value");
-                    continue;
-                }
-                // A text holding an expression the walk does not model, which
-                // MSBuild may throw on: #1094's gap.
-                let held_values = property_map(&[
-                    ("A".to_owned(), walk_held("A")),
-                    ("B".to_owned(), walk_held("B")),
-                    ("U".to_owned(), walk_held("U")),
-                ]);
-                let unmodelled = template.contains("{t}")
-                    && substitute(&body, &held_values)
-                        .1
-                        .iter()
-                        .any(|issue| matches!(issue, Issue::Unsupported { .. }));
-                assert!(
-                    unmodelled,
-                    "certain-implies-exact violated: MSBuild rejects this project, as the walk \
-                     holds `U` too, and the walk committed {ours:?}\n{}",
-                    describe()
-                );
-                tally.rejected_on_an_unmodelled_body += 1;
-                census.reached(&hostile, "msbuild-rejects-on-an-unmodelled-body");
+            if ours.is_empty() {
+                census.reached(&hostile, outcome(true, false));
                 continue;
             }
-            census.reached(&hostile, outcome(true, false));
+            // MSBuild rejects, and the walk committed: wrong, unless the
+            // rejection rests on what the walk does not judge yet. That is
+            // shown, not assumed. With every name as the walk holds it (`U`
+            // without the write the walk could not decide, a name it holds a
+            // value of written as it holds it), MSBuild evaluates the project:
+            // it rejected over a value the walk does not hold. Or it does once
+            // the names the walk holds no value of (`X`, a refused write) hold
+            // some value, which the walk's judgement leaves to them: a throw
+            // on the `""` the walk substitutes is no claim.
+            // The walk's reading at the site, before a later write puts a
+            // name's plain value back.
+            let at_site = if later.is_empty() {
+                None
+            } else {
+                let xml = format!(
+                    "<Project>\n  <PropertyGroup>{writes}</PropertyGroup>\n  {site}\n</Project>\n"
+                );
+                std::fs::write(&project_path, &xml).unwrap();
+                Some(
+                    parse_fsproj_with_imports(
+                        &borzoi_msbuild::ProjectFile::buffer(&project_path, &xml)
+                            .expect("a project path spelt as its full path"),
+                        &HashMap::new(),
+                        &common::oracle_environment(),
+                        None,
+                        None,
+                    )
+                    .expect("well-formed"),
+                )
+            };
+            let parsed = at_site.as_ref().unwrap_or(&parsed);
+            let as_held = |name: &str, drawn: &hostile::Drawn<String>, unheld: &str| {
+                let text = match (parsed.property(name), parsed.properties.get(name)) {
+                    (PropertyRead::Value(_), _) => xml_text(&drawn.value),
+                    (_, Some(_)) if !drawn.value.contains("$(") => xml_text(&drawn.value),
+                    (_, Some(value)) => spelt(value),
+                    (_, None) => xml_text(unheld),
+                };
+                format!("<{name}>{text}</{name}>")
+            };
+            let varied = |unheld: &str| {
+                format!(
+                    "{}{}{}<X>{}</X>",
+                    as_held("A", &a, unheld),
+                    as_held("B", &b, unheld),
+                    as_held("U", &held, unheld),
+                    xml_text(unheld)
+                )
+            };
+            let evaluates = |oracle: &mut Oracle, writes: &str, site: &str| {
+                oracle
+                    .project_design_time(&document(writes, site), &names, Some(&project_path), &[])
+                    .is_some()
+            };
+            if std::iter::once(&"")
+                .chain(VARIED_VALUES)
+                .any(|value| evaluates(&mut oracle, &varied(value), &site))
+            {
+                tally.rejected_on_an_uncertain_value += 1;
+                census.reached(&hostile, "msbuild-rejects-on-an-uncertain-value");
+                continue;
+            }
+            // MSBuild may throw on every value of a name the walk is not sure
+            // of, by a different expression for each (`$(X.Split(';')[1])`
+            // beside a version function of `$(X)`): the judgement over the
+            // values a name may hold (#1009's second stage), which the walk
+            // leaves to them. So the rejection is the walk's to see only where
+            // it survives with every part reading such a name struck from the
+            // site: a condition's leaf by a boolean (true for every one, then
+            // false), a text's expression by a value.
+            let unsure_names: Vec<&str> = ["A", "B", "U", "X"]
+                .into_iter()
+                .filter(|name| !matches!(parsed.property(name), PropertyRead::Value(_)))
+                .collect();
+            let reads_unsure = |text: &str| {
+                property_references(text)
+                    .iter()
+                    .any(|name| unsure_names.contains(name))
+            };
+            let piece = if template.contains("{t}") {
+                &body
+            } else {
+                &gate
+            };
+            let unsure_expressions = innermost_expressions(piece, &reads_unsure);
+            // The walk judges each leaf alone, and follows no correlation
+            // between two such expressions, nor between two places one
+            // stands: each place takes its own value, every assignment up to a
+            // bound.
+            let mut places: Vec<(usize, &str)> = Vec::new();
+            for expression in &unsure_expressions {
+                for (at, _) in piece.match_indices(expression.as_str()) {
+                    if !places.iter().any(|(seen, _)| *seen == at) {
+                        places.push((at, expression.as_str()));
+                    }
+                }
+            }
+            places.sort();
+            let struck_sites: Vec<String> = assignments(places.len())
+                .into_iter()
+                .map(|assignment| {
+                    let mut struck = String::new();
+                    let mut from = 0;
+                    for ((at, expression), value) in places.iter().zip(assignment) {
+                        struck.push_str(&piece[from..*at]);
+                        struck.push_str(value);
+                        from = at + expression.len();
+                    }
+                    struck.push_str(&piece[from..]);
+                    site.replace(&xml_attribute(piece), &xml_attribute(&struck))
+                })
+                .collect();
+            if struck_sites
+                .iter()
+                .any(|struck| evaluates(&mut oracle, &varied(""), struck))
+            {
+                tally.rejected_on_an_uncertain_value += 1;
+                census.reached(&hostile, "msbuild-rejects-on-an-uncertain-value");
+                continue;
+            }
+            // A text's expressions the walk does not model, on the values it
+            // holds, struck from the site.
+            // As written where the walk holds it as written, so that its
+            // escapes are as at the site.
+            let held_value = |name: &str, drawn: Option<&hostile::Drawn<String>>| match (
+                drawn,
+                parsed.properties.get(name),
+            ) {
+                (Some(drawn), Some(_)) if !drawn.value.contains("$(") => drawn.value.clone(),
+                (_, Some(value)) => spelt(value),
+                (_, None) => String::new(),
+            };
+            let held_values = property_map(&[
+                ("A".to_owned(), held_value("A", Some(&a))),
+                ("B".to_owned(), held_value("B", Some(&b))),
+                ("U".to_owned(), held_value("U", Some(&held))),
+                ("X".to_owned(), held_value("X", None)),
+            ]);
+            let unmodelled: Vec<String> = if template.contains("{t}") {
+                substitute(&body, &held_values)
+                    .1
+                    .into_iter()
+                    .filter_map(|issue| match issue {
+                        Issue::Unsupported { expression } => Some(expression),
+                        // One reading item metadata the walk does not hold.
+                        Issue::Throws { expression } if expression.contains("%(") => {
+                            Some(expression)
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let mut struck = site.clone();
+            for expression in &unmodelled {
+                struck = struck.replace(&xml_attribute(expression), "s");
+            }
+            let shown = !unmodelled.is_empty()
+                && std::iter::once(&"")
+                    .chain(VARIED_VALUES)
+                    .any(|value| evaluates(&mut oracle, &varied(value), &struck));
+            assert!(
+                shown,
+                "certain-implies-exact violated: MSBuild rejects this project whatever the names \
+                 the walk is not sure of hold, and the walk committed {ours:?}\n{}",
+                describe()
+            );
+            tally.rejected_on_an_unmodelled_body += 1;
+            census.reached(&hostile, "msbuild-rejects-on-an-unmodelled-body");
             continue;
         };
         assert_ne!(
@@ -432,7 +681,7 @@ fn project_sweep_fixed_seed() {
             tally.rejected_on_an_uncertain_value,
             tally.rejected_on_an_unmodelled_body
         ),
-        (25, 4),
+        (91, 25),
         "the projects MSBuild rejects that the walk commits moved: pin the new counts if \
          #1051's second stage or #1094 now judges more of them, or if the generator changed \
          ({tally:?})"

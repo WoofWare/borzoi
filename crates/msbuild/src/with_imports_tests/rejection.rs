@@ -618,6 +618,70 @@ fn a_property_function_msbuild_throws_on_is_rejected() {
     }
 }
 
+/// What the walk reads a property function's inputs as must be MSBuild's
+/// before a throw on them is a claim, and the text must be one MSBuild
+/// expands: each of these evaluates in MSBuild (`tests/condition_diff.rs`'s
+/// `where_msbuild_evaluates_a_text` and corners).
+#[test]
+fn a_throw_on_text_msbuild_reads_otherwise_is_none() {
+    for body in [
+        // Version arguments in either other string delimiter.
+        "<PropertyGroup><R Condition=\"$([MSBuild]::VersionEquals(&quot;1.2&quot;,&quot;1.2&quot;))\">x</R></PropertyGroup>",
+        "<PropertyGroup><R Condition=\"$([MSBuild]::VersionEquals(`1.2`,`1.2`))\">x</R></PropertyGroup>",
+        // An item definition's metadata MSBuild substitutes first.
+        "<ItemDefinitionGroup><I><V>1.0</V><M>$([MSBuild]::VersionEquals('%(V)','1.0'))</M></I></ItemDefinitionGroup>",
+        "<ItemGroup><I Include=\"x\" V=\"1.0\" M=\"$([MSBuild]::VersionEquals('%(V)','1.0'))\" /></ItemGroup>",
+        // A label MSBuild does not expand.
+        "<PropertyGroup><P>abc</P></PropertyGroup><UsingTask TaskName=\"X\" AssemblyFile=\"y.dll\" Label=\"$(P[9])\" />",
+        "<PropertyGroup><P>abc</P></PropertyGroup><ItemGroup><I Include=\"x\" Label=\"$(P[9])\" /></ItemGroup>",
+        // A literal tab in an attribute, which MSBuild reads as itself.
+        "<PropertyGroup><P>a&#x9;b</P></PropertyGroup><ItemGroup><I Include=\"$(P.Split('\t')[1])\" /></ItemGroup>",
+        // A boolean the walk does not compute coerces without throwing.
+        "<PropertyGroup><R Condition=\"$([System.String]::IsNullOrWhiteSpace('\u{a0}'))\">x</R></PropertyGroup>",
+    ] {
+        for parsed in both_walkers(&format!("  {body}")) {
+            assert_eq!(parsed.rejection, None, "{body}: {:#?}", parsed.diagnostics);
+        }
+    }
+    // An `Update`'s metadata is expanded only where the update applies.
+    let body = "<PropertyGroup><P>abc</P></PropertyGroup><ItemGroup><I Update=\"nothere\" M=\"$(P[9])\" /></ItemGroup>";
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_ne!(
+            parsed.rejection.as_ref().map(|r| r.certainty),
+            Some(RejectionCertainty::Certain),
+            "{body}"
+        );
+    }
+}
+
+/// A throw on certain values beside an operand the walk cannot judge is
+/// still MSBuild's: one on a value the walk holds none of (`A`, refused), or
+/// one returning a boolean the walk does not compute, does not hide a later
+/// expression that throws whatever it holds.
+#[test]
+fn a_throw_beside_an_unjudged_expression_is_judged() {
+    let refused = "<A>$(P.Substring(0))</A>";
+    for body in [
+        format!("<PropertyGroup><P>abc</P>{refused}<R>$(A[0])$(P[9])</R></PropertyGroup>"),
+        format!(
+            "<PropertyGroup><P>abc</P>{refused}<R Condition=\"'$(A)$(P[9])' == ''\">x</R></PropertyGroup>"
+        ),
+        "<PropertyGroup><P>abc</P><R Condition=\"'$([System.String]::IsNullOrWhiteSpace(&quot;É&quot;))' == '$(P[9])'\">x</R></PropertyGroup>"
+            .to_owned(),
+    ] {
+        for parsed in both_walkers(&format!("  {body}")) {
+            assert_withdrawn_as(
+                &parsed,
+                &["Before", "After"],
+                parsed
+                    .rejection
+                    .as_ref()
+                    .map_or(RejectionCertainty::Possible, |r| r.certainty),
+            );
+        }
+    }
+}
+
 /// An operand the walk does not model, reached on values it is certain of,
 /// may throw (`'abc'.Substring(5)` does, MSB4184): a Possible site, before
 /// the operand that decides the condition and not after it. One MSBuild

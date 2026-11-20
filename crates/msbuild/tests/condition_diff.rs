@@ -1124,7 +1124,10 @@ fn where_msbuild_evaluates_a_text() {
             "<Target Name=\"T\"><PropertyGroup><R>{t}</R></PropertyGroup></Target>",
             Rejects::Neither,
         ),
-        ("<ItemGroup><I Include=\"{t}\" /></ItemGroup>", Rejects::Both),
+        (
+            "<ItemGroup><I Include=\"{t}\" /></ItemGroup>",
+            Rejects::Both,
+        ),
         (
             "<ItemGroup><I Include=\"{t}\" Condition=\"false\" /></ItemGroup>",
             Rejects::DesignTimeOnly,

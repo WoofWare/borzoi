@@ -116,7 +116,7 @@ use crate::document::attribute;
 use crate::imports::normalise;
 use crate::{Rejection, RejectionCause, RejectionCertainty, UnloadableImport};
 
-use super::item_pass::expand_silent;
+use super::item_pass::{expand_silent, metadata_attribute};
 use super::observed::{self, EntryKind};
 use super::{
     SdkResolution, State, collect_element_text, condition, condition_exists, directory_build,
@@ -322,32 +322,32 @@ pub(super) fn judge_condition_rejection(
 /// ([`properties::Issue::Throws`]): for text MSBuild may evaluate where the
 /// walk does not. Expanded without the file system, so it probes nothing: an
 /// expression that would need a probe claims nothing.
-pub(super) fn throwing_expression(text: &str, state: &State<'_>) -> Option<String> {
+pub(super) fn throwing_expressions(text: &str, state: &State<'_>) -> Vec<String> {
     let (_, issues) = properties::substitute(text, &state.lookup);
-    first_throw(&issues)
+    throws_in(&issues)
 }
 
-/// The first expression of an expansion's `issues` MSBuild throws on
-/// ([`properties::Issue::Throws`]). MSBuild expands the whole text and throws
-/// at the first expression it throws on, so a throw anywhere is the text's,
-/// whatever came before it: one the walk does not model either throws too or
-/// returns.
-pub(super) fn first_throw(issues: &[properties::Issue]) -> Option<String> {
-    issues.iter().find_map(|issue| match issue {
-        properties::Issue::Throws { expression } => Some(expression.clone()),
-        _ => None,
-    })
+/// Every expression of an expansion's `issues` MSBuild throws on, on the
+/// values the expansion read ([`properties::Issue::Throws`]), in order.
+pub(super) fn throws_in(issues: &[properties::Issue]) -> Vec<String> {
+    issues
+        .iter()
+        .filter_map(|issue| match issue {
+            properties::Issue::Throws { expression } => Some(expression.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Note the rejection MSBuild makes evaluating a text, at `span`, whose
-/// `$(…)` `expression` throws on the values the walk holds. `reached`:
+/// `$(…)` `expressions` throw on the values the walk holds. `reached`:
 /// whether MSBuild evaluates the text for certain. MSBuild expands the whole
 /// text, and a throw anywhere in it rejects the project, so what an
-/// expression before the throwing one does is moot: it is certain where it is
-/// reached for certain and every name `expression` reads is certain
+/// expression before a throwing one does is moot: it is certain where it is
+/// reached for certain and every name one of them reads is certain
 /// ([`operands_are_certain`]).
 ///
-/// Short of that it is Possible, where every name `expression` reads holds a
+/// Short of that it is Possible, where every name one of them reads holds a
 /// value MSBuild may hold ([`holds_a_value_msbuild_may`]). A throw on one
 /// that does not is no site: the value held is none MSBuild need hold, and
 /// whether the function throws on MSBuild's own value is the judgement over
@@ -355,16 +355,23 @@ pub(super) fn first_throw(issues: &[properties::Issue]) -> Option<String> {
 /// ([`condition::may_throw_on_held`]).
 pub(super) fn judge_throwing_expression(
     state: &mut State<'_>,
-    expression: String,
+    expressions: Vec<String>,
     reached: bool,
     span: Range<usize>,
 ) {
-    if !properties::property_references(&expression)
-        .all(|name| holds_a_value_msbuild_may(state, name))
-    {
+    let held = |expression: &String| {
+        properties::property_references(expression)
+            .all(|name| holds_a_value_msbuild_may(state, name))
+    };
+    let mut candidates = expressions.into_iter().filter(held).peekable();
+    let Some(first) = candidates.peek().cloned() else {
         return;
-    }
-    let certainty = certain_if(reached && operands_are_certain(state, &expression));
+    };
+    let certain = candidates.find(|expression| operands_are_certain(state, expression));
+    let (certainty, expression) = match certain {
+        Some(expression) if reached => (RejectionCertainty::Certain, expression),
+        _ => (RejectionCertainty::Possible, first),
+    };
     state.note_rejection(
         certainty,
         RejectionCause::ThrowingExpression { expression },
@@ -375,8 +382,9 @@ pub(super) fn judge_throwing_expression(
 /// Judge `text`, at `span`, which MSBuild evaluates as `reached` says and the
 /// walk does not, for an expression MSBuild throws on.
 fn judge_unwalked_text(state: &mut State<'_>, text: &str, reached: bool, span: Range<usize>) {
-    if let Some(expression) = throwing_expression(text, state) {
-        judge_throwing_expression(state, expression, reached, span);
+    let expressions = throwing_expressions(text, state);
+    if !expressions.is_empty() {
+        judge_throwing_expression(state, expressions, reached, span);
     }
 }
 
@@ -625,13 +633,74 @@ pub(super) fn judge_deferred(node: Node<'_, '_>, dir: &Path, reached: bool, stat
     judge_unwalked(node, dir, reached, state);
 }
 
-/// Judge each attribute of `node` but its `Condition`, which MSBuild expands
-/// as `reached` says, for an expression it throws on.
+/// Judge each attribute of the `<UsingTask>` at `node` but its `Condition`
+/// and `Label`, which MSBuild expands as `reached` says, for an expression it
+/// throws on.
 fn judge_unwalked_attributes(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
     for attr in node.attributes() {
-        if attr.name() != "Condition" {
-            judge_unwalked_text(state, attr.value(), reached, node.range());
+        if attr.namespace().is_none()
+            && !matches!(attr.name(), "Condition" | "Label")
+            && let Some(text) = attribute(node, attr.name())
+        {
+            judge_item_text(state, &text, reached, node.range());
         }
+    }
+}
+
+/// Judge each metadatum of the item or item definition at `node` written as
+/// an attribute, read as MSBuild reads one (`item_pass::metadata_attribute`),
+/// which MSBuild expands as `reached` says.
+fn judge_metadata_attributes(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
+    for attr in node.attributes() {
+        if attr.namespace().is_none()
+            && item_attribute(attr.name()) == ItemAttribute::Metadata
+            && let Some(text) = metadata_attribute(node, &attr)
+        {
+            judge_item_text(state, &text, reached, node.range());
+        }
+    }
+}
+
+/// What an attribute of an item is to MSBuild's evaluation
+/// (`tests/condition_diff.rs`'s `where_msbuild_evaluates_a_text`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ItemAttribute {
+    /// Not expanded at evaluation: the condition (judged as one), a label,
+    /// and the operations only a target runs.
+    Unexpanded,
+    /// The item operation and its options.
+    Operation,
+    /// A metadatum.
+    Metadata,
+}
+
+fn item_attribute(name: &str) -> ItemAttribute {
+    match name {
+        "Condition" | "Label" | "KeepMetadata" | "RemoveMetadata" | "KeepDuplicates" => {
+            ItemAttribute::Unexpanded
+        }
+        "Include"
+        | "Exclude"
+        | "Remove"
+        | "Update"
+        | "MatchOnMetadata"
+        | "MatchOnMetadataOptions" => ItemAttribute::Operation,
+        _ => ItemAttribute::Metadata,
+    }
+}
+
+/// Judge `text` of an item, item definition or `<UsingTask>`
+/// ([`judge_unwalked_text`]), but for an expression that reads item metadata
+/// (`%(…)`) or an item list (`@(…)`): MSBuild expands those into it first
+/// (escaped, so no expression's extent moves), and the walk's expansion
+/// leaves them as text, so a throw it finds there is not MSBuild's.
+fn judge_item_text(state: &mut State<'_>, text: &str, reached: bool, span: Range<usize>) {
+    let expressions: Vec<String> = throwing_expressions(text, state)
+        .into_iter()
+        .filter(|expression| !expression.contains("%(") && !expression.contains("@("))
+        .collect();
+    if !expressions.is_empty() {
+        judge_throwing_expression(state, expressions, reached, span);
     }
 }
 
@@ -643,26 +712,27 @@ fn judge_unwalked_attributes(node: Node<'_, '_>, reached: bool, state: &mut Stat
 /// so not at all when the `Include` names no item: then its conditions are
 /// only possibly evaluated.
 ///
-/// It expands an `Include` whatever the group's and the item's conditions
-/// hold, and each metadatum's value whatever the item's holds but not under a
-/// false condition of its own (`tests/condition_diff.rs`'s
-/// `where_msbuild_evaluates_a_text`). The rest of the item (its other
-/// attributes, an `Update`'s metadata, which MSBuild expands only where the
-/// update applies) is claimed reached only under gates decided true from
-/// certain inputs.
+/// It expands an item's operation (`Include`, `Exclude`, `Remove`, `Update`
+/// and the `MatchOnMetadata` options) whatever the group's and the item's
+/// conditions hold, and an `Include` item's metadata, child or attribute, as
+/// it evaluates their conditions, but not under a false condition of the
+/// metadatum's own; an `Update`'s metadata only where the update applies,
+/// which the walk does not know here (`tests/condition_diff.rs`'s
+/// `where_msbuild_evaluates_a_text`).
 fn judge_item_group(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
     let entry_dir = state.entry_project_dir.clone();
-    let group = judge_gate(node, &entry_dir, reached, state);
+    judge_condition(node, &entry_dir, reached, state);
     for item in node.children().filter(Node::is_element) {
-        let gated = judge_gate(item, &entry_dir, reached, state);
-        let strictly = reached && group == Judged::Decided(true) && gated == Judged::Decided(true);
+        judge_condition(item, &entry_dir, reached, state);
+        // Design-time evaluation expands the operation whatever the group's
+        // or the item's condition holds.
         for attr in item.attributes() {
-            let attr_reached = match attr.name() {
-                "Condition" => continue,
-                "Include" => reached,
-                _ => strictly,
-            };
-            judge_unwalked_text(state, attr.value(), attr_reached, item.range());
+            if attr.namespace().is_none()
+                && item_attribute(attr.name()) == ItemAttribute::Operation
+                && let Some(text) = attribute(item, attr.name())
+            {
+                judge_item_text(state, &text, reached, item.range());
+            }
         }
         if let Some(sure) = loader::remove_matching_more_than_items(item) {
             state.note_rejection(
@@ -686,11 +756,15 @@ fn judge_item_group(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
                     || metadata.attributes().any(|a| reads_items(a.value()))
             });
         let metadata_reached = reached && attribute(item, "Include").is_some() && !per_item;
+        // An `Update`'s metadata is expanded only where the update applies,
+        // which the walk does not know here: reached perhaps.
+        judge_metadata_attributes(item, metadata_reached, state);
         for metadata in item.children().filter(Node::is_element) {
             if let Some(value_reached) =
                 judge_gate(metadata, &entry_dir, metadata_reached, state).inner(metadata_reached)
+                && let Some(text) = collect_element_text(metadata)
             {
-                judge_unwalked_body(metadata, value_reached, state);
+                judge_item_text(state, &text, value_reached, metadata.range());
             }
         }
     }
@@ -710,12 +784,13 @@ fn judge_item_definition_group(node: Node<'_, '_>, reached: bool, state: &mut St
         else {
             continue;
         };
-        judge_unwalked_attributes(definition, metadata_reached, state);
+        judge_metadata_attributes(definition, metadata_reached, state);
         for metadata in definition.children().filter(Node::is_element) {
             if let Some(value_reached) =
                 judge_gate(metadata, &entry_dir, metadata_reached, state).inner(metadata_reached)
+                && let Some(text) = collect_element_text(metadata)
             {
-                judge_unwalked_body(metadata, value_reached, state);
+                judge_item_text(state, &text, value_reached, metadata.range());
             }
         }
     }

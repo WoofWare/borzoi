@@ -687,6 +687,17 @@ fn hand_picked_corners() {
             props(&[("P", "a-b")]),
             ExpandVerdict::Exact,
         ),
+        // `null` is no string: MSBuild binds a null argument.
+        (
+            "$([System.String]::IsNullOrEmpty(null))",
+            props(&[]),
+            ExpandVerdict::Partial,
+        ),
+        (
+            "$(P.Contains(NULL))",
+            props(&[("P", "anullb")]),
+            ExpandVerdict::Partial,
+        ),
         // Escaped, a literal we do not read.
         (
             "$(P.TrimStart(v%56))",
