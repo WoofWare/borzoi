@@ -55,7 +55,7 @@
 //! So is a `<UsingTask>` MSBuild refuses as it registers the task without an
 //! expression throwing: a name that expands to empty, a flag no boolean, a
 //! type it does not take, a body under no task factory
-//! ([`judge_registration`], #1099).
+//! ([`judge_using_task`], #1099).
 //!
 //! **Certain.** A [`RejectionCertainty::Certain`] site is a claim the
 //! differentials grade, so it needs MSBuild to reach the construct for
@@ -1017,94 +1017,6 @@ pub(super) fn judge_deferred(node: Node<'_, '_>, dir: &Path, reached: bool, stat
     judge_unwalked(node, dir, reached, state);
 }
 
-/// The attributes of a `<UsingTask>` MSBuild expands as it registers the
-/// task. Its `Condition` is judged as one, and it expands neither its
-/// `Label` nor `RequiredPlatform` nor `RequiredRuntime` (probed,
-/// `msbuild-condition-oracle`, SDK 10.0.401; `tests/condition_diff.rs`'s
-/// `using_task_texts_are_judged_where_msbuild_expands_them`).
-const USING_TASK_EXPANDED: &[&str] = &[
-    "TaskName",
-    "AssemblyFile",
-    "AssemblyName",
-    "TaskFactory",
-    "Architecture",
-    "Runtime",
-    "Override",
-];
-
-/// Judge what MSBuild expands of the `<UsingTask>` at `node` as it registers
-/// the task, which it does as `reached` says, for an expression it throws on:
-/// the attributes it expands ([`USING_TASK_EXPANDED`]), each parameter's
-/// `ParameterType`, `Required` and `Output`, the body's `Evaluate`, and the
-/// body itself (its text, CDATA included, and its elements' attributes; not
-/// its comments) unless `Evaluate` holds `false`, in any case and padding.
-/// Any other `Evaluate` MSBuild evaluates the body under or throws on, which
-/// rejects alike. A value the walk cannot vouch for leaves the body reached
-/// perhaps.
-fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
-    judge_registration(node, reached, state);
-    for name in USING_TASK_EXPANDED {
-        if let Some(text) = attribute(node, name) {
-            let text = if *name == "AssemblyFile" {
-                assembly_file_text(&text)
-            } else {
-                text.into_owned()
-            };
-            judge_unwalked_text(state, &text, reached, node.range());
-        }
-    }
-    for child in node.children().filter(Node::is_element) {
-        match child.tag_name().name() {
-            "ParameterGroup" => {
-                for parameter in child.children().filter(Node::is_element) {
-                    for name in ["ParameterType", "Required", "Output"] {
-                        if let Some(text) = attribute(parameter, name) {
-                            judge_unwalked_text(state, &text, reached, parameter.range());
-                        }
-                    }
-                }
-            }
-            "Task" => {
-                let body_reached = match attribute(child, "Evaluate") {
-                    None => Some(reached),
-                    Some(evaluate) => {
-                        judge_unwalked_text(state, &evaluate, reached, child.range());
-                        let (value, issues) = properties::substitute(&evaluate, &state.lookup);
-                        // Its trust is judged just below, name by name. MSBuild
-                        // reads the flag as expanded, escapes and all
-                        // (`%66alse` is no `false`; probed,
-                        // `msbuild-condition-oracle`, SDK 10.0.401).
-                        let value = value.ignoring_trust().as_escaped().to_owned();
-                        // An item list or metadatum MSBuild expands into it
-                        // the walk does not.
-                        if !issues.is_empty()
-                            || !operands_are_certain(state, &evaluate)
-                            || value.contains("@(")
-                            || value.contains("%(")
-                        {
-                            Some(false)
-                        } else if value
-                            // `Boolean.TryParse`'s padding: whitespace, as
-                            // `char.IsWhiteSpace` and Rust's `trim` both
-                            // classify it, and NUL.
-                            .trim_matches(|c: char| c.is_whitespace() || c == '\0')
-                            .eq_ignore_ascii_case("false")
-                        {
-                            None
-                        } else {
-                            Some(reached)
-                        }
-                    }
-                };
-                if let Some(body_reached) = body_reached {
-                    judge_element_contents(state, child, body_reached, Contents::Text);
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
 /// The text MSBuild expands of a `<UsingTask>`'s `AssemblyFile` written as
 /// `raw`: it turns the attribute's own `\` into `/` before it expands it,
 /// where `\` is no separator (`ProjectUsingTaskElement.AssemblyFile`,
@@ -1118,7 +1030,7 @@ fn assembly_file_text(raw: &str) -> String {
 }
 
 /// A `<UsingTask>` value as the walk holds it, for the registration
-/// judgement ([`judge_registration`]).
+/// judgement ([`judge_using_task`]).
 enum RegistrationValue {
     /// Expanded from names the walk is certain of ([`operands_are_certain`]),
     /// escapes and all, as MSBuild reads it (`ExpandIntoStringLeaveEscaped`).
@@ -1148,14 +1060,24 @@ fn registration_value(raw: &str, state: &State<'_>) -> RegistrationValue {
     };
     let value = value.ignoring_trust().as_escaped().to_owned();
     if issues.iter().any(|issue| {
-        !matches!(
+        matches!(
             issue,
-            properties::Issue::Undefined { .. } | properties::Issue::PathAdjustmentUndecided { .. }
+            properties::Issue::Unsupported { .. } | properties::Issue::Throws { .. }
         )
     }) {
         return RegistrationValue::Unheld;
     }
-    if value.contains("@(") {
+    // A value MSBuild computes without throwing that the walk does not (a
+    // host's architecture, a boolean it cannot fold), or an item list MSBuild
+    // expands into it: any value.
+    if value.contains("@(")
+        || issues.iter().any(|issue| {
+            matches!(
+                issue,
+                properties::Issue::ReturnsValue { .. } | properties::Issue::ReturnsBoolean { .. }
+            )
+        })
+    {
         return RegistrationValue::Opaque(value);
     }
     // A backslash MSBuild may turn into a separator, by its working
@@ -1219,53 +1141,45 @@ enum Registered {
     Unknown,
 }
 
-/// Judge the `<UsingTask>` at `node`, which MSBuild registers as `reached`
-/// says, for what its registration refuses without an expression throwing
-/// (`TaskRegistry.RegisterTasksFromUsingTaskElement` and
-/// `ParameterGroupAndTaskElementRecord`, MSBuild 18.9; #1099): a `TaskName`
-/// that expands to empty; children under a `TaskFactory` that expands to
-/// empty, `AssemblyTaskFactory` or `TaskHostFactory`; the `AssemblyFile`
-/// written (else the `AssemblyName`) expanding to empty; a body's `Evaluate`,
-/// or a parameter's `Output` or `Required`, that `Boolean.TryParse` does not
-/// read (an attribute written empty reads as absent); a `ParameterType` that
-/// expands to empty or that names no type MSBuild takes ([`PARAMETER_TYPES`]
-/// are those it does). Certain where the value is certain and the
-/// registration reached for certain; a refusal on a value the walk doubts,
-/// or one it cannot tell, is Possible; one on a value it holds none of is no
-/// site (#1051).
-fn judge_registration(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
+/// Judge the `<UsingTask>` at `node` as MSBuild registers the task, which it
+/// does as `reached` says (`TaskRegistry.RegisterTasksFromUsingTaskElement`
+/// and `ParameterGroupAndTaskElementRecord`, MSBuild 18.9), in its order, each
+/// value judged where MSBuild expands it, for an expression it throws on
+/// ([`judge_unwalked_text`]) and then for what the registration refuses
+/// without one ([`judge_registered`], #1099):
+///
+/// 1. `TaskName`, which must not expand to empty;
+/// 2. `TaskFactory`, under which children need one that is neither empty,
+///    `AssemblyTaskFactory` nor `TaskHostFactory`;
+/// 3. the `AssemblyFile` written, else the `AssemblyName`, which must not
+///    expand to empty;
+/// 4. the body's `Evaluate`, which `Boolean.TryParse` must read (written
+///    empty, it reads as absent), and the body itself (its text, CDATA
+///    included, and its elements' attributes; not its comments) unless
+///    `Evaluate` holds `false`, in any case and padding;
+/// 5. each parameter's `ParameterType` (not empty, and a type MSBuild takes:
+///    [`PARAMETER_TYPES`] are those probed), `Output` and `Required`
+///    (booleans), and its name, which MSBuild keys case-insensitively, so
+///    one an earlier name folds to fails its registry;
+/// 6. `Runtime`, `Architecture` and `Override`.
+///
+/// It expands neither `Label` nor `RequiredPlatform` nor `RequiredRuntime`
+/// (probed, `msbuild-condition-oracle`, SDK 10.0.401;
+/// `tests/condition_diff.rs`'s
+/// `using_task_texts_are_judged_where_msbuild_expands_them`), and its
+/// `Condition` is judged as one. The first rejection certain is the one
+/// MSBuild reports, so the order is MSBuild's.
+fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
     let task = attribute(node, "TaskName").unwrap_or_default().into_owned();
-    let judge = |state: &mut State<'_>,
-                 raw: &str,
-                 span: Range<usize>,
-                 attribute_name: &str,
-                 rule: &dyn Fn(&str) -> Registered| {
-        let (certain, value, verdict) = match registration_value(raw, state) {
-            RegistrationValue::Certain(value) => {
-                let verdict = rule(&value);
-                (true, value, verdict)
-            }
-            RegistrationValue::Possible(value) => {
-                let verdict = rule(&value);
-                (false, value, verdict)
-            }
-            RegistrationValue::Opaque(value) => (false, value, Registered::Unknown),
-            RegistrationValue::Unheld => return,
-        };
-        let certainty = match verdict {
-            Registered::Takes => return,
-            Registered::Refuses if certain && reached => RejectionCertainty::Certain,
-            Registered::Refuses | Registered::Unknown => RejectionCertainty::Possible,
-        };
-        state.note_rejection(
-            certainty,
-            RejectionCause::UsingTaskRegistration {
-                task: task.clone(),
-                attribute: attribute_name.to_owned(),
-                value,
-            },
-            span,
-        );
+    let step = |state: &mut State<'_>,
+                raw: &str,
+                span: Range<usize>,
+                attribute_name: &str,
+                rule: Option<&dyn Fn(&str) -> Registered>| {
+        judge_unwalked_text(state, raw, reached, span.clone());
+        if let Some(rule) = rule {
+            judge_registered(state, &task, raw, span, attribute_name, rule, reached);
+        }
     };
     let non_empty = |value: &str| {
         if value.is_empty() {
@@ -1281,111 +1195,183 @@ fn judge_registration(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) 
             Registered::Refuses
         }
     };
+    let factory = |value: &str| {
+        if !value.is_ascii() {
+            // `OrdinalIgnoreCase` folds letters outside ASCII the walk does
+            // not.
+            Registered::Unknown
+        } else if value.is_empty()
+            || value.eq_ignore_ascii_case("AssemblyTaskFactory")
+            || value.eq_ignore_ascii_case("TaskHostFactory")
+        {
+            Registered::Refuses
+        } else {
+            Registered::Takes
+        }
+    };
+    let parameter_type = |value: &str| {
+        if value.is_empty() {
+            Registered::Refuses
+        } else if PARAMETER_TYPES.contains(&value) {
+            Registered::Takes
+        } else {
+            Registered::Unknown
+        }
+    };
     if let Some(raw) = attribute(node, "TaskName") {
-        judge(state, &raw, node.range(), "TaskName", &non_empty);
+        step(state, &raw, node.range(), "TaskName", Some(&non_empty));
     }
-    if node.children().any(|child| child.is_element()) {
-        let raw = attribute(node, "TaskFactory").unwrap_or_default();
-        judge(state, &raw, node.range(), "TaskFactory", &|value: &str| {
-            if !value.is_ascii() {
-                // `OrdinalIgnoreCase` folds letters outside ASCII the walk
-                // does not.
-                Registered::Unknown
-            } else if value.is_empty()
-                || value.eq_ignore_ascii_case("AssemblyTaskFactory")
-                || value.eq_ignore_ascii_case("TaskHostFactory")
-            {
-                Registered::Refuses
-            } else {
-                Registered::Takes
-            }
-        });
+    let has_children = node.children().any(|child| child.is_element());
+    let factory_raw = attribute(node, "TaskFactory");
+    if factory_raw.is_some() || has_children {
+        let raw = factory_raw.unwrap_or_default();
+        step(
+            state,
+            &raw,
+            node.range(),
+            "TaskFactory",
+            has_children.then_some(&factory as &dyn Fn(&str) -> Registered),
+        );
     }
     match (
         attribute(node, "AssemblyFile"),
         attribute(node, "AssemblyName"),
     ) {
-        (Some(raw), _) if !raw.is_empty() => {
-            judge(
-                state,
-                &assembly_file_text(&raw),
-                node.range(),
-                "AssemblyFile",
-                &non_empty,
-            );
-        }
-        (_, Some(raw)) => judge(state, &raw, node.range(), "AssemblyName", &non_empty),
+        (Some(raw), _) if !raw.is_empty() => step(
+            state,
+            &assembly_file_text(&raw),
+            node.range(),
+            "AssemblyFile",
+            Some(&non_empty),
+        ),
+        (_, Some(raw)) => step(state, &raw, node.range(), "AssemblyName", Some(&non_empty)),
         _ => {}
     }
-    for child in node.children().filter(Node::is_element) {
-        match child.tag_name().name() {
-            "Task" => {
-                if let Some(raw) = attribute(child, "Evaluate").filter(|raw| !raw.is_empty()) {
-                    judge(state, &raw, child.range(), "Evaluate", &boolean);
+    if let Some(body) = node.children().find(|child| child.has_tag_name("Task")) {
+        let body_reached = match attribute(body, "Evaluate") {
+            None => Some(reached),
+            Some(evaluate) => {
+                step(
+                    state,
+                    &evaluate,
+                    body.range(),
+                    "Evaluate",
+                    (!evaluate.is_empty()).then_some(&boolean as &dyn Fn(&str) -> Registered),
+                );
+                let (value, issues) = properties::substitute(&evaluate, &state.lookup);
+                // Its trust is judged just below, name by name. MSBuild reads
+                // the flag as expanded, escapes and all (`%66alse` is no
+                // `false`; probed, `msbuild-condition-oracle`, SDK 10.0.401).
+                let value = value.ignoring_trust().as_escaped().to_owned();
+                // An item list MSBuild expands into it the walk does not.
+                if !issues.is_empty()
+                    || !operands_are_certain(state, &evaluate)
+                    || value.contains("@(")
+                    || value.contains("%(")
+                {
+                    Some(false)
+                } else if value
+                    .trim_matches(|c: char| c.is_whitespace() || c == '\0')
+                    .eq_ignore_ascii_case("false")
+                {
+                    None
+                } else {
+                    Some(reached)
                 }
             }
-            "ParameterGroup" => {
-                // MSBuild keys the parameters case-insensitively
-                // (`OrdinalIgnoreCase`): a second name the first folds to
-                // fails its registry. The loader keys them by exact name.
-                // Names are literal, so a collision of ASCII names is
-                // certain; one a fold outside ASCII may make is possible.
-                let mut seen: Vec<&str> = Vec::new();
-                for parameter in child.children().filter(Node::is_element) {
-                    let name = parameter.tag_name().name();
-                    let collision = seen.iter().find_map(|earlier| {
-                        if earlier.eq_ignore_ascii_case(name) {
-                            Some(true)
-                        } else if !(earlier.is_ascii() && name.is_ascii())
-                            && earlier.to_lowercase() == name.to_lowercase()
-                        {
-                            Some(false)
-                        } else {
-                            None
-                        }
-                    });
-                    seen.push(name);
-                    if let Some(sure) = collision {
-                        state.note_rejection(
-                            certain_if(sure && reached),
-                            RejectionCause::UsingTaskRegistration {
-                                task: task.clone(),
-                                attribute: "ParameterGroup".to_owned(),
-                                value: name.to_owned(),
-                            },
-                            parameter.range(),
-                        );
-                    }
-                    if let Some(raw) =
-                        attribute(parameter, "ParameterType").filter(|raw| !raw.is_empty())
-                    {
-                        judge(
-                            state,
-                            &raw,
-                            parameter.range(),
-                            "ParameterType",
-                            &|value: &str| {
-                                if value.is_empty() {
-                                    Registered::Refuses
-                                } else if PARAMETER_TYPES.contains(&value) {
-                                    Registered::Takes
-                                } else {
-                                    Registered::Unknown
-                                }
-                            },
-                        );
-                    }
-                    for name in ["Output", "Required"] {
-                        if let Some(raw) = attribute(parameter, name).filter(|raw| !raw.is_empty())
-                        {
-                            judge(state, &raw, parameter.range(), name, &boolean);
-                        }
-                    }
-                }
-            }
-            _ => {}
+        };
+        if let Some(body_reached) = body_reached {
+            judge_element_contents(state, body, body_reached, Contents::Text);
         }
     }
+    if let Some(group) = node
+        .children()
+        .find(|child| child.has_tag_name("ParameterGroup"))
+    {
+        // The names MSBuild keys the parameters by, folded as
+        // `OrdinalIgnoreCase` folds them: the loader admits only ASCII names.
+        let mut seen: HashMap<String, String> = HashMap::new();
+        for parameter in group.children().filter(Node::is_element) {
+            for (name, rule) in [
+                (
+                    "ParameterType",
+                    &parameter_type as &dyn Fn(&str) -> Registered,
+                ),
+                ("Output", &boolean),
+                ("Required", &boolean),
+            ] {
+                if let Some(raw) = attribute(parameter, name) {
+                    step(
+                        state,
+                        &raw,
+                        parameter.range(),
+                        name,
+                        (!raw.is_empty()).then_some(rule),
+                    );
+                }
+            }
+            let name = parameter.tag_name().name();
+            if let Some(first) = seen.insert(name.to_ascii_lowercase(), name.to_owned()) {
+                state.note_rejection(
+                    certain_if(reached),
+                    RejectionCause::UsingTaskParameterCollision {
+                        task: task.clone(),
+                        first,
+                        second: name.to_owned(),
+                    },
+                    parameter.range(),
+                );
+            }
+        }
+    }
+    for name in ["Runtime", "Architecture", "Override"] {
+        if let Some(raw) = attribute(node, name) {
+            step(state, &raw, node.range(), name, None);
+        }
+    }
+}
+
+/// Judge the value `raw` of `attribute_name` of the `<UsingTask>` of `task`,
+/// at `span`, which MSBuild registers as `reached` says, by what its
+/// registration makes of the value (`rule`): certain where the value is
+/// certain and the registration reached for certain; a refusal on a value
+/// the walk doubts, or one it cannot tell, possible; one on a value it holds
+/// none of no site (#1051).
+fn judge_registered(
+    state: &mut State<'_>,
+    task: &str,
+    raw: &str,
+    span: Range<usize>,
+    attribute_name: &str,
+    rule: &dyn Fn(&str) -> Registered,
+    reached: bool,
+) {
+    let (certain, value, verdict) = match registration_value(raw, state) {
+        RegistrationValue::Certain(value) => {
+            let verdict = rule(&value);
+            (true, value, verdict)
+        }
+        RegistrationValue::Possible(value) => {
+            let verdict = rule(&value);
+            (false, value, verdict)
+        }
+        RegistrationValue::Opaque(value) => (false, value, Registered::Unknown),
+        RegistrationValue::Unheld => return,
+    };
+    let certainty = match verdict {
+        Registered::Takes => return,
+        Registered::Refuses if certain && reached => RejectionCertainty::Certain,
+        Registered::Refuses | Registered::Unknown => RejectionCertainty::Possible,
+    };
+    state.note_rejection(
+        certainty,
+        RejectionCause::UsingTaskRegistration {
+            task: task.to_owned(),
+            attribute: attribute_name.to_owned(),
+            value,
+        },
+        span,
+    );
 }
 
 /// What MSBuild reads as the text of `element`, a property, a metadatum or

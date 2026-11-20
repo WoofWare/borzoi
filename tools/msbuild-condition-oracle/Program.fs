@@ -121,6 +121,15 @@
 ///     the evaluated items (F#'s `FSharpSourceCodeCompileOrder` reorders the
 ///     Compile list) without a `dotnet msbuild` per case.
 ///
+///   {"op":"rejectionCode","xml":s,"path":s}
+///     -> {"ok":true}                     // MSBuild evaluated the project
+///      | {"ok":false,"code":s}           // MSBuild rejects it, with this code
+///     The design-time evaluation of the document as the file at `path`, as
+///     `project` with `"designTime":true` evaluates it, reporting the
+///     `InvalidProjectFileException`'s error code (`MSB4184`, …), for a
+///     differential that grades which refusal rejected the project
+///     (`respondRejectionCode`).
+///
 ///   {"op":"globalName","name":s}
 ///     -> {"accepted":true}
 ///      | {"accepted":false,"exceptionType":s,"message":s}
@@ -651,6 +660,21 @@ let private respondProject (root: JsonElement) : string =
             {| ok = true
                values = values |> Map.toSeq |> dict |}
     | None -> JsonSerializer.Serialize {| ok = false |}
+
+/// The `rejectionCode` op: the design-time evaluation of `xml` as the file at
+/// `path`, and the error code of the `InvalidProjectFileException` that
+/// rejects it, if one does.
+let private respondRejectionCode (root: JsonElement) : string =
+    let xml = root.GetProperty("xml").GetString()
+    let path = root.GetProperty("path").GetString()
+    use collection = new ProjectCollection()
+    writeProject path xml
+
+    try
+        Project(path, globalTable null, null, collection) |> ignore
+        JsonSerializer.Serialize {| ok = true |}
+    with :? InvalidProjectFileException as e ->
+        JsonSerializer.Serialize {| ok = false; code = e.ErrorCode; message = e.BaseMessage |}
 
 /// The `globalName` op: whether MSBuild takes `name` as a global property name,
 /// or the exception it refuses it with. MSBuild refuses a reserved name
@@ -1756,6 +1780,7 @@ let main argv =
                     | "evaluated" -> respondEvaluated root
                     | "targetItems" -> respondTargetItems root
                     | "runTargets" -> respondRunTargets root
+                    | "rejectionCode" -> respondRejectionCode root
                     | "globalName" -> respondGlobalName root
                     | "reservedNames" -> respondReservedNames ()
                     | "bench" -> respondBench root

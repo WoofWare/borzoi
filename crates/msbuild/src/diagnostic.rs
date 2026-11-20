@@ -312,6 +312,15 @@ pub enum RejectionCause {
         attribute: String,
         value: String,
     },
+    /// Two parameters of a `<UsingTask>`'s `<ParameterGroup>` whose names
+    /// MSBuild's registry, keyed case-insensitively, takes for one: it fails
+    /// on the `second`, after the `first` (MSB1025). `task` is the
+    /// `TaskName` as written.
+    UsingTaskParameterCollision {
+        task: String,
+        first: String,
+        second: String,
+    },
 }
 
 /// A construct MSBuild's loader (`ProjectParser`) refuses when it loads a

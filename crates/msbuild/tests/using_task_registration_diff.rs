@@ -10,7 +10,7 @@
 //! `Evaluate` or a parameter's `Output` or `Required` `Boolean.TryParse` does
 //! not read, or a parameter's `ParameterType` names no type it takes. The
 //! walk's registration judgement (`evaluator/rejection.rs`'s
-//! `judge_registration`) is held to it certain-implies-exact:
+//! `judge_using_task`) is held to it certain-implies-exact:
 //!
 //! - MSBuild rejects the project: the walk claims it may;
 //! - MSBuild evaluates it: the walk claims no certain rejection, and commits
@@ -33,6 +33,11 @@ use common::{Oracle, SplitMix64};
 /// An inline task's `<UsingTask>` attributes, but for its children.
 const INLINE: &str = "TaskName=\"X\" TaskFactory=\"RoslynCodeTaskFactory\" \
                       AssemblyFile=\"$(MSBuildToolsPath)\\Microsoft.Build.Tasks.Core.dll\"";
+
+/// Items every graded document declares: `Flags`, a list of one boolean, so
+/// that a value naming it expands to one MSBuild takes, where the walk cannot
+/// tell.
+const ITEMS: &str = "<ItemGroup><Flags Include=\"true\" /></ItemGroup>";
 
 /// A gate MSBuild evaluates to true and the walk cannot decide.
 const UNDECIDED_TRUE: &str = "'É' == 'é'";
@@ -57,13 +62,14 @@ fn grade(oracle: &mut Oracle, writes: &str, body: &str) -> Graded {
     let dir = borzoi_msbuild::observed::host_fs::canonicalize(tmp.path()).unwrap();
     let project_path = dir.join("Demo.fsproj");
     let xml = format!(
-        "<Project><PropertyGroup><Empty></Empty>{writes}</PropertyGroup>{body}\
+        "<Project><PropertyGroup><Empty></Empty>{writes}</PropertyGroup>{ITEMS}{body}\
          <PropertyGroup><After>ok</After></PropertyGroup></Project>"
     );
     std::fs::write(&project_path, &xml).unwrap();
-    let msbuild_rejects = oracle
-        .project_design_time(&xml, &["After".to_string()], Some(&project_path), &[])
-        .is_none();
+    let code = oracle
+        .design_time_rejection_code(&xml, &project_path)
+        .unwrap_or_else(|error| panic!("MSBuild fails by another exception, {error}: {xml}"));
+    let msbuild_rejects = code.is_some();
     let parsed = common::parse_fsproj_with_imports(
         &borzoi_msbuild::ProjectFile::buffer(&project_path, &xml)
             .expect("a project path spelt as its full path"),
@@ -75,11 +81,24 @@ fn grade(oracle: &mut Oracle, writes: &str, body: &str) -> Graded {
     .expect("well-formed");
     let walk = parsed.rejection.as_ref().map(|r| r.certainty);
     let v_unheld = writes.contains("<V>") && !parsed.properties.contains_key("V");
-    if msbuild_rejects {
+    if let Some(code) = &code {
         assert!(
             walk.is_some() || v_unheld,
             "MSBuild rejects, and the walk claims nothing: {xml}"
         );
+        // A certain rejection names the refusal MSBuild rejects with.
+        if let Some(rejection) = parsed
+            .rejection
+            .as_ref()
+            .filter(|r| r.certainty == RejectionCertainty::Certain)
+        {
+            assert_eq!(
+                code,
+                &code_of(&rejection.cause),
+                "MSBuild rejects with {code}, and the walk claims another refusal: {xml}\n\
+                 {rejection:#?}"
+            );
+        }
     } else {
         assert_ne!(
             walk,
@@ -104,6 +123,41 @@ fn grade(oracle: &mut Oracle, writes: &str, body: &str) -> Graded {
     }
 }
 
+/// The error MSBuild rejects a project with, as [`Oracle::design_time_rejection_code`]
+/// reports it, for a `cause` the walk claims certainly: `MSB4184` for an
+/// expression that throws, `MSB4022` for an attribute whose value the
+/// registration does not take, `MSB4069` for a parameter type it does not
+/// resolve, `MSB4067` for a body under no task factory, and the loader's
+/// message, which carries no code, for what the loader refuses.
+fn code_of(cause: &borzoi_msbuild::RejectionCause) -> String {
+    use borzoi_msbuild::{LoadTimeError, RejectionCause};
+    match cause {
+        RejectionCause::ThrowingExpression { .. } => "MSB4184".to_owned(),
+        RejectionCause::UsingTaskRegistration {
+            attribute, value, ..
+        } => match attribute.as_str() {
+            "TaskFactory" => "MSB4067",
+            "ParameterType" if !value.is_empty() => "MSB4069",
+            _ => "MSB4022",
+        }
+        .to_owned(),
+        RejectionCause::LoadTime(LoadTimeError::Malformed { element, rule })
+            if element == "UsingTask" =>
+        {
+            match *rule {
+                "`TaskName` is missing or empty" => "no code: \"Task name cannot be empty.\"",
+                "not exactly one of `AssemblyName` and `AssemblyFile`" => "MSB4072",
+                "a `<ParameterGroup>` or `<Task>` without a `TaskFactory`" => "MSB4035",
+                other => {
+                    return format!("a loader refusal the differential does not expect: {other}");
+                }
+            }
+            .to_owned()
+        }
+        other => panic!("a refusal the registration differential does not expect: {other:?}"),
+    }
+}
+
 /// Where a value goes: `{v}` stands for it.
 const PLACES: &[&str] = &[
     "<UsingTask {INLINE}><Task Evaluate=\"{v}\">x</Task></UsingTask>",
@@ -119,6 +173,8 @@ const PLACES: &[&str] = &[
 
 /// The plain values a place reads, beside the hostile ones.
 const PLAIN: &[&str] = &[
+    "@(Flags)",
+    "@(Nothing)",
     "true",
     "false",
     "FALSE",
@@ -282,13 +338,14 @@ fn hand_picked_registrations() {
             true,
             Some(Certain),
         ),
-        // `AssemblyFile`'s own `\` turned into `/` before it expands.
+        // `AssemblyFile`'s own `\` turned into `/` before it expands, where `\` is no
+        // separator: on Windows the split finds no `\`, and the file is named.
         (
             "<PropertyGroup><Slash>/foo</Slash></PropertyGroup>\
              <UsingTask TaskName=\"X\" AssemblyFile=\"$(Slash.Split('\\')[0])\" />"
                 .to_owned(),
-            true,
-            Some(Certain),
+            !cfg!(windows),
+            (!cfg!(windows)).then_some(Certain),
         ),
         // A metadatum MSBuild leaves as written: a file name.
         (
@@ -311,6 +368,18 @@ fn hand_picked_registrations() {
             false,
             None,
         ),
+        // A value the walk does not compute: MSBuild's verdict either way,
+        // and the walk's a decline.
+        (
+            inline_task(
+                "",
+                "<Task Evaluate=\"$([System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture)\">x</Task>",
+            ),
+            true,
+            Some(Possible),
+        ),
+        (inline_task("", "<Task Evaluate=\"@(Flags)\">x</Task>"), false, Some(Possible)),
+        (inline_task("", "<Task Evaluate=\"@(Nothing)\">x</Task>"), true, Some(Possible)),
         // A factory name a fold outside ASCII may match: a decline.
         (
             "<UsingTask TaskName=\"X\" TaskFactory=\"É\" AssemblyFile=\"y.dll\"><Task>x</Task></UsingTask>".to_owned(),
@@ -331,6 +400,64 @@ fn hand_picked_registrations() {
             "{body}"
         );
     }
+}
+
+/// The error code MSBuild rejects `xml` with (`None` where it evaluates) and
+/// the walk's rejection.
+fn verdicts(oracle: &mut Oracle, xml: &str) -> (Option<String>, Option<borzoi_msbuild::Rejection>) {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let dir = borzoi_msbuild::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    let project_path = dir.join("Demo.fsproj");
+    std::fs::write(&project_path, xml).unwrap();
+    let verdict = oracle
+        .design_time_rejection_code(xml, &project_path)
+        .expect("MSBuild's evaluation fails by no other exception");
+    let parsed = common::parse_fsproj_with_imports(
+        &borzoi_msbuild::ProjectFile::buffer(&project_path, xml)
+            .expect("a project path spelt as its full path"),
+        &HashMap::new(),
+        &common::oracle_environment(),
+        None,
+        None,
+    )
+    .expect("well-formed");
+    (verdict, parsed.rejection)
+}
+
+/// MSBuild registers a task one attribute at a time, in its order, and the
+/// first it refuses is the project's error; the walk names that one as the
+/// cause, whichever refusal is written first or would be judged first.
+#[test]
+fn the_first_refusal_in_msbuild_order_is_the_cause() {
+    use borzoi_msbuild::RejectionCause;
+    let mut oracle = Oracle::spawn();
+    // `TaskName` throws before the body's `Evaluate` is read.
+    let xml = "<Project><PropertyGroup><P>a</P></PropertyGroup>\
+               <UsingTask TaskName=\"$(P[9])\" TaskFactory=\"RoslynCodeTaskFactory\" \
+               AssemblyFile=\"y.dll\"><Task Evaluate=\"off\">x</Task></UsingTask></Project>";
+    let (verdict, rejection) = verdicts(&mut oracle, xml);
+    assert_eq!(verdict.as_deref(), Some("MSB4184"));
+    let rejection = rejection.expect("the walk claims the rejection");
+    assert!(
+        matches!(rejection.cause, RejectionCause::ThrowingExpression { .. }),
+        "{rejection:#?}"
+    );
+    // `TaskName` empty is refused before the body's throwing `Evaluate` is
+    // expanded.
+    let xml = "<Project><PropertyGroup><P>a</P><Empty></Empty></PropertyGroup>\
+               <UsingTask TaskName=\"$(Empty)\" TaskFactory=\"RoslynCodeTaskFactory\" \
+               AssemblyFile=\"y.dll\"><Task Evaluate=\"$(P[9])\">x</Task></UsingTask></Project>";
+    let (verdict, rejection) = verdicts(&mut oracle, xml);
+    assert_eq!(verdict.as_deref(), Some("MSB4022"));
+    let rejection = rejection.expect("the walk claims the rejection");
+    assert_eq!(rejection.certainty, RejectionCertainty::Certain);
+    assert!(
+        matches!(
+            &rejection.cause,
+            RejectionCause::UsingTaskRegistration { attribute, .. } if attribute == "TaskName"
+        ),
+        "{rejection:#?}"
+    );
 }
 
 /// Two parameters whose names fold to one: MSBuild's registry, keyed
@@ -363,10 +490,15 @@ fn parameters_colliding_by_case_fail_the_registry() {
         None,
     )
     .expect("well-formed");
+    let rejection = parsed.rejection.expect("the walk claims the rejection");
+    assert_eq!(rejection.certainty, RejectionCertainty::Certain, "{xml}");
     assert_eq!(
-        parsed.rejection.as_ref().map(|r| r.certainty),
-        Some(RejectionCertainty::Certain),
-        "{xml}"
+        rejection.cause,
+        borzoi_msbuild::RejectionCause::UsingTaskParameterCollision {
+            task: "X".to_owned(),
+            first: "A".to_owned(),
+            second: "a".to_owned(),
+        },
     );
 }
 
@@ -408,11 +540,16 @@ fn registration_sweep(seed: u64, cases: usize) -> Census {
     let mut oracle = Oracle::spawn();
     let mut rng = SplitMix64(seed);
     let mut tally = Census::default();
+    // Every entry of the alphabet once, as a witness, before the draws.
+    let mut witnesses = value::alphabet().entries().iter();
     while tally.cases < cases {
         let place = *rng.pick(PLACES);
         let source = *rng.pick(SOURCES);
         let plain = *rng.pick(PLAIN);
-        let drawn = match value::alphabet().sample(rng.next()) {
+        let entry = witnesses
+            .next()
+            .or_else(|| value::alphabet().sample(rng.next()));
+        let drawn = match entry {
             Some(entry) => hostile::Drawn::of(entry).map(|v| v.render(plain)),
             None => hostile::Drawn::plain(plain.to_owned()),
         };
