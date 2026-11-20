@@ -679,7 +679,7 @@ fn evaluate_item_group(node: Node<'_, '_>, state: &mut State<'_>) {
         }
         CondGate::Unsupported => {
             // Record the carve-outs while both contexts are still set.
-            emit_unsupported_condition(node, state);
+            emit_unsupported_condition(node, &state.entry_project_dir.clone(), state);
             // An unsupported gate is untrusted by construction: probed
             // (dotnet 10, 2026-07-10) — an `<ItemGroup>` on a
             // property-function condition containing `<ProjectReference
@@ -895,6 +895,7 @@ fn walk_item_child_unattributed(node: Node<'_, '_>, state: &mut State<'_>) {
     };
     if let Some(item_type) = batched
         && update_strands_late(node, item_type, state)
+        && strand_may_move_a_capture(node, item_type, state)
     {
         let update = attribute(node, "Update").unwrap_or_default().to_string();
         if item_type == "Compile" {
@@ -1030,7 +1031,7 @@ fn walk_item_child_inner(node: Node<'_, '_>, kind: ItemKind, state: &mut State<'
             return;
         }
         CondGate::Unsupported => {
-            emit_unsupported_condition(node, state);
+            emit_unsupported_condition(node, &state.entry_project_dir.clone(), state);
             // A mutation behind a condition we can't evaluate may still run
             // in the real build — the captured list can't be trusted either
             // way (see the Update/Remove gate below).
@@ -1118,11 +1119,16 @@ fn walk_item_child_inner(node: Node<'_, '_>, kind: ItemKind, state: &mut State<'
     // allowed to be semicolon-delimited lists in MSBuild, so
     // `Include="$(ExtraFiles)"` may expand into multiple items even
     // though the raw attribute looks like one.
-    let expansion = state.expand(include, node.range());
+    let (expansion, spelling_known) =
+        state.expand_include(include, node.range(), attribute(node, "Exclude").is_some());
     if expansion.had_issue() {
         // Substitution failure leaves a path with empty fragments or
-        // residual `$(...)`. Either way the result is corrupt; we refuse
-        // to emit a misleading item.
+        // residual `$(...)`, or one of several spellings. Either way the
+        // result is corrupt; we refuse to emit a misleading item, and a list
+        // derived from the references is then incomplete.
+        if kind == ItemKind::ProjectReference {
+            state.project_reference_includes_hidden = true;
+        }
         return;
     }
     // The Include VALUE can lean on an untrusted read the same way the
@@ -1135,12 +1141,27 @@ fn walk_item_child_inner(node: Node<'_, '_>, kind: ItemKind, state: &mut State<'
     match state.glob_resolver {
         None => {
             for entry in spec_fragments(&spelled) {
-                push_include_entry(node, kind, placement, entry, &metadata, state);
+                push_include_entry(
+                    node,
+                    kind,
+                    placement,
+                    entry,
+                    &metadata,
+                    spelling_known,
+                    state,
+                );
             }
         }
         Some(resolver) => {
             route_item_through_resolver(
-                node, kind, placement, &spelled, &metadata, resolver, state,
+                node,
+                kind,
+                placement,
+                &spelled,
+                &metadata,
+                spelling_known,
+                resolver,
+                state,
             );
         }
     }
@@ -1249,6 +1270,8 @@ fn walk_generic_item_child(node: Node<'_, '_>, state: &mut State<'_>) {
         return;
     };
     let identity_uses_sdk_taint = state.raw_uses_sdk_package_taint(include);
+    // An item table reads each identity as spelled: worlds that spell one
+    // apart leave the list in doubt.
     let expansion = expand_silent(include, state);
     if identity_uses_sdk_taint {
         state.taint_item_list(item_type);
@@ -1354,7 +1377,7 @@ fn apply_generic_item_remove(item_type: &str, remove: &str, state: &mut State<'_
         state.evaluated_items.remove(&item_key(item_type));
         return;
     }
-    let Some(spec) = resolve_item_spec(remove, state) else {
+    let Some(spec) = resolve_item_spec(remove, SpecPasses::Remove, state) else {
         state.invalidate_item_list(item_type);
         return;
     };
@@ -1399,7 +1422,7 @@ fn resolve_generic_exclude_set(node: Node<'_, '_>, state: &mut State<'_>) -> Opt
         return Some(ExcludeSet(HashSet::new()));
     };
     let item_type = node.tag_name().name();
-    let keys = resolve_item_spec(exclude, state).and_then(|spec| {
+    let keys = resolve_item_spec(exclude, SpecPasses::Exclude, state).and_then(|spec| {
         if spec.sdk_tainted {
             state.taint_item_list(item_type);
         }
@@ -1450,20 +1473,41 @@ impl ItemSpec {
     }
 }
 
+/// How many times MSBuild expands an item spec: a `Remove` once, an
+/// `Exclude` once whole and again fragment by fragment
+/// ([`properties::exclude_second_pass_may_move`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SpecPasses {
+    Remove,
+    Exclude,
+}
+
 /// Resolve a `Remove`/`Exclude` value. `None` when its expansion leaned on a
 /// value we could not pin, or when it holds a fragment we do not evaluate — a
 /// wildcard (which glob-matches, not path-matches), a transform, an item
 /// function other than `Exists`, or an item list we do not know exactly.
-fn resolve_item_spec(raw: &str, state: &State<'_>) -> Option<ItemSpec> {
+fn resolve_item_spec(raw: &str, passes: SpecPasses, state: &State<'_>) -> Option<ItemSpec> {
     let sdk_tainted = state.raw_uses_sdk_package_taint(raw);
-    let expansion = expand_silent(raw, state);
+    let expansion = expand_silent_paths(raw, state, properties::match_collapse);
     if expansion.had_issue() {
+        return None;
+    }
+    let second_pass = passes == SpecPasses::Exclude;
+    if second_pass && properties::exclude_second_pass_may_move(expansion.value.ignoring_trust()) {
         return None;
     }
     let mut identities = Vec::new();
     for fragment in spec_fragments(expansion.value.ignoring_trust()) {
         if let Some(expression) = parse_item_expression(fragment) {
             let items = evaluate_item_expression(expression, state)?;
+            // The second pass adjusts each identity the reference expands to.
+            if second_pass
+                && items
+                    .iter()
+                    .any(|item| properties::exclude_fragment_second_pass_may_move(&item.identity))
+            {
+                return None;
+            }
             identities.extend(items.into_iter().map(|item| item.identity));
             continue;
         }
@@ -1488,7 +1532,7 @@ fn resolve_item_spec(raw: &str, state: &State<'_>) -> Option<ItemSpec> {
 /// `ItemspecContainsASingleBareItemReference`, which empties the list without
 /// matching anything — so it is exact whatever the list holds.
 fn remove_clears_its_own_list(item_type: &str, remove: &str, state: &State<'_>) -> bool {
-    let expansion = expand_silent(remove, state);
+    let expansion = expand_silent_paths(remove, state, properties::match_collapse);
     if expansion.had_issue() {
         return false;
     }
@@ -1660,7 +1704,7 @@ fn apply_project_reference_remove(node: Node<'_, '_>, state: &mut State<'_>) -> 
         state.project_references.clear();
         return true;
     }
-    let Some(spec) = resolve_item_spec(remove, state) else {
+    let Some(spec) = resolve_item_spec(remove, SpecPasses::Remove, state) else {
         return false;
     };
     // An SDK-tainted value may name other references in the real build.
@@ -1820,7 +1864,7 @@ fn read_compile_order_metadata_write(
             }
             CondGate::Skip => {}
             CondGate::Unsupported => {
-                emit_unsupported_condition(child, state);
+                emit_unsupported_condition(child, &state.entry_project_dir.clone(), state);
                 return None;
             }
         }
@@ -1869,7 +1913,10 @@ fn resolve_compile_update_targets(
     }
     let raw = attribute(node, "Update")?;
     let raw: &str = &raw;
-    let expansion = state.expand(raw, node.range());
+    // A batch keys, abandons and removes fragments by their spelling, which
+    // decides whether each is its own key, and a fragment compared as written
+    // matches by it: no two worlds' spellings are read as one.
+    let expansion = state.expand_paths(raw, node.range(), |_| None);
     if expansion.had_issue() {
         return None;
     }
@@ -2294,7 +2341,7 @@ fn walk_package_reference(node: Node<'_, '_>, state: &mut State<'_>) {
         CondGate::Run => {}
         CondGate::Skip => return,
         CondGate::Unsupported => {
-            emit_unsupported_condition(node, state);
+            emit_unsupported_condition(node, &state.entry_project_dir.clone(), state);
             return;
         }
     }
@@ -2504,12 +2551,20 @@ pub(super) struct UpdateBatchRun {
 /// `Update="Alpha;Alpha"` then `Update="Beta;Alpha" VersionOverride="1.0"`
 /// then `Include="Alpha;Beta"` gives `Beta` the override.
 ///
-/// So this answers true when an `Update` leaves the batch at its second
+/// So this answers true when an `Update` may leave the batch at its second
 /// fragment or later, with one of those before it strandable (its written text
 /// not its key, ignoring case) and no batch pending. It over-approximates, as the
-/// conservative reading: a fragment without a computable key may collide with
-/// anything, and an operation whose condition the walk cannot
-/// decide does not flush.
+/// conservative reading. A spec the walk does not know (one it cannot expand,
+/// read from a value it does not trust, or whose worlds differ at all)
+/// may leave anywhere and leave any key behind. A fragment without a
+/// computable key may collide with any key the batch holds, and leave one any
+/// later fragment collides with; from there on, as after an unknown spec, the
+/// batch may hold anything, and the spec may leave at every fragment. An
+/// operation whose condition the walk cannot decide does not flush.
+///
+/// A strand applies the stranding `Update`'s own metadata: the caller counts
+/// it only where that writes something the walk captures
+/// ([`strand_may_move_a_capture`]).
 fn update_strands_late(node: Node<'_, '_>, item_type: &str, state: &mut State<'_>) -> bool {
     let key = item_key(item_type);
     let (include, update) = (attribute(node, "Include"), attribute(node, "Update"));
@@ -2530,64 +2585,110 @@ fn update_strands_late(node: Node<'_, '_>, item_type: &str, state: &mut State<'_
             return false;
         }
     };
-    let expansion = expand_silent(update, state);
+    let (worlds, startup_undecided) = expand_silent_worlds_noting(update, state);
+    // As in `resolve_compile_update_targets`: no two worlds' spellings are
+    // read as one.
+    let worlds = path_worlds(worlds, |_| None);
+    let startup_undecided = startup_undecided || worlds.value.ignoring_trust().is_split();
+    let expansion = agreed_silently(worlds);
     let project_dir = state.entry_project_dir.clone();
     let run = state.update_batches.entry(key).or_default();
+    if startup_undecided || expansion.had_issue() || !expansion.value.trust().is_certain() {
+        run.unknown = true;
+        run.pending = false;
+        return true;
+    }
     let fragments: Vec<&str> = spec_fragments(expansion.value.ignoring_trust()).collect();
-    // Whether the walk cannot tell if the fragment it stopped at joined.
-    let mut undecided = false;
+    // From which fragment on the batch may hold a key the walk does not know.
+    let mut unknown_from = run.unknown.then_some(0);
     let mut left_at = None;
-    // Whether a fragment that joined is one leaving would strand: its written
-    // text is not its key, so removing it by text misses. (A spelling MSBuild
-    // compares unnormalised is its own key.)
+    // Whether a fragment before the current one is one leaving would strand:
+    // its written text is not its key, so removing it by text misses. (A
+    // spelling MSBuild compares unnormalised is its own key.)
     let mut strandable = false;
+    // Whether the spec may leave at a fragment after a strandable one.
+    let mut may_strand = false;
+    // The keys this spec added that leaving removes: those of fragments
+    // spelled as their key, which removing by text finds.
+    let mut removed_on_leaving = Vec::new();
     for (i, fragment) in fragments.iter().enumerate() {
         let expands = ["*", "?", "$(", "@(", "%"]
             .iter()
             .any(|marker| fragment.contains(marker));
-        let fragment_key = (!expands && !expansion.had_issue())
-            .then(|| item_spec::comparison_key(&fragment_identity(fragment), &project_dir))
+        let decoded = fragment_identity(fragment);
+        let fragment_key = (!expands)
+            .then(|| item_spec::batch_key(&decoded, &project_dir))
             .flatten();
-        let joins = match &fragment_key {
-            Some(fragment_key) => !run.unknown && run.keys.insert(fragment_key.clone()),
-            None => {
-                // A fragment without a key may have joined, and may collide
-                // with any later one.
-                if !expands {
-                    run.unknown = true;
-                    undecided = true;
-                }
-                false
-            }
-        };
-        if !joins {
+        let may_collide = unknown_from.is_some() || fragment_key.is_none();
+        if (expands || may_collide) && i > 0 && strandable {
+            may_strand = true;
+        }
+        if expands {
             left_at = Some(i);
             break;
         }
-        let decoded = fragment_identity(fragment);
-        strandable |= !crate::glob::compares_unnormalised(&decoded)
-            && fragment_key.is_some_and(|key| key != fragment.to_ascii_lowercase());
+        match fragment_key {
+            Some(fragment_key) => {
+                if unknown_from.is_none() && !run.keys.insert(fragment_key.clone()) {
+                    left_at = Some(i);
+                    break;
+                }
+                let stays = !crate::glob::compares_unnormalised(&decoded)
+                    && fragment_key != fragment.to_ascii_lowercase();
+                if !stays {
+                    removed_on_leaving.push(fragment_key);
+                }
+                strandable |= stays;
+            }
+            None => {
+                unknown_from.get_or_insert(i);
+                strandable = true;
+            }
+        }
+    }
+    if unknown_from.is_some() {
+        // Where the spec left, if it did, and so whether it flushed, are
+        // unknown: keep every key, take no batch as pending, and count any
+        // strand it may leave.
+        run.unknown = true;
+        run.pending = false;
+        return may_strand;
     }
     match left_at {
         None => {
             run.pending = true;
             false
         }
-        Some(i) if undecided => {
-            // It may have joined (no flush) or left (a flush, if pending): keep
-            // every key, take no batch as pending, and count a strand whether
-            // or not one was.
-            run.pending = false;
-            i > 0 && strandable
-        }
         Some(i) => {
             let strands_late = i > 0 && strandable && !run.pending;
             if run.pending {
                 *run = UpdateBatchRun::default();
+            } else {
+                for key in &removed_on_leaving {
+                    run.keys.remove(key);
+                }
             }
             strands_late
         }
     }
+}
+
+/// Whether a strand of `node`'s `Update` may move something the walk
+/// captures: the strand applies `node`'s own metadata, late. A `Compile`
+/// `Update` moves the compile order only by writing `CompileOrder`; a
+/// `PackageReference` one, by writing captured package metadata
+/// ([`update_writes_captured_metadata`]).
+fn strand_may_move_a_capture(node: Node<'_, '_>, item_type: &str, state: &State<'_>) -> bool {
+    if item_type != "Compile" {
+        return update_writes_captured_metadata(node, state);
+    }
+    let is_order = |name: &str| name.eq_ignore_ascii_case("CompileOrder");
+    node.attributes()
+        .any(|attr| is_item_metadata_attribute(attr.name()) && is_order(attr.name()))
+        || node
+            .children()
+            .filter(Node::is_element)
+            .any(|metadata| is_order(metadata.tag_name().name()))
 }
 
 /// Whether `id` has NuGet's package-id shape: ASCII `[A-Za-z0-9._-]`, non-empty,
@@ -2765,7 +2866,7 @@ fn walk_package_version(node: Node<'_, '_>, state: &mut State<'_>) {
         CondGate::Run => {}
         CondGate::Skip => return,
         CondGate::Unsupported => {
-            emit_unsupported_condition(node, state);
+            emit_unsupported_condition(node, &state.entry_project_dir.clone(), state);
             return;
         }
     }
@@ -2831,7 +2932,7 @@ fn walk_global_package_reference(node: Node<'_, '_>, state: &mut State<'_>) {
         CondGate::Run => {}
         CondGate::Skip => return,
         CondGate::Unsupported => {
-            emit_unsupported_condition(node, state);
+            emit_unsupported_condition(node, &state.entry_project_dir.clone(), state);
             return;
         }
     }
@@ -2993,7 +3094,7 @@ fn walk_framework_reference(node: Node<'_, '_>, state: &mut State<'_>) {
         CondGate::Run => {}
         CondGate::Skip => return,
         CondGate::Unsupported => {
-            emit_unsupported_condition(node, state);
+            emit_unsupported_condition(node, &state.entry_project_dir.clone(), state);
             return;
         }
     }
@@ -3080,11 +3181,12 @@ fn resolve_exclude_set(node: Node<'_, '_>, state: &mut State<'_>) -> ExcludeSet 
         return ExcludeSet(HashSet::new());
     };
     state.note_package_uncertain_from_sdk_property_taint(raw);
-    let expansion = state.expand(raw, node.range());
+    let expansion = state.expand_paths(raw, node.range(), properties::match_collapse);
     let parts: Vec<String> = spec_fragments(expansion.value.ignoring_trust())
         .map(str::to_owned)
         .collect();
     if expansion.had_issue()
+        || properties::exclude_second_pass_may_move(expansion.value.ignoring_trust())
         || parts.iter().any(|s| {
             contains_glob(s) || contains_item_reference(s) || contains_metadata_reference(s)
         })
@@ -3267,7 +3369,9 @@ fn read_item_metadata(node: Node<'_, '_>, name: &str, state: &mut State<'_>) -> 
                 };
             }
             CondGate::Skip => {}
-            CondGate::Unsupported => emit_unsupported_condition(child, state),
+            CondGate::Unsupported => {
+                emit_unsupported_condition(child, &state.entry_project_dir.clone(), state)
+            }
         }
     }
     chosen
@@ -3825,6 +3929,7 @@ fn evaluate_item_condition_silent(node: Node<'_, '_>, state: &State<'_>) -> (Con
             Some(condition::Probes {
                 exists: &exists,
                 observer: state.observer,
+                start: state.start(),
             }),
             state.condition_site(),
         )
@@ -3834,7 +3939,9 @@ fn evaluate_item_condition_silent(node: Node<'_, '_>, state: &State<'_>) -> (Con
     let tainted =
         matches!(
             eval.outcome,
-            condition::Outcome::Illegal | condition::Outcome::Unsupported
+            condition::Outcome::Illegal
+                | condition::Outcome::Unsupported
+                | condition::Outcome::StartupDirectory
         ) || !state.condition_is_decided_exactly(cond, Some(&state.entry_project_dir), &|name| {
             state.undefined_read_is_exact(name)
         });
@@ -3843,7 +3950,9 @@ fn evaluate_item_condition_silent(node: Node<'_, '_>, state: &State<'_>) -> (Con
         condition::Outcome::False => CondGate::Skip,
         // An illegal condition is judged as a rejection, group by group
         // ([`rejection::judge_deferred`]); here it gates as an unmodelled one.
-        condition::Outcome::Illegal | condition::Outcome::Unsupported => CondGate::Unsupported,
+        condition::Outcome::Illegal
+        | condition::Outcome::Unsupported
+        | condition::Outcome::StartupDirectory => CondGate::Unsupported,
     };
     (gate, tainted)
 }
@@ -3865,7 +3974,7 @@ fn evaluate_item_condition_silent_with_sdk_taint(
 }
 
 /// Expand `raw`, the value of an item's metadatum, reporting as
-/// [`State::expand`] does. MSBuild expands a metadatum's own metadata
+/// [`State::expand_metadata`] does. MSBuild expands a metadatum's own metadata
 /// references first, so a property function reading one is handed the
 /// metadatum's value, not the reference the walk's expansion leaves it
 /// ([`properties::expressions_reading_metadata`]): an unsupported expression.
@@ -3876,7 +3985,7 @@ fn evaluate_item_condition_silent_with_sdk_taint(
 /// does.
 fn expand_metadata(state: &mut State<'_>, raw: &str, span: Range<usize>) -> Expansion {
     let before = state.diagnostics.len();
-    let mut expansion = state.expand(raw, span.clone());
+    let mut expansion = state.expand_metadata(raw, span.clone());
     for expression in properties::expressions_reading_metadata(raw) {
         expansion.had_unsupported = true;
         // The expansion reports one it did not model already.
@@ -3900,22 +4009,85 @@ fn expand_metadata(state: &mut State<'_>, raw: &str, span: Range<usize>) -> Expa
     expansion
 }
 
-/// [`expand_silent`] of a metadatum's value: a property function reading
-/// item metadata is unsupported, as in [`expand_metadata`].
+/// [`expand_silent_metadata`], with a property function reading item
+/// metadata unsupported, as in [`expand_metadata`].
 fn expand_metadata_silent(raw: &str, state: &State<'_>) -> Expansion {
-    let mut expansion = expand_silent(raw, state);
+    let mut expansion = expand_silent_metadata(raw, state);
     if !properties::expressions_reading_metadata(raw).is_empty() {
         expansion.had_unsupported = true;
     }
     expansion
 }
 
+/// [`expand_silent_worlds`]'s one value where every world of MSBuild's
+/// startup directory agrees. Where they do not, the value is declined as a
+/// residual expression is (`had_unsupported`): it is the one where no segment
+/// is a directory there.
 pub(super) fn expand_silent(raw: &str, state: &State<'_>) -> Expansion {
-    let (value, issues) = if state.follow_imports {
-        properties::substitute_with_fs(raw, &state.lookup, state.observer)
-    } else {
-        properties::substitute(raw, &state.lookup)
-    };
+    agreed_silently(expand_silent_worlds(raw, state))
+}
+
+/// `expansion`'s one value where every world agrees, the value declined as
+/// residual (`had_unsupported`) where they do not.
+pub(super) fn agreed_silently(expansion: Expansion<Worlds<Escaped>>) -> Expansion {
+    let Expansion {
+        value,
+        had_undefined,
+        mut had_unsupported,
+        unpinned_root,
+        throws,
+    } = expansion;
+    let value = value.map(|worlds| match worlds {
+        Worlds::Same(value) => value,
+        split @ Worlds::Split(_) => {
+            had_unsupported = true;
+            split.absent_everywhere().clone()
+        }
+    });
+    Expansion {
+        value,
+        had_undefined,
+        had_unsupported,
+        unpinned_root,
+        throws,
+    }
+}
+
+/// [`expand_silent`] of a value read as paths (`State::expand_paths`), its
+/// worlds collapsed where they agree on `key`.
+pub(super) fn expand_silent_paths(
+    raw: &str,
+    state: &State<'_>,
+    collapse: fn(&Worlds<Escaped>) -> Option<Escaped>,
+) -> Expansion {
+    agreed_silently(path_worlds(expand_silent_worlds(raw, state), collapse))
+}
+
+/// [`expand_silent`] of an item's metadatum (`State::expand_metadata`).
+pub(super) fn expand_silent_metadata(raw: &str, state: &State<'_>) -> Expansion {
+    let observer = state.follow_imports.then_some(state.observer);
+    agreed_silently(metadata_worlds(expand_silent_worlds(raw, state), observer).0)
+}
+
+/// Expand `raw` without diagnostics, keeping the value of each world of
+/// MSBuild's startup directory ([`crate::properties::worlds`]).
+pub(super) fn expand_silent_worlds(raw: &str, state: &State<'_>) -> Expansion<Worlds<Escaped>> {
+    expand_silent_worlds_noting(raw, state).0
+}
+
+/// [`expand_silent_worlds`], and whether the walk left a spelling undecided
+/// ([`Issue::PathAdjustmentUndecided`]: more segments than it enumerates).
+pub(super) fn expand_silent_worlds_noting(
+    raw: &str,
+    state: &State<'_>,
+) -> (Expansion<Worlds<Escaped>>, bool) {
+    let mut startup_undecided = false;
+    let (value, issues) = properties::substitute_worlds(
+        raw,
+        &state.lookup,
+        state.follow_imports.then_some(state.observer),
+        state.start(),
+    );
     let mut had_undefined = false;
     let mut had_unsupported = false;
     let throws = super::rejection::throws_in(&issues);
@@ -3936,9 +4108,10 @@ pub(super) fn expand_silent(raw: &str, state: &State<'_>) -> Expansion {
             Issue::Unsupported { .. }
             | Issue::ReturnsBoolean { .. }
             | Issue::ReturnsValue { .. }
-            | Issue::Throws { .. }
-            | Issue::PathAdjustmentUndecided { .. } => {
+            | Issue::Throws { .. } => had_unsupported = true,
+            Issue::PathAdjustmentUndecided { .. } => {
                 had_unsupported = true;
+                startup_undecided = true;
             }
         }
     }
@@ -3953,13 +4126,14 @@ pub(super) fn expand_silent(raw: &str, state: &State<'_>) -> Expansion {
         }
     }
     state.assert_scan_holds_the_reads(raw, value.trust(), unpinned_root.as_ref(), had_unsupported);
-    Expansion {
+    let expansion = Expansion {
         value,
         had_undefined,
         had_unsupported,
         unpinned_root,
         throws,
-    }
+    };
+    (expansion, startup_undecided)
 }
 
 fn exact_item_list_reference(value: &str) -> Option<&str> {
@@ -4035,12 +4209,14 @@ fn taint_reference_list_on_untrusted_value(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn route_item_through_resolver(
     node: Node<'_, '_>,
     kind: ItemKind,
     placement: ItemPlacement,
     include_value: &Escaped,
     metadata: &ItemMetadata,
+    spelling_known: bool,
     resolver: &GlobResolver<'_>,
     state: &mut State<'_>,
 ) {
@@ -4074,14 +4250,31 @@ fn route_item_through_resolver(
     // resolver — keep the literal fast path (same items, no IO).
     if !any_glob && exclude_attr.is_none() {
         for entry in include_specs {
-            push_include_entry(node, kind, placement, entry, metadata, state);
+            push_include_entry(
+                node,
+                kind,
+                placement,
+                entry,
+                metadata,
+                spelling_known,
+                state,
+            );
         }
         return;
     }
     let mut excludes: Vec<SpecFragment> = Vec::new();
     if let Some(raw) = exclude_attr.as_deref() {
-        let expansion = state.expand(raw, node.range());
+        let expansion = state.expand_paths(raw, node.range(), properties::match_collapse);
         if expansion.had_issue() {
+            return;
+        }
+        if properties::exclude_second_pass_may_move(expansion.value.ignoring_trust()) {
+            state.push(
+                DiagnosticKind::UnsupportedItemOperation {
+                    operation: format!("Exclude {raw}, whose fragments MSBuild expands again"),
+                },
+                node.range(),
+            );
             return;
         }
         // The Exclude VALUE gets the same trust check as the Include's: an
@@ -4180,12 +4373,16 @@ fn route_item_through_resolver(
 /// once, after the scan. A fragment with an escaped wildcard beside a live one
 /// is literal too ([`escaping::filespec_has_wildcards`]): `a%2a*.fs` is the
 /// one item `a**.fs`.
+/// Push the item `entry` names. `spelling_known` is false where MSBuild's
+/// spelling of it turns on its startup directory (`State::expand_include`):
+/// the item is pushed with its full path and no identity.
 fn push_include_entry(
     node: Node<'_, '_>,
     kind: ItemKind,
     placement: ItemPlacement,
     entry: &str,
     metadata: &ItemMetadata,
+    spelling_known: bool,
     state: &mut State<'_>,
 ) {
     if escaping::filespec_has_wildcards(entry) {
@@ -4249,7 +4446,7 @@ fn push_include_entry(
             unmodelled_reference_metadata: metadata.unmodelled_reference_metadata,
             span,
         },
-        Some(identity),
+        spelling_known.then_some(identity),
     );
     #[cfg(any(test, feature = "test-support"))]
     if let Some(pushed) = bucket_for_placement(state, placement).last_mut() {
@@ -4753,7 +4950,7 @@ fn resolve_string_metadata(
                 continue;
             }
             CondGate::Unsupported => {
-                emit_unsupported_condition(child, state);
+                emit_unsupported_condition(child, &state.entry_project_dir.clone(), state);
                 resolved = ItemMetadataValue::Unknown;
                 continue;
             }

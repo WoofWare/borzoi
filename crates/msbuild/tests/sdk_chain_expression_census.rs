@@ -256,7 +256,7 @@ fn check_condition_claim(oracle: &mut Oracle, cond: &str, props: &[(String, Stri
         // An `Illegal` verdict leans on the values given, and this census's
         // table leaves the names MSBuild always defines unset (see above), so
         // it is no claim here either.
-        Outcome::Illegal | Outcome::Unsupported => return false,
+        Outcome::Illegal | Outcome::Unsupported | Outcome::StartupDirectory => return false,
         Outcome::True => true,
         Outcome::False => false,
     };

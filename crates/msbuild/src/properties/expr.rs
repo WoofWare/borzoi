@@ -1800,9 +1800,7 @@ mod tests {
     /// [`Escaped`]; a function result re-enters the domain escaped, so this
     /// unescapes it back to the text MSBuild would show).
     fn ev(inner: &str, props: &PropertyMap) -> Option<(String, Vec<Issue>)> {
-        evaluate(inner, &Reads::of(props), None)
-            .ok()
-            .map(|e| (e.value.unescape(), e.issues))
+        super::super::evaluate_for_test(inner, props)
     }
 
     /// Stage E3 of `docs/completed/msbuild-escaped-value-plan.md`: the evaluator runs

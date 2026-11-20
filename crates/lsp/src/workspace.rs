@@ -58,7 +58,7 @@ use std::path::{Component, Path, PathBuf};
 use borzoi_cst::language_version::LanguageVersion;
 use borzoi_msbuild::{
     GlobResolver, ParsedProject, ProjectFile, ResolvedItem, SdkResolution, SdkResolver, SdkVersion,
-    parse_fsproj_with_imports_reusing, target_frameworks,
+    parse_fsproj_with_imports_reusing, target_frameworks, target_frameworks_undecided,
 };
 
 use crate::paths::{lexically_normalize, paths_equal};
@@ -218,6 +218,12 @@ struct EvaluatedProject {
     /// arcade idiom) vanishes from the re-evaluated `parsed`'s properties, so
     /// reading the list off `parsed` would under-count.
     declared_tfms: Vec<String>,
+    /// Whether the first pass's empty `declared_tfms` is no answer: the
+    /// declarations turn on MSBuild's startup directory
+    /// ([`target_frameworks_undecided`]), or the plural is untrusted
+    /// ([`tfm_policy::plural_untrusted`]: a write the evaluator skipped under
+    /// a gate it could not decide may have declared frameworks).
+    declared_tfms_undecided: bool,
     /// The first pass's body-written non-empty `TargetFramework`, i.e.
     /// whether the project pins its own singular TFM
     /// (`select_target_framework` case 2). Distinguishes "TFM known" from
@@ -1499,6 +1505,9 @@ impl Workspace {
                 }
                 match &e.chosen_tfm {
                     Some(tfm) => ServedTfm::Tfm(tfm.clone()),
+                    // A declaration that is no answer is no proof that the
+                    // project declares no framework.
+                    None if e.declared_tfms_undecided => ServedTfm::Untrusted,
                     None => ServedTfm::NoneDeclared,
                 }
             }
@@ -2585,6 +2594,29 @@ fn resolve_node_uncached(
             references_uncertain: outer_suppressed,
         };
     }
+    if outer.declared_tfms_undecided {
+        // The declared list is no answer (it turns on MSBuild's startup
+        // directory, or the walk does not trust it): no framework of the
+        // list in hand is known to be current, so none validates a restore's
+        // seed, and the node's output declines with its TFM. No inner build
+        // can be enumerated to show which of this evaluation's edges survive
+        // into the one the compiler sees, so a compile closure takes none,
+        // and says so.
+        return match purpose {
+            GraphWalkPurpose::DeclaredStructure => NodeResult::Resolved {
+                edges: outer_edges,
+                tfm: NodeTfm::Unresolved,
+                output_name: None,
+                references_uncertain: outer_suppressed,
+            },
+            GraphWalkPurpose::CompileClosure => NodeResult::Resolved {
+                edges: Vec::new(),
+                tfm: NodeTfm::Unresolved,
+                output_name: None,
+                references_uncertain: true,
+            },
+        };
+    }
     let declared = &outer.declared_tfms;
     if declared.len() <= 1 {
         // Single-target (or no TFM declared at all): there is only one build
@@ -2998,6 +3030,8 @@ fn evaluate_project(
     // (a `TfmChoice::Reseed` replaces `parsed` with an inner-build pass in
     // which an outer-gated `<TargetFrameworks>` may no longer exist).
     let declared_tfms = target_frameworks(&parsed);
+    let declared_tfms_undecided =
+        target_frameworks_undecided(&parsed) || tfm_policy::plural_untrusted(&parsed);
     let body_target_framework = tfm_policy::body_target_framework(&parsed);
     let pass1_untrusted = tfm_policy::tfm_untrusted(&parsed);
     let served = select_target_framework(
@@ -3040,6 +3074,7 @@ fn evaluate_project(
             compiler,
             chosen_tfm,
             declared_tfms,
+            declared_tfms_undecided,
             body_target_framework,
             tfm_untrusted,
             not_an_inner_build,
@@ -4128,6 +4163,120 @@ mod tests {
             node.output_name, None,
             "a TFM-unresolved node's per-TFM output name cannot be pinned either"
         );
+    }
+
+    /// Under an explicitly empty `TargetFramework` global, a project whose
+    /// `TargetFrameworks` declares different lists from different startup
+    /// directories declares frameworks, and none the walk can name: its node
+    /// is `Unresolved`, not `NoneDeclared`, which would let the env fold a
+    /// lone stale framework's output.
+    #[cfg(not(windows))]
+    #[test]
+    fn an_undecided_framework_list_under_an_empty_global_is_unresolved() {
+        let tmp = TempDir::new().unwrap();
+        let proj = tmp.path().join("Sample.fsproj");
+        let node_tfm = |body: &str| {
+            write_file(&proj, body);
+            let extra = HashMap::from([("TargetFramework".to_string(), String::new())]);
+            let ws =
+                Workspace::with_env_and_extra_build_properties(SdkDiscoveryEnv::default(), extra);
+            // A restore seeded the node with a framework of the list (the
+            // map's keys are canonicalised).
+            let seeds = BTreeMap::from([(
+                crate::observed::host_fs::canonicalize(&proj).unwrap(),
+                "net8.0".to_string(),
+            )]);
+            let graph = ws.project_graph_with_producer_tfms(
+                &proj,
+                &seeds,
+                &borzoi_msbuild::observed::Observer::new(),
+            );
+            graph
+                .nodes
+                .iter()
+                .find(|n| paths_equal(&n.path, &proj))
+                .expect("entry node")
+                .tfm
+                .clone()
+        };
+        assert_eq!(
+            node_tfm(
+                r#"<Project>
+  <PropertyGroup>
+    <S>seg\a</S>
+    <Q>./$(S)//</Q>
+    <TargetFrameworks>net$(Q.Length).0</TargetFrameworks>
+  </PropertyGroup>
+</Project>"#
+            ),
+            NodeTfm::Unresolved
+        );
+        // A plural written under a gate that turns on the startup directory:
+        // `net8.0` from a directory without `seg/`, nothing from one with it.
+        assert_eq!(
+            node_tfm(
+                r#"<Project>
+  <PropertyGroup>
+    <S>seg\a</S>
+    <TargetFrameworks Condition="'$(S)' != 'seg/a'">net8.0</TargetFrameworks>
+  </PropertyGroup>
+</Project>"#
+            ),
+            NodeTfm::Unresolved
+        );
+        // A list the walk holds but does not trust, replaced under a gate
+        // that turns on the startup directory: no framework of it is current.
+        assert_eq!(
+            node_tfm(
+                r#"<Project>
+  <PropertyGroup>
+    <S>seg\a</S>
+    <TargetFrameworks>net8.0;net9.0</TargetFrameworks>
+    <TargetFrameworks Condition="'$(S)' != 'seg/a'">net10.0</TargetFrameworks>
+  </PropertyGroup>
+</Project>"#
+            ),
+            NodeTfm::Unresolved
+        );
+        assert_eq!(
+            node_tfm("<Project><PropertyGroup /></Project>"),
+            NodeTfm::NoneDeclared
+        );
+        // An outer-build reference of a project whose frameworks turn on the
+        // startup directory is in no inner build the compiler sees.
+        write_file(&tmp.path().join("Lib.fsproj"), "<Project />");
+        write_file(
+            &proj,
+            r#"<Project>
+  <PropertyGroup>
+    <S>seg\a</S>
+    <Q>./$(S)//</Q>
+    <TargetFrameworks>net$(Q.Length).0</TargetFrameworks>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="Lib.fsproj" Condition="'$(TargetFramework)' == ''" />
+  </ItemGroup>
+</Project>"#,
+        );
+        let extra = HashMap::from([("TargetFramework".to_string(), String::new())]);
+        let ws = Workspace::with_env_and_extra_build_properties(SdkDiscoveryEnv::default(), extra);
+        let graph = ws.project_graph_with_producer_tfms(
+            &proj,
+            &BTreeMap::new(),
+            &borzoi_msbuild::observed::Observer::new(),
+        );
+        let node = graph
+            .nodes
+            .iter()
+            .find(|n| paths_equal(&n.path, &proj))
+            .expect("entry node");
+        assert!(node.references.is_empty(), "{:?}", node.references);
+        // The entry's served framework says the same: no current framework
+        // was established, so no restored target's assemblies are served.
+        let extra = HashMap::from([("TargetFramework".to_string(), String::new())]);
+        let mut ws =
+            Workspace::with_env_and_extra_build_properties(SdkDiscoveryEnv::default(), extra);
+        assert_eq!(ws.served_tfm_for_project(&proj), ServedTfm::Untrusted);
     }
 
     /// A producer-seeded node is labelled by *its own* evaluation, so an

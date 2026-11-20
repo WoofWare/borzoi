@@ -386,11 +386,29 @@ fn without_a_startup_directory_nothing_that_moves_with_it_is_committed() {
     let answers = msbuild_answers(&tree);
     for (name, project) in &tree.projects {
         let walk = ours(project, None);
+        // `Probes` imports a path built from the name under an `Exists` of
+        // it, which is true of a directory too: with the name unknown, the
+        // import may be rejected, and that is why the name is inexact.
+        let why_inexact = |read: &PropertyRead| match read {
+            PropertyRead::UnsetInexact(InexactUnset::Toolset) => *name == "App",
+            PropertyRead::UnsetInexact(InexactUnset::Rejected(rejection)) => {
+                *name == "Probes"
+                    && matches!(
+                        **rejection,
+                        borzoi_msbuild::Rejection {
+                            certainty: borzoi_msbuild::RejectionCertainty::Possible,
+                            cause: borzoi_msbuild::RejectionCause::Import {
+                                why: borzoi_msbuild::UnloadableImport::PathUndecided,
+                                ..
+                            },
+                            ..
+                        }
+                    )
+            }
+            _ => false,
+        };
         assert!(
-            matches!(
-                walk.startup,
-                PropertyRead::UnsetInexact(InexactUnset::Toolset)
-            ),
+            why_inexact(&walk.startup),
             "{name}: without a startup directory the name is unset and inexact, not {:?}",
             walk.startup
         );

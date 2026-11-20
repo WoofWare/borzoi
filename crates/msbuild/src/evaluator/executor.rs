@@ -330,8 +330,18 @@ impl<'s, 'r> Engine<'s, 'r> {
         let mut properties = BTreeMap::new();
         for name in &probe.properties {
             self.check_read(name)?;
-            // `check_read` above answered the trust question.
-            properties.insert(name.clone(), self.lookup.get_unescaped_ignoring_trust(name));
+            // `check_read` above answered the trust question, and declines a
+            // value that turns on MSBuild's startup directory.
+            let value = self
+                .lookup
+                .get_unescaped_ignoring_trust(name)
+                .map(|worlds| {
+                    worlds
+                        .agreed()
+                        .expect("check_read declines a split value")
+                        .clone()
+                });
+            properties.insert(name.clone(), value);
         }
         let mut items = BTreeMap::new();
         for item_type in &probe.item_types {
@@ -504,11 +514,12 @@ impl<'s, 'r> Engine<'s, 'r> {
         };
         for name in names {
             self.check_read(name)?;
-            if self
-                .lookup
-                .get_ignoring_trust(name)
-                .is_some_and(|value| value.as_escaped().contains(['@', '%', '$', ';']))
-            {
+            if self.lookup.get_ignoring_trust(name).is_some_and(|worlds| {
+                worlds
+                    .values()
+                    .into_iter()
+                    .any(|value| value.as_escaped().contains(['@', '%', '$', ';']))
+            }) {
                 return declined();
             }
         }
@@ -748,7 +759,7 @@ impl<'s, 'r> Engine<'s, 'r> {
             self.check_property_write(name)?;
             let raw = element_text(property)?;
             let value = self.expand(&raw)?;
-            self.lookup.insert_expanded(name, value);
+            self.lookup.insert_escaped(name, value);
             self.written.insert(name.to_ascii_lowercase());
         }
         Ok(())
@@ -1064,9 +1075,9 @@ impl<'s, 'r> Engine<'s, 'r> {
                 "the condition {raw} expands to an item or metadata reference"
             ));
         }
-        // The condition evaluator takes a relative probe of project text to
-        // miss, as an evaluation does; a target runs in the project's
-        // directory, so a backslash that meets one declines here.
+        // The condition evaluator answers a relative probe under MSBuild's
+        // startup directory, as an evaluation does; a target runs in the
+        // project's directory, so a backslash that meets one declines here.
         if issues
             .iter()
             .any(|issue| matches!(issue, Issue::PathAdjustmentUndecided { .. }))
@@ -1079,6 +1090,9 @@ impl<'s, 'r> Engine<'s, 'r> {
             condition::Outcome::True => Ok(true),
             condition::Outcome::False => Ok(false),
             condition::Outcome::Illegal => decline(format!("MSBuild rejects the condition {raw}")),
+            condition::Outcome::StartupDirectory => decline(format!(
+                "the condition {raw} turns on MSBuild's startup directory"
+            )),
             condition::Outcome::Unsupported => {
                 decline(format!("the condition {raw} is not modelled"))
             }
@@ -1104,11 +1118,12 @@ impl<'s, 'r> Engine<'s, 'r> {
         }
         for name in crate::properties::property_references(raw) {
             self.check_read(name)?;
-            if self
-                .lookup
-                .get_ignoring_trust(name)
-                .is_some_and(|value| may_assemble(value.as_escaped()))
-            {
+            if self.lookup.get_ignoring_trust(name).is_some_and(|worlds| {
+                worlds
+                    .values()
+                    .into_iter()
+                    .any(|value| may_assemble(value.as_escaped()))
+            }) {
                 return decline(format!("{name} may assemble an item reference"));
             }
         }
@@ -1168,9 +1183,12 @@ impl<'s, 'r> Engine<'s, 'r> {
         if raw.contains("@(")
             && (raw.contains('\\')
                 || crate::properties::property_references(raw).any(|name| {
-                    self.lookup
-                        .get_ignoring_trust(name)
-                        .is_some_and(|value| value.as_escaped().contains('\\'))
+                    self.lookup.get_ignoring_trust(name).is_some_and(|worlds| {
+                        worlds
+                            .values()
+                            .into_iter()
+                            .any(|value| value.as_escaped().contains('\\'))
+                    })
                 }))
         {
             return decline(format!(
@@ -1272,12 +1290,24 @@ impl<'s, 'r> Engine<'s, 'r> {
         // A value that holds an item or metadata reference is one MSBuild
         // expands again as such once properties are in (`$(A)$(B)` with
         // `A=@`, `B=(I)` reads `@(I)`).
+        if self.lookup.get_ignoring_trust(name).is_some_and(|worlds| {
+            worlds
+                .values()
+                .into_iter()
+                .any(|value| holds_reference(value.as_escaped()))
+        }) {
+            return decline(format!("{name} holds an item or metadata reference"));
+        }
+        // A value that turns on MSBuild's startup directory is no one value a
+        // target reads.
         if self
             .lookup
             .get_ignoring_trust(name)
-            .is_some_and(|value| holds_reference(value.as_escaped()))
+            .is_some_and(|worlds| worlds.is_split())
         {
-            return decline(format!("{name} holds an item or metadata reference"));
+            return decline(format!(
+                "{name} turns on MSBuild's startup directory, which the walk does not know"
+            ));
         }
         if self.written.contains(&lower) {
             return Ok(());

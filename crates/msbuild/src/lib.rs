@@ -59,6 +59,7 @@ pub use imports::detect_implicit_imports;
 pub use project_file::{ProjectFile, ProjectFileError};
 pub use properties::escaping::escape;
 pub use properties::trust::UntrustedCause;
+pub use properties::worlds::{Split, Worlds};
 pub use sdk_resolver::global_json::{
     GlobalJson, GlobalJsonError, GlobalJsonSettings, GlobalJsonWorkloads, SdkPathEntry,
     UndecidedGlobalJson, find_global_json, parse_global_json,
@@ -68,7 +69,7 @@ pub use sdk_resolver::{
     SdkResolveError, SdkVersion, locate_dotnet_sdk, nuget_package_version, resolve_sdk,
     running_sdk_dir, workloads,
 };
-pub use target_frameworks::target_frameworks;
+pub use target_frameworks::{target_frameworks, target_frameworks_undecided};
 
 /// MSBuild's boolean vocabulary (`ConversionUtilities.TryConvertStringToBool`):
 /// `true`/`on`/`yes` and `false`/`off`/`no`, each optionally negated with a
@@ -561,6 +562,12 @@ pub struct ParsedProject {
     /// (oracle-pinned 2026-07-12), and `properties` has already been unescaped
     /// for its consumers.
     pub target_frameworks: Vec<String>,
+    /// Whether the plural `<TargetFrameworks>` declares a list that turns on
+    /// MSBuild's startup directory: worlds that split it into different lists
+    /// ([`crate::Worlds`]). [`Self::target_frameworks`] is then empty, and
+    /// names no list a build declares, so the accessor does not fall back to
+    /// the singular.
+    pub target_frameworks_undecided: bool,
     /// The evaluated `$(LangVersion)` (the project's `<LangVersion>`), trimmed,
     /// or `None` when unset/empty. Raw text — `"8.0"`, `"latest"`, `"preview"`,
     /// `"11"`, etc. — left for the consumer to resolve (e.g. the LSP maps it via

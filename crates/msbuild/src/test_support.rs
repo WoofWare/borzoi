@@ -155,6 +155,7 @@ pub fn evaluate_with_exists(
     let probes = crate::condition::Probes {
         exists: &exists,
         observer: &observer,
+        start: crate::properties::worlds::Start::Unknown,
     };
     crate::condition::evaluate_with_exists(condition, props, probes).outcome
 }

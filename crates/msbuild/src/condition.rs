@@ -39,7 +39,7 @@
 //! produce wrong output" promise.
 //!
 //! Property substitution inside condition strings reuses the main
-//! [`crate::properties::substitute`] function. Undefined references become
+//! [`crate::properties::substitute_in_world`] function. Undefined references become
 //! `""` (matching MSBuild's "unset property → empty string" rule) so
 //! we can still compute a truth value, but the names of every
 //! undefined reference are returned alongside the outcome so the
@@ -62,8 +62,9 @@ use std::ops::Range;
 
 use super::observed::Observer;
 use super::properties::escaping::Escaped;
+use super::properties::worlds::{self, Start, World, Worlds};
 use super::properties::{
-    Issue, MAX_EXPRESSION_NESTING, PropertyMap, substitute, substitute_with_fs,
+    Issue, MAX_EXPRESSION_NESTING, PropertyMap, Provenanced, path_fixup, substitute_in_world,
 };
 
 /// The file-system queries a condition may make: `exists` answers
@@ -71,10 +72,17 @@ use super::properties::{
 /// and the property functions that probe the file system
 /// (`GetDirectoryNameOfFileAbove`) query through `observer`. A condition
 /// evaluated without them treats both as unsupported.
+///
+/// `start` is what the evaluation knows about MSBuild's startup directory,
+/// under which the Unix path adjustment probes a relative segment
+/// ([`worlds`]). A condition is evaluated in every world it allows, and
+/// decided only where every world decides it the same way; a condition
+/// evaluated without `Probes` knows no startup directory.
 #[derive(Clone, Copy)]
 pub(crate) struct Probes<'a> {
     pub exists: &'a dyn Fn(&str) -> bool,
     pub observer: &'a Observer,
+    pub start: Start<'a>,
 }
 
 /// Where MSBuild evaluates a condition, which decides two things about it.
@@ -108,17 +116,98 @@ pub enum Site {
 }
 
 /// What an evaluation reaches beyond the property table: the file system,
-/// where the caller gives one, and the condition's [`Site`].
+/// where the caller gives one, the condition's [`Site`], and the world of
+/// MSBuild's startup directory it reads the table in ([`worlds::World`]):
+/// `None` outside an enumeration of them, where a read takes the value where
+/// no segment is a directory.
 #[derive(Clone, Copy)]
 struct Ctx<'a> {
     probes: Option<Probes<'a>>,
     site: Site,
+    world: Option<&'a World<'a>>,
 }
 
-impl Ctx<'_> {
+impl<'a> Ctx<'a> {
+    fn new(probes: Option<Probes<'a>>, site: Site) -> Self {
+        Ctx {
+            probes,
+            site,
+            world: None,
+        }
+    }
+
     fn observer(&self) -> Option<&Observer> {
         self.probes.map(|probes| probes.observer)
     }
+
+    /// What MSBuild's startup directory may be.
+    fn start(&self) -> Start<'a> {
+        self.probes.map_or(Start::Unknown, |probes| probes.start)
+    }
+
+    /// `self` in `world`.
+    fn in_world<'b>(&self, world: &'b World<'b>) -> Ctx<'b>
+    where
+        'a: 'b,
+    {
+        Ctx {
+            probes: self.probes,
+            site: self.site,
+            world: Some(world),
+        }
+    }
+
+    /// `text` substituted in this context's world.
+    fn substitute(&self, text: &str, props: &PropertyMap) -> (Provenanced<Escaped>, Vec<Issue>) {
+        match self.world {
+            Some(world) => substitute_in_world(text, props, self.observer(), world),
+            None => substitute_in_world(text, props, self.observer(), &World::absent_everywhere()),
+        }
+    }
+
+    /// The value `name` holds in this context's world.
+    fn value<'m>(&self, props: &'m PropertyMap, name: &str) -> Option<&'m Escaped> {
+        let worlds = props.get_ignoring_trust(name)?;
+        Some(match self.world {
+            Some(world) => world.read(worlds),
+            None => worlds.absent_everywhere(),
+        })
+    }
+}
+
+/// A condition's value in each world: a boolean, or a rejection within that
+/// world. `Err(TooManySegments)` when the condition asks about more of
+/// MSBuild's startup directory than the walk enumerates.
+type InEveryWorld = Result<Worlds<Result<bool, Reject>>, worlds::TooManySegments>;
+
+/// `expr` evaluated in every world `fs` allows, with the undefined names the
+/// evaluations read: the first world's in order, then any other world's it
+/// lacks.
+fn eval_in_every_world(
+    expr: &BoolExpr,
+    props: &PropertyMap,
+    fs: Ctx<'_>,
+) -> (InEveryWorld, Vec<String>) {
+    let mut undefined: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut first = true;
+    let value = worlds::in_every_world(fs.start(), |world| {
+        let mut read = Vec::new();
+        let value = eval_bool(expr, props, fs.in_world(world), &mut read);
+        if first {
+            seen.extend(read.iter().cloned());
+            undefined = read;
+            first = false;
+        } else {
+            for name in read {
+                if seen.insert(name.clone()) {
+                    undefined.push(name);
+                }
+            }
+        }
+        value
+    });
+    (value, undefined)
 }
 
 /// Result of evaluating a condition string.
@@ -149,10 +238,17 @@ pub enum Outcome {
     /// (`tests/condition_diff.rs`'s `where_msbuild_evaluates_a_condition`).
     Illegal,
     /// The condition contains syntax or operators outside the
-    /// grammar we model. Treat the containing construct as excluded;
-    /// do NOT proceed as if it were true. MSBuild may evaluate it to either
-    /// boolean, or reject it.
+    /// grammar we model, or asks about more of MSBuild's startup directory
+    /// than the walk enumerates. Treat the containing construct as
+    /// excluded; do NOT proceed as if it were true. MSBuild may evaluate it to
+    /// either boolean, or reject it.
     Unsupported,
+    /// MSBuild evaluates the condition to a boolean wherever it starts, and
+    /// to different booleans by what its startup directory holds
+    /// (`super::properties::worlds`). Treat the containing construct as
+    /// excluded, as for [`Outcome::Unsupported`]; but MSBuild does not reject
+    /// the project over it.
+    StartupDirectory,
 }
 
 /// Why a condition, or a part of it, has no boolean: what MSBuild does there,
@@ -267,14 +363,7 @@ pub struct Eval {
 /// populated.
 #[cfg(any(test, feature = "test-support"))]
 pub fn evaluate(source: &str, props: &PropertyMap) -> Eval {
-    evaluate_inner(
-        source,
-        props,
-        Ctx {
-            probes: None,
-            site: Site::ItemPass,
-        },
-    )
+    evaluate_inner(source, props, Ctx::new(None, Site::ItemPass))
 }
 
 /// Evaluate a condition with support for MSBuild's filesystem-backed
@@ -282,14 +371,7 @@ pub fn evaluate(source: &str, props: &PropertyMap) -> Eval {
 /// system (see [`Probes`]).
 #[cfg(any(test, feature = "test-support"))]
 pub fn evaluate_with_exists(source: &str, props: &PropertyMap, probes: Probes<'_>) -> Eval {
-    evaluate_inner(
-        source,
-        props,
-        Ctx {
-            probes: Some(probes),
-            site: Site::ItemPass,
-        },
-    )
+    evaluate_inner(source, props, Ctx::new(Some(probes), Site::ItemPass))
 }
 
 /// A condition evaluated at `site`, with the file system where
@@ -300,7 +382,25 @@ pub(crate) fn evaluate_at(
     probes: Option<Probes<'_>>,
     site: Site,
 ) -> Eval {
-    evaluate_inner(source, props, Ctx { probes, site })
+    evaluate_inner(source, props, Ctx::new(probes, site))
+}
+
+/// Whether `source` evaluates differently by MSBuild's startup directory, or
+/// asks about more of it than the walk enumerates: why an evaluation of it at
+/// `site` is undecided when its grammar is not to blame.
+pub(crate) fn depends_on_startup_directory(
+    source: &str,
+    props: &PropertyMap,
+    probes: Option<Probes<'_>>,
+    site: Site,
+) -> bool {
+    let Ok(Some(expr)) = parse_condition(source) else {
+        return false;
+    };
+    !matches!(
+        eval_in_every_world(&expr, props, Ctx::new(probes, site)).0,
+        Ok(Worlds::Same(_))
+    )
 }
 
 fn evaluate_inner(source: &str, props: &PropertyMap, fs: Ctx<'_>) -> Eval {
@@ -315,8 +415,31 @@ fn evaluate_inner(source: &str, props: &PropertyMap, fs: Ctx<'_>) -> Eval {
         }
         Err(reject) => return rejected(reject),
     };
-    let mut undefined = Vec::new();
-    let outcome = match eval_bool(&expr, props, fs, &mut undefined) {
+    // A condition whose value turns on MSBuild's startup directory has none
+    // the walk can commit to, as one outside the grammar has none. Where every
+    // world returns a boolean, no world throws.
+    let (value, undefined) = match eval_in_every_world(&expr, props, fs) {
+        (Ok(Worlds::Same(value)), undefined) => (value, undefined),
+        (Ok(split), _) if split.values().iter().all(|value| value.is_ok()) => {
+            return Eval {
+                outcome: Outcome::StartupDirectory,
+                undefined_properties: Vec::new(),
+                undefined_outside_empty_comparison: Vec::new(),
+            };
+        }
+        // The worst of the worlds' rejections stands for them.
+        (Ok(split), _) => {
+            let worst = split
+                .values()
+                .into_iter()
+                .filter_map(|value| value.err())
+                .max()
+                .expect("a split with a non-boolean world");
+            return rejected(worst);
+        }
+        (Err(worlds::TooManySegments), _) => return rejected(Reject::Unmodelled),
+    };
+    let outcome = match value {
         Ok(true) => Outcome::True,
         Ok(false) => Outcome::False,
         Err(reject) => {
@@ -496,7 +619,7 @@ pub fn judge(
     site: Site,
     uncertain: &dyn Fn(&str) -> bool,
 ) -> Judgement {
-    let fs = Ctx { probes, site };
+    let fs = Ctx::new(probes, site);
     match parse_condition(source) {
         Ok(Some(expr)) => judge_expr(&expr, props, fs, uncertain, Walk::Judge),
         Ok(None) => Judgement::of(Some(true), Throws::Never, false),
@@ -547,7 +670,7 @@ pub fn throws_whatever(
     site: Site,
     uncertain: &dyn Fn(&str) -> bool,
 ) -> bool {
-    let fs = Ctx { probes, site };
+    let fs = Ctx::new(probes, site);
     match parse_condition(source) {
         Ok(Some(expr)) => {
             judge_expr(&expr, props, fs, uncertain, Walk::Certainty).throws == Throws::Certainly
@@ -561,7 +684,6 @@ pub fn throws_whatever(
 /// names unknown: `judge`'s throw verdict other than [`Throws::Never`],
 /// found without evaluating (or probing the file system for) any operand past
 /// the first that may throw.
-#[cfg(test)]
 pub fn may_throw(
     source: &str,
     props: &PropertyMap,
@@ -569,7 +691,7 @@ pub fn may_throw(
     site: Site,
     uncertain: &dyn Fn(&str) -> bool,
 ) -> bool {
-    let fs = Ctx { probes, site };
+    let fs = Ctx::new(probes, site);
     may_throw_walked(source, props, fs, uncertain, None)
 }
 
@@ -591,7 +713,7 @@ pub fn may_throw_on_held(
     unsure: &dyn Fn(&str) -> bool,
     doubted: &dyn Fn(&str) -> bool,
 ) -> bool {
-    let fs = Ctx { probes, site };
+    let fs = Ctx::new(probes, site);
     may_throw_walked(source, props, fs, unsure, Some(doubted))
 }
 
@@ -656,7 +778,59 @@ fn judge_expr(
         | BoolExpr::HasTrailingSlash(_)
         | BoolExpr::MsbuildVersionFunction(_)
         | BoolExpr::CoerceBool(_)
-        | BoolExpr::Compare { .. } => {
+        | BoolExpr::Compare { .. } => judge_leaf_in_every_world(expr, props, fs, uncertain, walk),
+    }
+}
+
+/// [`judge_leaf`] in every world of MSBuild's startup directory: a leaf whose
+/// judgement turns on it has no value, and throws certainly only where it
+/// does in every world, perhaps where it may in some. One that asks about
+/// more of the startup directory than the walk enumerates is unevaluated, and
+/// may throw as its kind can.
+fn judge_leaf_in_every_world(
+    expr: &BoolExpr,
+    props: &PropertyMap,
+    fs: Ctx<'_>,
+    uncertain: &dyn Fn(&str) -> bool,
+    walk: Walk<'_>,
+) -> Judgement {
+    let judged = worlds::in_every_world(fs.start(), |world| {
+        judge_leaf(expr, props, fs.in_world(world), uncertain, walk)
+    });
+    match judged {
+        Ok(Worlds::Same(judged)) => judged,
+        Ok(split) => {
+            let values = split.values();
+            let throws = if values.iter().all(|j| j.throws == Throws::Certainly) {
+                Throws::Certainly
+            } else if values.iter().all(|j| j.throws == Throws::Never) {
+                Throws::Never
+            } else {
+                Throws::Maybe
+            };
+            Judgement::of(None, throws, values.iter().any(|j| j.unevaluated))
+        }
+        Err(worlds::TooManySegments) => {
+            let throws = if leaf_may_throw_on_some_value(expr) {
+                Throws::Maybe
+            } else {
+                Throws::Never
+            };
+            Judgement::of(None, throws, true)
+        }
+    }
+}
+
+/// `judge_expr` of the leaf `expr`, in `fs`'s world.
+fn judge_leaf(
+    expr: &BoolExpr,
+    props: &PropertyMap,
+    fs: Ctx<'_>,
+    uncertain: &dyn Fn(&str) -> bool,
+    walk: Walk<'_>,
+) -> Judgement {
+    {
+        {
             let mut references = Vec::new();
             leaf_references(expr, &mut references);
             let mut implicit = Vec::new();
@@ -679,8 +853,8 @@ fn judge_expr(
                     // is `uncertain`'s to say, asked first.
                     let completes = references.iter().any(|name| {
                         !uncertain(name)
-                            && props
-                                .get_ignoring_trust(name)
+                            && fs
+                                .value(props, name)
                                 .is_some_and(|value| value.as_escaped().contains(['@', '%']))
                     });
                     let throws = if leaf_may_throw_on_some_value(expr) || completes {
@@ -762,12 +936,11 @@ fn doubted_failures(
     // on everything it names.
     let mut failing: Vec<(String, bool)> = Vec::new();
     for text in &texts {
-        let (_, issues) = match fs.observer() {
-            Some(observer) => substitute_with_fs(text, props, observer),
-            None => substitute(text, props),
-        };
+        let (_, issues) = fs.substitute(text, props);
         failing.extend(issues.into_iter().filter_map(|issue| match issue {
-            Issue::Throws { expression, reads } => {
+            Issue::Throws {
+                expression, reads, ..
+            } => {
                 let doubted = reads.iter().any(|name| uncertain(name));
                 Some((expression, doubted))
             }
@@ -799,10 +972,7 @@ fn fails_on_held(
     doubted: &dyn Fn(&str) -> bool,
 ) -> bool {
     texts.iter().any(|text| {
-        let (_, issues) = match fs.observer() {
-            Some(observer) => substitute_with_fs(text, props, observer),
-            None => substitute(text, props),
-        };
+        let (_, issues) = fs.substitute(text, props);
         issues.into_iter().any(|issue| match issue {
             Issue::Throws { reads, .. } => !reads.iter().any(|name| doubted(name)),
             Issue::Unsupported { expression } => {
@@ -927,15 +1097,17 @@ pub(crate) fn expression_throws_whatever_they_return(
     if inner.is_empty() {
         return false;
     }
+    // It throws whatever they return only where it throws in every world of
+    // MSBuild's startup directory.
     RETURNED.iter().all(|value| {
         let struck = strike(expression, &inner, value);
-        let (_, issues) = match observer {
-            Some(observer) => substitute_with_fs(&struck, props, observer),
-            None => substitute(&struck, props),
-        };
-        issues.iter().any(|issue| {
-            matches!(issue, Issue::Throws { reads, .. } if !reads.iter().any(|name| unheld(name)))
-        })
+        let thrown = worlds::in_every_world(Start::Unknown, |world| {
+            let (_, issues) = substitute_in_world(&struck, props, observer, world);
+            issues.iter().any(|issue| {
+                matches!(issue, Issue::Throws { reads, .. } if !reads.iter().any(|name| unheld(name)))
+            })
+        });
+        matches!(thrown, Ok(Worlds::Same(true)))
     })
 }
 
@@ -1193,13 +1365,13 @@ pub fn decide_without(
     site: Site,
     untrusted: &dyn Fn(&str) -> bool,
 ) -> Decision {
-    let fs = Ctx { probes, site };
+    let fs = Ctx::new(probes, site);
     let expr = match parse_condition(source) {
         Ok(Some(expr)) => expr,
         Ok(None) => return Decision::Decided(true),
         Err(_) => return Decision::Unsupported,
     };
-    match judge_expr(&expr, props, fs, untrusted, Walk::Decide) {
+    match judge_decide(&expr, props, fs, untrusted) {
         Judgement {
             unevaluated: true, ..
         } => Decision::Unsupported,
@@ -1208,6 +1380,28 @@ pub fn decide_without(
         } => Decision::Decided(value),
         Judgement { value: None, .. } => Decision::Depends,
     }
+}
+
+/// `judge_expr` walked to decide, but where `expr` reads no name `untrusted`
+/// names, the whole of it evaluated in every world of MSBuild's startup
+/// directory first: a leaf judged alone forgets that another leaf read the
+/// same value in the same world (`'$(S)' == 'seg/a' And '$(S)' != 'seg/a'`
+/// is false in every world, though each leaf turns on it).
+fn judge_decide(
+    expr: &BoolExpr,
+    props: &PropertyMap,
+    fs: Ctx<'_>,
+    untrusted: &dyn Fn(&str) -> bool,
+) -> Judgement {
+    let mut names = Vec::new();
+    leaf_references(expr, &mut names);
+    leaf_implicit_references(expr, &mut names);
+    if !names.iter().any(|name| untrusted(name))
+        && let (Ok(Worlds::Same(Ok(value))), _) = eval_in_every_world(expr, props, fs)
+    {
+        return Judgement::of(Some(value), Throws::Never, false);
+    }
+    judge_expr(expr, props, fs, untrusted, Walk::Decide)
 }
 
 /// Whether `source` is a conjunction (nested conjunctions flattened) each of
@@ -1224,7 +1418,7 @@ pub fn decided_conjunctwise(
     untrusted: &dyn Fn(&str) -> bool,
     is_the_exists: &dyn Fn(&str) -> bool,
 ) -> bool {
-    let fs = Ctx { probes, site };
+    let fs = Ctx::new(probes, site);
     let expr = match parse_condition(source) {
         Ok(Some(expr)) => expr,
         Ok(None) => return true,
@@ -1236,7 +1430,7 @@ pub fn decided_conjunctwise(
             BoolExpr::And(operands) => pending.extend(operands),
             BoolExpr::Exists(arg) if fs.probes.is_some() && is_the_exists(arg) => {}
             other => {
-                let judged = judge_expr(other, props, fs, untrusted, Walk::Decide);
+                let judged = judge_decide(other, props, fs, untrusted);
                 if judged.value.is_none() || judged.unevaluated {
                     return false;
                 }
@@ -1436,7 +1630,7 @@ enum Token {
     /// specially-recognised version functions below — a plain reference
     /// (`$(SomeBool)`) or an instance-method call (`$(V.Contains('{'))`).
     /// The raw `$(…)` text is kept until evaluation, when it is expanded
-    /// via [`super::properties::substitute`] and used either as a
+    /// via [`super::properties::substitute_in_world`] and used either as a
     /// comparison operand or coerced to bool (`Condition="$(SomeBool)"`).
     /// An expression the substituter can't evaluate poisons the condition
     /// to [`Outcome::Unsupported`], exactly as it did when this arrived as
@@ -1871,7 +2065,7 @@ enum ScalarExpr {
         part: VersionPart,
     },
     /// A bare `$(…)` property expression (reference or instance-method
-    /// call), expanded via [`super::properties::substitute`] at evaluation.
+    /// call), expanded via [`super::properties::substitute_in_world`] at evaluation.
     Property(String),
 }
 
@@ -2169,6 +2363,8 @@ fn eval_bool(
                 expand_for_condition(raw, props, fs, undefined)?;
                 return Err(Reject::Undecided);
             };
+            // A `\` written in the argument is a `/` before it is expanded.
+            let raw = &path_fixup::fix_file_path(raw);
             let value = expand_for_condition(raw, props, fs, undefined)?;
             // MSBuild expands the argument into an item list and asks about
             // every entry: true when each exists, false for an empty list
@@ -2197,6 +2393,7 @@ fn eval_bool(
                     .all(|entry| (probes.exists)(&entry.unescape())))
         }
         BoolExpr::HasTrailingSlash(raw) => {
+            let raw = &path_fixup::fix_file_path(raw);
             let value = expand_for_condition(raw, props, fs, undefined)
                 .map_err(Reject::read_by_throwing_leaf)?;
             // MSBuild expands the argument into an item list: each entry is
@@ -2233,7 +2430,7 @@ fn eval_bool(
         BoolExpr::CoerceBool(scalar) => {
             let value = match expand_scalar_for_condition(scalar, props, fs, undefined) {
                 // A boolean we do not compute coerces without throwing.
-                Err(Reject::Undecided) if lone_boolean(scalar, props) => {
+                Err(Reject::Undecided) if lone_boolean(scalar, props, fs) => {
                     return Err(Reject::Undecided);
                 }
                 other => other.map_err(Reject::read_by_throwing_leaf)?,
@@ -2265,7 +2462,7 @@ fn eval_bool(
             let operand = |reject: Reject, scalar: &ScalarExpr| {
                 if !relational {
                     reject
-                } else if reject == Reject::Undecided && lone_boolean(scalar, props) {
+                } else if reject == Reject::Undecided && lone_boolean(scalar, props, fs) {
                     // A boolean we do not compute is still no number nor
                     // version: an order on it throws.
                     Reject::Illegal
@@ -2449,13 +2646,13 @@ fn probe_emptiness(
 /// Whether the operand `scalar` is one `$(…)` whose only issue is a boolean
 /// we do not compute ([`Issue::ReturnsBoolean`]), so that coercing it cannot
 /// throw.
-fn lone_boolean(scalar: &ScalarExpr, props: &PropertyMap) -> bool {
+fn lone_boolean(scalar: &ScalarExpr, props: &PropertyMap, fs: Ctx<'_>) -> bool {
     let (ScalarExpr::String(raw) | ScalarExpr::Property(raw)) = scalar else {
         return false;
     };
     // The operand is that one expression, with nothing beside it: text
     // around it would make the boolean a word (`'x$(…)'` is `xFalse`).
-    let (_, issues) = substitute(raw, props);
+    let (_, issues) = fs.substitute(raw, props);
     matches!(issues.as_slice(), [Issue::ReturnsBoolean { expression }] if expression == raw)
 }
 
@@ -2514,9 +2711,9 @@ fn expand_system_version_parse_arg(
     if let Some(property) = split_dash_zero_property(raw) {
         // A condition's trust is the whole-tree scan, not its operands' (see
         // [`expand_for_condition`]).
-        if let Some(value) = props.get_ignoring_trust(property) {
+        if let Some(value) = fs.value(props, property) {
             // A condition operand is a point of use: MSBuild compares the
-            // *unescaped* value.
+            // *unescaped* value, the one this world holds.
             let value = value.unescape();
             return Ok(value.split('-').next().unwrap_or("").to_string());
         }
@@ -2817,11 +3014,7 @@ fn expand_for_condition(
 ) -> Result<Escaped, Reject> {
     // FS-probing property functions follow the same split as `Exists()`:
     // available exactly when the caller supplied a filesystem oracle.
-    let (value, issues) = if let Some(observer) = fs.observer() {
-        substitute_with_fs(raw, props, observer)
-    } else {
-        substitute(raw, props)
-    };
+    let (value, issues) = fs.substitute(raw, props);
     // The operand's carried trust is left behind, deliberately. Evaluation
     // short-circuits (`'$(X)' == '' Or '$(X)' == 'x'` never expands the second
     // arm when the first is true), so the trust of what *this* evaluation read
@@ -2896,6 +3089,7 @@ mod tests {
         Probes {
             exists,
             observer: Box::leak(Box::new(Observer::new())),
+            start: Start::Unknown,
         }
     }
 
@@ -5273,7 +5467,7 @@ mod decide_without_props {
                         Outcome::False => !decided,
                         // A rejected condition is a project error in MSBuild, and an
                         // unmodelled one may be.
-                        Outcome::Illegal | Outcome::Unsupported => true,
+                        Outcome::Illegal | Outcome::Unsupported | Outcome::StartupDirectory => true,
                     };
                     prop_assert!(
                         agrees,
@@ -5298,6 +5492,7 @@ mod decide_without_props {
                 Outcome::True => Decision::Decided(true),
                 Outcome::False => Decision::Decided(false),
                 Outcome::Illegal | Outcome::Unsupported => Decision::Unsupported,
+                Outcome::StartupDirectory => Decision::Depends,
             };
             prop_assert_eq!(decision, expected, "{}", source);
         }
@@ -5381,7 +5576,7 @@ mod decide_without_props {
                                 v
                             );
                         }
-                        Outcome::Unsupported => {}
+                        Outcome::Unsupported | Outcome::StartupDirectory => {}
                     }
                 }
             }

@@ -765,6 +765,7 @@ fn cause(cause: &borzoi_msbuild::UntrustedCause) -> String {
         Unentered(_) => "content not entered".to_owned(),
         Refused { name } => format!("$({name}) refused"),
         Rejected(_) => "MSBuild may reject the project".to_owned(),
+        StartupDirectory(_) => "turns on the startup directory".to_owned(),
     }
 }
 

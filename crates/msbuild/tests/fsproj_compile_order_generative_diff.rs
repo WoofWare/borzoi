@@ -834,6 +834,99 @@ fn certain_compile_order_matches_msbuild() {
     );
 }
 
+/// An `Update` spec over three files only, so fragments repeat within a spec
+/// and across consecutive specs, in spellings that are and are not their own
+/// key (`Rooted` is the full path; the rest are not), with an escaped
+/// fragment where the batch is left for certain.
+fn batch_update_spec_strategy() -> impl Strategy<Value = UpdateSpec> {
+    let spelling = prop_oneof![
+        4 => Just(Spelling::Bare),
+        3 => Just(Spelling::Rooted),
+        1 => Just(Spelling::DotSlash),
+        1 => Just(Spelling::Lower),
+        1 => Just(Spelling::Escaped),
+    ];
+    proptest::collection::vec((0..3usize, spelling), 2..5).prop_map(UpdateSpec::Files)
+}
+
+/// A run of consecutive `Update`s (each writing `CompileOrder` or only other
+/// metadata) between `Include`s: MSBuild's batch of `Update`s, its strands
+/// and what removing a fragment by its text leaves, are what this sweeps.
+fn batch_fixture_strategy() -> impl Strategy<Value = Fixture> {
+    let update = prop_oneof![
+        1 => (batch_update_spec_strategy(), (0..5usize))
+            .prop_map(|(spec, order)| ItemDecl::OrderUpdate {
+                spec,
+                order: OrderMeta {
+                    attr: Some(OrderValue::Lit(order)),
+                    children: Vec::new(),
+                },
+                cond: Cond::None,
+            }),
+        1 => batch_update_spec_strategy()
+            .prop_map(|spec| ItemDecl::Boundary(Boundary::OtherMetadataUpdate(spec))),
+    ];
+    let include = (0..3usize).prop_map(|file| ItemDecl::Include {
+        item_type: ItemType::Compile,
+        spec: IncludeSpec::File(file, Spelling::Bare),
+        order: OrderMeta::default(),
+        cond: Cond::None,
+    });
+    let run = (
+        proptest::collection::vec(include.clone(), 0..2),
+        proptest::collection::vec(update, 2..6),
+        proptest::collection::vec(include, 1..3),
+    )
+        .prop_map(|(before, updates, after)| {
+            before
+                .into_iter()
+                .chain(updates)
+                .chain(after)
+                .collect::<Vec<_>>()
+        });
+    proptest::collection::vec(run, 1..3).prop_map(|runs| Fixture {
+        sdk_props: Vec::new(),
+        project: vec![Group::Items {
+            cond: Cond::None,
+            items: runs.into_iter().flatten().collect(),
+        }],
+        sdk_targets: Vec::new(),
+    })
+}
+
+/// [`certain_compile_order_matches_msbuild`] over runs of consecutive
+/// `Update`s ([`batch_fixture_strategy`]), where the walk models MSBuild's
+/// batch of them. Also requires that the walk commits on a tenth of the
+/// cases, so the batch model is graded, not declined.
+#[test]
+fn update_batches_match_msbuild() {
+    let cases: u32 = std::env::var("BORZOI_COMPILE_ORDER_CASES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1000);
+    let mut runner = TestRunner::new(ProptestConfig {
+        cases,
+        source_file: Some(file!()),
+        ..ProptestConfig::default()
+    });
+    let oracle_hits = std::cell::Cell::new(0u32);
+    runner
+        .run(&batch_fixture_strategy(), |fixture| {
+            if check_certain_implies_exact(&fixture)? {
+                oracle_hits.set(oracle_hits.get() + 1);
+            }
+            Ok(())
+        })
+        .unwrap_or_else(|e| panic!("{e}"));
+    eprintln!("{} batch cases reached the oracle", oracle_hits.get());
+    // About a quarter of the cases commit; a tenth is the floor.
+    assert!(
+        oracle_hits.get() >= cases / 10,
+        "only {} of {cases} batch cases reached the MSBuild oracle",
+        oracle_hits.get()
+    );
+}
+
 /// The property above skips uncertain cases, so on its own it could rot into
 /// testing (almost) nothing if the generator, or a regression, made
 /// uncertainty the norm. Sample the strategy deterministically — our parser

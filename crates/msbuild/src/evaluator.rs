@@ -77,7 +77,8 @@ use super::properties::trust::{
     OpacityCause, PropertyProvenance, RefusedOutcome, ResolvedProvenance, SdkPackagePropertyTaint,
     StaleOutcome, TaintOutcome, Trust, UndefinedBecause, UnpinnedOutcome, UnpinnedRoot,
 };
-use super::properties::{self, Issue, PropertyMap, Provenanced};
+use super::properties::worlds::Start;
+use super::properties::{self, Issue, PropertyMap, Provenanced, Worlds};
 use super::{
     FrameworkReference, GlobRequest, GlobResolver, GlobalPackageReference, ItemKind,
     ItemMetadataValue, PackageRefOp, PackageReference, PackageVersion, ParsedProject, ResolvedItem,
@@ -344,13 +345,17 @@ pub fn walk_with_imports<'r>(
             // No consumer to protect: the discharge this decides never fires
             // on a real SDK chain (P2′ of
             // `docs/msbuild-value-carried-provenance-plan.md`).
+            // Under every startup directory: the discharge must hold whichever
+            // spelling MSBuild stored.
             state
                 .lookup
                 .get_unescaped_ignoring_trust("DirectoryPackagesPropsPath")
-                .map(|raw| raw.trim().replace('\\', "/"))
-                .filter(|path| !path.is_empty())
-                .is_some_and(|path| {
-                    canonicalise_or_normalise(observer, Path::new(&path)) == *walked
+                .is_some_and(|worlds| {
+                    worlds.values().into_iter().all(|raw| {
+                        let path = raw.trim().replace('\\', "/");
+                        !path.is_empty()
+                            && canonicalise_or_normalise(observer, Path::new(&path)) == *walked
+                    })
                 })
         });
     if let Some(path) = detected_packages_props
@@ -951,6 +956,15 @@ struct State<'r> {
     /// models (`Compile`, `PackageReference`), as far as the walk can follow it
     /// ([`item_pass`]'s `update_strands_late`), keyed by lowercased item type.
     update_batches: HashMap<String, item_pass::UpdateBatchRun>,
+    /// Whether the walk has declined a property write for MSBuild's startup
+    /// directory: skipped one under a gate whose outcome turns on it (or asks
+    /// about more of it than the walk enumerates), refused one past the
+    /// segment cap, or declined a `DefaultTargets` that turns on it. Such a
+    /// write holds, in some world, a value the walk does not, under any name
+    /// it is copied to and past any later write the walk is not sure ran, so
+    /// a later condition that may throw on any name the walk is not certain
+    /// of is a possible rejection ([`rejection::judge_condition_rejection`]).
+    startup_directory_declined: bool,
     package_versions: Vec<PackageVersion>,
     package_versions_untracked: bool,
     global_package_references: Vec<GlobalPackageReference>,
@@ -1078,6 +1092,9 @@ struct State<'r> {
     /// Where every file-system query of the walk is made and recorded
     /// ([`crate::observed`]), the resolvers' included.
     observer: &'r Observer,
+    /// MSBuild's startup directory, physical, when the caller starts the
+    /// process this evaluation models ([`State::start`]).
+    startup: Option<PathBuf>,
     /// Byte ranges of *entry-project* body `<Import Sdk="X"
     /// Project="Sdk.{props,targets}"/>` nodes that the pre-scan in
     /// [`find_explicit_sdk_promotion`] has hoisted to the root SDK
@@ -1404,13 +1421,20 @@ impl HelperMetadataUncertainty {
 ///     literal in the output. Storing such a value would let later
 ///     `$(Name)` references silently expand to that residual, corrupting
 ///     downstream paths. Property writes refuse to record it.
-struct Expansion {
+struct Expansion<V = Escaped> {
     /// The expanded text, still in MSBuild's escaped domain — it is stored as a
     /// property without leaving it, exactly as MSBuild stores it, and each
     /// consumer unescapes at its own point of use — with the trust of every
     /// entry the expansion read. A consumer takes the trust or says it is
     /// leaving it behind ([`Provenanced`]).
-    value: Provenanced<Escaped>,
+    ///
+    /// `V` is [`Escaped`] for a consumer that needs one value (`State::expand`
+    /// declines one that turns on MSBuild's startup directory), and
+    /// [`Worlds<Escaped>`] for one that reads each world's value: a property
+    /// write, which stores them all, and an item spec or a metadatum, which
+    /// collapse them first (`State::expand_paths`,
+    /// `State::expand_metadata`).
+    value: Provenanced<V>,
     had_undefined: bool,
     had_unsupported: bool,
     /// Why the produced value cannot be trusted as final, if it can't: a
@@ -1499,10 +1523,76 @@ impl PathOf {
     }
 }
 
-impl Expansion {
+impl<V> Expansion<V> {
     fn had_issue(&self) -> bool {
         self.had_undefined || self.had_unsupported
     }
+}
+
+/// A path value's worlds collapsed as its reader reads them
+/// (`State::expand_paths`): one world, the one `collapse` picks, or the worlds
+/// as they were where it picks none.
+fn path_worlds(
+    expansion: Expansion<Worlds<Escaped>>,
+    collapse: fn(&Worlds<Escaped>) -> Option<Escaped>,
+) -> Expansion<Worlds<Escaped>> {
+    let Expansion {
+        value,
+        had_undefined,
+        had_unsupported,
+        unpinned_root,
+        throws,
+    } = expansion;
+    let value = value.map(|worlds| match &worlds {
+        Worlds::Same(_) => worlds,
+        Worlds::Split(_) => collapse(&worlds).map_or(worlds, Worlds::Same),
+    });
+    Expansion {
+        value,
+        had_undefined,
+        had_unsupported,
+        unpinned_root,
+        throws,
+    }
+}
+
+/// A metadatum's worlds after MSBuild's pass of each
+/// ([`properties::metadata_pass`]), and the value of a world the pass leaves
+/// undecided, if one does. Then the expansion is declined as residual
+/// (`had_unsupported`), its worlds as they were.
+fn metadata_worlds(
+    expansion: Expansion<Worlds<Escaped>>,
+    observer: Option<&Observer>,
+) -> (Expansion<Worlds<Escaped>>, Option<Escaped>) {
+    let Expansion {
+        value,
+        had_undefined,
+        mut had_unsupported,
+        unpinned_root,
+        throws,
+    } = expansion;
+    let mut undecided = None;
+    let value = value.map(|worlds| {
+        let passed = worlds.map(&mut |value| properties::metadata_pass(value, observer));
+        if passed.values().iter().any(|value| value.is_none()) {
+            had_unsupported = true;
+            undecided = worlds
+                .values()
+                .into_iter()
+                .find(|value| properties::metadata_pass(value, observer).is_none())
+                .cloned();
+            return worlds;
+        }
+        passed.map(&mut |value| value.clone().expect("every world passed"))
+    });
+    let expansion = Expansion {
+        value,
+        had_undefined,
+        had_unsupported,
+        unpinned_root,
+        throws,
+    };
+    (expansion, undecided)
 }
 
 impl<'r> State<'r> {
@@ -1519,11 +1609,11 @@ impl<'r> State<'r> {
         observer: &'r Observer,
     ) -> Self {
         let mut lookup = properties::well_known(project_path);
+        let startup = startup_directory.and_then(|dir| physical_startup_directory(observer, dir));
         // Seeded before `reserved` is taken from the table, so it is reserved
         // and protected like the path-derived names.
-        if let Some(seed) = startup_directory.and_then(|dir| startup_directory_seed(observer, dir))
-        {
-            lookup.insert_escaped("MSBuildStartupDirectory", seed);
+        if let Some(seed) = startup.as_deref().and_then(Path::to_str) {
+            lookup.insert_escaped("MSBuildStartupDirectory", Escaped::from_xml(seed));
         }
         // Reserved well-known names are unconditionally protected;
         // `TreatAsLocalProperty` is documented to apply to *global*
@@ -1759,6 +1849,7 @@ impl<'r> State<'r> {
             package_versions_untracked: false,
             default_targets_decided: false,
             update_batches: HashMap::new(),
+            startup_directory_declined: false,
             global_package_references: Vec::new(),
             framework_references: Vec::new(),
             evaluated_items: HashMap::new(),
@@ -1786,6 +1877,7 @@ impl<'r> State<'r> {
             sdk_resolver,
             glob_resolver,
             observer,
+            startup,
             hoisted_sdk_imports: HashSet::new(),
             directory_build: directory_build::Bookkeeping::default(),
             enclosing_condition_stale: None,
@@ -2209,6 +2301,7 @@ impl<'r> State<'r> {
             .map(crate::UntrustedCause::of_opacity);
         let State {
             lookup,
+            startup: _,
             protected: _,
             reserved: _,
             #[cfg(any(test, feature = "test-support"))]
@@ -2245,6 +2338,7 @@ impl<'r> State<'r> {
                 package_cause_owners: _,
             default_targets_decided: _,
             update_batches: _,
+            startup_directory_declined: _,
             package_versions,
             package_versions_untracked,
             global_package_references,
@@ -2333,12 +2427,24 @@ impl<'r> State<'r> {
         // Their trust is answered at the write, not here: a CPM flag's
         // condition and value are package-affecting (`package_context`), so an
         // untrusted write of either already left the package set uncertain.
-        let manages_versions_centrally = lookup
-            .get_unescaped_ignoring_trust("ManagePackageVersionsCentrally")
-            .is_some_and(|v| is_msbuild_true(&v));
-        let central_package_versions_file_imported = lookup
-            .get_unescaped_ignoring_trust("CentralPackageVersionsFileImported")
-            .is_some_and(|v| is_msbuild_true(&v));
+        //
+        // Each flag is read in every world of MSBuild's startup directory. One
+        // the worlds disagree on leaves the package set uncertain, and is read
+        // in the direction that discharges nothing: central management on,
+        // the central file not imported.
+        let flag = |name: &str| -> Option<bool> {
+            match lookup.get_unescaped_ignoring_trust(name) {
+                None => Some(false),
+                Some(worlds) => worlds.map(&mut |v| is_msbuild_true(v)).agreed().copied(),
+            }
+        };
+        let (manages, imported) = (
+            flag("ManagePackageVersionsCentrally"),
+            flag("CentralPackageVersionsFileImported"),
+        );
+        let cpm_turns_on_startup_directory = manages.is_none() || imported.is_none();
+        let manages_versions_centrally = manages.unwrap_or(true);
+        let central_package_versions_file_imported = imported.unwrap_or(false);
         // `CentralPackageVersionOverrideEnabled` is different in kind: the SDK
         // does not compare it, it forwards the raw value to the restore task,
         // so the vocabulary is NuGet's C# rather than MSBuild's and this crate
@@ -2350,7 +2456,11 @@ impl<'r> State<'r> {
         // real restore would reject.
         let central_package_version_override_enabled = !lookup
             .get_unescaped_ignoring_trust("CentralPackageVersionOverrideEnabled")
-            .is_some_and(|v| condition::parse_msbuild_bool(&v) == Some(false));
+            .is_some_and(|v| {
+                v.values()
+                    .into_iter()
+                    .any(|v| condition::parse_msbuild_bool(v) == Some(false))
+            });
         // `package_references` is already the effective (Include + Update
         // collapsed) set, with versionless uncertainty detected on it, from the
         // item pass's `finalize_package_references`.
@@ -2361,6 +2471,20 @@ impl<'r> State<'r> {
             package_references_uncertain = true;
             package_reference_uncertainties.push(PackageReferenceUncertaintyCause {
                 kind: PackageReferenceUncertaintyCauseKind::ManagePackageVersionsCentrally,
+                span: 0..0,
+                origin: DiagnosticOrigin::Buffer,
+            });
+        }
+        if cpm_turns_on_startup_directory {
+            package_references_uncertain = true;
+            package_reference_uncertainties.push(PackageReferenceUncertaintyCause {
+                kind: PackageReferenceUncertaintyCauseKind::Diagnostic(
+                    DiagnosticKind::PathAdjustmentUndecided {
+                        value: "$(ManagePackageVersionsCentrally) / \
+                                $(CentralPackageVersionsFileImported)"
+                            .to_owned(),
+                    },
+                ),
                 span: 0..0,
                 origin: DiagnosticOrigin::Buffer,
             });
@@ -2435,9 +2559,11 @@ impl<'r> State<'r> {
             .filter_map(|project_name| {
                 // Trust-blind by contract: `property_reads` carries each
                 // name's trust to a consumer that decides on it.
+                // A value that turns on MSBuild's startup directory is the one
+                // where no segment it asks about is a directory there.
                 lookup
                     .get_unescaped_ignoring_trust(&project_name)
-                    .map(|v| (project_name, v))
+                    .map(|v| (project_name, v.absent_everywhere().clone()))
             })
             .collect();
         // `define_constants` reflects the *evaluated* `$(DefineConstants)`
@@ -2453,35 +2579,74 @@ impl<'r> State<'r> {
         // (oracle-pinned 2026-07-12). Decoding first would split it in two.
         // Its trust is `define_constants_uncertain`, a consequence-side flag
         // raised where a user-authored write could diverge.
-        let define_constants = lookup
+        // A value that turns on MSBuild's startup directory leaves the list
+        // uncertain: it is the one where no segment is a directory there.
+        let define_constants = match lookup
             .get_ignoring_trust("DefineConstants")
-            .map(crate::define_constants_from_escaped)
-            .unwrap_or_default();
+            .map(|worlds| worlds.map(&mut |value| crate::define_constants_from_escaped(value)))
+        {
+            None => Vec::new(),
+            Some(Worlds::Same(symbols)) => symbols,
+            Some(split @ Worlds::Split(_)) => {
+                let representative = lookup
+                    .get_ignoring_trust("DefineConstants")
+                    .expect("read just above")
+                    .absent_everywhere();
+                define_constants_uncertain = true;
+                define_constants_uncertainties.push(DefineConstantsUncertaintyCause {
+                    kind: DefineConstantsUncertaintyCauseKind::Diagnostic(
+                        DiagnosticKind::PathAdjustmentUndecided {
+                            value: representative.as_escaped().to_owned(),
+                        },
+                    ),
+                    span: 0..0,
+                    origin: DiagnosticOrigin::Buffer,
+                });
+                split.absent_everywhere().clone()
+            }
+        };
         // Same rule, same reason: split the escaped value, decode each fragment.
         // The plural is consumed as a declared list whose TFM-invariant
         // intersection trusts no single branch (the `msbuild-trust-audit`
         // skill, entry 11), so its trust is not read here.
-        let target_frameworks: Vec<String> = lookup
+        //
+        // Where the value turns on MSBuild's startup directory, the list is
+        // the one every world declares; where they declare different lists,
+        // it is empty, and the plural's read says why
+        // (`UntrustedCause::StartupDirectory`), as for any plural the walk
+        // cannot establish.
+        let frameworks = |value: &Escaped| -> Vec<String> {
+            value
+                .split_list()
+                .map(|f| f.unescape().trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        };
+        let framework_worlds = lookup
             .get_ignoring_trust("TargetFrameworks")
-            .map(|v| {
-                v.split_list()
-                    .map(|f| f.unescape().trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect()
-            })
+            .map(|worlds| worlds.map(&mut |value| frameworks(value)));
+        let target_frameworks_undecided = framework_worlds
+            .as_ref()
+            .is_some_and(|worlds| worlds.agreed().is_none());
+        let target_frameworks: Vec<String> = framework_worlds
+            .and_then(|worlds| worlds.agreed().cloned())
             .unwrap_or_default();
         // `<LangVersion>` from the same merged map. Trim and drop empties so an
         // unset (or whitespace-only) value reads as `None` rather than `Some("")`.
         // Published beside `property_reads`; the LSP reads the
         // `LangVersion` read there into its fold's cache key, beside the
         // consequence-side `shape_depends_on_language_version`.
+        //
+        // Neither carries trust: a decision reads the name's `property_reads`
+        // entry, which says when the value turns on MSBuild's startup
+        // directory. This is the value where no segment is a directory there.
         let lang_version_untrimmed = lookup
             .get_unescaped_ignoring_trust("LangVersion")
-            .map(|v| v.to_string())
+            .map(|v| v.absent_everywhere().clone())
             .filter(|s| !s.is_empty());
         let other_flags = lookup
             .get_unescaped_ignoring_trust("OtherFlags")
-            .map(|v| v.to_string())
+            .map(|v| v.absent_everywhere().clone())
             .filter(|s| !s.is_empty());
         let lang_version = lang_version_untrimmed
             .as_deref()
@@ -2489,6 +2654,7 @@ impl<'r> State<'r> {
             .filter(|s| !s.is_empty());
         ParsedProject {
             target_frameworks,
+            target_frameworks_undecided,
             items,
             project_references,
             project_references_uncertain,
@@ -2851,6 +3017,27 @@ impl<'r> State<'r> {
         self.lookup.trust(name)
     }
 
+    /// Whether the walk declines `condition` for MSBuild's startup directory:
+    /// `declined`, its evaluation was undecided, and the reason is the
+    /// startup directory ([`condition::depends_on_startup_directory`]).
+    fn declines_for_startup(&self, condition: &str, declined: bool, dir: &Path) -> bool {
+        declined && {
+            let observer = self.observer;
+            let exists = |path: &str| condition_exists(observer, path, dir);
+            let probes = self.follow_imports.then_some(condition::Probes {
+                exists: &exists,
+                observer,
+                start: self.start(),
+            });
+            condition::depends_on_startup_directory(
+                condition,
+                &self.lookup,
+                probes,
+                self.condition_site(),
+            )
+        }
+    }
+
     /// The trust a *value* inherits from the properties it references: the
     /// join over every `$(…)` in `raw`, in source order.
     ///
@@ -2893,8 +3080,19 @@ impl<'r> State<'r> {
     /// Store an evaluated write's value and its verdict together, so a value
     /// cannot enter the table without the write saying what it does to the
     /// name's trust.
-    fn write_property(&mut self, name: &str, value: Escaped, provenance: PropertyProvenance) {
-        let held = (!provenance.is_doubtful()).then_some(&value);
+    fn write_property(
+        &mut self,
+        name: &str,
+        value: Worlds<Escaped>,
+        provenance: PropertyProvenance,
+    ) {
+        // A value that turns on MSBuild's startup directory is no one value
+        // the write is known to store.
+        let held = if provenance.is_doubtful() {
+            None
+        } else {
+            value.agreed()
+        };
         self.note_foreign_write(name, held);
         self.directory_build.note_write(name);
         let resolved = self.resolve_provenance(provenance);
@@ -3225,13 +3423,26 @@ impl<'r> State<'r> {
                 }
                 PropertyRead::Value(_) | PropertyRead::Unset => {}
             }
-            // The entry's trust is the question just asked.
-            match self.lookup.get_ignoring_trust(name) {
-                None => continue,
-                Some(v) if v.is_empty() => continue,
-                Some(v) if v.as_escaped().contains("$(") => return ItemMetadataValue::Unknown,
-                Some(v) if v.unescape().trim().is_empty() => return ItemMetadataValue::Unknown,
-                Some(v) => return ItemMetadataValue::known(v.unescape()),
+            // The entry's trust is the question just asked. The verdict is
+            // taken in each world of MSBuild's startup directory (spellings
+            // that decode alike read as one value), and stands where every
+            // world gives it.
+            let Some(worlds) = self.lookup.get_ignoring_trust(name) else {
+                continue;
+            };
+            let verdict = |v: &Escaped| -> Option<ItemMetadataValue> {
+                if v.is_empty() {
+                    None
+                } else if v.as_escaped().contains("$(") || v.unescape().trim().is_empty() {
+                    Some(ItemMetadataValue::Unknown)
+                } else {
+                    Some(ItemMetadataValue::known(v.unescape()))
+                }
+            };
+            match worlds.map(&mut |v| verdict(v)).agreed() {
+                Some(None) => continue,
+                Some(Some(verdict)) => return verdict.clone(),
+                None => return ItemMetadataValue::Unknown,
             }
         }
         ItemMetadataValue::Known(None)
@@ -3328,7 +3539,11 @@ impl<'r> State<'r> {
         let observer = self.observer;
         let exists = exists_dir.map(|dir| move |path: &str| condition_exists(observer, path, dir));
         let probes = match (&exists, self.follow_imports) {
-            (Some(exists), true) => Some(condition::Probes { exists, observer }),
+            (Some(exists), true) => Some(condition::Probes {
+                exists,
+                observer,
+                start: self.start(),
+            }),
             _ => None,
         };
         matches!(
@@ -3450,7 +3665,131 @@ impl<'r> State<'r> {
     /// residual `$(...)` literal text) so callers can take different
     /// actions for each.
     fn expand(&mut self, raw: &str, span: Range<usize>) -> Expansion {
-        self.expand_inner(raw, span, None)
+        let expansion = self.expand_inner(raw, span.clone(), None);
+        self.agreed(expansion, span)
+    }
+
+    /// `expansion`'s one value where every world agrees. Where they do not,
+    /// the value is declined as a residual expression is
+    /// (`had_unsupported`), with a [`DiagnosticKind::PathAdjustmentUndecided`]
+    /// naming the value where no segment is a directory.
+    fn agreed(&mut self, expansion: Expansion<Worlds<Escaped>>, span: Range<usize>) -> Expansion {
+        let Expansion {
+            value,
+            had_undefined,
+            mut had_unsupported,
+            unpinned_root,
+            throws,
+        } = expansion;
+        let value = value.map(|worlds| match worlds {
+            Worlds::Same(value) => value,
+            split @ Worlds::Split(_) => {
+                let representative = split.absent_everywhere().clone();
+                self.push(
+                    DiagnosticKind::PathAdjustmentUndecided {
+                        value: representative.as_escaped().to_owned(),
+                    },
+                    span,
+                );
+                had_unsupported = true;
+                representative
+            }
+        });
+        Expansion {
+            value,
+            had_undefined,
+            had_unsupported,
+            unpinned_root,
+            throws,
+        }
+    }
+
+    /// [`Self::expand`] of a value read as paths: an item spec (an `Include`,
+    /// `Remove`, `Update` or `Exclude`) or an import's `Project`. Worlds of
+    /// MSBuild's startup directory that differ only in separators
+    /// ([`properties::import_collapse`]) are the one where no segment is
+    /// a directory there, every `\` they differ in kept. Each reader judges
+    /// what such a `\` names as it judges any: an item spec reads it as a
+    /// separator (and its identity's spelling as unknown,
+    /// `item_spec::include_spelling`), an import declines one whose spelling
+    /// moves the file (`adjustment_settles`). Worlds that differ otherwise are
+    /// declined as [`Self::expand`] declines them.
+    fn expand_paths(
+        &mut self,
+        raw: &str,
+        span: Range<usize>,
+        collapse: fn(&Worlds<Escaped>) -> Option<Escaped>,
+    ) -> Expansion {
+        let expansion = self.expand_inner(raw, span.clone(), None);
+        let expansion = path_worlds(expansion, collapse);
+        self.agreed(expansion, span)
+    }
+
+    /// [`Self::expand`] of a Compile item's or a reference's `Include`, whose
+    /// items the walk publishes by full path. Where its worlds differ and no
+    /// `Exclude` compares its items, it still commits where every world names
+    /// the same files ([`properties::include_insensitive`]: the same full
+    /// paths and the same patterns), but not the items' spellings, which
+    /// differ: the second value says whether the spelling is known. A reader
+    /// of an identity (a `Remove`, an `Update`, `@(…)`, an item table) then
+    /// declines. Beside an `Exclude`, which matches each world's spellings by
+    /// its own rules, the worlds must also agree on a literal's runs of
+    /// separators and on a spelling compared as written
+    /// ([`properties::include_beside_exclude_insensitive`]).
+    fn expand_include(
+        &mut self,
+        raw: &str,
+        span: Range<usize>,
+        has_exclude: bool,
+    ) -> (Expansion, bool) {
+        let expansion = self.expand_inner(raw, span.clone(), None);
+        let worlds = expansion.value.ignoring_trust();
+        let key = if has_exclude {
+            properties::include_beside_exclude_insensitive
+        } else {
+            properties::include_insensitive
+        };
+        let by_full_path = worlds.is_split()
+            && matches!(worlds.map(&mut |value| key(value)).agreed(), Some(Some(_)));
+        if by_full_path {
+            let expansion =
+                path_worlds(expansion, |worlds| Some(worlds.absent_everywhere().clone()));
+            return (self.agreed(expansion, span), false);
+        }
+        (self.agreed(expansion, span), true)
+    }
+
+    /// [`Self::expand`] of an item's metadatum, after the pass MSBuild makes
+    /// of each world's value ([`properties::metadata_pass`]). A value that
+    /// pass leaves undecided is declined as worlds that disagree are.
+    fn expand_metadata(&mut self, raw: &str, span: Range<usize>) -> Expansion {
+        let expansion = self.expand_inner(raw, span.clone(), None);
+        let (expansion, undecided) =
+            metadata_worlds(expansion, self.follow_imports.then_some(self.observer));
+        // Reported as an expansion's own undecided adjustment is, so the
+        // contexts it decides (a package's metadata, say) see the doubt.
+        if let Some(value) = undecided {
+            self.push(
+                DiagnosticKind::PathAdjustmentUndecided {
+                    value: value.as_escaped().to_owned(),
+                },
+                span.clone(),
+            );
+        }
+        self.agreed(expansion, span)
+    }
+
+    /// What this evaluation knows about MSBuild's startup directory: the
+    /// physical directory a caller that starts the process supplied, asked
+    /// through the observer, and otherwise nothing.
+    fn start(&self) -> Start<'_> {
+        match &self.startup {
+            Some(dir) if self.follow_imports => Start::Known {
+                dir,
+                observer: self.observer,
+            },
+            _ => Start::Unknown,
+        }
     }
 
     /// Expand a property-pass value.
@@ -3464,7 +3803,7 @@ impl<'r> State<'r> {
         raw: &str,
         span: Range<usize>,
         writing_property: &str,
-    ) -> Expansion {
+    ) -> Expansion<Worlds<Escaped>> {
         self.expand_inner(raw, span, Some(writing_property))
     }
 
@@ -3473,14 +3812,15 @@ impl<'r> State<'r> {
         raw: &str,
         span: Range<usize>,
         writing_property: Option<&str>,
-    ) -> Expansion {
+    ) -> Expansion<Worlds<Escaped>> {
         // FS-probing property functions are with-imports-only; the pure
         // surface documents "no filesystem access".
-        let (value, issues) = if self.follow_imports {
-            properties::substitute_with_fs(raw, &self.lookup, self.observer)
-        } else {
-            properties::substitute(raw, &self.lookup)
-        };
+        let (value, issues) = properties::substitute_worlds(
+            raw,
+            &self.lookup,
+            self.follow_imports.then_some(self.observer),
+            self.start(),
+        );
         let mut had_undefined = false;
         let mut had_unsupported = false;
         let throws = rejection::throws_in(&issues);
@@ -3656,7 +3996,11 @@ impl<'r> State<'r> {
         let name = match self.lookup.get_ignoring_trust("MSBuildThisFileName") {
             Some(file) => name.replace(
                 "$(MSBuildThisFileName)",
-                &properties::escaping::unescape(file.as_escaped()),
+                &properties::escaping::unescape(
+                    file.agreed()
+                        .expect("a reserved name holds its seed")
+                        .as_escaped(),
+                ),
             ),
             None => name.into_owned(),
         };
@@ -3687,9 +4031,15 @@ impl<'r> State<'r> {
         let saved = seeds
             .iter()
             // Reserved names, which no project can write: the frame saves and
-            // restores their values, and their trust is certain throughout.
+            // restores their values, and their trust is certain throughout. A
+            // seed is one value under every startup directory.
             .map(|(name, _)| {
-                let value = self.lookup.get_ignoring_trust(name).cloned();
+                let value = self.lookup.get_ignoring_trust(name).map(|worlds| {
+                    worlds
+                        .agreed()
+                        .expect("a reserved name holds its seed")
+                        .clone()
+                });
                 (*name, value.unwrap_or_default())
             })
             .collect();
@@ -3958,7 +4308,7 @@ fn walk_top_level(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State
                         state,
                     );
                     rejection::judge_properties(node, false, state);
-                    emit_unsupported_condition(node, state);
+                    emit_unsupported_condition(node, current_file_dir, state);
                     state.define_context = prev;
                     state.package_context = prev_pkg;
                 }
@@ -4045,7 +4395,7 @@ fn walk_top_level(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State
                     }
                 }
                 CondGate::Unsupported => {
-                    emit_unsupported_condition(node, state);
+                    emit_unsupported_condition(node, current_file_dir, state);
                     state.import_gate_context = prev_gate;
                     state.package_import_gate_context = prev_pkg_gate;
                     rejection::judge_imports(node, current_file_dir, false, state);
@@ -4232,7 +4582,7 @@ fn handle_choose(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State<
             state.diagnostics.len() != diagnostics_before || matches!(gate, CondGate::Unsupported);
         if maybe_wrong || uses_sdk_taint {
             if matches!(gate, CondGate::Unsupported) {
-                emit_unsupported_condition(*when, state);
+                emit_unsupported_condition(*when, &exists_dir, state);
             }
             let unpinned_root = state
                 .unpinned_root_from_recent_diagnostics(diagnostics_before)
@@ -4663,7 +5013,7 @@ fn walk_property_child_inner(
                     stale: StaleOutcome::Keep,
                 },
             );
-            emit_unsupported_condition(node, state);
+            emit_unsupported_condition(node, &state.entry_project_dir.clone(), state);
             return;
         }
     }
@@ -4724,12 +5074,26 @@ fn walk_property_child_inner(
     let prev_in_value = state.in_define_value;
     state.in_define_value = true;
     let value_uses_sdk_taint = state.raw_uses_sdk_package_taint(&raw);
+    let diagnostics_before_value = state.diagnostics.len();
     let expansion = state.expand_property_pass_value(&raw, node.range(), &name);
     state.in_define_value = prev_in_value;
     if !expansion.throws.is_empty() {
         let reached = rejection::reach_is_certain(state) && own_gate(state) == Some(true);
         let expressions = expansion.throws.clone();
         rejection::judge_throwing_expression(state, expressions, reached, node.range());
+    }
+    // A value refused because it asks past the segment cap is one the walk
+    // declines for the startup directory.
+    if state.diagnostics[diagnostics_before_value..]
+        .iter()
+        .any(|diagnostic| {
+            matches!(
+                diagnostic.kind,
+                DiagnosticKind::PathAdjustmentUndecided { .. }
+            )
+        })
+    {
+        state.startup_directory_declined = true;
     }
     let value_taints_property = condition_taints_property
         || value_uses_sdk_taint
@@ -4775,11 +5139,27 @@ fn walk_property_child_inner(
     // write. We diagnose item refs first to match how Include
     // attributes order the checks; the categorisation matters less than
     // emitting *some* diagnostic that flips `is_partial`.
-    if contains_item_reference(expansion.value.ignoring_trust().as_escaped()) {
+    // The worlds of a value differ in separators alone, so a reference one
+    // holds every one holds; each is scanned all the same.
+    // A world whose value holds the reference, if one does; and whether
+    // another's does not, which makes the write one the walk declines for
+    // the startup directory (a property function may turn a separator into
+    // a different character, as `$(Q[9])` does).
+    let holding = |scan: fn(&str) -> bool| {
+        let values = expansion.value.ignoring_trust().values();
+        let found = values
+            .iter()
+            .find(|value| scan(value.as_escaped()))
+            .map(|value| value.as_escaped().to_string());
+        let apart = found.is_some() && values.iter().any(|value| !scan(value.as_escaped()));
+        (found, apart)
+    };
+    if let (Some(reference), apart) = holding(contains_item_reference) {
+        if apart {
+            state.startup_directory_declined = true;
+        }
         state.push(
-            DiagnosticKind::UnresolvedItemReference {
-                reference: expansion.value.ignoring_trust().as_escaped().to_string(),
-            },
+            DiagnosticKind::UnresolvedItemReference { reference },
             node.range(),
         );
         state.lookup.unbind(&name);
@@ -4802,11 +5182,12 @@ fn walk_property_child_inner(
         );
         return;
     }
-    if contains_metadata_reference(expansion.value.ignoring_trust().as_escaped()) {
+    if let (Some(reference), apart) = holding(contains_metadata_reference) {
+        if apart {
+            state.startup_directory_declined = true;
+        }
         state.push(
-            DiagnosticKind::UnresolvedMetadataReference {
-                reference: expansion.value.ignoring_trust().as_escaped().to_string(),
-            },
+            DiagnosticKind::UnresolvedMetadataReference { reference },
             node.range(),
         );
         state.lookup.unbind(&name);
@@ -4896,6 +5277,34 @@ fn walk_property_child_inner(
     state.written.insert(lower.clone(), name.clone());
 }
 
+/// Whether the gate at `node` may skip a property write: a `<PropertyGroup>`,
+/// a property, an import or import group, or a `<When>`/`<Otherwise>` whose
+/// arm holds one of those. An item group's or an item's skips none.
+fn gate_may_skip_property_writes(node: Node<'_, '_>) -> bool {
+    let writes = |name: &str| {
+        ["PropertyGroup", "Import", "ImportGroup"]
+            .iter()
+            .any(|tag| name.eq_ignore_ascii_case(tag))
+    };
+    let name = node.tag_name().name();
+    if writes(name)
+        || node.parent_element().is_some_and(|parent| {
+            parent
+                .tag_name()
+                .name()
+                .eq_ignore_ascii_case("PropertyGroup")
+        })
+    {
+        return true;
+    }
+    ["When", "Otherwise"]
+        .iter()
+        .any(|tag| name.eq_ignore_ascii_case(tag))
+        && node
+            .descendants()
+            .any(|descendant| descendant.is_element() && writes(descendant.tag_name().name()))
+}
+
 /// Result of evaluating a node's `Condition` attribute.
 enum CondGate {
     /// No condition, or a condition that evaluated to true. Walk the
@@ -4978,6 +5387,7 @@ fn evaluate_condition_with_exemptions(
             Some(condition::Probes {
                 exists: &exists,
                 observer: state.observer,
+                start: state.start(),
             }),
             state.condition_site(),
         )
@@ -5145,13 +5555,30 @@ fn evaluate_condition_with_exemptions(
             node.range(),
         );
     }
+    // A gate over property writes the walk declines for the startup
+    // directory may skip writes MSBuild makes.
+    if !state.startup_directory_declined
+        && gate_may_skip_property_writes(node)
+        && state.declines_for_startup(
+            cond,
+            matches!(
+                eval.outcome,
+                condition::Outcome::StartupDirectory | condition::Outcome::Unsupported
+            ),
+            current_file_dir,
+        )
+    {
+        state.startup_directory_declined = true;
+    }
     match eval.outcome {
         condition::Outcome::True => CondGate::Run,
         condition::Outcome::False => CondGate::Skip,
         // An illegal condition is judged above as a rejection, which withdraws
         // what the walk publishes; the walk carries on past it as past an
         // unmodelled one, for the read set and the diagnostics.
-        condition::Outcome::Illegal | condition::Outcome::Unsupported => CondGate::Unsupported,
+        condition::Outcome::Illegal
+        | condition::Outcome::Unsupported
+        | condition::Outcome::StartupDirectory => CondGate::Unsupported,
     }
 }
 
@@ -5188,7 +5615,7 @@ pub(crate) fn condition_exists(observer: &Observer, path: &str, current_file_dir
     dotnet_io::file_or_directory_exists(observer, &resolved)
 }
 
-fn emit_unsupported_condition(node: Node<'_, '_>, state: &mut State<'_>) {
+fn emit_unsupported_condition(node: Node<'_, '_>, exists_dir: &Path, state: &mut State<'_>) {
     // The diagnostic carries the raw condition text so callers can
     // surface it to users without re-parsing — see
     // `DiagnosticKind::UnsupportedCondition`. We only reach this
@@ -5203,6 +5630,25 @@ fn emit_unsupported_condition(node: Node<'_, '_>, state: &mut State<'_>) {
         state.record_compile_condition_uncertainty(
             cond,
             CompileConditionReason::Unsupported,
+            node.range(),
+        );
+    }
+    // A condition that turns on MSBuild's startup directory is in the
+    // grammar; say why it is undecided, before the gate's own diagnostic.
+    // `exists_dir` is the directory its `Exists` was evaluated against.
+    let observer = state.observer;
+    let exists = |path: &str| condition_exists(observer, path, exists_dir);
+    let probes = state.follow_imports.then_some(condition::Probes {
+        exists: &exists,
+        observer,
+        start: state.start(),
+    });
+    if condition::depends_on_startup_directory(cond, &state.lookup, probes, state.condition_site())
+    {
+        state.push(
+            DiagnosticKind::PathAdjustmentUndecided {
+                value: cond.to_string(),
+            },
             node.range(),
         );
     }
@@ -5414,7 +5860,7 @@ fn is_toolset_predefined_name(lower: &str) -> bool {
 /// does know them: `MSBuildAssemblyVersion` from a probed per-SDK table
 /// ([`toolset_assembly_version`]), and `MSBuildStartupDirectory` only for an
 /// evaluation of a process the caller launches, which hands the walk the
-/// directory it starts the process in ([`startup_directory_seed`]). An
+/// directory it starts the process in ([`physical_startup_directory`]). An
 /// evaluation of a build nobody launched has no such directory, and leaves the
 /// name undefined.
 ///
@@ -5465,12 +5911,16 @@ fn is_env_ignored_toolset_name(lower: &str) -> bool {
 /// (which would name a directory relative to this process's own), one that
 /// does not resolve or whose resolution is not UTF-8, and off Unix, where
 /// nothing has graded how the working directory resolves links.
-fn startup_directory_seed(observer: &Observer, dir: &Path) -> Option<Escaped> {
+///
+/// The same directory answers the Unix path adjustment's relative probes
+/// ([`State::start`]); where it is `None`, they are free.
+fn physical_startup_directory(observer: &Observer, dir: &Path) -> Option<PathBuf> {
     if !cfg!(unix) || !dir.has_root() {
         return None;
     }
     let physical = observed::canonicalize(observer, dir).ok()?;
-    Some(Escaped::from_xml(physical.to_str()?))
+    physical.to_str()?;
+    Some(physical)
 }
 
 /// The names MSBuild treats as *reserved*, as MSBuild spells them: the one
@@ -5723,6 +6173,7 @@ fn property_child_could_write(child: Node<'_, '_>, state: &State<'_>) -> bool {
             Some(condition::Probes {
                 exists: &exists,
                 observer: state.observer,
+                start: state.start(),
             }),
             state.condition_site(),
         )
@@ -5920,7 +6371,7 @@ fn follow_explicit_import(node: Node<'_, '_>, current_file_dir: &Path, state: &m
             // Re-enter the gate context so the `UnsupportedCondition` flags.
             state.import_gate_context = true;
             state.package_import_gate_context = true;
-            emit_unsupported_condition(node, state);
+            emit_unsupported_condition(node, current_file_dir, state);
             state.import_gate_context = prev_gate;
             state.package_import_gate_context = prev_pkg_gate;
             rejection::undecided_import(node, current_file_dir, state);
@@ -6013,7 +6464,13 @@ fn follow_import_after_gate(node: Node<'_, '_>, current_file_dir: &Path, state: 
         // relative path. Expansion issues (residual `$(...)` or
         // empty substitution) skip the import silently, mirroring the
         // non-SDK path below.
-        let expansion = state.expand(project_attr_raw, node.range());
+        // The SDK's path reads every `\` that survives as a separator (below).
+        let fixed_raw = import_project_as_expanded(project_attr_raw);
+        let expansion = state.expand_paths(
+            &fixed_raw,
+            node.range(),
+            sdk_import_collapse(project_attr_raw),
+        );
         if expansion.had_issue() || expansion.unpinned_root.is_some() {
             // An SDK import whose Project path we couldn't resolve is dropped;
             // an *unpinned* path (assembled from a property the property pass
@@ -6228,11 +6685,11 @@ fn follow_import_after_gate(node: Node<'_, '_>, current_file_dir: &Path, state: 
         state.note_unloadable_import(node, crate::UnloadableImport::NoPath);
         return;
     };
-    // MSBuild turns each `\` of the attribute as written into `/`
-    // (`ProjectImportElement.Project`'s `FixFilePath`) before it expands it,
-    // so only a `\` a property or an escape supplies survives expansion.
-    let fixed_raw = raw_path.replace('\\', "/");
-    let expansion = state.expand(&fixed_raw, node.range());
+    let fixed_raw = import_project_as_expanded(raw_path);
+    // Worlds of MSBuild's startup directory that differ only in separators are
+    // judged as the one that keeps every `\`, segment by segment, below
+    // (`adjustment_settles`).
+    let expansion = state.expand_paths(&fixed_raw, node.range(), properties::import_collapse);
     if expansion.had_issue() || expansion.unpinned_root.is_some() {
         // The expanded path has residual `$(...)`, substituted to "", or
         // leaned on an *unpinned* property (a value the property pass could
@@ -6508,7 +6965,7 @@ pub(super) fn unix_adjustment_rewrites(escaped: &str, observer: &Observer) -> bo
     match properties::path_fixup::unix_path_probe(&rewrite) {
         properties::path_fixup::UnixPathProbe::Exists => true,
         properties::path_fixup::UnixPathProbe::Absent
-        | properties::path_fixup::UnixPathProbe::WorkingDirectory => false,
+        | properties::path_fixup::UnixPathProbe::WorkingDirectory(_) => false,
         properties::path_fixup::UnixPathProbe::Directory(dir) => {
             observed::is_dir(observer, Path::new(dir))
         }
@@ -6528,6 +6985,28 @@ fn sdk_project_under_root<'a>(raw: &str, relative: &'a str) -> &'a str {
     } else {
         relative.trim_start_matches('/')
     }
+}
+
+/// How an SDK import's `Project`, written as `raw`, collapses its worlds:
+/// under the SDK root every surviving `\` is a separator
+/// ([`properties::full_path_collapse`]), but a rooted one bypasses the root,
+/// and a `..` there pops a segment a kept `\` may join to its neighbour, so
+/// its worlds collapse not at all.
+pub(super) fn sdk_import_collapse(raw: &str) -> fn(&Worlds<Escaped>) -> Option<Escaped> {
+    if sdk_project_written_rooted(raw) {
+        |_| None
+    } else {
+        properties::full_path_collapse
+    }
+}
+
+/// An import's `Project` attribute, written as `raw`, as MSBuild expands it
+/// ([`properties::path_fixup::fix_file_path`]): only a `\` a property or an escape
+/// supplies survives expansion. Every reader that expands the attribute
+/// (following the import, judging whether it may load nothing or names its
+/// path for certain) expands this, plain import or SDK.
+pub(super) fn import_project_as_expanded(raw: &str) -> String {
+    properties::path_fixup::fix_file_path(raw)
 }
 
 /// Whether an SDK import's `Project`, written as `raw`, is rooted as written,
@@ -6879,7 +7358,9 @@ fn latch_default_targets(root: Node<'_, '_>, state: &mut State<'_>) {
     let Some(raw) = raw.as_deref() else {
         return;
     };
-    let expansion = item_pass::expand_silent(raw, state);
+    let (worlds, startup_undecided) = item_pass::expand_silent_worlds_noting(raw, state);
+    let startup_undecided = startup_undecided || worlds.value.ignoring_trust().is_split();
+    let expansion = item_pass::agreed_silently(worlds);
     if expansion.had_issue()
         || expansion.unpinned_root.is_some()
         || state.walk_opaque.is_some()
@@ -6889,6 +7370,22 @@ fn latch_default_targets(root: Node<'_, '_>, state: &mut State<'_>) {
     {
         state.default_targets_decided = true;
         state.lookup.unbind("MSBuildProjectDefaultTargets");
+        // Where the value turns on the startup directory, or may read a value
+        // a write the walk declined for it left, it is one the walk does not
+        // hold: a read of the name is refused, not unset, and a later
+        // condition may throw on it.
+        if startup_undecided || state.startup_directory_declined {
+            state.lookup.apply_provenance(
+                "MSBuildProjectDefaultTargets",
+                ResolvedProvenance {
+                    taint: TaintOutcome::Keep,
+                    unpinned: UnpinnedOutcome::Keep,
+                    refused: RefusedOutcome::Set,
+                    stale: StaleOutcome::Keep,
+                },
+            );
+            state.startup_directory_declined = true;
+        }
         return;
     }
     // The expansion's trust was judged just above (`had_issue`,

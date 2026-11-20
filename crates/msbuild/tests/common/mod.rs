@@ -956,6 +956,16 @@ pub fn check_certain_implies_exact(
     }
     match evaluate(condition, &map).outcome {
         Outcome::Unsupported => Verdict::Unsupported,
+        // The claim is that MSBuild evaluates it to a boolean wherever it
+        // starts, which this oracle's start must bear out.
+        Outcome::StartupDirectory => {
+            assert!(
+                oracle.eval(condition, props).is_some(),
+                "certain-implies-exact violated: we say {condition:?} with props {props:?} \
+                 evaluates wherever MSBuild starts, but MSBuild rejects it as illegal"
+            );
+            Verdict::Unsupported
+        }
         Outcome::Illegal => {
             if let Some(theirs) = oracle.eval(condition, props) {
                 panic!(

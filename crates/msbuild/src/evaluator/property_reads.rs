@@ -13,6 +13,7 @@ use std::collections::HashMap;
 
 use super::{State, is_toolset_initial_property_name};
 use crate::UntrustedCause;
+use crate::properties::Worlds;
 
 /// A read of one property at the end of the walk.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -161,9 +162,16 @@ impl State<'_> {
         if let Some(stale) = trust.stale() {
             return PropertyRead::Untrusted(UntrustedCause::of_opacity(stale));
         }
-        // The entry's trust is the two questions answered just above.
+        // The entry's trust is the two questions answered just above. A value
+        // that turns on MSBuild's startup directory is no one value; the
+        // reader gets each, to collapse on what it reads if it can.
         if let Some(value) = self.lookup.get_unescaped_ignoring_trust(name) {
-            return PropertyRead::Value(value);
+            return match value {
+                Worlds::Same(value) => PropertyRead::Value(value),
+                split @ Worlds::Split(_) => {
+                    PropertyRead::Untrusted(UntrustedCause::StartupDirectory(Box::new(split)))
+                }
+            };
         }
         if self.undefined_read_is_exact(name) {
             return PropertyRead::Unset;

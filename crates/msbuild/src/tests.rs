@@ -11011,7 +11011,8 @@ mod gate_trust_props {
                     crate::condition::Outcome::True => outcomes.push(true),
                     crate::condition::Outcome::False => outcomes.push(false),
                     crate::condition::Outcome::Illegal
-                    | crate::condition::Outcome::Unsupported => {}
+                    | crate::condition::Outcome::Unsupported
+                    | crate::condition::Outcome::StartupDirectory => {}
                 }
             }
             outcomes.sort();
@@ -11347,4 +11348,1227 @@ fn item_definitions_are_not_items() {
             .contains_key("disabledlanguagefeatures")
     );
     assert!(foreign.item_metadata.contains_key("m"));
+}
+
+/// A value that turns on MSBuild's startup directory is no one value, but a
+/// reader that reads only part of it commits where every world agrees on that
+/// part. The output path's directory is `obj\Debug\` or `obj/Debug/`, by
+/// whether `obj` is a directory where MSBuild started; its file name is
+/// `App.dll` either way.
+#[test]
+#[cfg(not(windows))]
+fn a_reader_collapses_the_startup_directory_on_the_part_it_reads() {
+    let p = parse(
+        r"<Project>
+  <PropertyGroup>
+    <IntermediateOutputPath>obj\Debug\</IntermediateOutputPath>
+    <Out>$(IntermediateOutputPath)App.dll</Out>
+  </PropertyGroup>
+</Project>",
+    );
+    let worlds = match p.property("Out") {
+        crate::PropertyRead::Untrusted(crate::UntrustedCause::StartupDirectory(worlds)) => worlds,
+        other => panic!("Out reads {other:?}"),
+    };
+    let mut values: Vec<&String> = worlds.values();
+    values.sort();
+    assert_eq!(values, ["obj/Debug/App.dll", "obj\\Debug\\App.dll"]);
+    assert_eq!(worlds.agreed(), None);
+    // The file name, as the compiler's `-o:` reads it: `\` a separator.
+    let file_name = worlds.map(&mut |value: &String| {
+        value
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or_default()
+            .to_owned()
+    });
+    assert_eq!(file_name.agreed().map(String::as_str), Some("App.dll"));
+    // The trust-blind table holds the value where `obj` is no directory.
+    assert_eq!(p.properties["Out"], "obj\\Debug\\App.dll");
+}
+
+/// A metadatum MSBuild passes once more under the project's directory, which
+/// the walk does not ask, is no value the walk commits, even with the startup
+/// directory supplied: the package set is left uncertain, never read as
+/// carrying no such metadatum.
+#[test]
+#[cfg(not(windows))]
+fn a_metadatum_the_project_directory_pass_may_respell_is_uncertain() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    std::fs::create_dir_all(root.join("proj/seg")).unwrap();
+    std::fs::create_dir_all(root.join("start")).unwrap();
+    let project = root.join("proj/Demo.fsproj");
+    let source = r#"<Project>
+  <ItemGroup>
+    <PackageReference Include="Foo" Version="1.0.0" PrivateAssets="seg\all" />
+  </ItemGroup>
+</Project>"#;
+    let file = crate::ProjectFile::buffer(&project, source).unwrap();
+    let (p, _) = crate::test_support::parse_fsproj_reads(
+        &file,
+        &HashMap::new(),
+        &HashMap::new(),
+        None,
+        None,
+        Some(&root.join("start")),
+        &crate::test_support::ReadProbe::default(),
+    )
+    .unwrap();
+    assert!(
+        p.package_references_uncertain,
+        "{:#?}",
+        p.package_references
+    );
+    assert!(p.diagnostics.iter().any(|d| matches!(
+        &d.kind,
+        DiagnosticKind::PathAdjustmentUndecided { value } if value == "seg\\all"
+    )));
+}
+
+/// An item spec whose worlds differ, and which holds an escape, is not
+/// collapsed: the escape decodes into a character a literal `Exclude` compares
+/// as written, so the worlds' separators can decide what the exclude removes.
+#[test]
+#[cfg(not(windows))]
+fn an_escaped_item_spec_does_not_collapse_its_worlds() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    std::fs::create_dir_all(root.join("seg")).unwrap();
+    let parse = |include: &str| {
+        let source = format!(
+            r#"<Project>
+  <ItemGroup>
+    <Compile Include="{include}" Exclude="seg/a%2a.fs" />
+  </ItemGroup>
+</Project>"#
+        );
+        let project = root.join("Demo.fsproj");
+        crate::parse_fsproj_with_imports(
+            &crate::ProjectFile::buffer(&project, &source).unwrap(),
+            &[("RootSeg".to_owned(), "seg\\".to_owned())].into(),
+            &HashMap::new(),
+            None,
+            Some(&crate::glob_resolver::resolve as &crate::GlobResolver<'_>),
+        )
+        .unwrap()
+    };
+    // The same spec spelled with a `/` is decided: the exclude removes it.
+    let decided = parse("seg/a%2a.fs");
+    assert!(!decided.items_uncertain, "{:#?}", decided.diagnostics);
+    // Spelled through a global's `\`, which MSBuild respells only where `seg`
+    // is a directory where it started, it is not.
+    let p = parse("$(RootSeg)a%2a.fs");
+    assert!(p.items_uncertain, "{:#?}", p.items);
+}
+
+/// MSBuild expands an `Exclude` again fragment by fragment, so each
+/// fragment's own first segment decides its `\`: `seg\a%2a.fs` behind
+/// `skip;` is respelled where `seg` is a directory under MSBuild's startup
+/// directory, though the whole value's first segment is `skip;seg`. The
+/// literal it then names is compared as written, so whether it excludes the
+/// item turns on the startup directory. A fragment holding a reference the
+/// first expansion spliced raw is expanded the second time.
+#[test]
+#[cfg(not(windows))]
+fn each_exclude_fragment_is_adjusted_again() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    std::fs::create_dir_all(root.join("seg")).unwrap();
+    let parse = |exclude: &str, globals: &[(&str, &str)]| {
+        let source = format!(
+            r#"<Project>
+  <ItemGroup>
+    <Compile Include="seg/a%2a.fs" Exclude="{exclude}" />
+    <PackageReference Include="seg/a%2a.fs" Exclude="{exclude}" />
+  </ItemGroup>
+</Project>"#
+        );
+        let project = root.join("Demo.fsproj");
+        crate::parse_fsproj_with_imports(
+            &crate::ProjectFile::buffer(&project, &source).unwrap(),
+            &globals
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect(),
+            &HashMap::new(),
+            None,
+            Some(&crate::glob_resolver::resolve as &crate::GlobResolver<'_>),
+        )
+        .unwrap()
+    };
+    // Spelled with a `/`, the exclude removes it in every world.
+    let decided = parse("skip;seg/a%2a.fs", &[]);
+    assert!(!decided.items_uncertain, "{:#?}", decided.diagnostics);
+    assert!(decided.items.is_empty(), "{:#?}", decided.items);
+    for (exclude, globals) in [
+        ("skip;seg\\a%2a.fs", &[][..]),
+        ("$(X)", &[("X", "skip;seg\\a%2a.fs")][..]),
+        // The whole value's first segment is absolute, and absent: only the
+        // fragment's own probe asks about `seg`.
+        ("/borzoi-missing-993;seg\\a%2a.fs", &[][..]),
+        // Oracle-pinned: MSBuild excludes it, expanding `$(Y)` the second
+        // time; a `Remove` expands once, and does not.
+        ("$(X)", &[("X", "skip;$(Y)"), ("Y", "seg/a%2a.fs")][..]),
+    ] {
+        let p = parse(exclude, globals);
+        assert!(p.items_uncertain, "{exclude} {globals:?}: {:#?}", p.items);
+        assert!(
+            p.package_references_uncertain,
+            "{exclude} {globals:?}: {:#?}",
+            p.package_references
+        );
+    }
+}
+
+/// A bare literal `Include` naming a file with an escaped wildcard publishes
+/// its full path, which MSBuild reads with every `\` a separator whichever
+/// spelling the startup directory leaves; only its identity is unknown.
+#[test]
+#[cfg(not(windows))]
+fn a_bare_include_of_an_escaped_wildcard_is_its_full_path() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    let source = r#"<Project><ItemGroup><Compile Include="seg\a%2a.fs" /></ItemGroup></Project>"#;
+    let p = crate::parse_fsproj_with_imports(
+        &crate::ProjectFile::buffer(&root.join("Demo.fsproj"), source).unwrap(),
+        &HashMap::new(),
+        &HashMap::new(),
+        None,
+        Some(&crate::glob_resolver::resolve as &crate::GlobResolver<'_>),
+    )
+    .unwrap();
+    assert!(!p.items_uncertain, "{:#?}", p.diagnostics);
+    assert_eq!(
+        p.items
+            .iter()
+            .map(|i| i.include.clone())
+            .collect::<Vec<_>>(),
+        [root.join("seg/a*.fs")]
+    );
+}
+
+/// An `Update` that leaves the batch removes its earlier fragments by their
+/// written text, so one already spelled as its key leaves the batch: `Abs`
+/// joins the second `Update` afresh, which then strands `Beta`, and the
+/// third collides on it, stranding `Alpha` with its `CompileOrder` until
+/// `Alpha` is included. MSBuild compiles `Alpha` first.
+#[test]
+#[cfg(not(windows))]
+fn a_fragment_spelled_as_its_key_leaves_the_batch_with_its_update() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    let abs = root.join("Abs.fs");
+    let source = format!(
+        r#"<Project><PropertyGroup><Abs>{}</Abs></PropertyGroup><ItemGroup>
+    <Compile Update="Stray.fs;$(Abs);$(Abs)" Link="x" />
+    <Compile Update="$(Abs);Beta.fs;Beta.fs" Link="y" />
+    <Compile Update="Alpha.fs;Beta.fs" CompileOrder="CompileFirst" />
+    <Compile Include="First.fs" />
+    <Compile Include="Alpha.fs" />
+  </ItemGroup></Project>"#,
+        abs.display()
+    );
+    let p = crate::parse_fsproj_with_imports(
+        &crate::ProjectFile::buffer(&root.join("Demo.fsproj"), &source).unwrap(),
+        &HashMap::new(),
+        &HashMap::new(),
+        None,
+        None,
+    )
+    .unwrap();
+    let names: Vec<_> = p.items.iter().map(|i| i.include.clone()).collect();
+    assert!(
+        p.items_uncertain || names == [root.join("Alpha.fs"), root.join("First.fs")],
+        "{names:?}"
+    );
+}
+
+/// On Unix, MSBuild turns each `\` written in the argument of `Exists` into
+/// `/` before expanding it (oracle-pinned: with only `False.txt` present,
+/// `Exists('$(S.Contains(`\`)).txt')` is false for `S` = `a/b`, while a
+/// comparison of the same expansion reads `\`).
+#[test]
+#[cfg(not(windows))]
+fn a_backslash_written_in_an_exists_argument_is_a_slash_before_expansion() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    std::fs::write(root.join("False.txt"), "").unwrap();
+    let source = r#"<Project><PropertyGroup>
+    <S>a/b</S>
+    <E Condition="Exists('$(S.Contains(`\`)).txt')">yes</E>
+    <C Condition="'$(S.Contains(`\`))' == 'False'">yes</C>
+  </PropertyGroup></Project>"#;
+    let p = crate::parse_fsproj_with_imports(
+        &crate::ProjectFile::buffer(&root.join("Demo.fsproj"), source).unwrap(),
+        &HashMap::new(),
+        &HashMap::new(),
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(
+        matches!(p.property("E"), crate::PropertyRead::Unset),
+        "{:?}",
+        p.property("E")
+    );
+    assert_eq!(p.property("C"), crate::PropertyRead::Value("yes".into()));
+}
+
+/// An `Exclude`'s item reference expands to identities that MSBuild's second
+/// pass adjusts each by its own first segment: `seg\a:b.fsproj` is
+/// `seg/a:b.fsproj` where `seg` is a directory under the startup directory,
+/// and is compared as written. Whether `H` keeps its item, and so whether
+/// the `Remove` drops the reference, turns on the startup directory.
+#[test]
+#[cfg(not(windows))]
+fn an_excluded_item_reference_is_adjusted_again() {
+    let source = |skip: &str| {
+        format!(
+            r#"<Project><ItemGroup>
+    <Skip Include="/nosuch/stub;{skip}" Exclude="/nosuch/stub" />
+    <H Include="seg/a:b.fsproj" Exclude="@(Skip)" />
+    <ProjectReference Include="seg/a:b.fsproj" />
+    <ProjectReference Remove="@(H)" />
+  </ItemGroup></Project>"#
+        )
+    };
+    // The walk follows the file system, so the absolute first segment
+    // `/nosuch` is asked about, and shields the rest of the `Include` from the
+    // first pass.
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    let parse = |source: &str| {
+        crate::parse_fsproj_with_imports(
+            &crate::ProjectFile::buffer(&root.join("Demo.fsproj"), source).unwrap(),
+            &HashMap::new(),
+            &HashMap::new(),
+            None,
+            None,
+        )
+        .unwrap()
+    };
+    // Spelled with a `/`, `H` is excluded in every world, and the reference
+    // stays.
+    let decided = parse(&source("seg/a:b.fsproj"));
+    assert!(
+        !decided.project_references_uncertain,
+        "{:#?}",
+        decided.diagnostics
+    );
+    assert_eq!(decided.project_references.len(), 1);
+    let p = parse(&source(r"seg\a:b.fsproj"));
+    assert!(
+        p.project_references_uncertain,
+        "{:#?}",
+        p.project_references
+    );
+}
+
+/// An import whose written `\` MSBuild turns into `/` names one file from
+/// every startup directory, and a missing one is a certain rejection.
+#[test]
+#[cfg(not(windows))]
+fn a_missing_import_spelled_with_written_backslashes_is_a_certain_rejection() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    let source = r#"<Project><Import Project="seg\\missing.props" /></Project>"#;
+    let p = crate::parse_fsproj_with_imports(
+        &crate::ProjectFile::buffer(&root.join("Demo.fsproj"), source).unwrap(),
+        &HashMap::new(),
+        &HashMap::new(),
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        p.rejection.map(|r| r.certainty),
+        Some(crate::RejectionCertainty::Certain)
+    );
+}
+
+/// Whether an `Update` that leaves the batch removes a fragment turns on its
+/// spelling (`$(S)` is `seg/` or `seg\`, so the rooted fragment is its own
+/// key in one world only), though both worlds name the same files: the
+/// later `Update` then strands `seg/A.fs` in one world, and MSBuild compiles
+/// it first there and last in the other. No order is certain.
+#[test]
+#[cfg(not(windows))]
+fn an_update_whose_worlds_differ_is_one_the_batch_does_not_know() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    let source = r#"<Project><PropertyGroup><S>seg\</S></PropertyGroup><ItemGroup>
+    <Compile Update="a:b;$(MSBuildProjectDirectory)/$(S)A.fs;C.fs;%61" Link="x" />
+    <Compile Update="seg/A.fs;C.fs" CompileOrder="CompileFirst" />
+    <Compile Include="First.fs;seg/A.fs" />
+  </ItemGroup></Project>"#;
+    let p = crate::parse_fsproj_with_imports(
+        &crate::ProjectFile::buffer(&root.join("Demo.fsproj"), source).unwrap(),
+        &HashMap::new(),
+        &HashMap::new(),
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(p.items_uncertain, "{:#?}", p.items);
+}
+
+/// A write skipped under a gate that turns on the startup directory may
+/// leave a value a later condition coerces to a boolean, which MSBuild
+/// rejects (MSB4113) where the write ran: `A` is `bad` where `seg/` is
+/// missing under the startup directory. A later write under another
+/// undecided gate does not hide it. (The same through any other undecided
+/// gate is #1009.)
+#[test]
+#[cfg(not(windows))]
+fn a_skipped_write_a_condition_coerces_may_reject() {
+    // Past the segment cap, the gate is declined for the same reason.
+    let segments = crate::properties::worlds::MAX_SEGMENTS + 1;
+    let pieces: String = (0..segments)
+        .map(|i| format!("<S{i}>s{i}\\a</S{i}>"))
+        .collect();
+    let capped = (0..segments)
+        .map(|i| format!("'$(S{i})' == 's{i}\\a'"))
+        .collect::<Vec<_>>()
+        .join(" And ");
+    for gate in ["'$(P)' != 'seg/a'", "'$(P)' == 'seg\\a'", &capped] {
+        let p = parse(&format!(
+            r#"<Project><PropertyGroup>
+    <P>seg\a</P>
+    {pieces}
+    <A>true</A>
+    <A Condition="{gate}">bad</A>
+    <A Condition="'É' == 'é'">false</A>
+  </PropertyGroup>
+  <PropertyGroup Condition="$(A)"><Mid>m</Mid></PropertyGroup>
+  <PropertyGroup><After>yes</After></PropertyGroup></Project>"#
+        ));
+        assert!(
+            p.rejection.is_some()
+                || p.property("After") != crate::PropertyRead::Value("yes".into()),
+            "{gate}: {:?}",
+            p.property("After")
+        );
+    }
+}
+
+/// A write the walk refuses because it asks past the segment cap leaves a
+/// name whose value it does not hold: MSBuild's `S` is never empty, so the
+/// condition below reaches `$(S)` and throws (MSB4100) from every startup
+/// directory, though on the empty value the walk holds it stops at the
+/// first operand.
+#[test]
+#[cfg(not(windows))]
+fn a_refused_write_a_condition_coerces_may_reject() {
+    let pieces: String = (0..=crate::properties::worlds::MAX_SEGMENTS)
+        .map(|i| format!("s{i}\\x$(Empty)"))
+        .collect();
+    let p = parse(&format!(
+        r#"<Project><PropertyGroup><S>{pieces}</S></PropertyGroup>
+  <PropertyGroup Condition="'$(S)' == '' Or $(S)"><Mid>m</Mid></PropertyGroup>
+  <PropertyGroup><After>ok</After></PropertyGroup></Project>"#
+    ));
+    assert!(
+        p.rejection.is_some() || p.property("After") != crate::PropertyRead::Value("ok".into()),
+        "{:?}",
+        p.property("After")
+    );
+}
+
+/// An `Include` whose worlds differ beside a wildcard `Exclude`: `seg\\r.fs`
+/// keeps an empty segment the pattern `seg/*/r.fs` matches where `seg/` is
+/// missing under the startup directory, and is `seg/r.fs`, which it does not,
+/// where it is there. No list is certain.
+#[test]
+#[cfg(not(windows))]
+fn an_include_whose_worlds_differ_beside_an_exclude_is_no_list() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    std::fs::create_dir_all(root.join("seg")).unwrap();
+    std::fs::write(root.join("seg/r.fs"), "").unwrap();
+    let source = r#"<Project><ItemGroup><Compile Include="$(P)" Exclude="seg/*/r.fs" /></ItemGroup></Project>"#;
+    let p = crate::parse_fsproj_with_imports(
+        &crate::ProjectFile::buffer(&root.join("Demo.fsproj"), source).unwrap(),
+        &[("P".to_owned(), "seg\\\\r.fs".to_owned())].into(),
+        &HashMap::new(),
+        None,
+        Some(&crate::glob_resolver::resolve as &crate::GlobResolver<'_>),
+    )
+    .unwrap();
+    assert!(p.items_uncertain, "{:#?}", p.items);
+}
+
+/// `DefaultTargets` that turns on the startup directory leaves
+/// `MSBuildProjectDefaultTargets` refused, never empty: both of its values
+/// are non-empty, so the condition below reaches it and throws (MSB4100).
+#[test]
+#[cfg(not(windows))]
+fn default_targets_that_turn_on_the_startup_directory_are_refused() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    let source = r#"<Project DefaultTargets="seg\a">
+  <PropertyGroup Condition="'$(MSBuildProjectDefaultTargets)' == '' Or $(MSBuildProjectDefaultTargets)"><Mid>m</Mid></PropertyGroup>
+  <PropertyGroup><After>ok</After></PropertyGroup></Project>"#;
+    let p = crate::parse_fsproj_with_imports(
+        &crate::ProjectFile::buffer(&root.join("Demo.fsproj"), source).unwrap(),
+        &HashMap::new(),
+        &HashMap::new(),
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(
+        p.rejection.is_some() || p.property("After") != crate::PropertyRead::Value("ok".into()),
+        "{:?}",
+        p.property("After")
+    );
+}
+
+/// The public framework helper tells a plural written only under a gate that
+/// turns on the startup directory from no declaration.
+#[test]
+#[cfg(not(windows))]
+fn a_gated_framework_declaration_is_undecided() {
+    let p = parse(
+        r#"<Project><PropertyGroup>
+    <S>seg\a</S>
+    <TargetFrameworks Condition="'$(S)' == 'seg/a'">net8.0</TargetFrameworks>
+  </PropertyGroup></Project>"#,
+    );
+    assert_eq!(crate::target_frameworks(&p), Vec::<String>::new());
+    assert!(crate::target_frameworks_undecided(&p));
+    // So is a singular written only under such a gate.
+    let singular = parse(
+        r#"<Project><PropertyGroup>
+    <S>seg\a</S>
+    <TargetFramework Condition="'$(S)' != 'seg/a'">net8.0</TargetFramework>
+  </PropertyGroup></Project>"#,
+    );
+    assert_eq!(crate::target_frameworks(&singular), Vec::<String>::new());
+    assert!(crate::target_frameworks_undecided(&singular));
+    assert!(!crate::target_frameworks_undecided(&parse(
+        "<Project><PropertyGroup /></Project>"
+    )));
+}
+
+/// The doubt a gate that turns on the startup directory leaves reaches a
+/// sibling the group writes after a write its own gate reads, a
+/// `DefaultTargets` that reads a doubted name, and no protected global.
+#[test]
+#[cfg(not(windows))]
+fn startup_doubt_reaches_siblings_and_default_targets_and_spares_globals() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    let walk = |source: &str, globals: &[(&str, &str)]| {
+        crate::parse_fsproj_with_imports(
+            &crate::ProjectFile::buffer(&root.join("Demo.fsproj"), source).unwrap(),
+            &globals
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect(),
+            &HashMap::new(),
+            None,
+            None,
+        )
+        .unwrap()
+    };
+    let possible = |p: &crate::ParsedProject| {
+        p.rejection.is_some() || p.property("After") != crate::PropertyRead::Value("ok".into())
+    };
+    // `B` is written only where `A` was, inside the same skipped group.
+    let siblings = walk(
+        r#"<Project><PropertyGroup><P>seg\a</P><A>false</A><B>true</B></PropertyGroup>
+  <PropertyGroup Condition="'$(P)' != 'seg/a'"><A>true</A><B Condition="'$(A)' == 'true'">bad</B></PropertyGroup>
+  <PropertyGroup Condition="$(B)"><Mid>m</Mid></PropertyGroup>
+  <PropertyGroup><After>ok</After></PropertyGroup></Project>"#,
+        &[],
+    );
+    assert!(possible(&siblings), "{:?}", siblings.property("After"));
+    // A protected global is not doubted: MSBuild reads `true` from every
+    // startup directory.
+    let global = walk(
+        r#"<Project><PropertyGroup><P>seg\a</P></PropertyGroup>
+  <PropertyGroup Condition="'$(P)' != 'seg/a'"><A>x</A><Pin>bad</Pin></PropertyGroup>
+  <PropertyGroup Condition="$(Pin)"><Mid>m</Mid></PropertyGroup>
+  <PropertyGroup><After>ok</After></PropertyGroup></Project>"#,
+        &[("Pin", "true")],
+    );
+    assert_eq!(global.rejection, None);
+    assert_eq!(
+        global.property("After"),
+        crate::PropertyRead::Value("ok".into())
+    );
+    // An imported root's `DefaultTargets` reads `A`, `bad` where the gate ran.
+    std::fs::write(
+        root.join("imp.props"),
+        r#"<Project DefaultTargets="$(A)" />"#,
+    )
+    .unwrap();
+    let imported = walk(
+        r#"<Project><PropertyGroup><P>seg\a</P><A>true</A></PropertyGroup>
+  <PropertyGroup Condition="'$(P)' != 'seg/a'"><A>bad</A></PropertyGroup>
+  <Import Project="imp.props" />
+  <PropertyGroup Condition="'$(MSBuildProjectDefaultTargets)' == '' Or $(MSBuildProjectDefaultTargets)"><Mid>m</Mid></PropertyGroup>
+  <PropertyGroup><After>ok</After></PropertyGroup></Project>"#,
+        &[],
+    );
+    assert!(possible(&imported), "{:?}", imported.property("After"));
+}
+
+/// `Exists` of an import's list asks about each entry: with `one.props` a
+/// file and `sub` a directory it is true, and MSBuild then fails to import
+/// `sub` where the rest of the gate holds. A gate the walk cannot decide over
+/// it is a possible rejection.
+#[test]
+#[cfg(not(windows))]
+fn an_exists_guard_over_an_import_list_asks_about_each_entry() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    std::fs::write(root.join("one.props"), "<Project />").unwrap();
+    std::fs::create_dir_all(root.join("sub")).unwrap();
+    let source = r#"<Project>
+  <PropertyGroup><P>seg\a</P></PropertyGroup>
+  <Import Project="one.props;sub" Condition="Exists('one.props;sub') And '$(P)' != 'seg/a'" />
+  <PropertyGroup><After>ok</After></PropertyGroup>
+</Project>"#;
+    let p = crate::parse_fsproj_with_imports(
+        &crate::ProjectFile::buffer(&root.join("Demo.fsproj"), source).unwrap(),
+        &HashMap::new(),
+        &HashMap::new(),
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(p.rejection.is_some(), "{:#?}", p.diagnostics);
+}
+
+/// A property function that turns a separator into a different character
+/// (`$(Q[9])` is `@` or `x`) makes an item reference in one world only: the
+/// write is declined for the startup directory, so a later condition that may
+/// throw on it is a possible rejection, and the diagnostic quotes the world
+/// that holds the reference.
+#[test]
+#[cfg(not(windows))]
+fn a_reference_in_one_world_only_is_a_startup_decline() {
+    let p = parse(
+        r#"<Project><PropertyGroup>
+    <P>seg\a</P>
+    <Q>./$(P)//@x</Q>
+    <S>$(Q[9])(Z)</S>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(S)' == '' Or $(S)"><Mid>m</Mid></PropertyGroup>
+  <PropertyGroup><After>ok</After></PropertyGroup></Project>"#,
+    );
+    assert!(
+        p.rejection.is_some() || p.property("After") != crate::PropertyRead::Value("ok".into()),
+        "{:?}",
+        p.property("After")
+    );
+    assert!(
+        p.diagnostics.iter().any(|d| matches!(
+            &d.kind,
+            DiagnosticKind::UnresolvedItemReference { reference } if reference.contains("@(Z)")
+        )),
+        "{:#?}",
+        p.diagnostics
+    );
+}
+
+/// An item group whose gate turns on the startup directory skips no property
+/// write: a later item group's condition on a name the walk doubts (`B`,
+/// written under a gate it cannot decide) is judged as on any project, on the
+/// value it holds.
+#[test]
+#[cfg(not(windows))]
+fn an_item_gate_that_turns_on_the_startup_directory_withdraws_nothing() {
+    let p = parse(
+        r#"<Project><PropertyGroup><P>seg\a</P><B>true</B><B Condition="'É' == 'é'">true</B></PropertyGroup>
+  <ItemGroup Condition="'$(P)' == 'seg/a'"><Compile Include="a.fs" /></ItemGroup>
+  <ItemGroup Condition="$(B)"><Compile Include="b.fs" /></ItemGroup>
+  <PropertyGroup><After>ok</After></PropertyGroup></Project>"#,
+    );
+    assert_eq!(p.rejection, None, "{:#?}", p.diagnostics);
+    assert_eq!(p.property("After"), crate::PropertyRead::Value("ok".into()));
+}
+
+/// Beside a wildcard `Exclude`, a literal `Include` is matched as written:
+/// `seg\..\r.fs` is `r.fs` to `r*.fs` where `seg/` is under the startup
+/// directory and MSBuild respells it, and not where it keeps the `\`
+/// (oracle-pinned by review, dotnet 10.0.403). No list is certain.
+#[test]
+#[cfg(not(windows))]
+fn a_literal_beside_a_wildcard_exclude_is_matched_as_written() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    std::fs::create_dir_all(root.join("seg")).unwrap();
+    std::fs::write(root.join("r.fs"), "").unwrap();
+    let source =
+        r#"<Project><ItemGroup><Compile Include="$(P)" Exclude="r*.fs" /></ItemGroup></Project>"#;
+    let p = crate::parse_fsproj_with_imports(
+        &crate::ProjectFile::buffer(&root.join("Demo.fsproj"), source).unwrap(),
+        &[("P".to_owned(), "seg\\..\\r.fs".to_owned())].into(),
+        &HashMap::new(),
+        None,
+        Some(&crate::glob_resolver::resolve as &crate::GlobResolver<'_>),
+    )
+    .unwrap();
+    assert!(p.items_uncertain, "{:#?}", p.items);
+}
+
+/// #1009's first repro from #993: a property function MSBuild throws on in
+/// one world only (`[1]` past the end of `Len`'s split where `seg/` is under
+/// the startup directory), and a later coercion of its value in the other
+/// (`x` is no boolean). MSBuild rejects the project from both directories;
+/// the walk may not publish `After`.
+#[test]
+#[cfg(not(windows))]
+fn a_property_function_throwing_in_one_world_is_a_possible_rejection() {
+    let p = parse(
+        r#"<Project><PropertyGroup>
+    <S>seg\a</S>
+    <Q>./$(S)//</Q>
+    <Len>$(Q.Length)x</Len>
+    <P>$(Len.Split('8')[1])</P>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(P)' == '' Or $(P)"><Mid>m</Mid></PropertyGroup>
+  <PropertyGroup><After>ok</After></PropertyGroup></Project>"#,
+    );
+    assert!(
+        p.rejection.is_some(),
+        "{:?} {:#?}",
+        p.property("After"),
+        p.diagnostics
+    );
+    // Without the coercion MSBuild accepts the project where `seg/` is
+    // missing, so the throw is a possible rejection, not a certain one.
+    let alone = parse(
+        r#"<Project><PropertyGroup>
+    <S>seg\a</S>
+    <Q>./$(S)//</Q>
+    <Len>$(Q.Length)x</Len>
+    <P>$(Len.Split('8')[1])</P>
+  </PropertyGroup></Project>"#,
+    );
+    assert_eq!(
+        alone.rejection.map(|r| r.certainty),
+        Some(crate::RejectionCertainty::Possible)
+    );
+}
+
+/// #1009's second repro from #993: `$(A)$(B)` forms the item function
+/// `@(Foo->NoSuchFunction())` in an item's condition only where `seg/` is
+/// under the startup directory (`$(Q[9])` is `@` there and `x` elsewhere).
+/// MSBuild rejects the project there (MSB4184); the walk may not publish
+/// `After`.
+#[test]
+#[cfg(not(windows))]
+fn an_item_function_formed_in_one_world_is_a_possible_rejection() {
+    let p = parse(
+        r#"<Project><PropertyGroup>
+    <P>seg\a</P>
+    <Q>./$(P)//@x</Q>
+    <A>$(Q[9])</A>
+    <B>(Foo->NoSuchFunction())</B>
+  </PropertyGroup>
+  <ItemGroup>
+    <Foo Include="f" />
+    <Compile Include="a.fs" Condition="'$(A)$(B)' == 'x'" />
+  </ItemGroup>
+  <PropertyGroup><After>ok</After></PropertyGroup></Project>"#,
+    );
+    assert!(
+        p.rejection.is_some(),
+        "{:?} {:#?}",
+        p.property("After"),
+        p.diagnostics
+    );
+}
+
+/// `Q` is `./seg/a//` where `seg` is a directory under MSBuild's startup
+/// directory, and `./seg/a/` elsewhere: the whole value's pass respells it
+/// only where `S`'s `\` survived. Each reader below that would act on one of
+/// the two declines.
+#[cfg(not(windows))]
+const SPLIT_Q: &str = r"<S>seg\a</S>
+    <Q>./$(S)//</Q>";
+
+/// A `TargetFrameworks` list the worlds declare differently is no list.
+#[test]
+#[cfg(not(windows))]
+fn target_frameworks_the_worlds_disagree_on_are_no_list() {
+    let p = parse(&format!(
+        "<Project><PropertyGroup>{SPLIT_Q}
+    <TargetFrameworks>net$(Q.Length).0</TargetFrameworks>
+  </PropertyGroup></Project>"
+    ));
+    assert_eq!(p.target_frameworks, Vec::<String>::new());
+    assert!(matches!(
+        p.property("TargetFrameworks"),
+        crate::PropertyRead::Untrusted(crate::UntrustedCause::StartupDirectory(_))
+    ));
+}
+
+/// The declared-frameworks accessor does not fall back to the singular past a
+/// plural the worlds declare differently.
+#[test]
+#[cfg(not(windows))]
+fn the_frameworks_accessor_names_no_list_past_an_undecided_plural() {
+    let p = parse(&format!(
+        "<Project><PropertyGroup>{SPLIT_Q}
+    <TargetFrameworks>net$(Q.Length).0</TargetFrameworks>
+    <TargetFramework>net7.0</TargetFramework>
+  </PropertyGroup></Project>"
+    ));
+    assert_eq!(crate::target_frameworks(&p), Vec::<String>::new());
+}
+
+/// An `Include` MSBuild compares as written (a `:`), spelled through a `\`
+/// the worlds respell apart, is captured by its full path with no identity:
+/// MSBuild's `Remove` takes it in one world and not the other, and the walk
+/// applies no `Remove` to an item whose spelling it does not know.
+#[test]
+#[cfg(not(windows))]
+fn a_verbatim_include_the_worlds_spell_apart_is_removed_by_no_certain_remove() {
+    let p = parse_with(
+        r#"<Project><ItemGroup>
+    <ProjectReference Include="$(RootSeg)a:b.fsproj" />
+    <ProjectReference Remove="seg/a:b.fsproj" />
+  </ItemGroup></Project>"#,
+        &[("RootSeg", "seg\\")],
+    );
+    assert!(
+        p.project_references_uncertain,
+        "{:#?}",
+        p.project_references
+    );
+}
+
+/// A batched `Update` whose fragments collide in one world and not another:
+/// `seg/a:b` is compared as written, so it collides with `$(S)` only where
+/// MSBuild respelled `S`'s `\`. There the first `Update` leaves its batch,
+/// stranding `Alpha`'s removal, and the second applies `CompileFirst` to the
+/// later `Beta.fs`; elsewhere it does not. No compile order is certain.
+#[test]
+#[cfg(not(windows))]
+fn a_batch_collision_the_worlds_decide_apart_strands() {
+    let p = parse(
+        r#"<Project><PropertyGroup><S>seg\a:b</S></PropertyGroup><ItemGroup>
+    <Compile Update="Alpha;$(S);seg/a:b" Link="x" />
+    <Compile Update="Beta.fs;Alpha" CompileOrder="CompileFirst" />
+    <Compile Include="First.fs" />
+    <Compile Include="Beta.fs" />
+  </ItemGroup></Project>"#,
+    );
+    assert!(p.items_uncertain, "{:#?}", p.items);
+    // Spelled with a `/`, the collision is in every world, and decided.
+    let decided = parse(
+        r#"<Project><PropertyGroup><S>seg/a:b</S></PropertyGroup><ItemGroup>
+    <Compile Update="Alpha;$(S);seg/a:b" CompileOrder="CompileFirst" />
+  </ItemGroup></Project>"#,
+    );
+    assert!(
+        decided
+            .diagnostics
+            .iter()
+            .any(|d| matches!(d.kind, DiagnosticKind::StrandedUpdatePrefix { .. })),
+        "{:#?}",
+        decided.diagnostics
+    );
+}
+
+/// A compile-order `Update` naming, as written, a file the worlds spell
+/// apart reaches the `Include` spelled `seg/a:b.fs` only where MSBuild
+/// respelled `S`'s `\`: no compile order is certain.
+#[test]
+#[cfg(not(windows))]
+fn a_verbatim_update_the_worlds_spell_apart_decides_no_order() {
+    let p = parse(
+        r#"<Project><PropertyGroup><S>seg\a:b.fs</S></PropertyGroup><ItemGroup>
+    <Compile Include="First.fs" />
+    <Compile Include="seg/a:b.fs" />
+    <Compile Update="$(S)" CompileOrder="CompileFirst" />
+  </ItemGroup></Project>"#,
+    );
+    assert!(p.items_uncertain, "{:#?}", p.items);
+}
+
+/// A batched `Update` whose spec the walk does not know (here, a value it
+/// refused past the segment cap) may leave its batch anywhere, and a later
+/// `Update` may collide with any key it left: `Alpha;Alpha` strands `Alpha`,
+/// and the next `Update` collides on it, stranding `Beta.fs` with its
+/// `CompileOrder` until `Beta.fs` is included. No compile order is certain.
+#[test]
+#[cfg(not(windows))]
+fn an_update_the_walk_does_not_know_may_strand_a_later_one() {
+    let pieces: String = (0..=crate::properties::worlds::MAX_SEGMENTS)
+        .map(|i| format!("s{i}\\x/../../$(Empty)"))
+        .collect();
+    for (name, spec) in [
+        ("refused", format!("Alpha;Alpha;{pieces}")),
+        ("unsupported", "$([System.Guid]::NewGuid())".to_owned()),
+    ] {
+        let p = parse(&format!(
+            r#"<Project><PropertyGroup><P>{spec}</P></PropertyGroup><ItemGroup>
+    <Compile Update="$(P)" Link="x" />
+    <Compile Update="Beta.fs;Alpha" CompileOrder="CompileFirst" />
+    <Compile Include="First.fs" />
+    <Compile Include="Beta.fs" />
+  </ItemGroup></Project>"#
+        ));
+        assert!(p.items_uncertain, "{name}: {:#?}", p.items);
+    }
+}
+
+/// Of a lone `Update` that writes no captured metadata, a strand applies
+/// nothing the walk reads, however its batch goes.
+#[test]
+fn a_strand_of_an_update_writing_nothing_captured_moves_nothing() {
+    let p = parse(
+        r#"<Project><ItemGroup>
+    <Compile Include="Program.fs" />
+    <Compile Update="Alpha;$([System.Guid]::NewGuid());Alpha" Link="Display.fs" />
+    <Compile Include="Alpha" />
+  </ItemGroup></Project>"#,
+    );
+    assert!(!p.items_uncertain, "{:#?}", p.diagnostics);
+}
+
+/// An `Update` the walk cannot expand for a reason other than the startup
+/// directory keeps the batch unknown without counting a strand: a lone
+/// `Link`-only one moves no compile order.
+#[test]
+fn an_unexpandable_update_alone_strands_nothing() {
+    let p = parse(
+        r#"<Project><ItemGroup>
+    <Compile Include="Program.fs" />
+    <Compile Update="$([System.IO.Path]::GetFileName('src/Program.fs'))" Link="Display.fs" />
+  </ItemGroup></Project>"#,
+    );
+    assert!(!p.items_uncertain, "{:#?}", p.diagnostics);
+}
+
+/// A gate whose leaves turn on the same startup-directory fact is judged in
+/// each world whole, not leaf by leaf: one false in every world rules its
+/// import out. And a bare Compile item MSBuild would compare as written, with
+/// nothing to compare it, is its full path.
+#[test]
+#[cfg(not(windows))]
+fn correlated_leaves_and_bare_verbatim_includes_are_decided() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    let source = r#"<Project>
+  <PropertyGroup><S>seg\a</S></PropertyGroup>
+  <Import Project="missing.props" Condition="'$(S)' == 'seg/a' And '$(S)' != 'seg/a'" />
+  <PropertyGroup><After>y</After></PropertyGroup>
+  <ItemGroup><Compile Include="seg\a:b.fs" /></ItemGroup>
+</Project>"#;
+    let p = crate::parse_fsproj_with_imports(
+        &crate::ProjectFile::buffer(&root.join("Demo.fsproj"), source).unwrap(),
+        &HashMap::new(),
+        &HashMap::new(),
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(p.rejection, None, "{:#?}", p.diagnostics);
+    assert_eq!(p.property("After"), crate::PropertyRead::Value("y".into()));
+    assert!(!p.items_uncertain, "{:#?}", p.diagnostics);
+    assert_eq!(
+        p.items
+            .iter()
+            .map(|i| i.include.clone())
+            .collect::<Vec<_>>(),
+        [root.join("seg/a:b.fs")]
+    );
+}
+
+/// An import guarded by `Exists` of its own path, whose path reads a value
+/// the walk refused (its worlds past the segment cap), may be rejected: the
+/// guard reads text the walk never saw, whose `\` `Exists` may read apart from
+/// the import.
+#[test]
+#[cfg(not(windows))]
+fn a_guarded_import_of_a_refused_value_may_be_rejected() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    std::fs::create_dir_all(root.join("proj")).unwrap();
+    std::fs::write(root.join("proj/T.props"), "<Project />").unwrap();
+    let project = root.join("proj/Demo.fsproj");
+    let pieces: String = (0..=crate::properties::worlds::MAX_SEGMENTS)
+        .map(|i| format!("s{i}\\x/../../$(Empty)"))
+        .collect();
+    // The import reads the refused value directly, or through a copy.
+    for read in ["$(P)", "$(Q)"] {
+        let source = format!(
+            r#"<Project>
+  <PropertyGroup><P>{pieces}/T.props</P><Q>$(P)</Q></PropertyGroup>
+  <Import Project="{read}" Condition="Exists('{read}')" />
+  <PropertyGroup><After>y</After></PropertyGroup>
+</Project>"#
+        );
+        let p = crate::parse_fsproj_with_imports(
+            &crate::ProjectFile::buffer(&project, &source).unwrap(),
+            &HashMap::new(),
+            &HashMap::new(),
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(p.rejection.is_some(), "{read}: {:#?}", p.diagnostics);
+    }
+}
+
+/// A literal Compile item whose worlds name one full path in spellings no
+/// world keeps for all (`seg\\A.fs` and `seg/A.fs`) is that path; and a
+/// wildcard `Exclude` through the same directory is a pattern either way.
+#[test]
+#[cfg(not(windows))]
+fn compile_items_the_worlds_spell_apart_are_their_full_paths() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    std::fs::create_dir_all(root.join("seg")).unwrap();
+    std::fs::write(root.join("seg/A.fs"), "").unwrap();
+    let literal = r#"<Project>
+  <PropertyGroup><SubDir>seg\</SubDir></PropertyGroup>
+  <ItemGroup><Compile Include="$(SubDir)\A.fs" /></ItemGroup>
+</Project>"#;
+    let p = crate::parse_fsproj_with_imports(
+        &crate::ProjectFile::buffer(&root.join("Demo.fsproj"), literal).unwrap(),
+        &HashMap::new(),
+        &HashMap::new(),
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(!p.items_uncertain, "{:#?}", p.diagnostics);
+    assert_eq!(
+        p.items
+            .iter()
+            .map(|i| i.include.clone())
+            .collect::<Vec<_>>(),
+        [root.join("seg/A.fs")]
+    );
+    let source = r#"<Project>
+  <PropertyGroup><SubDir>seg\</SubDir></PropertyGroup>
+  <ItemGroup><Compile Include="seg/*.fs" Exclude="$(SubDir)*.fs" /></ItemGroup>
+</Project>"#;
+    let p = crate::parse_fsproj_with_imports(
+        &crate::ProjectFile::buffer(&root.join("Demo.fsproj"), source).unwrap(),
+        &HashMap::new(),
+        &HashMap::new(),
+        None,
+        Some(&crate::glob_resolver::resolve as &crate::GlobResolver<'_>),
+    )
+    .unwrap();
+    assert!(!p.items_uncertain, "{:#?}", p.diagnostics);
+    assert!(p.items.is_empty(), "{:#?}", p.items);
+}
+
+/// A glob whose worlds differ in the runs of its pattern (`**//*` against
+/// `**/*`) may match different files, so it is no list; and a spelling MSBuild
+/// compares as written may equal another operand's full path.
+#[test]
+#[cfg(not(windows))]
+fn pattern_runs_and_verbatim_spellings_are_compared_as_msbuild_compares_them() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    std::fs::create_dir_all(root.join("seg/b/a")).unwrap();
+    std::fs::write(root.join("seg/b/a/i.fs"), "").unwrap();
+    let source = r#"<Project><ItemGroup><Compile Include="$(Pat)" /></ItemGroup></Project>"#;
+    let p = crate::parse_fsproj_with_imports(
+        &crate::ProjectFile::buffer(&root.join("Demo.fsproj"), source).unwrap(),
+        &[("Pat".to_owned(), "seg\\**//*/**/A??.fs".to_owned())].into(),
+        &HashMap::new(),
+        None,
+        Some(&crate::glob_resolver::resolve as &crate::GlobResolver<'_>),
+    )
+    .unwrap();
+    assert!(p.items_uncertain, "{:#?}", p.items);
+    let removed = parse(
+        r#"<Project><ItemGroup>
+    <ProjectReference Include="/tmp/a:b" />
+    <ProjectReference Remove="/tmp/a:b/." />
+  </ItemGroup></Project>"#,
+    );
+    assert!(!removed.project_references_uncertain);
+    assert!(
+        removed.project_references.is_empty(),
+        "{:#?}",
+        removed.project_references
+    );
+}
+
+/// Central package management the worlds disagree on discharges nothing.
+#[test]
+#[cfg(not(windows))]
+fn central_package_management_the_worlds_disagree_on_is_uncertain() {
+    let p = parse(&format!(
+        r#"<Project><PropertyGroup>{SPLIT_Q}
+    <ManagePackageVersionsCentrally>$(Q.EndsWith('//'))</ManagePackageVersionsCentrally>
+    <CentralPackageVersionsFileImported>true</CentralPackageVersionsFileImported>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageVersion Include="Foo" Version="1.0.0" />
+    <PackageReference Include="Foo" />
+  </ItemGroup></Project>"#
+    ));
+    assert!(
+        p.package_references_uncertain,
+        "{:#?}",
+        p.package_references
+    );
+}
+
+/// A condition every world evaluates to a boolean, if not the same one, is
+/// no project error, however its leaves look one at a time.
+#[test]
+#[cfg(not(windows))]
+fn a_condition_every_world_evaluates_is_no_rejection() {
+    let a = "'$(Q)' == './seg/a//'";
+    let p = parse(&format!(
+        r#"<Project><PropertyGroup>{SPLIT_Q}
+    <G Condition="({a} And !({a}) And ('bad' &lt; '5')) Or {a}">x</G>
+    <After>y</After>
+  </PropertyGroup></Project>"#
+    ));
+    assert_eq!(p.rejection, None);
+    assert_eq!(p.property("After"), crate::PropertyRead::Value("y".into()));
+    assert!(!p.property("G").is_exact());
+}
+
+/// A `Remove` MSBuild compares as written (a `:` in the file name) removes
+/// the item only where its spelling matches, which turns on the startup
+/// directory, which leaves the list uncertain; and an `Include` whose identity
+/// the worlds spell apart, though its full path agrees, is no identity.
+#[test]
+#[cfg(not(windows))]
+fn spellings_the_worlds_disagree_on_leave_references_uncertain() {
+    let removed = parse_with(
+        r#"<Project><ItemGroup>
+    <ProjectReference Include="seg/a:b.fsproj" />
+    <ProjectReference Remove="$(RootSeg)a:b.fsproj" />
+  </ItemGroup></Project>"#,
+        &[("RootSeg", "seg\\")],
+    );
+    assert!(
+        removed.project_references_uncertain,
+        "{:#?} {:#?}",
+        removed.project_references, removed.diagnostics
+    );
+    let spelled = parse_with(
+        r#"<Project><ItemGroup>
+    <ProjectReference Include="./$(S)//B.fsproj" />
+  </ItemGroup></Project>"#,
+        &[("S", "seg\\a")],
+    );
+    // The reference is captured by the full path every world names, with no
+    // identity to match or hand on.
+    assert_eq!(
+        spelled
+            .project_references
+            .iter()
+            .map(|r| r.include.clone())
+            .collect::<Vec<_>>(),
+        [item_path("/repo/proj/seg/a/B.fsproj")]
+    );
+}
+
+/// An import guarded by `Exists` of its own path, whose worlds open
+/// different files, is a possible rejection: `Exists` collapses its argument
+/// otherwise than the import opens it.
+#[test]
+#[cfg(not(windows))]
+fn a_guarded_import_the_worlds_open_apart_may_be_rejected() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    std::fs::create_dir_all(root.join("proj")).unwrap();
+    std::fs::write(root.join("proj/T.props"), "<Project />").unwrap();
+    let project = root.join("proj/Demo.fsproj");
+    let source = r#"<Project>
+  <PropertyGroup><S>seg\a/../../T%2eprops</S></PropertyGroup>
+  <Import Project="$(S)" Condition="Exists('$(S)')" />
+  <PropertyGroup><After>y</After></PropertyGroup>
+</Project>"#;
+    let p = crate::parse_fsproj_with_imports(
+        &crate::ProjectFile::buffer(&project, source).unwrap(),
+        &HashMap::new(),
+        &HashMap::new(),
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(p.rejection.is_some(), "{:#?}", p.diagnostics);
+    assert!(!p.property("After").is_exact());
+}
+
+/// A condition decided differently by MSBuild's startup directory is
+/// undecided, and the walk says why; one every world decides the same way is
+/// decided.
+#[test]
+#[cfg(not(windows))]
+fn a_condition_that_turns_on_the_startup_directory_names_it() {
+    let p = parse(
+        r#"<Project>
+  <PropertyGroup>
+    <P>obj\</P>
+    <Moved Condition="'$(P)' == 'obj/'">yes</Moved>
+    <Slash Condition="HasTrailingSlash('$(P)')">yes</Slash>
+  </PropertyGroup>
+</Project>"#,
+    );
+    assert!(!p.property("Moved").is_exact(), "{:?}", p.property("Moved"));
+    assert_eq!(
+        p.property("Slash"),
+        crate::PropertyRead::Value("yes".into())
+    );
+    assert!(
+        p.diagnostics.iter().any(|d| matches!(
+            &d.kind,
+            DiagnosticKind::PathAdjustmentUndecided { value } if value == "'$(P)' == 'obj/'"
+        )),
+        "{:#?}",
+        p.diagnostics
+    );
+}
+
+/// [`crate::properties::worlds::MAX_SEGMENTS`], pinned at its edge on an
+/// expansion: a value whose pieces ask about that many relative segments is
+/// one value per world; one more, and the value declines.
+#[test]
+#[cfg(not(windows))]
+fn the_segment_cap_holds_at_its_edge_on_an_expansion() {
+    // The cap the corpus measurement chose (three segments at most on any
+    // path of a real project's expansions, doubled); moving it is a decision
+    // this pin makes visible.
+    let cap = 6;
+    assert_eq!(cap, crate::properties::worlds::MAX_SEGMENTS);
+    // Each literal piece meets the adjustment on its own: `s0\x`, `s1\x`, ….
+    let body = |segments: usize| {
+        (0..segments)
+            .map(|i| format!("s{i}\\x"))
+            .collect::<Vec<_>>()
+            .join("$(Empty)")
+    };
+    let read = |segments: usize| {
+        let p = parse(&format!(
+            "<Project><PropertyGroup><P>{}</P></PropertyGroup></Project>",
+            body(segments)
+        ));
+        p.property("P")
+    };
+    match read(cap) {
+        // Fewer than `2^cap` values: where `s0` is a directory, the whole
+        // value's pass respells every piece's `\` alike.
+        crate::PropertyRead::Untrusted(crate::UntrustedCause::StartupDirectory(worlds)) => {
+            assert!(worlds.values().len() > cap, "{worlds:?}");
+        }
+        other => panic!("{cap} segments read {other:?}"),
+    }
+    match read(cap + 1) {
+        crate::PropertyRead::Untrusted(crate::UntrustedCause::StartupDirectory(_))
+        | crate::PropertyRead::Value(_) => {
+            panic!("{} segments must decline", cap + 1)
+        }
+        _ => {}
+    }
 }

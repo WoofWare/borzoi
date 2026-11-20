@@ -452,6 +452,20 @@ fn untrusted_cause_phrase(cause: &UntrustedCause) -> String {
             &rejection.cause,
             rejection.certainty == RejectionCertainty::Certain,
         ),
+        UntrustedCause::StartupDirectory(worlds) => {
+            let mut values: Vec<String> = worlds
+                .values()
+                .into_iter()
+                .map(|value| format!("`{value}`"))
+                .collect();
+            values.sort();
+            values.dedup();
+            format!(
+                "the directory the build is started from: MSBuild respells a `\\` in a path as \
+                 `/` only where a directory it names exists there, so the value is one of {}",
+                values.join(", ")
+            )
+        }
     }
 }
 

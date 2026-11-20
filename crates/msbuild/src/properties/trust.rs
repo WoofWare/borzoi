@@ -168,6 +168,13 @@ pub enum UntrustedCause {
     /// MSBuild may reject the whole project, so it holds no value at all
     /// ([`crate::ParsedProject::rejection`]).
     Rejected(Box<crate::Rejection>),
+    /// The value turns on MSBuild's startup directory, which the evaluation
+    /// does not know: MSBuild's Unix path adjustment respells a `\` as `/`
+    /// where a relative segment is a directory there. It holds the value,
+    /// unescaped, under each answer. A reader that reads only part
+    /// of a value (a file name, say) may take each through
+    /// [`crate::Worlds::map`] and commit where every world agrees.
+    StartupDirectory(Box<crate::Worlds<String>>),
 }
 
 impl UntrustedCause {

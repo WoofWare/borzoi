@@ -700,6 +700,146 @@ fn an_absolute_path_through_a_property_is_appended_to_the_sdk_directory() {
     ));
 }
 
+/// MSBuild turns each `\` written in an import's `Project` into `/` before it
+/// expands it, SDK import or plain: a property function reading a `\` written
+/// in its argument reads a `/`.
+#[test]
+fn a_backslash_written_in_the_attribute_is_a_slash_before_expansion() {
+    let layout = Layout::new();
+    let sdk_root = layout.sdk_root();
+    for (name, marker) in [("True.props", "slash"), ("False.props", "backslash")] {
+        std::fs::write(
+            sdk_root.join(name),
+            format!(
+                "<Project><PropertyGroup><Seen>$(Seen);{marker}</Seen></PropertyGroup></Project>"
+            ),
+        )
+        .expect("write marker");
+    }
+    let prelude = "  <PropertyGroup><Slash>a/b</Slash></PropertyGroup>\n";
+    let imports = vec![r"$(Slash.Contains('\')).props".to_owned()];
+    // On Windows, `FixFilePath` leaves the attribute as written.
+    let expected = if cfg!(windows) {
+        ";backslash"
+    } else {
+        ";slash"
+    };
+    for kind in KINDS {
+        let (xml, parsed, theirs) = evaluate_both_after(&layout, kind, prelude, &imports);
+        assert_eq!(
+            theirs.as_deref(),
+            Ok(expected),
+            "{kind:?}: MSBuild's import"
+        );
+        assert_certain_implies_exact(&format!("{kind:?}"), &xml, &parsed, theirs, true);
+    }
+}
+
+/// Whether an import under a gate the walk cannot decide may load nothing is
+/// judged on the file MSBuild would open: the attribute's written `\` is a
+/// `/` there too. Only `False.props` exists; MSBuild opens `True.props`
+/// where the gate holds (started where `seg` is a directory), and rejects
+/// the project.
+#[test]
+#[cfg(not(windows))]
+fn a_gated_import_is_judged_on_the_file_msbuild_opens() {
+    let layout = Layout::new();
+    let sdk_root = layout.sdk_root();
+    std::fs::write(sdk_root.join("False.props"), "<Project/>").expect("write props");
+    std::fs::write(layout.root.join("False.props"), "<Project/>").expect("write props");
+    let env = child_environment(&layout);
+    let resolver = |name: &str,
+                    _observer: &borzoi_msbuild::observed::Observer|
+     -> Result<SdkResolution, SdkResolveError> {
+        if name == "MySdk" {
+            Ok(SdkResolution::Single(SdkPaths {
+                root: sdk_root.clone(),
+                props: sdk_root.join("Sdk.props"),
+                targets: sdk_root.join("Sdk.targets"),
+            }))
+        } else {
+            Err(SdkResolveError::NotFound)
+        }
+    };
+    let cwd = layout.root.join("cwd-seg");
+    std::fs::create_dir_all(cwd.join("seg")).expect("mkdir seg");
+    for sdk in [" Sdk=\"MySdk\"", ""] {
+        let xml = format!(
+            "<Project>\n  <PropertyGroup><Slash>a/b</Slash><P>seg\\x</P></PropertyGroup>\n  \
+             <Import{sdk} Project=\"$(Slash.Contains('\\')).props\" Condition=\"'$(P)' == 'seg/x'\" />\n  \
+             <PropertyGroup><Seen>after</Seen></PropertyGroup>\n</Project>\n"
+        );
+        let proj = layout.root.join("p.proj");
+        std::fs::write(&proj, &xml).expect("write project");
+        let parsed = parse_fsproj_with_imports(
+            &borzoi_msbuild::ProjectFile::buffer(&proj, &xml).expect("a full path"),
+            &HashMap::new(),
+            &env,
+            Some(&resolver),
+            None,
+        )
+        .unwrap_or_else(|e| panic!("our parse: {e}\n{xml}"));
+        let theirs = msbuild_seen_from(&proj, &env, &cwd);
+        assert!(
+            theirs.is_err(),
+            "{sdk}: MSBuild opens True.props where `seg` is a directory: {theirs:?}"
+        );
+        assert!(
+            parsed.rejection.is_some(),
+            "{sdk}: we commit {:?}\n{xml}",
+            parsed.properties.get("Seen")
+        );
+    }
+}
+
+/// A rooted SDK import bypasses the SDK root, and a `..` after a property's
+/// `\` pops `seg/child`'s last segment where `seg/` is under the startup
+/// directory and `seg\child` whole elsewhere: MSBuild opens `work/seg/T.props`
+/// or `work/T.props`. The walk commits neither.
+#[test]
+#[cfg(not(windows))]
+fn a_rooted_sdk_import_through_a_backslash_and_a_parent_hop_declines() {
+    let layout = Layout::new();
+    let work = layout.root.join("work");
+    std::fs::create_dir_all(work.join("seg")).expect("mkdir work/seg");
+    for (file, marker) in [("T.props", "top"), ("seg/T.props", "seg")] {
+        std::fs::write(
+            work.join(file),
+            format!(
+                "<Project><PropertyGroup><Seen>$(Seen);{marker}</Seen></PropertyGroup></Project>"
+            ),
+        )
+        .expect("write marker");
+    }
+    let prelude = "  <PropertyGroup><G>seg\\child</G></PropertyGroup>\n";
+    let import = format!("/missing/..{}/$(G)/../T.props", work.display());
+    let (xml, parsed, _) = evaluate_both_after(&layout, Kind::Sdk, prelude, &[import]);
+    assert!(
+        !parsed.diagnostics.is_empty(),
+        "we committed {:?}\n{xml}",
+        parsed.properties.get("Seen")
+    );
+}
+
+/// A missing SDK import named through a property's `\` names one file under
+/// the SDK root from every startup directory, so its failure is certain.
+#[test]
+#[cfg(not(windows))]
+fn a_missing_sdk_import_through_a_backslash_is_a_certain_rejection() {
+    let layout = Layout::new();
+    // Two backslashes: the whole value's pass collapses the run where it
+    // respells, so the worlds differ in more than separators.
+    let prelude = "  <PropertyGroup><S>seg\\\\Missing.props</S></PropertyGroup>\n";
+    let (xml, parsed, theirs) =
+        evaluate_both_after(&layout, Kind::Sdk, prelude, &["$(S)".to_owned()]);
+    assert!(theirs.is_err(), "MSBuild rejects it: {theirs:?}\n{xml}");
+    assert_eq!(
+        parsed.rejection.map(|r| r.certainty),
+        Some(borzoi_msbuild::RejectionCertainty::Certain),
+        "{xml}"
+    );
+}
+
 /// A plain import of a path whose `\` a property supplies, from the SDK
 /// directory (which holds `sub/`), with MSBuild run from there, from an empty
 /// directory and from one holding every first segment. Each case says whether

@@ -18,8 +18,23 @@
 
 use std::path::Path;
 
+use super::worlds::World;
 use crate::dotnet_io;
 use crate::observed::Observer;
+
+/// `FileUtilities.FixFilePath`: on Unix each `\` of `raw` is a `/`; on
+/// Windows `raw` is left as it is. MSBuild applies it to text as written,
+/// before expanding it, in an import's `Project` (`ProjectImportElement`)
+/// and in the argument of a condition's `Exists` and `HasTrailingSlash`
+/// (oracle-pinned: `Exists('$(S.Contains(`\`)).txt')` asks about
+/// `True.txt` for `S` = `a/b`), so a property function there reads a `/`.
+pub(crate) fn fix_file_path(raw: &str) -> String {
+    if cfg!(windows) {
+        raw.to_owned()
+    } else {
+        raw.replace('\\', "/")
+    }
+}
 
 /// The **rewrite** the fixup would apply if it fires, or `None` when the fixup
 /// cannot fire at all (so the value is unambiguous — MSBuild returns it raw).
@@ -81,10 +96,12 @@ pub enum UnixPathProbe<'a> {
     Directory(&'a str),
     /// `File.Exists || Directory.Exists` of this absolute path.
     FileOrDirectory(&'a str),
-    /// A directory named relative to the MSBuild process's working directory,
-    /// which nothing in the evaluation's inputs determines: `dotnet build` run
-    /// from two directories evaluates the same project two ways.
-    WorkingDirectory,
+    /// A directory named relative to the MSBuild process's working directory
+    /// (its startup directory, [`super::worlds`]): this segment. Unless the
+    /// evaluation knows that directory, nothing in its inputs determines the
+    /// answer: `dotnet build` run from two directories evaluates the same
+    /// project two ways.
+    WorkingDirectory(&'a str),
 }
 
 /// The probe that decides whether the fixup keeps `rewrite`.
@@ -118,7 +135,7 @@ pub fn unix_path_probe(rewrite: &str) -> UnixPathProbe<'_> {
         "." | ".." => UnixPathProbe::Exists,
         // `Path.Combine` returns a rooted second argument whole.
         segment if segment.starts_with('/') => UnixPathProbe::Directory(segment),
-        _ => UnixPathProbe::WorkingDirectory,
+        segment => UnixPathProbe::WorkingDirectory(segment),
     }
 }
 
@@ -130,18 +147,32 @@ pub(crate) enum Adjusted {
     Unchanged,
     /// MSBuild returns this rewrite.
     Rewritten(String),
-    /// The answer turns on a directory named relative to the MSBuild
-    /// process's working directory.
-    WorkingDirectory,
-    /// The answer turns on a path under the root, and the evaluation asks no
-    /// file system.
-    Unasked,
+    /// The answer turns on something the evaluation does not ask: a path under
+    /// the root with no file system to ask, or a directory relative to a
+    /// working directory that is not decided ([`Relative::Undecided`]).
+    Undecided,
+}
+
+/// How [`adjust`] answers a probe of a directory named relatively.
+#[derive(Clone, Copy)]
+pub(crate) enum Relative<'w> {
+    /// Under MSBuild's startup directory, as this world has it: an
+    /// evaluation's expansion ([`super::worlds`]).
+    Startup(&'w World<'w>),
+    /// Not at all: a target's expansion, which runs in the project's directory
+    /// at a moment of the build the walk does not observe.
+    Undecided,
 }
 
 /// What MSBuild's fixup makes of `escaped`, one piece of an expansion or a
 /// whole expanded value, asking the file system through `observer` where the
-/// probe names an absolute path (`None` asks nothing).
-pub(crate) fn adjust(escaped: &str, observer: Option<&Observer>) -> Adjusted {
+/// probe names an absolute path (`None` asks nothing), and `relative` where it
+/// names a relative one.
+pub(crate) fn adjust(
+    escaped: &str,
+    observer: Option<&Observer>,
+    relative: Relative<'_>,
+) -> Adjusted {
     let Some(rewrite) = worlds(escaped) else {
         return Adjusted::Unchanged;
     };
@@ -160,12 +191,15 @@ pub(crate) fn adjust(escaped: &str, observer: Option<&Observer>) -> Adjusted {
         UnixPathProbe::FileOrDirectory(path) => {
             observer.map(|observer| dotnet_io::file_or_directory_exists(observer, Path::new(path)))
         }
-        UnixPathProbe::WorkingDirectory => return Adjusted::WorkingDirectory,
+        UnixPathProbe::WorkingDirectory(segment) => match relative {
+            Relative::Startup(world) => Some(world.present(segment)),
+            Relative::Undecided => None,
+        },
     };
     match rewrites {
         Some(true) => Adjusted::Rewritten(rewrite),
         Some(false) => Adjusted::Unchanged,
-        None => Adjusted::Unasked,
+        None => Adjusted::Undecided,
     }
 }
 
@@ -305,12 +339,12 @@ mod tests {
                 UnixPathProbe::Absent => 1,
                 UnixPathProbe::Directory(_) => 2,
                 UnixPathProbe::FileOrDirectory(_) => 3,
-                UnixPathProbe::WorkingDirectory => 4,
+                UnixPathProbe::WorkingDirectory(_) => 4,
             }] += 1;
             for (cwd_holds, root_holds) in
                 [(false, false), (false, true), (true, false), (true, true)]
             {
-                let mut asked = Vec::new();
+                let mut asked: Vec<String> = Vec::new();
                 let mut asked_any = Vec::new();
                 let reference = looks_like_unix_file_path(
                     &rewrite,
@@ -339,7 +373,10 @@ mod tests {
                         assert_eq!(asked_any, [path], "{value:?}");
                         root_holds
                     }
-                    UnixPathProbe::WorkingDirectory => cwd_holds,
+                    UnixPathProbe::WorkingDirectory(segment) => {
+                        assert_eq!(asked, [segment], "{value:?}");
+                        cwd_holds
+                    }
                 };
                 assert_eq!(
                     ours, reference,
@@ -373,7 +410,7 @@ mod tests {
         let root = root.to_str().unwrap();
         let first = root.split('/').nth(1).unwrap();
         let observer = Observer::new();
-        let ask = |value: &str| adjust(value, Some(&observer));
+        let ask = |value: &str| adjust(value, Some(&observer), Relative::Undecided);
         // A directory under the root: rewritten, slash runs collapsed.
         assert_eq!(
             ask(&format!("{root}\\a\\\\b")),
@@ -388,25 +425,34 @@ mod tests {
         assert_eq!(ask("\\borzoi-missing"), Adjusted::Unchanged);
         // `.` and `..` are directories wherever MSBuild runs.
         assert_eq!(ask("..\\a"), Adjusted::Rewritten("../a".to_string()));
-        // Under the working directory: not this evaluation's to decide.
-        assert_eq!(ask("seg\\a"), Adjusted::WorkingDirectory);
+        // Under the working directory: undecided where the caller says so,
+        // and otherwise the world's answer.
+        assert_eq!(ask("seg\\a"), Adjusted::Undecided);
+        let in_world = |value: &str| {
+            super::super::worlds::in_every_world(super::super::worlds::Start::Unknown, |world| {
+                adjust(value, Some(&observer), Relative::Startup(world))
+            })
+            .unwrap()
+        };
+        let seg = in_world("seg\\a");
+        assert_eq!(
+            seg.values(),
+            [
+                &Adjusted::Rewritten("seg/a".to_string()),
+                &Adjusted::Unchanged
+            ]
+        );
+        assert_eq!(seg.agreed(), None);
         // Ineligible: no backslash, a network prefix, an escaped backslash.
         assert_eq!(ask("seg/a"), Adjusted::Unchanged);
         assert_eq!(ask("\\\\srv\\a"), Adjusted::Unchanged);
         assert_eq!(ask("seg%5ca"), Adjusted::Unchanged);
-        // No file system: an absolute probe is unasked, a relative one still
-        // the working directory's.
-        assert_eq!(adjust(&format!("{root}\\a"), None), Adjusted::Unasked);
-        assert_eq!(adjust("seg\\a", None), Adjusted::WorkingDirectory);
-        assert_eq!(
-            adjust("..\\a", None),
-            Adjusted::Rewritten("../a".to_string())
-        );
+        // No file system: an absolute probe is undecided.
+        let unasked = |value: &str| adjust(value, None, Relative::Undecided);
+        assert_eq!(unasked(&format!("{root}\\a")), Adjusted::Undecided);
+        assert_eq!(unasked("..\\a"), Adjusted::Rewritten("../a".to_string()));
         // The root exists without asking: `/..` is `/` to `Directory.Exists`.
-        assert_eq!(adjust("\\", None), Adjusted::Rewritten("/".to_string()));
-        assert_eq!(
-            adjust("\\..\\a", None),
-            Adjusted::Rewritten("/../a".to_string())
-        );
+        assert_eq!(unasked("\\"), Adjusted::Rewritten("/".to_string()));
+        assert_eq!(unasked("\\..\\a"), Adjusted::Rewritten("/../a".to_string()));
     }
 }

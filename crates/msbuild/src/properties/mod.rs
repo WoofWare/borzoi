@@ -30,9 +30,12 @@ mod expr;
 pub(crate) use expr::is_name_byte;
 pub(crate) mod path_fixup;
 pub(crate) mod trust;
+pub(crate) mod worlds;
 
 use escaping::Escaped;
 use trust::{ResolvedProvenance, Trust};
+pub use worlds::Worlds;
+use worlds::{Start, TooManySegments, World};
 
 use crate::dotnet_io;
 use crate::observed::Observer;
@@ -50,7 +53,7 @@ const MAX_TARGET_FRAMEWORK_VERSION_PARTS: usize = 4;
 /// A single issue encountered while substituting an attribute or property
 /// value. Callers attach a span to convert these into
 /// [`Diagnostic`](super::Diagnostic)s.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Issue {
     /// `$(Name)` where `Name` is not in the property map. Substituted as
     /// the empty string in the output.
@@ -70,6 +73,10 @@ pub enum Issue {
         /// MSBuild never reaches (`$(P.Split(';')[9].Contains('$(X)'))`
         /// throws at `[9]`, whatever `X` holds), is not among them.
         reads: Vec<String>,
+        /// Whether it throws in every world of MSBuild's startup directory
+        /// the expansion ran in (`properties::worlds`): where it does not, MSBuild may
+        /// start where it does not throw here.
+        everywhere: bool,
     },
     /// `$(...)` MSBuild evaluates without throwing, to a boolean we do not
     /// compute (`expr::Failure::ReturnsBoolean`). Left literal in the output,
@@ -104,25 +111,11 @@ struct Entry {
     canonical: String,
     /// The value, in MSBuild's **escaped domain** — the form MSBuild itself
     /// stores. It leaves the domain exactly once, at a point of use; see
-    /// [`escaping::Escaped`]. `None` when the name has no binding.
-    value: Option<Escaped>,
+    /// [`escaping::Escaped`]. `None` when the name has no binding. A value
+    /// whose expansion turned on MSBuild's startup directory holds one value
+    /// per answer ([`Worlds`]).
+    value: Option<Worlds<Escaped>>,
     trust: Trust,
-    origin: Origin,
-}
-
-/// How MSBuild stored a value, which decides whether its backslashes have met
-/// the Unix path adjustment ([`path_fixup`]) yet: every expansion adjusts each
-/// piece it splices, but a value bound without one keeps its `\` until it is
-/// read.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Origin {
-    /// Bound as given: a reserved, toolset, environment or global name, the
-    /// `MSBuildThisFile*` frame, a task's output. MSBuild stores the text
-    /// without expanding it.
-    Seed,
-    /// What an expansion of project text produced: a property write, which
-    /// was adjusted on the way in.
-    Expansion,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -142,13 +135,13 @@ pub struct PropertyMap {
 /// through a method that names how.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Held<'a> {
-    value: &'a Escaped,
+    value: &'a Worlds<Escaped>,
 }
 
 impl<'a> Held<'a> {
     /// The value, leaving its trust behind — a decision the caller makes in
     /// writing, and greppable for that reason.
-    pub(crate) fn ignoring_trust(self) -> &'a Escaped {
+    pub(crate) fn ignoring_trust(self) -> &'a Worlds<Escaped> {
         self.value
     }
 }
@@ -180,6 +173,14 @@ impl<T> Provenanced<T> {
     /// The value, leaving its trust behind.
     pub(crate) fn into_ignoring_trust(self) -> T {
         self.value
+    }
+
+    /// The value taken through `f`, keeping the trust it carried.
+    pub(crate) fn map<U>(self, f: impl FnOnce(T) -> U) -> Provenanced<U> {
+        Provenanced {
+            value: f(self.value),
+            trust: self.trust,
+        }
     }
 }
 
@@ -223,20 +224,14 @@ impl PropertyMap {
 
     /// Bind an already-escaped value — the result of a substitution, which is
     /// composed *in* the domain and never left it. A seed: see [`Self::insert`].
-    /// Its backslashes have not met the Unix path adjustment (`Origin::Seed`);
-    /// a property write binds through `insert_expanded` instead.
+    /// A seed's backslashes meet the Unix path adjustment when it is read, as
+    /// every spliced piece does; a written value has met it already, and
+    /// meets it again idempotently, in the same world.
     pub fn insert_escaped(&mut self, key: impl Into<String>, value: Escaped) {
-        self.bind(key, value, Origin::Seed);
+        self.bind(key, Worlds::Same(value));
     }
 
-    /// Bind what MSBuild's expander produced from project text: a property
-    /// write, as a target runs it. Its pieces have met the Unix path
-    /// adjustment, unlike a seed's ([`Origin`]).
-    pub(crate) fn insert_expanded(&mut self, key: impl Into<String>, value: Escaped) {
-        self.bind(key, value, Origin::Expansion);
-    }
-
-    fn bind(&mut self, key: impl Into<String>, value: Escaped, origin: Origin) {
+    fn bind(&mut self, key: impl Into<String>, value: Worlds<Escaped>) {
         let key = key.into();
         let lower = key.to_ascii_lowercase();
         self.fresh.push(lower.clone());
@@ -247,14 +242,12 @@ impl PropertyMap {
                     entry.canonical = key;
                 }
                 entry.value = Some(value);
-                entry.origin = origin;
             }
             std::collections::hash_map::Entry::Vacant(slot) => {
                 slot.insert(Entry {
                     canonical: key,
                     value: Some(value),
                     trust: Trust::CERTAIN,
-                    origin,
                 });
             }
         }
@@ -265,11 +258,11 @@ impl PropertyMap {
     pub(crate) fn write(
         &mut self,
         key: impl Into<String>,
-        value: Escaped,
+        value: Worlds<Escaped>,
         provenance: ResolvedProvenance,
     ) {
         let key = key.into();
-        self.insert_expanded(key.clone(), value);
+        self.bind(key.clone(), value);
         self.apply_provenance(&key, provenance);
     }
 
@@ -294,7 +287,6 @@ impl PropertyMap {
                         canonical: key.to_string(),
                         value: None,
                         trust,
-                        origin: Origin::Seed,
                     });
                 }
             }
@@ -329,16 +321,18 @@ impl PropertyMap {
     /// [`Held::ignoring_trust`] in one step, for a reader whose trust question
     /// is answered elsewhere and says where. (The domain type is
     /// crate-internal by design: no consumer outside the evaluator should be
-    /// able to pick the wrong one.)
-    pub(crate) fn get_ignoring_trust(&self, key: &str) -> Option<&Escaped> {
+    /// able to pick the wrong one.) The reader also says what it makes of a
+    /// value that turns on MSBuild's startup directory.
+    pub(crate) fn get_ignoring_trust(&self, key: &str) -> Option<&Worlds<Escaped>> {
         self.get(key).map(Held::ignoring_trust)
     }
 
     /// The stored value at its point of use, unescaped exactly once and
     /// without its trust. This is what MSBuild's own
     /// `ProjectProperty.EvaluatedValue` returns (`ProjectProperty.cs:89`).
-    pub fn get_unescaped_ignoring_trust(&self, key: &str) -> Option<String> {
-        self.get_ignoring_trust(key).map(Escaped::unescape)
+    pub fn get_unescaped_ignoring_trust(&self, key: &str) -> Option<Worlds<String>> {
+        self.get_ignoring_trust(key)
+            .map(|worlds| worlds.map(&mut Escaped::unescape))
     }
 
     /// Whether `key` has a binding. A question about presence, not about the
@@ -408,6 +402,13 @@ impl PropertyMap {
         }
     }
 
+    /// Bind `value` as a write would, for a test that needs a value which
+    /// turns on the startup directory.
+    #[cfg(test)]
+    pub(crate) fn insert_worlds_for_test(&mut self, key: &str, value: Worlds<Escaped>) {
+        self.bind(key, value);
+    }
+
     /// Every name the table holds an entry for, bound or not, lowercase.
     pub(crate) fn names(&self) -> impl Iterator<Item = &str> {
         self.inner.keys().map(String::as_str)
@@ -427,19 +428,27 @@ impl PropertyMap {
 /// of the entry it consulted, bound or not, so the expansion's result can
 /// carry it ([`Provenanced`]). The accumulator is the one piece of mutable
 /// state, scoped to a single expansion.
+///
+/// An expansion runs in one world ([`World`]): a stored value that turns on
+/// MSBuild's startup directory is read as that world has it, and a relative
+/// probe the expansion makes is answered by it.
 pub(crate) struct Reads<'m> {
     map: &'m PropertyMap,
     joined: std::cell::RefCell<Trust>,
     /// Every name looked up, bound or not, in order.
     names: std::cell::RefCell<Vec<String>>,
+    world: &'m World<'m>,
+    probes: Probes,
 }
 
 impl<'m> Reads<'m> {
-    pub(crate) fn of(map: &'m PropertyMap) -> Self {
+    fn new(map: &'m PropertyMap, world: &'m World<'m>, probes: Probes) -> Self {
         Reads {
             map,
             joined: std::cell::RefCell::new(Trust::CERTAIN),
             names: std::cell::RefCell::new(Vec::new()),
+            world,
+            probes,
         }
     }
 
@@ -453,18 +462,22 @@ impl<'m> Reads<'m> {
         self.names.borrow()[mark..].to_vec()
     }
 
-    /// The stored value of `key`, joining its entry's trust into the
-    /// expansion's.
+    /// The stored value of `key` in this expansion's world, joining its
+    /// entry's trust into the expansion's.
     pub(crate) fn get(&self, key: &str) -> Option<&'m Escaped> {
-        self.get_with_origin(key).map(|(value, _)| value)
-    }
-
-    /// [`Self::get`], with how the value was stored.
-    fn get_with_origin(&self, key: &str) -> Option<(&'m Escaped, Origin)> {
         self.names.borrow_mut().push(key.to_owned());
         let entry = self.map.inner.get(&key.to_ascii_lowercase())?;
         self.joined.borrow_mut().join_in(&entry.trust);
-        Some((entry.value.as_ref()?, entry.origin))
+        Some(self.world.read(entry.value.as_ref()?))
+    }
+
+    /// How the expansion answers a relative probe of the Unix path adjustment.
+    fn relative(&self) -> path_fixup::Relative<'m> {
+        match self.probes {
+            Probes::Evaluation => path_fixup::Relative::Startup(self.world),
+            #[cfg(any(test, feature = "test-support"))]
+            Probes::Target => path_fixup::Relative::Undecided,
+        }
     }
 
     fn into_trust(self) -> Trust {
@@ -676,53 +689,74 @@ fn no_root(dir: &Path) -> String {
 ///
 /// Each piece of the expansion, and then the whole of it, meets MSBuild's Unix
 /// path adjustment ([`path_fixup`]), as every `ExpandIntoString…` does. This
-/// form asks no file system, so an adjustment that turns on one is an
-/// [`Issue::PathAdjustmentUndecided`]; a relative probe of project text is
-/// taken to miss ([`Relative::MissForProjectText`]).
+/// form asks no file system and knows no startup directory, and it answers
+/// only what is the same under every startup directory: a value that is not is
+/// an [`Issue::PathAdjustmentUndecided`] ([`substitute_agreed`]).
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn substitute(input: &str, props: &PropertyMap) -> (Provenanced<Escaped>, Vec<Issue>) {
-    substitute_adjusting(input, props, None, Relative::MissForProjectText)
+    substitute_agreed(input, props, None, Start::Unknown)
 }
 
-/// [`substitute`], with the filesystem-probing property functions enabled
+/// The expansion of `input` under every startup directory `start` allows
+/// ([`worlds`]), with the issues any of them met and the trust of everything
+/// any of them read.
+///
+/// `observer`, when given, enables the filesystem-probing property functions
 /// (`GetDirectoryNameOfFileAbove` walks ancestor directories asking .NET's
-/// `File.Exists` of each, through `observer`), and the Unix path adjustment's
-/// probes of absolute paths asked through it too. Only the with-imports
-/// evaluation path may use this; the pure `parse_fsproj` surface promises no
-/// filesystem access, so there the same expression stays a visible
-/// [`Issue::Unsupported`].
+/// `File.Exists` of each) and answers the Unix path adjustment's probes of
+/// absolute paths. Only the with-imports evaluation path passes one; the pure
+/// `parse_fsproj` surface promises no filesystem access, so there the same
+/// expression stays a visible [`Issue::Unsupported`].
+///
+/// A computation that asks about more than [`worlds::MAX_SEGMENTS`] relative
+/// segments is not enumerated: its value is the one where none of them is a
+/// directory, with an [`Issue::PathAdjustmentUndecided`].
+pub(crate) fn substitute_worlds(
+    input: &str,
+    props: &PropertyMap,
+    observer: Option<&Observer>,
+    start: Start<'_>,
+) -> (Provenanced<Worlds<Escaped>>, Vec<Issue>) {
+    expand_in_every_world(input, props, observer, start, Probes::Evaluation)
+}
+
+/// [`substitute_worlds`], answering only a value that is the same under every
+/// startup directory. One that is not is an
+/// [`Issue::PathAdjustmentUndecided`], and the value returned is the one where
+/// no segment it asks about is a directory: a caller that reads it past the
+/// issue reads a guess.
+pub(crate) fn substitute_agreed(
+    input: &str,
+    props: &PropertyMap,
+    observer: Option<&Observer>,
+    start: Start<'_>,
+) -> (Provenanced<Escaped>, Vec<Issue>) {
+    let (worlds, issues) = substitute_worlds(input, props, observer, start);
+    agreed_or_undecided(worlds, issues)
+}
+
+/// [`substitute`], with the filesystem-probing property functions and the
+/// absolute probes of the Unix path adjustment asked through `observer`.
+#[cfg(test)]
 pub(crate) fn substitute_with_fs(
     input: &str,
     props: &PropertyMap,
     observer: &Observer,
 ) -> (Provenanced<Escaped>, Vec<Issue>) {
-    substitute_adjusting(input, props, Some(observer), Relative::MissForProjectText)
+    substitute_agreed(input, props, Some(observer), Start::Unknown)
 }
 
-/// [`substitute`] as a target's body expands: with the project's directory as
-/// MSBuild's working directory (a build request sets it), which the
-/// evaluation's assumption that a relative probe misses does not describe. So
-/// every relative probe is an [`Issue::PathAdjustmentUndecided`].
-#[cfg(any(test, feature = "test-support"))]
-pub(crate) fn substitute_in_target(
-    input: &str,
-    props: &PropertyMap,
-) -> (Provenanced<Escaped>, Vec<Issue>) {
-    substitute_adjusting(input, props, None, Relative::Undecided)
-}
-
-fn substitute_adjusting(
+/// One world's expansion of `input`: what a computation that is itself run
+/// once per world ([`worlds::in_every_world`]) expands, a condition's operand
+/// among them.
+pub(crate) fn substitute_in_world(
     input: &str,
     props: &PropertyMap,
     observer: Option<&Observer>,
-    relative: Relative,
+    world: &World<'_>,
 ) -> (Provenanced<Escaped>, Vec<Issue>) {
-    let reads = Reads::of(props);
-    let (value, issues) = substitute_impl(
-        input,
-        &reads,
-        observer,
-        Adjust::Pieces { observer, relative },
-    );
+    let reads = Reads::new(props, world, Probes::Evaluation);
+    let (value, issues) = substitute_impl(input, &reads, observer, Adjust::Pieces { observer });
     (
         Provenanced {
             value,
@@ -732,22 +766,308 @@ fn substitute_adjusting(
     )
 }
 
-/// What an expansion's adjustment ([`path_fixup::adjust`]) concludes from a
-/// probe of a directory named relative to MSBuild's working directory.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Relative {
-    /// Where every backslash in question is project text, the probe misses,
-    /// and the text stays as it is: MSBuild's answer when started from a
-    /// directory holding none of the segments. This is the evaluation's
-    /// known gap (`docs/msbuild-unix-path-fixup-plan.md`, the deferred
-    /// provenance dimension): declining instead would decline the SDK's own
-    /// `obj\`, and with it every import `MSBuildProjectExtensionsPath`
-    /// chooses. A seed's backslash is not project text, and declines.
-    MissForProjectText,
-    /// Every relative probe declines: a target's expansion
-    /// ([`substitute_in_target`]).
+/// [`substitute`] as a target's body expands: with the project's directory as
+/// MSBuild's working directory (a build request sets it), at a moment of the
+/// build the walk does not observe. So every relative probe the expansion
+/// makes is an [`Issue::PathAdjustmentUndecided`]; a value it reads that the
+/// evaluation left depending on the startup directory is answered only where
+/// every startup directory agrees.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn substitute_in_target(
+    input: &str,
+    props: &PropertyMap,
+) -> (Provenanced<Escaped>, Vec<Issue>) {
+    let (worlds, issues) =
+        expand_in_every_world(input, props, None, Start::Unknown, Probes::Target);
+    agreed_or_undecided(worlds, issues)
+}
+
+/// Which relative probes an expansion answers through its world.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Probes {
+    /// Every one: an evaluation's expansion, probing under MSBuild's startup
+    /// directory.
+    Evaluation,
+    /// None: a target's expansion ([`substitute_in_target`]).
     #[cfg(any(test, feature = "test-support"))]
-    Undecided,
+    Target,
+}
+
+fn expand_in_every_world(
+    input: &str,
+    props: &PropertyMap,
+    observer: Option<&Observer>,
+    start: Start<'_>,
+    probes: Probes,
+) -> (Provenanced<Worlds<Escaped>>, Vec<Issue>) {
+    let mut trust = Trust::CERTAIN;
+    let mut run = |world: &World<'_>| {
+        let reads = Reads::new(props, world, probes);
+        let result = substitute_impl(input, &reads, observer, Adjust::Pieces { observer });
+        trust.join_in(&reads.into_trust());
+        result
+    };
+    let (value, issues) = match worlds::in_every_world(start, &mut run) {
+        Ok(results) => {
+            // The first world's issues as they came, then any other world's
+            // it lacks.
+            let worlds = results.values();
+            let mut issues: Vec<Issue> = worlds[0].1.clone();
+            if worlds.len() > 1 {
+                let mut seen: std::collections::HashSet<Issue> = issues.iter().cloned().collect();
+                for (_, world_issues) in &worlds[1..] {
+                    for issue in world_issues {
+                        if seen.insert(issue.clone()) {
+                            issues.push(issue.clone());
+                        }
+                    }
+                }
+            }
+            // A throw some world does not make is one MSBuild may not make.
+            let thrown_in = |world_issues: &[Issue], thrown: &str| {
+                world_issues.iter().any(|issue| {
+                    matches!(issue, Issue::Throws { expression, .. } if expression == thrown)
+                })
+            };
+            for issue in &mut issues {
+                if let Issue::Throws {
+                    expression,
+                    everywhere,
+                    ..
+                } = issue
+                {
+                    *everywhere = worlds.iter().all(|(_, w)| thrown_in(w, expression));
+                }
+            }
+            (results.map(&mut |(value, _)| value.clone()), issues)
+        }
+        Err(TooManySegments) => {
+            let (value, mut issues) = run(&World::absent_everywhere());
+            // The worlds left unenumerated may not throw.
+            for issue in &mut issues {
+                if let Issue::Throws { everywhere, .. } = issue {
+                    *everywhere = false;
+                }
+            }
+            issues.push(Issue::PathAdjustmentUndecided {
+                value: input.to_owned(),
+            });
+            (Worlds::Same(value), issues)
+        }
+    };
+    (Provenanced { value, trust }, issues)
+}
+
+/// The value of `worlds` where every world agrees; otherwise the value where
+/// no segment is a directory, with an [`Issue::PathAdjustmentUndecided`].
+fn agreed_or_undecided(
+    worlds: Provenanced<Worlds<Escaped>>,
+    mut issues: Vec<Issue>,
+) -> (Provenanced<Escaped>, Vec<Issue>) {
+    let Provenanced { value, trust } = worlds;
+    let value = match value {
+        Worlds::Same(value) => value,
+        split @ Worlds::Split(_) => {
+            let representative = split.absent_everywhere().clone();
+            issues.push(Issue::PathAdjustmentUndecided {
+                value: representative.as_escaped().to_owned(),
+            });
+            representative
+        }
+    };
+    (Provenanced { value, trust }, issues)
+}
+
+/// What a path spec names, as far as its separators go: `value` with every
+/// run of `\` and `/` one `/` ([`path_fixup::convert_to_unix_slashes`]). The
+/// worlds of an expansion differ only in whether MSBuild's Unix path
+/// adjustment respelled such runs, so worlds that agree on this name the same
+/// paths where MSBuild reads a `\` as a separator: splitting, globbing,
+/// taking a full path. (An escaped `%5c` decodes to a `\` the full path reads
+/// as a separator too.) Total; `Option` for the collapse functions' shape.
+pub(crate) fn separator_insensitive(value: &Escaped) -> Option<String> {
+    Some(path_fixup::convert_to_unix_slashes(value.as_escaped()))
+}
+
+/// What a spec names where it is matched against items (a `Remove`, an
+/// `Exclude`): [`separator_insensitive`], except that a spec with a
+/// literal fragment MSBuild compares as written
+/// ([`crate::glob::compares_unnormalised`]) agrees only with itself. A
+/// wildcard fragment is a pattern, whose `\` the glob reads as a separator.
+pub(crate) fn match_insensitive(value: &Escaped) -> Option<String> {
+    Some(fragment_keys(value, true, false))
+}
+
+/// What an `Include` names where an `Exclude` compares its items: a pattern
+/// in the `Exclude` reads a literal item's spelling as written (a run of
+/// separators is an empty segment `*` matches, and `seg\..\r.fs` is not
+/// `r.fs` to `r*.fs`), so a literal is compared as written; a pattern's own
+/// fixed directory still names a directory.
+pub(crate) fn include_beside_exclude_insensitive(value: &Escaped) -> Option<String> {
+    Some(fragment_keys(value, true, true))
+}
+
+/// What an `Include` names where nothing compares its items' spellings (no
+/// `Exclude`): [`match_insensitive`], a literal fragment always read as the
+/// full path it names.
+pub(crate) fn include_insensitive(value: &Escaped) -> Option<String> {
+    Some(fragment_keys(value, false, false))
+}
+
+/// The key of each `;`-fragment of `value`, joined. `verbatim`: whether a
+/// literal fragment MSBuild compares as written keeps its spelling.
+/// `literal_runs`: whether any other literal is compared as written too.
+fn fragment_keys(value: &Escaped, verbatim: bool, literal_runs: bool) -> String {
+    // Fragment by fragment: the adjustment never moves a `;`. A pattern reads
+    // each `\` as a `/` but keeps its runs, which choose how it matches
+    // (`**//*` is not `**/*`); a literal name MSBuild compares as written is
+    // read as written; any other literal names a full path, runs and all
+    // collapsed. A wildcard spelled as an escape is a pattern once decoded,
+    // to an `Exclude`, and read as written there; to a bare `Include` it is a
+    // literal naming a full path.
+    let fragments: Vec<String> = value
+        .as_escaped()
+        .split(';')
+        .map(|fragment| fragment_key(fragment, verbatim, literal_runs))
+        .collect();
+    fragments.join(";")
+}
+
+/// The key of one `;`-fragment, escaped ([`fragment_keys`]).
+fn fragment_key(fragment: &str, verbatim: bool, literal_runs: bool) -> String {
+    let decoded = escaping::unescape(fragment);
+    if escaping::filespec_has_wildcards(fragment) {
+        // The fixed directory before the first wildcard names a directory,
+        // whose runs do not matter; the rest is the pattern.
+        let wildcard = fragment.find(['*', '?']).unwrap_or(fragment.len());
+        let fixed = fragment[..wildcard]
+            .rfind(['/', '\\'])
+            .map_or(0, |at| at + 1);
+        format!(
+            "{}{}",
+            path_fixup::convert_to_unix_slashes(&fragment[..fixed]),
+            fragment[fixed..].replace('\\', "/")
+        )
+    } else if literal_runs
+        || (verbatim
+            && (decoded.contains(['*', '?']) || crate::glob::compares_unnormalised(&decoded)))
+    {
+        fragment.to_owned()
+    } else {
+        path_fixup::convert_to_unix_slashes(fragment)
+    }
+}
+
+/// Whether MSBuild's second expansion of an `Exclude` may change what
+/// `value`, the attribute's first expansion, matches. `LazyItemEvaluator`
+/// splits the expanded attribute and expands each fragment again (a `Remove`
+/// or an `Include` is expanded once), so a reference the first expansion
+/// spliced raw (a global's or the environment's `$(…)`) is expanded then, and
+/// each fragment's own first segment decides its `\` again
+/// ([`path_fixup::worlds`]). True where a fragment holds a `$(`, or the
+/// second adjustment may respell one that is then matched otherwise
+/// ([`match_insensitive`]).
+pub(crate) fn exclude_second_pass_may_move(value: &Escaped) -> bool {
+    value
+        .as_escaped()
+        .split(';')
+        .any(exclude_fragment_second_pass_may_move)
+}
+
+/// [`exclude_second_pass_may_move`] of one fragment, or of an identity an
+/// item reference in the `Exclude` expands to.
+pub(crate) fn exclude_fragment_second_pass_may_move(fragment: &str) -> bool {
+    fragment.contains("$(")
+        || path_fixup::worlds(fragment).is_some_and(|rewrite| {
+            fragment_key(fragment, true, false) != fragment_key(&rewrite, true, false)
+        })
+}
+
+/// The world of `worlds` every other is, but for some of its `\` respelled
+/// `/`, character for character, if there is one: the world that keeps every
+/// `\` the others respelled, for an import's `Project`, which then judges
+/// every world by the `\` it keeps (`adjustment_settles`). `None` where no
+/// world keeps all of them (a property function may build the worlds apart).
+/// A run of `/` alone, which the whole value's adjustment collapses where it
+/// respells and which `GetFullPath` collapses anyway, is one `/` in every
+/// world before the worlds are compared. A run that holds a `\` is compared
+/// as written, so the world keeping it keeps it whole.
+pub(crate) fn import_collapse(worlds: &Worlds<Escaped>) -> Option<Escaped> {
+    collapse_onto_kept_backslashes(worlds, collapse_slash_runs)
+}
+
+/// `text` with every run of `/` alone one `/`.
+fn collapse_slash_runs(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        if !(ch == '/' && out.ends_with('/')) {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+/// The world every other is, read through `canonical`, but for some of its
+/// `\` respelled `/`, character for character.
+fn collapse_onto_kept_backslashes(
+    worlds: &Worlds<Escaped>,
+    canonical: fn(&str) -> String,
+) -> Option<Escaped> {
+    let values = worlds.values();
+    let keeps = |kept: &str, other: &str| {
+        let (kept, other) = (canonical(kept), canonical(other));
+        kept.len() == other.len()
+            && kept
+                .bytes()
+                .zip(other.bytes())
+                .all(|(k, o)| k == o || (k == b'\\' && o == b'/'))
+    };
+    let dominant = values
+        .iter()
+        .max_by_key(|value| value.as_escaped().matches('\\').count())?;
+    values
+        .iter()
+        .all(|other| keeps(dominant.as_escaped(), other.as_escaped()))
+        .then(|| (*dominant).clone())
+}
+
+/// `worlds` collapsed for a reader that reads every live `\\` as a separator
+/// and opens the full path (an SDK import's `Project`): the value where no
+/// segment is a directory, where every world names the same path
+/// ([`separator_insensitive`]).
+pub(crate) fn full_path_collapse(worlds: &Worlds<Escaped>) -> Option<Escaped> {
+    matches!(
+        worlds.map(&mut separator_insensitive).agreed(),
+        Some(Some(_))
+    )
+    .then(|| worlds.absent_everywhere().clone())
+}
+
+/// `worlds` collapsed for a reader that matches them against items by full
+/// path ([`match_insensitive`]): the value where no segment is a directory,
+/// where every world agrees on what it matches.
+pub(crate) fn match_collapse(worlds: &Worlds<Escaped>) -> Option<Escaped> {
+    matches!(worlds.map(&mut match_insensitive).agreed(), Some(Some(_)))
+        .then(|| worlds.absent_everywhere().clone())
+}
+
+/// An item's metadatum after the pass MSBuild makes of it once expanded:
+/// `MaybeAdjustFilePath` again, with the containing project's directory as the
+/// base of a relative probe (`LazyItemOperation`). That directory is not the
+/// one this crate asks about, so a value whose first segment is relative and
+/// that still holds a `\` the pass may respell is `None`; any other is the
+/// pass's answer, asking the file system through `observer` where the probe
+/// names an absolute path.
+pub(crate) fn metadata_pass(value: &Escaped, observer: Option<&Observer>) -> Option<Escaped> {
+    match path_fixup::adjust(
+        value.as_escaped(),
+        observer,
+        path_fixup::Relative::Undecided,
+    ) {
+        path_fixup::Adjusted::Unchanged => Some(value.clone()),
+        path_fixup::Adjusted::Rewritten(rewrite) => Some(Escaped::from_xml(rewrite)),
+        path_fixup::Adjusted::Undecided => None,
+    }
 }
 
 /// How [`substitute_impl`] meets MSBuild's Unix path adjustment.
@@ -758,43 +1078,38 @@ enum Adjust<'a> {
     Off,
     /// Each piece, then the whole value, as `ExpandIntoStringLeaveEscaped`
     /// does, asking the file system through `observer` where a probe names an
-    /// absolute path.
-    Pieces {
-        observer: Option<&'a Observer>,
-        relative: Relative,
-    },
+    /// absolute path, and the expansion's world where it names a relative one.
+    Pieces { observer: Option<&'a Observer> },
 }
 
 /// An expansion as MSBuild's `SpanBasedConcatenator` builds it: each piece
 /// meets the Unix path adjustment as it is appended, and the whole value
 /// meets it once more at the end (`Expander.ExpandIntoStringLeaveEscaped`).
-struct Concatenation<'a> {
+struct Concatenation<'a, 'w> {
     out: Escaped,
     adjust: Adjust<'a>,
-    /// Whether a backslash some seed spliced survives in `out`.
-    seed_backslash: bool,
+    relative: path_fixup::Relative<'w>,
 }
 
-impl<'a> Concatenation<'a> {
-    fn new(adjust: Adjust<'a>) -> Self {
+impl<'a, 'w> Concatenation<'a, 'w> {
+    fn new(adjust: Adjust<'a>, relative: path_fixup::Relative<'w>) -> Self {
         Concatenation {
             out: Escaped::default(),
             adjust,
-            seed_backslash: false,
+            relative,
         }
     }
 
-    /// Append one piece, `origin` saying whether its text was stored without
-    /// expansion ([`Origin::Seed`]) or is project text.
-    fn push(&mut self, piece: &Escaped, origin: Origin, issues: &mut Vec<Issue>) {
-        let Adjust::Pieces { observer, relative } = self.adjust else {
+    /// Append one piece. Every piece meets the adjustment, whether project
+    /// text or a value MSBuild stored without expanding it (a seed):
+    /// the seed's backslash meets it here, at its first read.
+    fn push(&mut self, piece: &Escaped, issues: &mut Vec<Issue>) {
+        let Adjust::Pieces { observer } = self.adjust else {
             self.out.push(piece);
             return;
         };
-        let seeded = origin == Origin::Seed;
-        let adjusted = Self::adjusted(piece.as_escaped(), seeded, observer, relative, issues);
+        let adjusted = Self::adjusted(piece.as_escaped(), observer, self.relative, issues);
         let text = adjusted.as_deref().unwrap_or(piece.as_escaped());
-        self.seed_backslash |= seeded && text.contains('\\');
         self.out.push(&Escaped::from_xml(text.to_owned()));
     }
 
@@ -803,20 +1118,14 @@ impl<'a> Concatenation<'a> {
     /// MSBuild's answer for certain.
     fn adjusted(
         escaped: &str,
-        seeded: bool,
         observer: Option<&Observer>,
-        relative: Relative,
+        relative: path_fixup::Relative<'_>,
         issues: &mut Vec<Issue>,
     ) -> Option<String> {
-        match path_fixup::adjust(escaped, observer) {
+        match path_fixup::adjust(escaped, observer, relative) {
             path_fixup::Adjusted::Unchanged => None,
             path_fixup::Adjusted::Rewritten(rewrite) => Some(rewrite),
-            path_fixup::Adjusted::WorkingDirectory
-                if !seeded && relative == Relative::MissForProjectText =>
-            {
-                None
-            }
-            path_fixup::Adjusted::WorkingDirectory | path_fixup::Adjusted::Unasked => {
+            path_fixup::Adjusted::Undecided => {
                 issues.push(Issue::PathAdjustmentUndecided {
                     value: escaped.to_owned(),
                 });
@@ -827,20 +1136,26 @@ impl<'a> Concatenation<'a> {
 
     /// The whole value, after its own pass through the adjustment.
     fn finish(self, issues: &mut Vec<Issue>) -> Escaped {
-        let Adjust::Pieces { observer, relative } = self.adjust else {
+        let Adjust::Pieces { observer } = self.adjust else {
             return self.out;
         };
-        match Self::adjusted(
-            self.out.as_escaped(),
-            self.seed_backslash,
-            observer,
-            relative,
-            issues,
-        ) {
+        match Self::adjusted(self.out.as_escaped(), observer, self.relative, issues) {
             Some(rewrite) => Escaped::from_xml(rewrite),
             None => self.out,
         }
     }
+}
+
+/// [`expr::evaluate`] of `inner` against `props`, in the world where no
+/// relative segment is a directory, taken to its point of use: the expression
+/// tests' entry point.
+#[cfg(test)]
+fn evaluate_for_test(inner: &str, props: &PropertyMap) -> Option<(String, Vec<Issue>)> {
+    let world = World::absent_everywhere();
+    let reads = Reads::new(props, &world, Probes::Evaluation);
+    expr::evaluate(inner, &reads, None)
+        .ok()
+        .map(|e| (e.value.unescape(), e.issues))
 }
 
 fn substitute_impl(
@@ -854,15 +1169,11 @@ fn substitute_impl(
     // (a stored property is, by construction; an expression result is escaped
     // by the evaluator — bar the one `Char` hole it models). Nothing here needs
     // to know *where* a `%` came from, which is the whole point.
-    let mut out = Concatenation::new(adjust);
+    let mut out = Concatenation::new(adjust, props.relative());
     let mut issues = Vec::new();
     let mut rest = input;
     while let Some(idx) = rest.find("$(") {
-        out.push(
-            &Escaped::from_xml(&rest[..idx]),
-            Origin::Expansion,
-            &mut issues,
-        );
+        out.push(&Escaped::from_xml(&rest[..idx]), &mut issues);
         let after = &rest[idx + 2..];
         // Fast path: simple `$(Identifier)` — match the identifier and a
         // single closing paren without doing any nested-paren counting.
@@ -880,8 +1191,8 @@ fn substitute_impl(
         if id_len > 0 && after.as_bytes().get(id_len) == Some(&b')') {
             let name = &after[..id_len];
             rest = &after[id_len + 1..];
-            if let Some((value, origin)) = props.get_with_origin(name) {
-                out.push(value, origin, &mut issues);
+            if let Some(value) = props.get(name) {
+                out.push(value, &mut issues);
             } else {
                 issues.push(Issue::Undefined {
                     name: name.to_string(),
@@ -906,9 +1217,8 @@ fn substitute_impl(
                         // escape with what follows), while a string indexer's
                         // `Char` went in raw — MSBuild's own hole, modelled in
                         // `expr::evaluate`. A result holding a live backslash
-                        // has declined (see `expr::has_unix_backslash`), so its
-                        // origin is moot.
-                        out.push(&evaluated.value, Origin::Expansion, &mut issues);
+                        // has declined (see `expr::has_unix_backslash`).
+                        out.push(&evaluated.value, &mut issues);
                     }
                     Err(failure) => {
                         let expression = format!("$({inner})");
@@ -917,15 +1227,12 @@ fn substitute_impl(
                             expr::Failure::Throws => Issue::Throws {
                                 expression,
                                 reads: props.names_since(mark),
+                                everywhere: true,
                             },
                             expr::Failure::ReturnsBoolean => Issue::ReturnsBoolean { expression },
                             expr::Failure::ReturnsValue => Issue::ReturnsValue { expression },
                         });
-                        out.push(
-                            &Escaped::from_xml(format!("$({inner})")),
-                            Origin::Expansion,
-                            &mut issues,
-                        );
+                        out.push(&Escaped::from_xml(format!("$({inner})")), &mut issues);
                     }
                 }
             }
@@ -942,17 +1249,13 @@ fn substitute_impl(
                 issues.push(Issue::Unsupported {
                     expression: rest[idx..].to_string(),
                 });
-                out.push(
-                    &Escaped::from_xml(&rest[idx..]),
-                    Origin::Expansion,
-                    &mut issues,
-                );
+                out.push(&Escaped::from_xml(&rest[idx..]), &mut issues);
                 let out = out.finish(&mut issues);
                 return (out, issues);
             }
         }
     }
-    out.push(&Escaped::from_xml(rest), Origin::Expansion, &mut issues);
+    out.push(&Escaped::from_xml(rest), &mut issues);
     let out = out.finish(&mut issues);
     (out, issues)
 }
@@ -1629,7 +1932,7 @@ mod stale_tests {
                         let name = format!("P{n}");
                         map.write(
                             name.clone(),
-                            escaping::Escaped::from_xml("w".to_string()),
+                            Worlds::Same(escaping::Escaped::from_xml("w".to_string())),
                             super::trust::ResolvedProvenance {
                                 taint: super::trust::TaintOutcome::Clear,
                                 unpinned: super::trust::UnpinnedOutcome::Clear,
@@ -1684,16 +1987,16 @@ mod tests {
     }
 
     /// The same, for the fs-probing variant.
-    #[allow(dead_code)]
     fn substitute_with_fs(input: &str, props: &PropertyMap) -> (String, Vec<Issue>) {
         let (value, issues) = super::substitute_with_fs(input, props, &Observer::new());
         (value.into_ignoring_trust().unescape(), issues)
     }
 
     /// Each piece of an expansion, then the whole, meets the Unix path
-    /// adjustment; a relative probe misses for project text and declines for a
-    /// seed's backslash. `tests/path_fixup_expansion_diff.rs` holds the same
-    /// rule to MSBuild over generated values.
+    /// adjustment; a relative probe is a question about MSBuild's startup
+    /// directory, whoever wrote the backslash, and the expansion holds each
+    /// answer. `tests/path_fixup_expansion_diff.rs` holds the same rule to
+    /// MSBuild, started in several directories, over generated values.
     #[test]
     #[cfg(not(windows))]
     fn expansion_adjusts_each_piece_then_the_whole() {
@@ -1705,11 +2008,16 @@ mod tests {
         props.insert("AbsSeed", format!("{root}\\a"));
         props.insert("RelSeed", "seg\\a");
         props.insert("MissingSeed", "/borzoi-missing\\a");
-        let written = |value: &str| Escaped::from_xml(value.to_string());
-        props.insert_expanded("RelWritten", written("seg\\a"));
         let expand = |input: &str| {
-            let (value, issues) = super::substitute_with_fs(input, &props, &observer);
-            (value.into_ignoring_trust().unescape(), issues)
+            let (value, issues) = substitute_worlds(input, &props, Some(&observer), Start::Unknown);
+            let value = value
+                .into_ignoring_trust()
+                .map(&mut |value: &Escaped| value.unescape());
+            (value, issues)
+        };
+        let same = |value: &str| Worlds::Same(value.to_owned());
+        let split = |segment: &str, present: &str, absent: &str| {
+            Worlds::branch(segment.into(), same(present), same(absent))
         };
         let undecided = |issues: &[Issue]| {
             issues
@@ -1719,35 +2027,127 @@ mod tests {
         // A seed's absolute first segment exists: its piece is rewritten, and
         // a literal `\y` after it only with the whole value.
         let (out, issues) = expand("$(AbsSeed)\\y");
-        assert_eq!(out, format!("{root}/a/y"));
+        assert_eq!(out, same(&format!("{root}/a/y")));
         assert!(issues.is_empty(), "{issues:?}");
         // The piece passes before the whole: `x` before it is a relative first
         // segment, but the seed's backslash has gone by then.
         let (out, issues) = expand("x$(AbsSeed)");
-        assert_eq!(out, format!("x{root}/a"));
+        assert_eq!(out, same(&format!("x{root}/a")));
         assert!(issues.is_empty(), "{issues:?}");
-        // A seed's relative probe declines; project text's misses.
-        let (_, issues) = expand("$(RelSeed)");
-        assert!(undecided(&issues), "{issues:?}");
-        let (out, issues) = expand("$(RelWritten)");
-        assert_eq!(out, "seg\\a");
-        assert!(issues.is_empty(), "{issues:?}");
-        let (out, issues) = expand("seg\\a");
-        assert_eq!(out, "seg\\a");
-        assert!(issues.is_empty(), "{issues:?}");
+        // A relative probe, of a seed or of project text, is the startup
+        // directory's question.
+        for input in ["$(RelSeed)", "seg\\a"] {
+            let (out, issues) = expand(input);
+            assert_eq!(out, split("seg", "seg/a", "seg\\a"), "{input}");
+            assert!(issues.is_empty(), "{issues:?}");
+        }
         // A seed's backslash its own probe keeps meets a relative whole.
         let (out, issues) = expand("$(MissingSeed)");
-        assert_eq!(out, "/borzoi-missing\\a");
+        assert_eq!(out, same("/borzoi-missing\\a"));
         assert!(issues.is_empty(), "{issues:?}");
-        let (_, issues) = expand("x$(MissingSeed)");
-        assert!(undecided(&issues), "{issues:?}");
+        let (out, _) = expand("x$(MissingSeed)");
+        assert_eq!(out, split("x", "x/borzoi-missing/a", "x/borzoi-missing\\a"));
+        // A written value that turns on the startup directory is read in each
+        // world: copying it keeps the worlds, and a path function that
+        // converts its argument collapses them.
+        let (written, _) = substitute_worlds("seg\\a", &props, Some(&observer), Start::Unknown);
+        props.insert_worlds_for_test("RelWritten", written.into_ignoring_trust());
+        let expand = |input: &str| {
+            let (value, issues) = substitute_worlds(input, &props, Some(&observer), Start::Unknown);
+            (
+                value
+                    .into_ignoring_trust()
+                    .map(&mut |value: &Escaped| value.unescape()),
+                issues,
+            )
+        };
+        assert_eq!(expand("$(RelWritten)").0, split("seg", "seg/a", "seg\\a"));
+        assert_eq!(
+            expand("$([System.IO.Path]::Combine('$(RelWritten)', 'b'))").0,
+            same("seg/a/b")
+        );
         // Without a file system an absolute probe declines.
         let (_, issues) = substitute("$(AbsSeed)", &props);
         assert!(undecided(&issues), "{issues:?}");
+        // So does a value that is not the same under every startup directory,
+        // where only one value is asked for.
+        let (out, issues) = substitute("$(RelWritten)", &props);
+        assert_eq!(out, "seg\\a");
+        assert!(undecided(&issues), "{issues:?}");
         // A target runs in the project's directory: every relative probe
         // declines there.
-        let (_, issues) = substitute_in_target("$(RelWritten)", &props);
+        let (_, issues) = substitute_in_target("seg\\a", &props);
         assert!(undecided(&issues), "{issues:?}");
+    }
+
+    /// [`collapse_onto_kept_backslashes`] picks the world that keeps every
+    /// `\\` another respelled, and none where no world does: a slash-only
+    /// world beside one that keeps a `\\\\` network spelling names other
+    /// files.
+    #[test]
+    fn a_spelling_collapses_onto_the_world_that_keeps_every_backslash() {
+        let worlds = |a: &str, b: &str| {
+            Worlds::branch(
+                "seg".into(),
+                Worlds::Same(Escaped::from_xml(a)),
+                Worlds::Same(Escaped::from_xml(b)),
+            )
+        };
+        let collapse = |a: &str, b: &str| {
+            collapse_onto_kept_backslashes(&worlds(a, b), |text| text.to_owned())
+                .map(|kept| kept.as_escaped().to_owned())
+        };
+        assert_eq!(
+            collapse("seg/a\\b", "seg\\a\\b").as_deref(),
+            Some("seg\\a\\b")
+        );
+        assert_eq!(collapse("seg\\a/b", "seg/a\\b"), None);
+        assert_eq!(
+            collapse("/tmp/sub/../T.props", "\\\\tmp\\sub/../T.props"),
+            None
+        );
+        assert_eq!(collapse("./seg/a/q", "./seg/a//q"), None);
+        assert_eq!(
+            collapse("seg/a%2a", "seg\\a%2a").as_deref(),
+            Some("seg\\a%2a")
+        );
+        // An import reads a full path: a run of `/` alone the whole value's
+        // pass collapsed is one `/`; a run holding a `\` is not.
+        let import = |a: &str, b: &str| {
+            import_collapse(&worlds(a, b)).map(|kept| kept.as_escaped().to_owned())
+        };
+        assert_eq!(
+            import("%2e%2e/targets/T.props", "%2e%2e\\targets//T.props").as_deref(),
+            Some("%2e%2e\\targets//T.props")
+        );
+        assert_eq!(
+            collapse("%2e%2e/targets/T.props", "%2e%2e\\targets//T.props"),
+            None
+        );
+        assert_eq!(import("bin/x", "bin\\/x"), None);
+    }
+
+    /// A known startup directory answers each relative probe through the
+    /// observer, which records it.
+    #[test]
+    #[cfg(not(windows))]
+    fn a_known_startup_directory_decides_the_relative_probe() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::observed::host_fs::canonicalize(dir.path()).unwrap();
+        std::fs::create_dir_all(root.join("seg")).unwrap();
+        let observer = Observer::new();
+        let start = Start::Known {
+            dir: &root,
+            observer: &observer,
+        };
+        let props = PropertyMap::new();
+        let read = |input: &str| {
+            let (value, issues) = substitute_worlds(input, &props, Some(&observer), start);
+            assert!(issues.is_empty(), "{issues:?}");
+            value.into_ignoring_trust()
+        };
+        assert_eq!(read("seg\\a"), Worlds::Same(Escaped::from_xml("seg/a")));
+        assert_eq!(read("obj\\a"), Worlds::Same(Escaped::from_xml("obj\\a")));
     }
 
     #[test]
@@ -2471,7 +2871,10 @@ mod tests {
     #[test]
     fn well_known_includes_path_derivatives() {
         let m = well_known(std::path::Path::new("/repo/proj/Demo.fsproj"));
-        let get = |k: &str| m.get_unescaped_ignoring_trust(k);
+        let get = |k: &str| {
+            m.get_unescaped_ignoring_trust(k)
+                .map(|worlds| worlds.agreed().expect("a seed is one value").clone())
+        };
         assert_eq!(get("MSBuildProjectName").as_deref(), Some("Demo"));
         assert_eq!(get("MSBuildProjectExtension").as_deref(), Some(".fsproj"));
         assert_eq!(
@@ -2519,6 +2922,7 @@ mod tests {
         let m = well_known(std::path::Path::new("/repo/a;b (x)/Demo.fsproj"));
         let dir = m
             .get_ignoring_trust("MSBuildProjectDirectory")
+            .and_then(Worlds::agreed)
             .expect("seeded");
         assert_eq!(dir.as_escaped(), "/repo/a%3bb %28x%29");
         assert_eq!(dir.unescape(), "/repo/a;b (x)");

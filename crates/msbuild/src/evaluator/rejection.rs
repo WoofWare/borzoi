@@ -120,7 +120,7 @@ use crate::document::attribute;
 use crate::imports::normalise;
 use crate::{Rejection, RejectionCause, RejectionCertainty, UnloadableImport};
 
-use super::item_pass::{DeferredGroupKind, expand_silent, metadata_attribute};
+use super::item_pass::{DeferredGroupKind, expand_silent_paths, metadata_attribute};
 use super::observed::{self, EntryKind};
 use super::{
     Arm, PathOf, SdkResolution, Speculation, State, collect_element_text, condition,
@@ -372,8 +372,17 @@ fn speculative_write(node: Node<'_, '_>, state: &mut State<'_>) {
 /// Whether the walk names the `Project` of the import at `node` from certain
 /// values ([`operands_are_certain`]), with nothing it leaves as text.
 pub(super) fn import_path_is_certain(node: Node<'_, '_>, state: &State<'_>) -> bool {
-    let project = attribute(node, "Project").unwrap_or_default();
-    !expand_silent(&project, state).had_unsupported && operands_are_certain(state, &project)
+    let project =
+        super::import_project_as_expanded(&attribute(node, "Project").unwrap_or_default());
+    // Collapsed as the walk collapses the path it follows: an SDK import reads
+    // every surviving `\` as a separator under the SDK root.
+    let collapse = if attribute(node, "Sdk").is_some() {
+        super::sdk_import_collapse(&project)
+    } else {
+        properties::import_collapse
+    };
+    !expand_silent_paths(&project, state, collapse).had_unsupported
+        && operands_are_certain(state, &project)
 }
 
 /// How sure the walk is that a failed load of `path`, the import it is taking,
@@ -427,7 +436,12 @@ pub(super) fn import_failure_certainty(
 /// held, though it may throw on another value of the name
 /// ([`condition::Throws::Maybe`]): judging that withdraws every project the
 /// SDK's own conditions read such a name in, so it waits on knowing what
-/// values such a name may hold (#1009's second stage).
+/// values such a name may hold (#1009's second stage). The exception is a
+/// walk that has declined a property write for MSBuild's startup directory
+/// (`State::startup_directory_declined`): that write holds, in some world, a
+/// value the walk does not, under any name it is copied to, so there a
+/// condition that may throw on any value of a name the walk is not certain of
+/// ([`condition::may_throw`]) is a Possible site. No SDK write is declined so.
 pub(super) fn judge_condition_rejection(
     state: &mut State<'_>,
     condition: &str,
@@ -441,12 +455,34 @@ pub(super) fn judge_condition_rejection(
     let probes = state.follow_imports.then_some(condition::Probes {
         exists: &exists,
         observer,
+        start: state.start(),
     });
     let doubted = |name: &str| !holds_a_value_msbuild_may(state, name);
     let uncertain = |name: &str| !directory_build::is_certain(state, name);
+    if outcome != condition::Outcome::Illegal
+        && state.startup_directory_declined
+        && properties::property_references(condition).any(uncertain)
+        && condition::may_throw(
+            condition,
+            &state.lookup,
+            probes,
+            state.condition_site(),
+            &uncertain,
+        )
+    {
+        state.note_rejection(
+            RejectionCertainty::Possible,
+            RejectionCause::IllegalCondition {
+                condition: condition.to_owned(),
+            },
+            span,
+        );
+        return;
+    }
+    // Every world MSBuild may start in returns a boolean on the values held.
     if matches!(
         outcome,
-        condition::Outcome::True | condition::Outcome::False
+        condition::Outcome::True | condition::Outcome::False | condition::Outcome::StartupDirectory
     ) && !properties::property_references(condition).any(uncertain)
     {
         return;
@@ -496,6 +532,8 @@ pub(super) struct Thrown {
     /// The names its evaluation read before it threw: what the throw rests
     /// on.
     reads: Vec<String>,
+    /// Whether it throws in every world of MSBuild's startup directory.
+    everywhere: bool,
 }
 
 /// Every `$(…)` of `text` MSBuild throws on, on the values the walk holds
@@ -503,11 +541,12 @@ pub(super) struct Thrown {
 /// walk does not. Expanded with the file system where the walk has it, as
 /// the walk's own expansions are, so a probe it makes is recorded.
 pub(super) fn throwing_expressions(text: &str, state: &State<'_>) -> Vec<Thrown> {
-    let (_, issues) = if state.follow_imports {
-        properties::substitute_with_fs(text, &state.lookup, state.observer)
-    } else {
-        properties::substitute(text, &state.lookup)
-    };
+    let (_, issues) = properties::substitute_agreed(
+        text,
+        &state.lookup,
+        state.follow_imports.then_some(state.observer),
+        state.start(),
+    );
     throws_in(&issues)
 }
 
@@ -517,9 +556,14 @@ pub(super) fn throws_in(issues: &[properties::Issue]) -> Vec<Thrown> {
     issues
         .iter()
         .filter_map(|issue| match issue {
-            properties::Issue::Throws { expression, reads } => Some(Thrown {
+            properties::Issue::Throws {
+                expression,
+                reads,
+                everywhere,
+            } => Some(Thrown {
                 expression: expression.clone(),
                 reads: reads.clone(),
+                everywhere: *everywhere,
             }),
             _ => None,
         })
@@ -555,10 +599,11 @@ pub(super) fn judge_throwing_expression(
     let certain = held
         .iter()
         .find(|thrown| {
-            thrown
-                .reads
-                .iter()
-                .all(|name| directory_build::is_certain(state, name))
+            thrown.everywhere
+                && thrown
+                    .reads
+                    .iter()
+                    .all(|name| directory_build::is_certain(state, name))
         })
         .filter(|_| reached)
         .cloned();
@@ -719,6 +764,7 @@ fn judge_text(
         let probes = condition::Probes {
             exists: &exists,
             observer,
+            start: state.start(),
         };
         condition::evaluate_at(text, &state.lookup, Some(probes), state.condition_site()).outcome
     } else {
@@ -958,7 +1004,12 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
                     None => Some(reached),
                     Some(evaluate) => {
                         judge_unwalked_text(state, &evaluate, reached, child.range());
-                        let (value, issues) = properties::substitute(&evaluate, &state.lookup);
+                        let (value, issues) = properties::substitute_agreed(
+                            &evaluate,
+                            &state.lookup,
+                            None,
+                            state.start(),
+                        );
                         // Its trust is judged just below, name by name. MSBuild
                         // reads the flag as expanded, escapes and all
                         // (`%66alse` is no `false`; probed,
@@ -1571,6 +1622,7 @@ fn decision_but_for_opacity(
     let probes = state.follow_imports.then_some(condition::Probes {
         exists: &exists,
         observer,
+        start: state.start(),
     });
     let unknown = |name: &str| !certain_but_for_opacity(state, name);
     condition::decide_without(
@@ -1723,10 +1775,15 @@ fn may_load_nothing(
     if let Some(sdk) = attribute(node, "Sdk") {
         return sdk_import_may_load_nothing(&sdk, project, seen, state);
     }
-    // MSBuild turns the attribute's own `\` into `/` before it expands it.
-    let expansion = expand_silent(&project.replace('\\', "/"), state);
+    let fixed = super::import_project_as_expanded(project);
+    let expansion = expand_silent_paths(&fixed, state, properties::import_collapse);
+    // A guard requiring the file says nothing of a path the walk cannot
+    // compute: `Exists` is true of a directory MSBuild cannot import, and of
+    // a spelling whose `\` the import reads apart from it
+    // (`adjustment_settles`), and the walk cannot rule either out of text it
+    // does not hold.
     if path_undecided(project, state, expansion.had_unsupported) {
-        return (!requires_own_file).then_some(UnloadableImport::PathUndecided);
+        return Some(UnloadableImport::PathUndecided);
     }
     // Its trust is judged just above, name by name.
     let value = expansion.value.ignoring_trust();
@@ -1740,10 +1797,20 @@ fn may_load_nothing(
     }) {
         return Some(UnloadableImport::PathUndecided);
     }
+    // `Exists` asks about each entry of its argument's list, trimmed, and is
+    // false of an empty one: the gate rules the import out where an entry is
+    // missing.
     if requires_own_file {
-        let whole = current_file_dir.join(value.unescape().replace('\\', "/"));
-        if value.trimmed_unescaped().is_empty()
-            || observed::link_kind(state.observer, &normalise(&whole)).is_err()
+        let entries: Vec<String> = value
+            .split_list()
+            .map(|entry| entry.trimmed_unescaped())
+            .filter(|entry| !entry.is_empty())
+            .collect();
+        if entries.is_empty()
+            || entries.iter().any(|entry| {
+                let whole = current_file_dir.join(entry.replace('\\', "/"));
+                observed::link_kind(state.observer, &normalise(&whole)).is_err()
+            })
         {
             return None;
         }
@@ -1789,7 +1856,8 @@ fn sdk_import_may_load_nothing(
     let resolution = state
         .sdk_resolver
         .and_then(|resolver| resolver(sdk, state.observer).ok())?;
-    let expansion = expand_silent(project, state);
+    let fixed = super::import_project_as_expanded(project);
+    let expansion = expand_silent_paths(&fixed, state, super::sdk_import_collapse(project));
     if path_undecided(project, state, expansion.had_unsupported) {
         return Some(UnloadableImport::PathUndecided);
     }
@@ -1895,8 +1963,10 @@ pub(super) fn may_load_nothing_at(
     certain: bool,
     guarded: bool,
 ) -> Option<UnloadableImport> {
+    // As for an ordinary import, a guard says nothing of a path the walk
+    // cannot compute (`may_load_nothing`).
     if !certain {
-        return (!guarded).then_some(UnloadableImport::PathUndecided);
+        return Some(UnloadableImport::PathUndecided);
     }
     let Some(path) = path else {
         return (!guarded).then_some(UnloadableImport::NoPath);

@@ -498,6 +498,7 @@ fn is_decided_point(
     let probes = state.follow_imports.then_some(condition::Probes {
         exists: &exists,
         observer,
+        start: state.start(),
     });
     let unknown = |name: &str| !is_certain(state, name);
     let is_the_exists = |arg: &str| is_the_path(arg, kind);
@@ -791,10 +792,14 @@ fn contributes_nothing(path: &Path, state: &State<'_>) -> bool {
 /// duplicates) is asked of that one spelling, the walk's own.
 fn point_path(state: &State<'_>, path_name: &str, dir: &Path) -> Option<PathBuf> {
     // A point of use: trimmed in the domain (an escaped `%20` is filename
-    // data, not padding). Its trust is the caller's to judge.
+    // data, not padding). Its trust is the caller's to judge. A value that
+    // turns on MSBuild's startup directory is read where no segment is a
+    // directory there: whether every world names this file is
+    // `point_path_settles`'s question.
     let trimmed = state
         .lookup
         .get_ignoring_trust(path_name)?
+        .absent_everywhere()
         .trimmed_unescaped();
     if trimmed.is_empty() {
         return None;
@@ -816,17 +821,37 @@ fn names_one_file(state: &State<'_>, path_name: &str) -> bool {
     state
         .lookup
         .get_ignoring_trust(path_name)
-        .is_none_or(|value| !value.as_escaped().contains(';') && !value.is_filespec_wildcard())
+        .is_none_or(|worlds| {
+            worlds
+                .values()
+                .into_iter()
+                .all(|value| !value.as_escaped().contains(';') && !value.is_filespec_wildcard())
+        })
 }
 
 /// Whether [`point_path`], which reads every `\` as `/`, names the file an
 /// import of the path property opens ([`super::adjustment_settles`]).
 fn point_path_settles(state: &State<'_>, path_name: &str) -> bool {
-    // Only the value's shape is read here; its trust is the caller's.
+    // Only the value's shape is read here; its trust is the caller's. Where
+    // the worlds of MSBuild's startup directory differ only in which `\` the
+    // Unix path adjustment respelled, the world that keeps every one settles
+    // for all of them (`import_collapse`); where they differ otherwise,
+    // nothing settles.
     state
         .lookup
         .get_ignoring_trust(path_name)
-        .is_none_or(|value| {
+        .is_none_or(|worlds| {
+            let dominant;
+            let value = match worlds {
+                properties::Worlds::Same(value) => value,
+                properties::Worlds::Split(_) => match properties::import_collapse(worlds) {
+                    Some(kept) => {
+                        dominant = kept;
+                        &dominant
+                    }
+                    None => return false,
+                },
+            };
             let mut rewrites = None;
             value.split_list().all(|segment| {
                 super::adjustment_settles(
@@ -874,6 +899,7 @@ pub(super) fn decision_from_certain_inputs(
     let probes = state.follow_imports.then_some(condition::Probes {
         exists: &exists,
         observer,
+        start: state.start(),
     });
     let unknown = |name: &str| !is_certain(state, name);
     match condition::decide_without(

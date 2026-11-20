@@ -45,6 +45,12 @@ pub fn target_frameworks(project: &ParsedProject) -> Vec<String> {
     if !project.target_frameworks.is_empty() {
         return project.target_frameworks.clone();
     }
+    // A plural whose worlds declare different lists names none, and does not
+    // fall through to the singular; nor does a singular that turns on
+    // MSBuild's startup directory.
+    if project.target_frameworks_undecided || singular_turns_on_startup_directory(project) {
+        return Vec::new();
+    }
     if let Some(singular) = lookup_ci(project, "TargetFramework") {
         let trimmed = singular.trim();
         if !trimmed.is_empty() {
@@ -52,6 +58,31 @@ pub fn target_frameworks(project: &ParsedProject) -> Vec<String> {
         }
     }
     Vec::new()
+}
+
+fn singular_turns_on_startup_directory(project: &ParsedProject) -> bool {
+    matches!(
+        project.property("TargetFramework"),
+        crate::PropertyRead::Untrusted(crate::UntrustedCause::StartupDirectory(_))
+    )
+}
+
+/// Whether [`target_frameworks`]'s empty answer is no answer rather than "no
+/// framework declared": a plural whose worlds of MSBuild's startup directory
+/// declare different lists; or a plural or singular the walk does not hold
+/// for certain (a write it skipped under a gate it could not decide may have
+/// declared frameworks, or one it refused).
+pub fn target_frameworks_undecided(project: &ParsedProject) -> bool {
+    let unknown = |name: &str| {
+        matches!(
+            project.property(name),
+            crate::PropertyRead::Untrusted(_) | crate::PropertyRead::UnsetInexact(_)
+        )
+    };
+    project.target_frameworks.is_empty()
+        && (project.target_frameworks_undecided
+            || unknown("TargetFrameworks")
+            || unknown("TargetFramework"))
 }
 
 /// MSBuild property names are case-insensitive, but

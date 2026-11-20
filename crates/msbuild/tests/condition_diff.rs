@@ -2469,7 +2469,7 @@ mod exists_on_disk {
             let ours = evaluate_with_exists(condition, &map, &tree.proj());
             let theirs = theirs[name] == "T";
             match ours {
-                Outcome::Unsupported => census.declined += 1,
+                Outcome::Unsupported | Outcome::StartupDirectory => census.declined += 1,
                 // MSBuild evaluated the batch, so it rejects none of them.
                 Outcome::Illegal => panic!(
                     "certain-implies-exact violated: we say Illegal for {condition:?} with \
@@ -2542,7 +2542,9 @@ mod exists_on_disk {
             let ours = match ours {
                 Outcome::True => true,
                 Outcome::False => false,
-                Outcome::Illegal | Outcome::Unsupported => panic!("{path}: declined"),
+                Outcome::Illegal | Outcome::Unsupported | Outcome::StartupDirectory => {
+                    panic!("{path}: declined")
+                }
             };
             assert_eq!(ours, *expected, "Exists('{path}')");
         }
