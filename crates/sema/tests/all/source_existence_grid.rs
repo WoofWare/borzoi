@@ -538,6 +538,28 @@ pub fn cells() -> Vec<Cell> {
             "attribute_made_interface_augmentation_generic",
             "module AttrInterfaceG\n[<Interface>]\ntype I<'a>() =\n    abstract M: string -> string\ntype I<'a> with\n    static member Foo() = 1\n",
         ),
+        // An override in a signature's augmentation: FCS rejects it and
+        // imports the extension under ``List`1.ToString.Override``.
+        Cell::new(
+            "signature_augmentation_override",
+            &[
+                (
+                    "Lib.fsi",
+                    "module SigOverride\ntype System.Collections.Generic.List<'T> with\n    override ToString: unit -> string\n",
+                ),
+                (
+                    "Lib.fs",
+                    "module SigOverride\ntype System.Collections.Generic.List<'T> with\n    override l.ToString() = \"\"\n",
+                ),
+            ],
+        ),
+        // A type-provider producer whose check fails: FCS builds it no
+        // assembly data, as it builds none for a type provider, so the oracle
+        // cannot tell a source reading from a DLL one and grades nothing.
+        one(
+            "type_provider_assembly_failing",
+            "namespace TpFail\n[<assembly: Microsoft.FSharp.Core.CompilerServices.TypeProviderAssembly>]\ndo ()\nmodule M =\n    let x: int = \"s\"\n",
+        ),
         // A head whose argument pattern holds an active pattern on a later
         // line: FCS mangles by the binder's line, the head's first.
         one(

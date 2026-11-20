@@ -9235,6 +9235,20 @@ let private respondGraphReferenced (checker: FSharpChecker) (root: JsonElement) 
             match assemblyData checker built.[target] (outputOf target) with
             | Ok(Some data) -> rawSignatureOf data
             | Ok None when failed ->
+                // FCS answers `Unavailable` alike for a type-provider
+                // producer and for one whose assembly data failed to build
+                // (`IncrementalBuild.fs`, `tcAssemblyDataOpt`), so a failed
+                // producer that may be a type provider is refused as read
+                // from its DLL rather than graded as empty. Naming the
+                // attribute, or a provider, spells it in some source of the
+                // producer or of a project it reads (the framework
+                // references hold no provider).
+                let mayProvide =
+                    reached
+                    |> Seq.exists (fun p ->
+                        p.Sources |> Array.exists (fun path -> File.ReadAllText(path).Contains "TypeProvider"))
+                if mayProvide then
+                    failwithf "project %s: FCS may read it from its DLL: its check fails, and it may be a type provider" target
                 {| Streams = [||]; InternalsVisibleTo = [||]; AutoOpens = [||] |}
             | Ok None -> failwithf "project %s: FCS reads it from its DLL, not from source" target
             | Error why -> failwithf "project %s: cannot read its assembly data: %s" target why

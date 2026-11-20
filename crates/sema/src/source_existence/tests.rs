@@ -321,9 +321,14 @@ fn witness(channel: Channel) -> Observed {
                 "module M\ntype System.Collections.Generic.List<'T> with\n    [<return: CompiledName(\"Q\")>]\n    member s.Orig() = 1\n",
             ),
             |r| {
-                let names = extension_names(r);
-                names.contains(&vec!["List`1.Orig".to_owned(), "Orig".to_owned()])
-                    && !names.iter().flatten().any(|n| n == "Q")
+                // A `return:` target gives the return value the name, not
+                // the member.
+                let names: BTreeSet<String> = extension_names(r).into_iter().flatten().collect();
+                names.contains("List`1.Orig")
+                    && names.contains("Orig")
+                    && !names
+                        .iter()
+                        .any(|n| n == "Q" || n.ends_with("_Q") || n.ends_with(".Q"))
             },
         ),
         Channel::UnreadableCompiledName => observe(
@@ -359,11 +364,10 @@ fn witness(channel: Channel) -> Observed {
                 "module M\ntype System.Collections.Generic.List<'T> with\n    member s.Shout = s\n",
             ),
             |r| {
-                extension_names(r).iter().any(|names| {
-                    let mut names = names.clone();
-                    names.sort();
-                    names == ["List`1.get_Shout", "Shout", "get_Shout"]
-                })
+                let names: BTreeSet<String> = extension_names(r).into_iter().flatten().collect();
+                ["List`1.get_Shout", "Shout", "get_Shout"]
+                    .iter()
+                    .all(|n| names.contains(*n))
             },
         ),
         Channel::IntrinsicAugmentation => observe(
@@ -380,13 +384,13 @@ fn witness(channel: Channel) -> Observed {
             one(
                 "module M\ntype E =\n    [<System.Runtime.CompilerServices.Extension>]\n    static member Twice(s: string) = s\n",
             ),
-            |r| extension_names(r).contains(&vec!["Twice".to_owned()]),
+            |r| extension_names(r).iter().flatten().any(|n| n == "Twice"),
         ),
         Channel::ExtensionBinding => observe(
             one(
                 "module M\n[<System.Runtime.CompilerServices.Extension>]\nlet shout (s: string) = s\n",
             ),
-            |r| extension_names(r).contains(&vec!["shout".to_owned()]),
+            |r| extension_names(r).iter().flatten().any(|n| n == "shout"),
         ),
         Channel::BindingPattern => observe(
             one("module M\n[<System.Runtime.CompilerServices.Extension>]\nlet (a, b) = (1, 2)\n"),
@@ -660,12 +664,9 @@ fn a_partial_certificate_loses_exactness() {
         "{:?}",
         s.approximations
     );
-    let names = extension_names(&r);
-    assert!(names.contains(&vec!["f".to_owned()]), "{names:?}");
-    assert!(
-        names.contains(&vec!["Old".to_owned(), "f".to_owned()]),
-        "{names:?}"
-    );
+    // The written name, and the one the uncertain attribute may give.
+    let names: BTreeSet<String> = extension_names(&r).into_iter().flatten().collect();
+    assert!(names.contains("f") && names.contains("Old"), "{names:?}");
 }
 
 /// Each reading of a module whose name ends in `Module` walks its contents
@@ -689,6 +690,27 @@ fn repeated_readings_are_charged_by_the_declarations_they_visit() {
         matches!(r, SourceExistence::Unread(ExistenceUnread::TooManyReadings)),
         "{r:?}"
     );
+}
+
+/// The binding-head forms the walk reads through and the table certify each
+/// other: every form has a row (its verdict decides the walk's), and every
+/// row the table says is read is a form the walk reads.
+#[test]
+fn binding_head_forms_are_table_rows() {
+    for (i, form) in HeadForm::ALL.iter().enumerate() {
+        assert_eq!(form.index(), i, "{form:?} is out of place in HeadForm::ALL");
+        assert!(form.row().is_some(), "{form:?} has no LEAF_FORMS row");
+    }
+    for row in LEAF_FORMS
+        .iter()
+        .filter(|r| r.leaf == Leaf::BindingHead && r.verdict == Verdict::Read)
+    {
+        assert!(
+            HeadForm::ALL.iter().any(|f| f.name() == row.form),
+            "the binding-head row {} names no form the walk reads",
+            row.form
+        );
+    }
 }
 
 /// Each row repeats every name enclosing it, so long names under nested

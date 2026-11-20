@@ -96,16 +96,12 @@ fn ours(loaded: &LoadedProject, routes: Option<&MarkerRoutes>) -> SourceExistenc
         .map(PathBuf::as_path)
         .zip(&loaded.parses.files)
         .collect();
-    // An item the evaluation lists that the parses omit (unreadable, or no
-    // root) is unread, never absent.
-    let items: Vec<CompileItem<'_>> = loaded
+    let keys: Vec<String> = loaded
         .compile_items
         .iter()
-        .map(|p| match parsed.get(p.as_path()) {
-            Some(pf) => CompileItem::Parsed(pf),
-            None => CompileItem::Unreadable(p.to_str().unwrap_or("<non-UTF-8 path>")),
-        })
+        .map(|p| checkout_key(p))
         .collect();
+    let items = compile_items(&parsed, &loaded.compile_items, &keys);
     let files: Vec<&ProjectFile> = loaded.parses.files.iter().collect();
     let by_spelling = certify_by_spelling(&files);
     // A reference unread is one that may be a provider.
@@ -118,6 +114,57 @@ fn ours(loaded: &LoadedProject, routes: Option<&MarkerRoutes>) -> SourceExistenc
         routes: routes.unwrap_or(&by_spelling),
         providers,
     })
+}
+
+/// Each Compile item as the walk takes it: parsed, or, where the parses omit
+/// it (unreadable, or no root), unread, never absent, under its
+/// checkout-relative key (`keys`, one per item), so a verdict naming it is
+/// the same on every host.
+fn compile_items<'a>(
+    parsed: &BTreeMap<&Path, &'a ProjectFile>,
+    items: &[PathBuf],
+    keys: &'a [String],
+) -> Vec<CompileItem<'a>> {
+    items
+        .iter()
+        .zip(keys)
+        .map(|(p, key)| match parsed.get(p.as_path()) {
+            Some(pf) => CompileItem::Parsed(pf),
+            None => CompileItem::Unreadable(key),
+        })
+        .collect()
+}
+
+/// An unreadable item's verdict is the same under two checkout roots.
+#[test]
+fn an_unreadable_item_names_no_host_path() {
+    let base = std::env::temp_dir().join(format!("borzoi-unreadable-key-{}", std::process::id()));
+    let verdicts: Vec<String> = ["a", "b/deeper"]
+        .iter()
+        .map(|root| {
+            let checkout = base.join(root).join("Repo");
+            std::fs::create_dir_all(checkout.join(".git")).expect("make a checkout");
+            let item = checkout.join("src").join("Missing.fs");
+            let keys = vec![checkout_key(&item)];
+            let items = compile_items(&BTreeMap::new(), std::slice::from_ref(&item), &keys);
+            let routes = MarkerRoutes::Unknown;
+            match source_existence(Producer::Evaluated {
+                items: &items,
+                routes: &routes,
+                providers: ProviderReferences::None,
+            }) {
+                SourceExistence::Unread(why) => format!("unread {why:?}"),
+                SourceExistence::Read(_) => "read".to_owned(),
+            }
+        })
+        .collect();
+    std::fs::remove_dir_all(&base).expect("remove the checkouts");
+    assert_eq!(verdicts[0], verdicts[1]);
+    assert!(
+        verdicts[0].contains("Repo/src/Missing.fs"),
+        "{}",
+        verdicts[0]
+    );
 }
 
 /// FCS's rows of `loaded` as a consumer reads it from source, or why there

@@ -45,6 +45,54 @@
 //! itself, with its own exactness claim and grading**: nothing here is an
 //! exact source for them.
 //!
+//! # Spellings the walk derives
+//!
+//! Every name the walk emits is written in A's source, or derived from
+//! written names by a formula of FCS's. No consumer needs a derived spelling
+//! exactly, since only a backticked name queries one, so for each formula the
+//! walk emits every spelling it could produce (a bounded surplus, pinned per
+//! cell) rather than model which one it does produce:
+//!
+//! - **An optional extension member's compiled name**, `T.name` then
+//!   `.Static` (a member that is neither instance nor constructor) then
+//!   `.Override` (an override or explicit implementation)
+//!   (`CheckExpressions.fs:1099-1105`): every one of the four suffix
+//!   combinations, for every name of `T` and every spelling of `name`
+//!   ([`EXTENSION_SUFFIXES`], [`FileWalk::val_row`]).
+//! - **The extended type's logical name `T`**, its name with an arity
+//!   suffix (``List`1``, `tcref.LogicalName`): the bare name and every
+//!   arity up to the head's written parameter count. A head that writes no
+//!   parameters bounds nothing unless the type is certainly this list's, and
+//!   declines ([`Leaf::AugmentationHead`]). The `under_written_arity` row
+//!   grades a head that writes fewer parameters than its type has.
+//! - **A tuple augmentation's type**, `mkCompiledTupleTyconRef`
+//!   (`TypedTreeOps.Remap.fs:835`): ``Tuple`1`` to ``Tuple`8`` and
+//!   ``ValueTuple`1`` to ``ValueTuple`8``.
+//! - **Accessor names**, `get_`/`set_` (`CheckExpressions.fs:1066-1067`) and
+//!   a `[<CLIEvent>]`'s `add_`/`remove_` (`CheckExpressions.fs:4482-4483`):
+//!   every val's every accessor spelling, whatever accessors it has
+//!   ([`ACCESSOR_PREFIXES`], [`val_spellings`]).
+//! - **`[<CompiledName>]`**, which replaces a method's compiled name and
+//!   leaves a property's to codegen (`CheckExpressions.fs:1410-1419`): every
+//!   literal an attribute may give, with each accessor spelling of it,
+//!   beside the formula's names. One the walk cannot read declines.
+//! - **A class `let`'s fresh name**, `basic@line` and `basic@line-k`
+//!   (`FreshCompilerGeneratedName`, `CheckIncrementalClasses.fs:331`): every
+//!   line the head spans ([`head_lines`]) by every binder count. These are the
+//!   only positions the walk reads.
+//! - **A module's `Module` suffix** (`AdjustModuleName`,
+//!   `CheckDeclarations.fs:2736-2738`): canonical spelling strips one, so
+//!   both readings are the same name except for one already ending in
+//!   `Module`, whose both readings the walk emits.
+//! - **Generic arity on an entity's own name** (``Map`2``): erased by
+//!   canonical spelling, so none is emitted.
+//! - **Spellings taken as written:** an active pattern's `|A|_|`
+//!   (`pars.fsy`, `opName`) and an operator's compiled name `op_PlusDot`
+//!   (`CompileOpName`, ported as `borzoi_assembly::op_name` and held to FCS by
+//!   `operator_name_diff`) are FCS's logical names for what is written, not a
+//!   choice FCS makes. An exception's pickle keeps its written name
+//!   (`NewExn`, `TypedTree.fs:6437`).
+//!
 //! # Attributes
 //!
 //! Whether an attribute is `[<AutoOpen>]`, `[<Extension>]`, `[<Measure>]`,
@@ -383,6 +431,13 @@ pub const LEAF_FORMS: &[LeafForm] = &[
         leaf: Leaf::BindingHead,
         form: "nested_tuple",
         source: "module D\n[<System.Runtime.CompilerServices.Extension>]\nlet (a, (b, c)) = (1, (2, 3))\n",
+        providers: ProviderReferences::None,
+        verdict: Verdict::Declined,
+    },
+    LeafForm {
+        leaf: Leaf::BindingHead,
+        form: "attributed",
+        source: "module D\n[<System.Runtime.CompilerServices.Extension>]\nlet ([<System.Obsolete>] f: string -> string) = id\n",
         providers: ProviderReferences::None,
         verdict: Verdict::Declined,
     },
@@ -799,6 +854,18 @@ pub enum Treatment {
 /// before it declines ([`ExistenceUnread::TooManyReadings`]).
 pub const MAX_ROWS: usize = 200_000;
 
+/// The accessor prefixes FCS gives a member's vals: a property's
+/// (`CheckExpressions.fs:1066-1067`) and a `[<CLIEvent>]`'s
+/// (`CheckExpressions.fs:4482-4483`).
+const ACCESSOR_PREFIXES: [&str; 4] = ["get_", "set_", "add_", "remove_"];
+
+/// The suffixes FCS's formula appends to an optional extension member's
+/// compiled name `T.name` (`CheckExpressions.fs:1099-1105`): `.Static` for
+/// a member that is neither an instance member nor a constructor, then
+/// `.Override` for an override or explicit implementation. Every
+/// combination is emitted.
+const EXTENSION_SUFFIXES: [&str; 4] = ["", ".Static", ".Override", ".Static.Override"];
+
 /// The most bytes of names the walk's rows copy, every row's path included,
 /// before it declines ([`ExistenceUnread::TooManyReadings`]). Each row
 /// repeats every name enclosing it, so [`MAX_ROWS`] alone does not bound
@@ -1150,8 +1217,6 @@ impl Scope {
 /// reads it.
 #[derive(Debug, Clone)]
 struct LocalType {
-    /// The name as written (no arity).
-    name: String,
     /// Its declared type parameters' count.
     arity: usize,
     /// Its position in the declaration list.
@@ -1164,9 +1229,11 @@ struct LocalType {
 
 /// The declaration list an augmentation sits in.
 struct ListCtx {
-    locals: Vec<LocalType>,
+    /// The list's type definitions, by name, each name's in position order:
+    /// an augmentation looks up only its own name's.
+    locals: BTreeMap<String, Vec<LocalType>>,
     /// The positions that may change what a later name resolves to: an
-    /// `open`, a nested module (which may be `[<AutoOpen>]`).
+    /// `open`, a nested module (which may be `[<AutoOpen>]`). Ascending.
     barriers: Vec<usize>,
     is_rec: bool,
 }
@@ -1347,7 +1414,7 @@ impl FileWalk<'_> {
     /// The type definitions and barriers of a declaration list.
     fn list_ctx(&self, decls: &Decls, is_rec: bool) -> ListCtx {
         let mut ctx = ListCtx {
-            locals: Vec::new(),
+            locals: BTreeMap::new(),
             barriers: Vec::new(),
             is_rec,
         };
@@ -1369,8 +1436,7 @@ impl FileWalk<'_> {
             // A type parameter with an attribute may be a unit of measure,
             // which the name does not count.
             let full_arity = typars.iter().all(|t| t.attributes().next().is_none());
-            ctx.locals.push(LocalType {
-                name,
+            ctx.locals.entry(name).or_default().push(LocalType {
                 arity: typars.len(),
                 position,
                 class_like: full_arity && certainly_class_like(defn),
@@ -1380,8 +1446,8 @@ impl FileWalk<'_> {
         let exception =
             |position: usize, e: &borzoi_cst::syntax::ExceptionDefnDecl, ctx: &mut ListCtx| {
                 if let Some(t) = e.union_case().and_then(|c| c.ident()) {
-                    ctx.locals.push(LocalType {
-                        name: id_text(&t).into_owned(),
+                    let name = id_text(&t).into_owned();
+                    ctx.locals.entry(name).or_default().push(LocalType {
                         arity: 0,
                         position,
                         class_like: true,
@@ -1919,19 +1985,19 @@ impl FileWalk<'_> {
             let Some(pat) = b.pat() else {
                 return Err(ExistenceUnread::UnnamedDeclaration(self.index));
             };
-            let named: Vec<String> = match binding_name(&pat) {
-                Some(name) => vec![name],
-                None => {
-                    if !certified_pattern(&pat) {
-                        return Err(ExistenceUnread::OutsideDomain(
-                            self.index,
-                            Leaf::BindingHead,
-                        ));
-                    }
+            let named: Vec<String> = match binding_head(&pat) {
+                Some(Head::Named(name)) => vec![name],
+                Some(Head::Pattern(names)) => {
                     self.out
                         .approximations
                         .insert(Approximation::BindingPattern);
-                    pattern_idents(&pat)
+                    names
+                }
+                None => {
+                    return Err(ExistenceUnread::OutsideDomain(
+                        self.index,
+                        Leaf::BindingHead,
+                    ));
                 }
             };
             if named.is_empty() {
@@ -1954,6 +2020,9 @@ impl FileWalk<'_> {
             if self.out.entities.len() + self.out.extensions.len() + rows > MAX_ROWS {
                 return Err(ExistenceUnread::TooManyReadings);
             }
+            // And their bytes: each a name, an `@`, a line and a count.
+            let longest = named.iter().map(String::len).max().unwrap_or(0);
+            self.charge(inner, rows, longest + 24)?;
             for name in named {
                 let basic = match name.find('@') {
                     None | Some(0) => name.as_str(),
@@ -2052,48 +2121,6 @@ impl FileWalk<'_> {
             };
             // A signature keeps its `return:` attributes.
             let signature = matches!(m, MemberDefn::AbstractSlot(_) | MemberDefn::MemberSig(_));
-            // A `[<CLIEvent>]` property compiles to its event's accessors
-            // too, which `[<CompiledName>]` does not rename.
-            let mut vals = vals;
-            let mut event_vals: BTreeSet<String> = BTreeSet::new();
-            // `[<CLIEvent>]` on the member, or on an accessor's own list.
-            let event_marks = {
-                let mut all = lists.clone();
-                for v in &vals {
-                    all.extend(v.own_lists.iter().cloned());
-                }
-                self.routes.marks_on(&all, !signature)
-            };
-            if event_marks.may(Marker::CliEvent) && role == MemberRole::Member {
-                if event_marks.get(Marker::CliEvent) == Maybe::Possibly && event_marks.uncertain {
-                    self.out
-                        .approximations
-                        .insert(Approximation::UncertainAttribute);
-                }
-                // Every val: FCS's recovery of an event on a method (which it
-                // rejects) names its accessors after the method.
-                let carriers: Vec<MemberVal> = vals
-                    .iter()
-                    .filter(|v| v.accessor != Some("set_"))
-                    .cloned()
-                    .collect();
-                for g in carriers {
-                    let bare = match g.accessor {
-                        Some(prefix) => g.logical.strip_prefix(prefix).unwrap_or(&g.logical),
-                        None => &g.logical,
-                    };
-                    for prefix in ["add_", "remove_"] {
-                        let logical = format!("{prefix}{bare}");
-                        event_vals.insert(logical.clone());
-                        vals.push(MemberVal {
-                            logical,
-                            accessor: None,
-                            is_static: g.is_static,
-                            own_lists: Vec::new(),
-                        });
-                    }
-                }
-            }
             for v in vals {
                 let mut all = lists.clone();
                 all.extend(v.own_lists.iter().cloned());
@@ -2108,101 +2135,79 @@ impl FileWalk<'_> {
                         .insert(Approximation::UncertainAttribute);
                 }
                 // A `[<CompiledName>]` renames a method, never a property's
-                // or an event's accessor. A signature's getter reading may be
-                // a method whose type the walk does not classify (`'T -> bool
-                // when 'T: equality`), so its rename applies too.
-                let renames =
-                    (v.accessor.is_none() || signature) && !event_vals.contains(&v.logical);
-                if marks.compiled_name_unreadable && renames {
+                // accessor (`CheckExpressions.fs`, `compiledNameIsOnProp`).
+                // A signature's getter reading may be a method whose type the
+                // walk does not classify (`'T -> bool when 'T: equality`), so
+                // an unreadable one declines there too.
+                if marks.compiled_name_unreadable && (v.accessor.is_none() || signature) {
                     return Err(ExistenceUnread::UnreadableCompiledName(self.index));
                 }
-                match augmented {
-                    Some(type_names) => {
-                        if role == MemberRole::Constructor {
-                            // FCS rejects a constructor in an optional
-                            // augmentation, and keeps it in its recovery
-                            // (`String..ctor`).
-                            self.out.approximations.insert(Approximation::RejectedShape);
-                        }
-                        // An optional extension: compiled `T.name[.Static]`,
-                        // or the name a `[<CompiledName>]` gives. A signature's
-                        // getter reading may be a method (`'T -> bool when
-                        // 'T: equality`), compiled under its bare name.
-                        let mut logicals = vec![v.logical.clone()];
-                        if signature
-                            && let Some(bare) = v.accessor.and_then(|p| v.logical.strip_prefix(p))
-                        {
-                            logicals.push(bare.to_owned());
-                        }
-                        let mut compiled: BTreeSet<String> = type_names
-                            .iter()
-                            .flat_map(|t| logicals.iter().map(move |l| (t, l)))
-                            .map(|(t, logical)| {
-                                let mut c = format!("{t}.{logical}");
-                                // A constructor (rejected, and recovered as
-                                // static) takes no suffix.
-                                if v.is_static && role != MemberRole::Constructor {
-                                    c.push_str(".Static");
-                                }
-                                c
-                            })
-                            .collect();
-                        if renames {
-                            self.uncertain_renames(&marks);
-                            compiled.extend(marks.compiled_names.iter().cloned());
-                        }
-                        let names = 2 * v.logical.len()
-                            + compiled.iter().map(String::len).max().unwrap_or(0);
-                        self.charge(scope, compiled.len(), names)?;
-                        for c in compiled {
-                            self.out.extensions.push(ExtensionRow {
-                                layer: IndexLayer::Pickle,
-                                namespace: scope.namespace.clone(),
-                                enclosing: scope.enclosing.clone(),
-                                names: val_names(&v.logical, v.accessor, Some(&c)),
-                                instance: (role != MemberRole::Constructor).then_some(!v.is_static),
-                            });
-                        }
-                    }
-                    None => self.csharp_val(scope, &v, &marks, renames)?,
+                if augmented.is_some() && role == MemberRole::Constructor {
+                    // FCS rejects a constructor in an optional augmentation,
+                    // and keeps it in its recovery (`String..ctor`).
+                    self.out.approximations.insert(Approximation::RejectedShape);
                 }
+                let instance = match augmented {
+                    Some(_) => (role != MemberRole::Constructor).then_some(!v.is_static),
+                    None => None,
+                };
+                self.val_row(scope, &v, &marks, augmented, instance)?;
             }
         }
         Ok(())
     }
 
-    /// A C#-style extension row for a member val `v` of a type: one per
-    /// compiled name it may have. `renames`: whether a `[<CompiledName>]`
-    /// renames it (a method; never a property's or an event's accessor).
-    fn csharp_val(
+    /// The extension row of a val `v`: every spelling FCS's formulas could
+    /// give it ([`val_spellings`]), with, for an optional extension
+    /// (`augmented`: the names the extended type's logical name may have),
+    /// every compiled name `T.name` its suffixes could make. `instance`:
+    /// the row's staticness (`None` for either).
+    fn val_row(
         &mut self,
         scope: &Scope,
         v: &MemberVal,
         marks: &Marks,
-        renames: bool,
+        augmented: Option<&[String]>,
+        instance: Option<bool>,
     ) -> Result<(), ExistenceUnread> {
-        let mut compiled: Vec<Option<&String>> = vec![None];
-        if renames {
-            self.uncertain_renames(marks);
-            compiled.extend(marks.compiled_names.iter().map(Some));
+        self.uncertain_renames(marks);
+        let types = augmented.map_or(0, <[String]>::len);
+        let longest_type = augmented
+            .into_iter()
+            .flatten()
+            .map(String::len)
+            .max()
+            .unwrap_or(0);
+        let longest_name = marks
+            .compiled_names
+            .iter()
+            .map(String::len)
+            .chain([v.logical.len()])
+            .max()
+            .unwrap_or(0);
+        // Charged before any is made: every spelling, and for each type name
+        // and suffix a compiled name of it.
+        let spellings = (2 + ACCESSOR_PREFIXES.len()) * (1 + marks.compiled_names.len());
+        let compiled = types * spellings * EXTENSION_SUFFIXES.len();
+        let bytes = spellings * (longest_name + 8)
+            + compiled * (longest_type + longest_name + 8 + ".Static.Override".len());
+        self.charge(scope, 1, bytes)?;
+        let names = val_spellings(v, marks);
+        let mut all: BTreeSet<String> = names.iter().cloned().collect();
+        for t in augmented.into_iter().flatten() {
+            for n in &names {
+                for suffix in EXTENSION_SUFFIXES {
+                    all.insert(format!("{t}.{n}{suffix}"));
+                }
+            }
         }
-        let names = 2 * v.logical.len()
-            + marks
-                .compiled_names
-                .iter()
-                .map(String::len)
-                .max()
-                .unwrap_or(0);
-        self.charge(scope, compiled.len(), names)?;
-        for c in compiled {
-            self.out.extensions.push(ExtensionRow {
-                layer: IndexLayer::Pickle,
-                namespace: scope.namespace.clone(),
-                enclosing: scope.enclosing.clone(),
-                names: val_names(&v.logical, v.accessor, c.map(String::as_str)),
-                instance: None,
-            });
-        }
+        self.out.extensions.push(ExtensionRow {
+            layer: IndexLayer::Pickle,
+            namespace: scope.namespace.clone(),
+            enclosing: scope.enclosing.clone(),
+            names: all.into_iter().collect(),
+            instance,
+        });
         Ok(())
     }
 
@@ -2236,7 +2241,7 @@ impl FileWalk<'_> {
             is_static: true,
             own_lists: Vec::new(),
         };
-        self.csharp_val(scope, &v, marks, true)
+        self.val_row(scope, &v, marks, None, None)
     }
 
     /// A module `let` binding under `lists`: a C#-style row per bound value
@@ -2251,28 +2256,23 @@ impl FileWalk<'_> {
         if !marks.may(Marker::Extension) {
             return Ok(());
         }
-        match pat.as_ref().and_then(binding_name) {
-            Some(name) => self.csharp_row(scope, &name, &marks),
-            None => {
+        let Some(pat) = pat.as_ref() else {
+            return Err(ExistenceUnread::UnnamedDeclaration(self.index));
+        };
+        match binding_head(pat) {
+            Some(Head::Named(name)) => self.csharp_row(scope, &name, &marks),
+            None => Err(ExistenceUnread::OutsideDomain(
+                self.index,
+                Leaf::BindingHead,
+            )),
+            Some(Head::Pattern(names)) => {
                 // A pattern binding names several values, each carrying the
-                // attribute: in a certified form ([`Leaf::BindingHead`]),
-                // every name the pattern spells.
-                let Some(pat) = pat.as_ref() else {
-                    return Err(ExistenceUnread::UnnamedDeclaration(self.index));
-                };
-                if !certified_pattern(pat) {
-                    return Err(ExistenceUnread::OutsideDomain(
-                        self.index,
-                        Leaf::BindingHead,
-                    ));
-                }
-                let names = pattern_idents(pat);
+                // attribute: every name the pattern spells.
                 if names.is_empty() {
                     return Err(ExistenceUnread::UnnamedDeclaration(self.index));
                 }
-                // A row per name and compiled name: charged before expanding.
-                let rows = names.len() * (marks.compiled_names.len() + 1);
-                if self.out.entities.len() + self.out.extensions.len() + rows > MAX_ROWS {
+                // A row per name: charged before expanding.
+                if self.out.entities.len() + self.out.extensions.len() + names.len() > MAX_ROWS {
                     return Err(ExistenceUnread::TooManyReadings);
                 }
                 self.out
@@ -2312,18 +2312,14 @@ impl FileWalk<'_> {
             // ``Tuple`n``, or ``ValueTuple`n`` for a struct tuple, `n` its
             // elements' count (one beyond seven nest, so ``Tuple`8`` too).
             self.out.approximations.insert(Approximation::RejectedShape);
-            let n = defn.tuple_type_head().map_or(0, |t| tuple_arity(&t));
+            // Every tycon `mkCompiledTupleTyconRef` may choose
+            // (`TypedTreeOps.Remap.fs:835`): `n` elements up to seven, the
+            // eighth for more, reference or struct.
             let mut names = Vec::new();
             for family in ["Tuple", "ValueTuple"] {
                 names.push(family.to_owned());
-                for k in [n, 8] {
-                    if k > 0 {
-                        names.push(format!("{family}`{k}"));
-                    }
-                }
+                names.extend((1..=8).map(|k| format!("{family}`{k}")));
             }
-            names.sort();
-            names.dedup();
             // Its `let`s, which FCS rejects here, kept in the container.
             self.type_bodies(scope, None, &members)?;
             return self.members(scope, &members, Some(&names));
@@ -2387,6 +2383,7 @@ impl FileWalk<'_> {
         // The extended type's logical name: its name, with an arity suffix
         // of at most the head's parameter count (units of measure are not
         // counted, and the head need not repeat the type's measures).
+        self.charge(scope, arity + 1, last.len() + 24)?;
         let mut type_names = vec![last.clone()];
         type_names.extend((1..=arity).map(|n| format!("{last}`{n}")));
         self.members(scope, &members, Some(&type_names))
@@ -2401,27 +2398,30 @@ impl FileWalk<'_> {
 /// between that may bring another of its name; `No` when the list declares
 /// no type of that name at all.
 fn intrinsic_in(ctx: &ListCtx, name: &str, arity: usize, position: usize) -> Maybe {
-    let same_name: Vec<&LocalType> = ctx.locals.iter().filter(|t| t.name == name).collect();
-    if same_name.is_empty() {
+    let Some(same_name) = ctx.locals.get(name) else {
         return Maybe::No;
-    }
-    let earlier = |t: &&LocalType| ctx.is_rec || t.position <= position;
-    let Some(t) = same_name
-        .iter()
-        .copied()
-        .filter(earlier)
-        .max_by_key(|t| t.position)
-    else {
+    };
+    // The definitions in scope, in position order: every one in a `rec`
+    // list, else those at or before the augmentation.
+    let earlier = if ctx.is_rec {
+        same_name.len()
+    } else {
+        same_name.partition_point(|t| t.position <= position)
+    };
+    let Some(t) = earlier.checked_sub(1).map(|i| &same_name[i]) else {
         return Maybe::Possibly;
     };
     let clear = |from: usize| {
         if ctx.is_rec {
             ctx.barriers.is_empty()
         } else {
-            !ctx.barriers.iter().any(|&b| b > from && b < position)
+            // The first barrier after `from`, by binary search: none may sit
+            // before `position`.
+            let next = ctx.barriers.partition_point(|&b| b <= from);
+            ctx.barriers.get(next).is_none_or(|&b| b >= position)
         }
     };
-    let only_one = same_name.iter().filter(|u| earlier(u)).count() == 1;
+    let only_one = earlier == 1;
     if t.class_like && t.arity == arity && clear(t.position) && only_one {
         Maybe::Yes
     } else {
@@ -2533,19 +2533,6 @@ fn has_static_argument(ty: &Type) -> bool {
     })
 }
 
-/// The element count of a tuple augmentation's head (`(int * int)`: 2).
-fn tuple_arity(head: &borzoi_cst::syntax::TupleTypeExtensionHead) -> usize {
-    match head.ty() {
-        Some(Type::Tuple(t)) => t
-            .segments()
-            .iter()
-            .filter(|s| matches!(s, borzoi_cst::syntax::TupleSegment::Type(_)))
-            .count(),
-        Some(_) => 1,
-        None => 0,
-    }
-}
-
 /// Whether an abbreviation's target may be a generative provider's type,
 /// where a reference may be a provider ([`Leaf::ProvidedTarget`]): any
 /// named type, applied or not, prefix or postfix (FCS hands a provider any
@@ -2637,13 +2624,13 @@ fn head_lines(pat: &Pat, lines: &Lines) -> Option<std::ops::RangeInclusive<u32>>
 }
 
 /// Whether a binding's pattern, when it names no single value
-/// ([`binding_name`]), is a certified form ([`Leaf::BindingHead`]): a tuple
+/// ([`binding_name_at`]), is a certified form ([`Leaf::BindingHead`]): a tuple
 /// of names and wildcards, or a head that may be a union case
 /// (`let Q (s: string) = …`, `let X = …`), under parentheses or a type
 /// annotation. Its identifiers then hold its binders. Any other pattern (an
 /// `as`, a record, a list, a cons, an `|`, a qualified case) is outside the
 /// domain.
-fn certified_pattern(pat: &Pat) -> bool {
+fn certified_pattern(pat: &Pat, forms: &mut BTreeSet<HeadForm>) -> bool {
     let simple = |p: &Pat| match p {
         Pat::Named(n) => n.active_pat_name().is_none(),
         Pat::Wildcard(_) => true,
@@ -2671,11 +2658,25 @@ fn certified_pattern(pat: &Pat) -> bool {
         | Pat::Quote(_) => false,
     };
     match pat {
-        Pat::Paren(p) => p.inner().as_ref().is_some_and(certified_pattern),
-        Pat::Typed(t) => t.pat().as_ref().is_some_and(certified_pattern),
-        Pat::Tuple(t) => t.elements().all(|e| simple(&e)),
+        Pat::Paren(p) => {
+            forms.insert(HeadForm::ParenthesisedTyped);
+            p.inner()
+                .as_ref()
+                .is_some_and(|p| certified_pattern(p, forms))
+        }
+        Pat::Typed(t) => {
+            forms.insert(HeadForm::ParenthesisedTyped);
+            t.pat()
+                .as_ref()
+                .is_some_and(|p| certified_pattern(p, forms))
+        }
+        Pat::Tuple(t) => {
+            forms.insert(HeadForm::Tuple);
+            t.elements().all(|e| simple(&e))
+        }
         // A head that may be a union case, its arguments simple names.
         Pat::LongIdent(l) => {
+            forms.insert(HeadForm::UpperCaseHead);
             l.active_pat_name().is_none()
                 && l.name_pat_pairs().is_none()
                 && l.head().is_some_and(|h| h.idents().count() == 1)
@@ -2684,8 +2685,14 @@ fn certified_pattern(pat: &Pat) -> bool {
                     let mut a = a;
                     loop {
                         let inner = match &a {
-                            Pat::Paren(p) => p.inner(),
-                            Pat::Typed(t) => t.pat(),
+                            Pat::Paren(p) => {
+                                forms.insert(HeadForm::ParenthesisedTyped);
+                                p.inner()
+                            }
+                            Pat::Typed(t) => {
+                                forms.insert(HeadForm::ParenthesisedTyped);
+                                t.pat()
+                            }
                             Pat::Named(_)
                             | Pat::LongIdent(_)
                             | Pat::Wildcard(_)
@@ -2712,7 +2719,10 @@ fn certified_pattern(pat: &Pat) -> bool {
                 })
         }
         // `let _ = …` binds nothing: certified, and then unnamed.
-        Pat::Wildcard(_) => true,
+        Pat::Wildcard(_) => {
+            forms.insert(HeadForm::Value);
+            true
+        }
         Pat::Named(_)
         | Pat::Const(_)
         | Pat::MeasureLit(_)
@@ -2730,26 +2740,139 @@ fn certified_pattern(pat: &Pat) -> bool {
     }
 }
 
-/// A module `let` binding's single name: `let f …`, `let x`, `let (|A|_|) …`,
-/// an operator, under parentheses or a type annotation.
-fn binding_name(pat: &Pat) -> Option<String> {
-    binding_name_at(pat, true)
+/// A certified binding head's binders ([`Leaf::BindingHead`]): one value's
+/// name ([`binding_name_at`]), or a certified pattern's identifiers
+/// ([`certified_pattern`]). `None` outside the domain: a head read through
+/// any form whose `LEAF_FORMS` row does not say [`Verdict::Read`], or that
+/// has no row.
+fn binding_head(pat: &Pat) -> Option<Head> {
+    let mut forms = BTreeSet::new();
+    let head = match binding_name_at(pat, true, &mut forms) {
+        Some(name) => Head::Named(name),
+        None => {
+            forms.clear();
+            if !certified_pattern(pat, &mut forms) {
+                return None;
+            }
+            Head::Pattern(pattern_idents(pat))
+        }
+    };
+    forms
+        .iter()
+        .all(|f| f.row().is_some_and(|r| r.verdict == Verdict::Read))
+        .then_some(head)
 }
 
-/// [`binding_name`], `top` when `pat` is the binding's whole pattern. A
-/// long-ident head names a value only when spelled as no union case can be
+/// What a certified binding head binds.
+enum Head {
+    /// One value.
+    Named(String),
+    /// A pattern's identifiers: a superset of its binders.
+    Pattern(Vec<String>),
+}
+
+/// The binding-head constructs the walk reads through, each named by a
+/// `LEAF_FORMS` row of [`Leaf::BindingHead`] whose verdict decides whether a
+/// head read through it is read. `binding_head_forms_are_table_rows` holds
+/// the list and the table to each other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum HeadForm {
+    Value,
+    Function,
+    Operator,
+    ActivePattern,
+    NullaryActivePattern,
+    ParenthesisedTyped,
+    Attributed,
+    UpperCaseHead,
+    Tuple,
+}
+
+impl HeadForm {
+    /// Every form, in [`Self::index`] order.
+    #[cfg(test)]
+    pub(crate) const ALL: [HeadForm; 9] = [
+        HeadForm::Value,
+        HeadForm::Function,
+        HeadForm::Operator,
+        HeadForm::ActivePattern,
+        HeadForm::NullaryActivePattern,
+        HeadForm::ParenthesisedTyped,
+        HeadForm::Attributed,
+        HeadForm::UpperCaseHead,
+        HeadForm::Tuple,
+    ];
+
+    /// The form's position in [`Self::ALL`]: a new form must take one.
+    #[cfg(test)]
+    pub(crate) fn index(self) -> usize {
+        match self {
+            HeadForm::Value => 0,
+            HeadForm::Function => 1,
+            HeadForm::Operator => 2,
+            HeadForm::ActivePattern => 3,
+            HeadForm::NullaryActivePattern => 4,
+            HeadForm::ParenthesisedTyped => 5,
+            HeadForm::Attributed => 6,
+            HeadForm::UpperCaseHead => 7,
+            HeadForm::Tuple => 8,
+        }
+    }
+
+    /// Its `LEAF_FORMS` row's `form`.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            HeadForm::Value => "value",
+            HeadForm::Function => "function",
+            HeadForm::Operator => "operator",
+            HeadForm::ActivePattern => "active_pattern",
+            HeadForm::NullaryActivePattern => "nullary_active_pattern",
+            HeadForm::ParenthesisedTyped => "parenthesised_typed",
+            HeadForm::Attributed => "attributed",
+            HeadForm::UpperCaseHead => "upper_case_head",
+            HeadForm::Tuple => "tuple",
+        }
+    }
+
+    /// Its `LEAF_FORMS` row, if the table has one.
+    pub(crate) fn row(self) -> Option<&'static LeafForm> {
+        LEAF_FORMS
+            .iter()
+            .find(|f| f.leaf == Leaf::BindingHead && f.form == self.name())
+    }
+}
+
+/// A binding head's single name (`let f …`, `let x`, `let (|A|_|) …`, an
+/// operator), recording each form it reads through in `forms`; `top` when
+/// `pat` is the binding's whole pattern. A long-ident head names a value only when spelled as no union case can be
 /// (lower case first), and, with arguments, only at the top, where it is a
 /// function: `let Some x = …`, `let None = …` and `let (f x) = …` do not.
-fn binding_name_at(pat: &Pat, top: bool) -> Option<String> {
+fn binding_name_at(pat: &Pat, top: bool, forms: &mut BTreeSet<HeadForm>) -> Option<String> {
+    // A value's own name: an operator's is its compiled name (`op_PlusDot`),
+    // which is what `id_text` gives.
+    let mut value = |name: String, function: bool| {
+        forms.insert(if name.starts_with("op_") {
+            HeadForm::Operator
+        } else if function {
+            HeadForm::Function
+        } else {
+            HeadForm::Value
+        });
+        name
+    };
     match pat {
         // `let (|Zero|_|) = …`: a nullary active pattern, named by its
         // recognizer.
         Pat::Named(n) => match n.active_pat_name() {
-            Some(ap) => Some(active_pattern_name(&ap)),
-            None => n.ident().map(|t| id_text(&t).into_owned()),
+            Some(ap) => {
+                forms.insert(HeadForm::NullaryActivePattern);
+                Some(active_pattern_name(&ap))
+            }
+            None => n.ident().map(|t| value(id_text(&t).into_owned(), false)),
         },
         Pat::LongIdent(l) => {
             if let Some(ap) = l.active_pat_name() {
+                forms.insert(HeadForm::ActivePattern);
                 return Some(active_pattern_name(&ap));
             }
             let li = l.head()?;
@@ -2762,11 +2885,27 @@ fn binding_name_at(pat: &Pat, top: bool) -> Option<String> {
             let function_like = name.chars().next().is_some_and(char::is_lowercase);
             // An upper-case head may be a union case binding nothing.
             let no_args = l.args().next().is_none() && l.name_pat_pairs().is_none();
-            (function_like && (no_args || top) && l.name_pat_pairs().is_none()).then_some(name)
+            (function_like && (no_args || top) && l.name_pat_pairs().is_none())
+                .then(|| value(name, !no_args))
         }
-        Pat::Paren(p) => p.inner().as_ref().and_then(|p| binding_name_at(p, false)),
-        Pat::Typed(t) => t.pat().as_ref().and_then(|p| binding_name_at(p, top)),
-        Pat::Attrib(a) => a.pat().as_ref().and_then(|p| binding_name_at(p, top)),
+        Pat::Paren(p) => {
+            forms.insert(HeadForm::ParenthesisedTyped);
+            p.inner()
+                .as_ref()
+                .and_then(|p| binding_name_at(p, false, forms))
+        }
+        Pat::Typed(t) => {
+            forms.insert(HeadForm::ParenthesisedTyped);
+            t.pat()
+                .as_ref()
+                .and_then(|p| binding_name_at(p, top, forms))
+        }
+        Pat::Attrib(a) => {
+            forms.insert(HeadForm::Attributed);
+            a.pat()
+                .as_ref()
+                .and_then(|p| binding_name_at(p, top, forms))
+        }
         // A pattern binding no single name, or several.
         Pat::Wildcard(_)
         | Pat::Const(_)
@@ -2785,22 +2924,25 @@ fn binding_name_at(pat: &Pat, top: bool) -> Option<String> {
     }
 }
 
-/// Every name a call may spell a val by, as the pickle's extension rows list
-/// them: its logical name, its compiled name, and for a property accessor
-/// the property's name and the accessor's.
-fn val_names(logical: &str, accessor: Option<&str>, compiled: Option<&str>) -> Vec<String> {
-    let mut names = vec![logical.to_owned()];
-    if let Some(c) = compiled {
-        names.push(c.to_owned());
-    }
-    if let Some(prefix) = accessor {
-        match logical.strip_prefix(prefix) {
-            Some(bare) => names.push(bare.to_owned()),
-            None => names.push(format!("{prefix}{logical}")),
+/// Every spelling FCS's formulas could give val `v` (its name as written
+/// stripped of any accessor prefix, `bare`): `bare`, its logical name, each
+/// accessor's (`get_`/`set_`, `add_`/`remove_`: `CheckExpressions.fs`,
+/// `ComputeLogicalName` and the `[<CLIEvent>]` accessors), and each
+/// `[<CompiledName>]` literal an attribute may give, with each accessor's.
+/// Which accessors a member has is not modelled: every one is emitted.
+fn val_spellings(v: &MemberVal, marks: &Marks) -> BTreeSet<String> {
+    let bare = v
+        .accessor
+        .and_then(|p| v.logical.strip_prefix(p))
+        .unwrap_or(&v.logical);
+    let mut names = BTreeSet::new();
+    names.insert(v.logical.clone());
+    for base in std::iter::once(bare).chain(marks.compiled_names.iter().map(String::as_str)) {
+        names.insert(base.to_owned());
+        for prefix in ACCESSOR_PREFIXES {
+            names.insert(format!("{prefix}{base}"));
         }
     }
-    names.sort();
-    names.dedup();
     names
 }
 

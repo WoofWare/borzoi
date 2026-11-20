@@ -149,6 +149,10 @@ pub enum Refusal {
     ReadsDll,
     /// A source holds a `#r` or `#load` fsc acts on.
     NamesUnreadCode,
+    /// A's check fails and FCS builds it no assembly data, which it also
+    /// does for a type provider, and a source may name one: whether FCS would
+    /// read A from its DLL cannot be told, so A is not graded.
+    MayReadDll,
 }
 
 fn plain(s: &str) -> PlainName {
@@ -292,6 +296,7 @@ pub fn fcs(cell: &Cell) -> Fcs {
         // the check does not read. The walk must decline either.
         Err(e)
             if e.contains("FCS reads it from its DLL")
+                || e.contains("FCS may read it from its DLL")
                 || e.contains("names code the project check does not read") =>
         {
             return Fcs {
@@ -307,6 +312,8 @@ pub fn fcs(cell: &Cell) -> Fcs {
                 view_unread: Vec::new(),
                 refused: Some(if e.contains("FCS reads it from its DLL") {
                     Refusal::ReadsDll
+                } else if e.contains("FCS may read it from its DLL") {
+                    Refusal::MayReadDll
                 } else {
                     Refusal::NamesUnreadCode
                 }),
@@ -627,6 +634,9 @@ fn lines<T: std::fmt::Debug>(rows: &[T]) -> String {
 pub fn grade(cell: &Cell, fcs: &Fcs, ours: &SourceExistence) -> Result<String, String> {
     match (fcs.refused, ours) {
         (None, _) => {}
+        (Some(Refusal::MayReadDll), _) => {
+            return Ok("ungraded: its check fails, and FCS may read its DLL".to_owned());
+        }
         (Some(Refusal::ReadsDll), SourceExistence::Unread(ExistenceUnread::TypeProvider(_))) => {
             return Ok("unread TypeProvider, FCS reads the DLL".to_owned());
         }

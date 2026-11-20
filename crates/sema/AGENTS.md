@@ -69,7 +69,17 @@ each row's verdict, so the predicate and the table cannot drift apart. A
 clean producer's resolver fold is held to the walk too: every module and
 placed type `resolve_project_files` exports is one of its entities
 (`test_support::fold_entity_paths`). Every channel it reads is a `Channel` with a `Treatment`, and
-`the_inventory_is_what_the_walk_does` runs a witness of each. The only
+`the_inventory_is_what_the_walk_does` runs a witness of each. Every
+binding-head construct the walk reads through is a `HeadForm` whose
+`LEAF_FORMS` row decides it (`binding_head_forms_are_table_rows` holds the
+two together), so a construct with no Read row declines. Every spelling the
+walk derives rather than reads (compiled names, accessor and arity forms,
+mangled names) is listed, with the FCS formula it covers, in the module doc's
+"Spellings the walk derives": for each, the walk emits every spelling the
+formula could produce rather than model the one it does. Every byte a row
+copies is charged before it is made (`MAX_ROW_BYTES`), and
+`source_existence_budget` walks producers whose long names multiply under a
+memory limit, in a child process. The only
 positions the walk reads are the lines a marked class `let`'s head spans
 (`head_lines`): FCS mangles a taken name by its binder's line, and the walk
 emits every line of the head rather than model which token FCS takes the
