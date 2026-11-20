@@ -2609,6 +2609,13 @@ fn update_strands_late(node: Node<'_, '_>, item_type: &str, state: &mut State<'_
             return false;
         }
     };
+    // An `Update` the walk cannot tell runs neither sets the batch pending
+    // nor flushes it: MSBuild gives a later strand its metadata past a
+    // condition-false one as without it (probed, SDK 10).
+    let certainly_runs = matches!(
+        evaluate_item_condition_silent(node, state),
+        (CondGate::Run, false)
+    );
     let (worlds, startup_undecided) = expand_silent_worlds_noting(update, state);
     // As in `resolve_compile_update_targets`: no two worlds' spellings are
     // read as one.
@@ -2680,13 +2687,15 @@ fn update_strands_late(node: Node<'_, '_>, item_type: &str, state: &mut State<'_
     }
     match left_at {
         None => {
-            run.pending = true;
+            run.pending = certainly_runs;
             false
         }
         Some(i) => {
             let strands_late = i > 0 && strandable && !run.pending;
-            if run.pending {
+            if run.pending && certainly_runs {
                 *run = UpdateBatchRun::default();
+            } else if !certainly_runs {
+                run.pending = false;
             } else {
                 for key in &removed_on_leaving {
                     run.keys.remove(key);

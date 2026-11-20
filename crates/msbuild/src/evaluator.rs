@@ -5307,35 +5307,36 @@ fn walk_property_child_inner(
     state.written.insert(lower.clone(), name.clone());
 }
 
-/// Whether the gate at `node` may skip a property write: a `<PropertyGroup>`,
-/// a property, an import or import group, or a `<When>`/`<Otherwise>` whose
-/// arm holds one of those. An item group's or an item's skips none.
+/// Whether the gate at `node` may skip a property write: one over a property,
+/// an import, or a `<PropertyGroup>`, `<ImportGroup>` or
+/// `<When>`/`<Otherwise>` arm holding one. An item group's or an item's skips
+/// none, nor does a group that holds no write.
 fn gate_may_skip_property_writes(node: Node<'_, '_>) -> bool {
-    let writes = |name: &str| {
-        ["PropertyGroup", "Import", "ImportGroup"]
-            .iter()
-            .any(|tag| name.eq_ignore_ascii_case(tag))
+    let is_write = |element: Node<'_, '_>| {
+        element.is_element()
+            && (element.tag_name().name().eq_ignore_ascii_case("Import")
+                || element.parent_element().is_some_and(|parent| {
+                    parent
+                        .tag_name()
+                        .name()
+                        .eq_ignore_ascii_case("PropertyGroup")
+                }))
     };
     let name = node.tag_name().name();
-    if writes(name)
-        || node.parent_element().is_some_and(|parent| {
-            parent
-                .tag_name()
-                .name()
-                .eq_ignore_ascii_case("PropertyGroup")
-        })
+    let holds_a_write = |scope: Node<'_, '_>| scope.descendants().any(is_write);
+    if ["PropertyGroup", "ImportGroup", "Import"]
+        .iter()
+        .any(|tag| name.eq_ignore_ascii_case(tag))
+        || is_write(node)
     {
-        return true;
+        return holds_a_write(node);
     }
     // A `When` decides whether each later arm runs too, so its own arm and
     // every later one count; an earlier arm was already false.
     ["When", "Otherwise"]
         .iter()
         .any(|tag| name.eq_ignore_ascii_case(tag))
-        && std::iter::successors(Some(node), |arm| arm.next_sibling_element()).any(|arm| {
-            arm.descendants()
-                .any(|descendant| descendant.is_element() && writes(descendant.tag_name().name()))
-        })
+        && std::iter::successors(Some(node), |arm| arm.next_sibling_element()).any(holds_a_write)
 }
 
 /// Result of evaluating a node's `Condition` attribute.

@@ -12556,6 +12556,68 @@ fn an_unheld_splice_beside_a_certain_function_is_no_throw() {
     assert!(p.rejection.is_none(), "{:#?}", p.rejection);
 }
 
+/// A condition-false `Update` leaves no batch pending for a later one to
+/// flush: MSBuild gives `B.fs` the stranded `CompileFirst` with it as without
+/// it (probed, `dotnet msbuild`, SDK 10), so the order is no certain one.
+#[test]
+fn a_condition_false_update_leaves_no_batch_pending() {
+    let p = parse(
+        r#"<Project><ItemGroup>
+    <Compile Update="A.fs;A.fs" Link="a" />
+    <Compile Update="Z.fs" Condition="false" Link="z" />
+    <Compile Update="B.fs;A.fs" CompileOrder="CompileFirst" />
+    <Compile Include="A.fs;B.fs" />
+  </ItemGroup></Project>"#,
+    );
+    assert!(p.items_uncertain || p.rejection.is_some(), "{:#?}", p.items);
+}
+
+/// An expression's bounds follow the expander's quoting: the `(` in
+/// `Split("(")` opens nothing. After a startup decline `X` is `a(b` or `a`,
+/// and `[1]` is past the end of `a`'s split (MSB4184 where `seg/` is there).
+#[test]
+#[cfg(not(windows))]
+fn a_quoted_paren_after_a_startup_decline_may_reject() {
+    let p = parse(
+        r#"<Project><PropertyGroup>
+    <S>seg\a</S>
+    <X>a(b</X>
+    <X Condition="'$(S)' == 'seg/a'">a</X>
+    <Y>$(X.Split("(")[1])</Y>
+  </PropertyGroup>
+  <PropertyGroup><After>ok</After></PropertyGroup></Project>"#,
+    );
+    assert!(
+        p.rejection.is_some(),
+        "{:?} {:#?}",
+        p.property("After"),
+        p.diagnostics
+    );
+}
+
+/// A gate over groups that write nothing skips no write: an empty
+/// `PropertyGroup` in a `When`, or an empty `ImportGroup`, that turns on the
+/// startup directory leaves a later function of an unmodelled value judged as
+/// without them.
+#[test]
+#[cfg(not(windows))]
+fn an_empty_group_under_a_startup_gate_skips_no_write() {
+    for gated in [
+        r#"<Choose><When Condition="'$(S)' == 'seg/a'"><PropertyGroup /></When></Choose>"#,
+        r#"<ImportGroup Condition="'$(S)' == 'seg/a'" />"#,
+    ] {
+        let p = parse(&format!(
+            r#"<Project><PropertyGroup>
+    <S>seg\a</S>
+    <U>$([System.IO.Path]::GetFileName('x'))</U>
+  </PropertyGroup>
+  {gated}
+  <PropertyGroup><L>$(U.Length)</L><After>ok</After></PropertyGroup></Project>"#
+        ));
+        assert!(p.rejection.is_none(), "{gated}: {:#?}", p.rejection);
+    }
+}
+
 /// `Q` is `./seg/a//` where `seg` is a directory under MSBuild's startup
 /// directory, and `./seg/a/` elsewhere: the whole value's pass respells it
 /// only where `S`'s `\` survived. Each reader below that would act on one of

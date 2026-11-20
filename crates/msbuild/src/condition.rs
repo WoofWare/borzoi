@@ -1115,25 +1115,16 @@ fn uncertain_spans(text: &str, uncertain: &dyn Fn(&str) -> bool) -> Vec<Range<us
 /// MSBuild may throw evaluating on another value of that name. A plain
 /// reference to such a name beside a function of certain names is none.
 pub(crate) fn has_unplain_expression_reading(text: &str, uncertain: &dyn Fn(&str) -> bool) -> bool {
-    let mut at = 0;
-    while let Some(open) = text[at..].find("$(") {
-        let start = at + open;
-        let Some(close) = find_balanced_property_expression_close(&text[start + 2..]) else {
+    // The expander's own bounds, quoting included.
+    crate::properties::expression_texts(text).any(|expression| {
+        if plain_references_only(expression) {
             return false;
-        };
-        let end = start + 2 + close + 1;
-        let expression = &text[start..end];
-        if !plain_references_only(expression) {
-            let mut names = Vec::new();
-            explicit_references(expression, &mut names);
-            implicit_references(expression, &mut names);
-            if names.iter().any(|name| uncertain(name)) {
-                return true;
-            }
         }
-        at = end;
-    }
-    false
+        let mut names = Vec::new();
+        explicit_references(expression, &mut names);
+        implicit_references(expression, &mut names);
+        names.iter().any(|name| uncertain(name))
+    })
 }
 
 /// `text` with each of `spans` (disjoint, in order: those
