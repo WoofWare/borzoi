@@ -9,10 +9,14 @@
 //! the same name recurs (a module beside a type of its name, duplicates
 //! across files, an augmentation of a local type).
 
+use std::collections::{BTreeMap, BTreeSet};
+
+use borzoi_cst::parser::parse;
 use borzoi_oracle_harness::hostile::census::Census;
 use borzoi_oracle_harness::hostile::{self, Dimension, Kind as HostileKind, coverage, source};
 use borzoi_oracle_harness::manifest::Manifest;
 use borzoi_oracle_harness::project_graph::Target;
+use borzoi_sema::FcsRange as _;
 
 use crate::common::corpus_manifest::{check_manifest, regenerate};
 use crate::source_existence_diff::{Cell, grade_cells};
@@ -97,6 +101,10 @@ const MEMBER_NAMES: &[&str] = &["M", "Length", "Item", "ToString", "``odd member
 /// Names a type's `let`s, constructor arguments, self identifier, fields and
 /// `[<CompiledName>]`s share, so that one takes another's (and FCS mangles
 /// it, `f@7`).
+/// Partial active-pattern cases for a class `let`, whose binder's line is
+/// its `(|…|_|)`'s.
+const ACTIVE_CASES: &[&str] = &["Even", "Parse", "Q", "Some"];
+
 const LET_NAMES: &[&str] = &[
     "f",
     "g",
@@ -318,7 +326,12 @@ impl Gen {
                 for _ in 0..self.rng.below(4) {
                     let let_name = *self.rng.pick(LET_NAMES);
                     let other = *self.rng.pick(LET_NAMES);
-                    let binding = match self.rng.below(7) {
+                    let binding = match self.rng.below(9) {
+                        7 => format!(
+                            "{ext}\n{indent}    let (|{}|_|) (s: string) = Some s",
+                            self.rng.pick(ACTIVE_CASES)
+                        ),
+                        8 => format!("{ext}\n{indent}    static let {let_name}, {other} = 1, 2"),
                         0 => format!("{ext}\n{indent}    static let {let_name} (s: string) = s"),
                         1 => format!("{ext}\n{indent}    static let {let_name} = 1"),
                         2 => format!(
@@ -524,6 +537,12 @@ impl Gen {
 
 /// The generated cell of `seed`.
 pub fn cell(seed: u64) -> Cell {
+    cell_with_layout(seed).0
+}
+
+/// The generated cell of `seed`, with the layout perturbations mixed into
+/// it.
+fn cell_with_layout(seed: u64) -> (Cell, BTreeSet<Layout>) {
     let mut g = Gen {
         rng: Rng::new(seed),
         declared: Vec::new(),
@@ -535,6 +554,15 @@ pub fn cell(seed: u64) -> Cell {
         let (text, h) = g.file(i + 1 == n);
         headerless |= h;
         files.push((format!("F{i}.fs"), text));
+    }
+    // One case in two has layout trivia mixed into every file, from a stream
+    // of its own.
+    let mut layout = BTreeSet::new();
+    if seed % 2 == 1 {
+        let mut rng = Rng::new(seed ^ 0x1a70_u64);
+        for file in &mut files {
+            file.1 = perturb_layout(&file.1, &mut rng, &mut layout);
+        }
     }
     let mut cell = Cell::new(format!("gen_{seed}"), &[]);
     // One case in `hostile::RATE` has a hostile source state mixed into one
@@ -561,7 +589,165 @@ pub fn cell(seed: u64) -> Cell {
     if headerless {
         cell.target = Target::Exe;
     }
-    cell
+    (cell, layout)
+}
+
+/// Layout trivia that FCS's reading of a declaration does not depend on.
+/// The generator mixes it in before and inside every form, so a reader that
+/// takes a position from a node's range (which holds the node's leading
+/// trivia, line breaks included) rather than from its first token reads the
+/// wrong line, and the class-`let` names FCS mangles by line show it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Layout {
+    /// A line holding only a comment, before a line.
+    CommentLine,
+    /// An empty line before a line.
+    BlankLine,
+    /// `(* … *)` before a token that is not its line's first.
+    BlockComment,
+    /// A block comment spanning a line break, before such a token. The
+    /// comment closes past every column of the line it opened on, so the
+    /// tokens after it stay right of every context that line pushed.
+    MultiLineComment,
+    /// A line break before such a token, the rest of the line indented past
+    /// every column of the line it left.
+    LineBreak,
+}
+
+impl Layout {
+    const ALL: [Layout; 5] = [
+        Layout::CommentLine,
+        Layout::BlankLine,
+        Layout::BlockComment,
+        Layout::MultiLineComment,
+        Layout::LineBreak,
+    ];
+}
+
+impl Layout {
+    /// The perturbations at a line's start, before its first token.
+    pub const AT_LINE: [Layout; 2] = [Layout::CommentLine, Layout::BlankLine];
+    /// The perturbations before a token that is not its line's first.
+    pub const INSIDE: [Layout; 3] = [
+        Layout::BlockComment,
+        Layout::MultiLineComment,
+        Layout::LineBreak,
+    ];
+
+    /// The insertion `self` makes, and where: at `line_start` for an
+    /// [`AT_LINE`](Self::AT_LINE) perturbation, else at `at`, a token on
+    /// that line that is not its first.
+    pub fn edit(self, line_start: usize, at: usize) -> (usize, String) {
+        // Past every column of the line: the column is at most the byte
+        // offset from the line's start.
+        let past = " ".repeat(at - line_start + 1);
+        match self {
+            Layout::CommentLine => (line_start, "// layout\n".to_owned()),
+            Layout::BlankLine => (line_start, "\n".to_owned()),
+            Layout::BlockComment => (at, "(* layout *) ".to_owned()),
+            Layout::MultiLineComment => (at, format!("(* layout\n{past}*) ")),
+            Layout::LineBreak => (at, format!("\n{past}")),
+        }
+    }
+}
+
+/// The lines of `text` that hold a token, by their start offset: each line's
+/// token starts, those not its first among them. A line that starts inside
+/// a token (a string spanning lines) is that token's text, and is not one.
+pub fn layout_lines(text: &str) -> BTreeMap<usize, Vec<usize>> {
+    let tokens: Vec<(usize, usize)> = parse(text)
+        .root
+        .descendants_with_tokens()
+        .filter_map(|el| el.into_token())
+        .filter(|t| !t.kind().is_trivia() && !t.fcs_range().is_empty())
+        .map(|t| {
+            let r = t.fcs_range();
+            (usize::from(r.start()), usize::from(r.end()))
+        })
+        .collect();
+    let mut lines: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for &(at, _) in &tokens {
+        let start = text[..at].rfind('\n').map_or(0, |i| i + 1);
+        if tokens.iter().any(|&(s, e)| s < start && start < e) {
+            continue;
+        }
+        let inner = lines.entry(start).or_default();
+        if !text[start..at].trim().is_empty() {
+            inner.push(at);
+        }
+    }
+    lines
+}
+
+/// `text` with `edits` inserted, each at its offset in `text`.
+pub fn insert_all(text: &str, mut edits: Vec<(usize, String)>) -> String {
+    edits.sort_by_key(|(at, _)| *at);
+    let mut out = text.to_owned();
+    for (at, insertion) in edits.into_iter().rev() {
+        out.insert_str(at, &insertion);
+    }
+    out
+}
+
+/// One line in this many of a perturbed file gets a perturbation at its
+/// start, and, independently, one in this many gets one inside it.
+const LAYOUT_RATE: usize = 2;
+
+/// `text` with layout trivia mixed in: at each line holding a token, one
+/// time in [`LAYOUT_RATE`] a [`Layout::AT_LINE`] perturbation, and one time
+/// in [`LAYOUT_RATE`] a [`Layout::INSIDE`] one before one of its tokens
+/// (one per line, so each line break's column is the column it leaves).
+/// Each one used is recorded in `used`.
+fn perturb_layout(text: &str, rng: &mut Rng, used: &mut BTreeSet<Layout>) -> String {
+    let mut edits = Vec::new();
+    for (start, inner) in layout_lines(text) {
+        if rng.below(LAYOUT_RATE) == 0 {
+            let op = *rng.pick(&Layout::AT_LINE);
+            used.insert(op);
+            edits.push(op.edit(start, start));
+        }
+        if !inner.is_empty() && rng.below(LAYOUT_RATE) == 0 {
+            let op = *rng.pick(&Layout::INSIDE);
+            let at = *rng.pick(&inner);
+            used.insert(op);
+            edits.push(op.edit(start, at));
+        }
+    }
+    insert_all(text, edits)
+}
+
+/// Whether a verdict grades our reading against FCS's: a read that FCS
+/// accepted.
+fn graded(verdict: &str) -> bool {
+    let certified = verdict.split("; unknown: ").next().unwrap_or(verdict);
+    (certified.starts_with("certified: exact") || certified.starts_with("certified: covers"))
+        && !certified.contains("FCS rejects")
+}
+
+/// Every layout perturbation must reach a case FCS accepts and our walk
+/// reads, or the dimension grades nothing. Prints, per perturbation, the
+/// cases it reached and how many of them were graded.
+fn layout_must_commit(layouts: &[BTreeSet<Layout>], cells: &[Cell], entries: &[(String, String)]) {
+    for op in Layout::ALL {
+        let reached: Vec<&str> = cells
+            .iter()
+            .zip(layouts)
+            .filter(|(_, l)| l.contains(&op))
+            .map(|(c, _)| c.name.as_str())
+            .collect();
+        let graded_cases = reached
+            .iter()
+            .filter(|name| entries.iter().any(|(n, v)| n == *name && graded(v)))
+            .count();
+        eprintln!(
+            "layout {op:?}: {} cases, {graded_cases} graded",
+            reached.len()
+        );
+        assert!(
+            graded_cases > 0,
+            "layout {op:?} reached no case FCS accepts and our walk reads: {reached:?}"
+        );
+    }
 }
 
 /// The census of the source mutations the generator mixes in.
@@ -597,12 +783,17 @@ fn generated(first: u64, count: u64) -> Vec<Cell> {
     (first..first + count).map(cell).collect()
 }
 
+/// [`generated`], with each cell's layout perturbations.
+fn generated_with_layout(first: u64, count: u64) -> (Vec<Cell>, Vec<BTreeSet<Layout>>) {
+    (first..first + count).map(cell_with_layout).unzip()
+}
+
 /// The pinned default run of the generator: its seeds are fixed, so each
 /// case's verdict is pinned in `source_existence_gen.txt`.
 #[test]
 fn source_rows_are_fcs_rows_over_generated_projects() {
     let census = open_census();
-    let cells = generated(0, 60);
+    let (cells, layouts) = generated_with_layout(0, 60);
     let (entries, failures) = grade_cells(&cells);
     record(&census, &cells, &entries);
     if !failures.is_empty() {
@@ -620,6 +811,7 @@ fn source_rows_are_fcs_rows_over_generated_projects() {
         failures.len(),
         failures.join("\n")
     );
+    layout_must_commit(&layouts, &cells, &entries);
     let manifest = Manifest::from_keyed(entries).expect("well-formed entries");
     check_manifest(
         "source_existence_gen",

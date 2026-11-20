@@ -160,6 +160,7 @@ mod source_existence_diff;
 mod source_existence_domain;
 mod source_existence_gen;
 mod source_existence_grid;
+mod source_existence_layout;
 mod source_existence_placement;
 mod tier_order_diff;
 mod type_arity_route_grid;

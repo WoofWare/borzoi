@@ -14,7 +14,7 @@ gen_17	certified: exact [UncertainAttribute]; unknown: covers surplus(prefix 2, 
 gen_18	certified: exact []; unknown: exact []
 gen_19	certified: exact []; unknown: covers surplus(prefix 1, entity 1, lends 1, lender 0, auto-open 0, extension 0) [UncertainAttribute]
 gen_2	certified: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 6) []; unknown: covers surplus(prefix 0, entity 0, lends 4, lender 0, auto-open 0, extension 6) [UncertainAttribute]
-gen_20	certified: covers, FCS rejects surplus(prefix 0, entity 0, lends 1, lender 0, auto-open 0, extension 72) [AbbreviationOrUnion,ClassLetName]; unknown: unread TypeProvider(0) [FCS: FS35,FS37,FS37]
+gen_20	certified: covers, FCS rejects surplus(prefix 0, entity 0, lends 1, lender 0, auto-open 0, extension 74) [AbbreviationOrUnion,ClassLetName]; unknown: unread TypeProvider(0) [FCS: FS35,FS37,FS37]
 gen_21	certified: exact []; unknown: unread TypeProvider(0)
 gen_22	certified: exact []; unknown: covers surplus(prefix 0, entity 0, lends 2, lender 0, auto-open 0, extension 0) [UncertainAttribute]
 gen_23	certified: exact []; unknown: covers surplus(prefix 0, entity 0, lends 4, lender 0, auto-open 0, extension 0) [UncertainAttribute]
@@ -36,7 +36,7 @@ gen_37	certified: exact []; unknown: exact []
 gen_38	certified: unread Recovered(1); unknown: unread Recovered(1) [FCS: FS10]
 gen_39	certified: exact, FCS rejects []; unknown: unread TypeProvider(0) [FCS: FS927,FS927,FS927,FS927,FS927,FS927]
 gen_4	certified: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 12) []; unknown: unread TypeProvider(1)
-gen_40	certified: covers, FCS rejects surplus(prefix 1, entity 1, lends 3, lender 0, auto-open 0, extension 16) [UncertainAttribute,ClassLetName]; unknown: unread TypeProvider(1) [FCS: FS849,FS849,FS849,FS849,FS841,FS53]
+gen_40	certified: covers, FCS rejects surplus(prefix 1, entity 1, lends 3, lender 0, auto-open 0, extension 20) [UncertainAttribute,ClassLetName]; unknown: unread TypeProvider(1) [FCS: FS849,FS849,FS849,FS849,FS841,FS53]
 gen_41	certified: exact []; unknown: exact [UncertainAttribute]
 gen_42	certified: covers, FCS rejects surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 2) [AbbreviationOrUnion]; unknown: covers, FCS rejects surplus(prefix 0, entity 0, lends 2, lender 0, auto-open 0, extension 2) [UncertainAttribute,AbbreviationOrUnion] [FCS: FS35,FS39]
 gen_43	certified: covers, FCS rejects, its signature undecodable surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 2) [AbbreviationOrUnion]; unknown: unread TypeProvider(1) [FCS: FS37,FS35,FS249]
@@ -53,7 +53,7 @@ gen_52	certified: unread Recovered(1); unknown: unread TypeProvider(0) [FCS: FS3
 gen_53	certified: covers, FCS rejects surplus(prefix 1, entity 1, lends 2, lender 0, auto-open 0, extension 0) [UncertainAttribute,AbbreviationOrUnion]; unknown: covers, FCS rejects surplus(prefix 1, entity 1, lends 4, lender 0, auto-open 0, extension 0) [UncertainAttribute,AbbreviationOrUnion] [FCS: FS33,FS33]
 gen_54	certified: exact []; unknown: covers surplus(prefix 0, entity 0, lends 3, lender 0, auto-open 0, extension 0) [UncertainAttribute]
 gen_55	certified: exact []; unknown: covers surplus(prefix 0, entity 0, lends 3, lender 0, auto-open 0, extension 0) [UncertainAttribute]
-gen_56	certified: unread LineDirective(0); unknown: unread LineDirective(0) [FCS: FS38,FS37]
+gen_56	certified: unread LineDirective(0); unknown: unread LineDirective(0) [FCS: FS37]
 gen_57	certified: exact [AbbreviationOrUnion]; unknown: unread TypeProvider(1)
 gen_58	certified: unread TypeProvider(0); unknown: unread TypeProvider(0) [FCS: FS849,FS849]
 gen_59	certified: covers, FCS rejects surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 15) [RejectedShape]; unknown: covers, FCS rejects surplus(prefix 0, entity 0, lends 6, lender 2, auto-open 0, extension 15) [UncertainAttribute,RejectedShape] [FCS: FS3350]
