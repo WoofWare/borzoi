@@ -1425,11 +1425,26 @@ struct Expansion {
 struct Speculation {
     /// Lower-cased names written on the path, whose value there is unknown.
     unheld: HashSet<String>,
-    /// [`Self::unheld`] as the item groups deferred from the path share it
-    /// ([`State::defer_judgement`]), until it next changes.
-    snapshot: Option<std::rc::Rc<[String]>>,
+    /// Every name written anywhere in the outermost walk, which the item
+    /// groups deferred from it share ([`State::defer_judgement`]): MSBuild
+    /// evaluates an item group after every property write on its path,
+    /// those after the group included.
+    walk_written: std::rc::Rc<std::cell::RefCell<PathWrites>>,
+    /// While an item group deferred from a walk is judged, the names of that
+    /// walk whose final value is not certain ([`PathWrites::settled`]).
+    inherited: Option<std::rc::Rc<HashSet<String>>>,
     /// How many nested walks are open.
     depth: usize,
+}
+
+/// The names written in one walk of content the walk does not take
+/// ([`Speculation::walk_written`]).
+#[derive(Default)]
+struct PathWrites {
+    names: HashSet<String>,
+    /// Those whose final value is not certain, computed once, in the item
+    /// pass, when the table is final.
+    settled: Option<std::rc::Rc<HashSet<String>>>,
 }
 
 impl Expansion {

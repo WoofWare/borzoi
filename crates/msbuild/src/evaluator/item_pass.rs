@@ -155,7 +155,7 @@ pub(super) struct DeferredItemGroup {
     judge_only: bool,
     /// For a judge-only group, the names written on its path before it,
     /// whose value there the walk does not hold.
-    unheld: std::rc::Rc<[String]>,
+    written: Option<std::rc::Rc<std::cell::RefCell<super::PathWrites>>>,
 }
 
 impl<'r> State<'r> {
@@ -233,10 +233,10 @@ impl<'r> State<'r> {
                 DeferredFileKey::Imported(index)
             }
         };
-        let unheld = if judge_only {
+        let written = if judge_only {
             self.speculatively_written()
         } else {
-            std::rc::Rc::from([])
+            None
         };
         self.deferred_item_groups.push(DeferredItemGroup {
             kind,
@@ -247,7 +247,7 @@ impl<'r> State<'r> {
             in_sdk_subtree: self.in_sdk_subtree,
             reach_certain,
             judge_only,
-            unheld,
+            written,
         });
     }
 }
@@ -284,7 +284,7 @@ pub(super) fn replay_deferred_item_groups(entry_doc: &Document<'_>, state: &mut 
         // MSBuild evaluates the group's conditions in this pass, against the
         // final property table: judged here, before the group is walked.
         let judge = |node: Node<'_, '_>, dir: &Path, state: &mut State<'_>| {
-            state.judge_from_path(&group.unheld, |state| {
+            state.judge_from_path(group.written.as_ref(), |state| {
                 rejection::judge_deferred(node, dir, group.reach_certain, state);
             });
         };

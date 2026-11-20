@@ -123,8 +123,8 @@ use crate::{Rejection, RejectionCause, RejectionCertainty, UnloadableImport};
 use super::item_pass::{DeferredGroupKind, expand_silent, metadata_attribute};
 use super::observed::{self, EntryKind};
 use super::{
-    SdkResolution, Speculation, State, collect_element_text, condition, condition_exists,
-    directory_build, import_dedup_key, loader, properties, sdk_import_path,
+    PathWrites, SdkResolution, Speculation, State, collect_element_text, condition,
+    condition_exists, directory_build, import_dedup_key, loader, properties, sdk_import_path,
     sdk_project_in_alphabet, sdk_project_under_root, sdk_project_written_rooted,
     sdk_root_is_reparsed,
 };
@@ -231,7 +231,7 @@ impl State<'_> {
     /// pass's, or the property pass's ([`condition::Site`]).
     pub(super) fn condition_site(&self) -> condition::Site {
         if self.in_item_pass {
-            condition::Site::Plain
+            condition::Site::ItemPass
         } else {
             condition::Site::PropertyPass
         }
@@ -240,9 +240,14 @@ impl State<'_> {
     /// Whether the speculative walk of content the walk does not take
     /// ([`State::speculation`]) leaves `name`'s value unknown.
     pub(super) fn speculatively_unheld(&self, name: &str) -> bool {
-        self.speculation
-            .as_ref()
-            .is_some_and(|speculation| speculation.unheld.contains(&name.to_ascii_lowercase()))
+        self.speculation.as_ref().is_some_and(|speculation| {
+            let name = name.to_ascii_lowercase();
+            speculation.unheld.contains(&name)
+                || speculation
+                    .inherited
+                    .as_ref()
+                    .is_some_and(|inherited| inherited.contains(&name))
+        })
     }
 
     /// Open a walk of content the walk does not take: what a write there
@@ -256,7 +261,8 @@ impl State<'_> {
             None => {
                 self.speculation = Some(Speculation {
                     unheld: HashSet::new(),
-                    snapshot: None,
+                    walk_written: std::rc::Rc::default(),
+                    inherited: None,
                     depth: 1,
                 });
             }
@@ -272,43 +278,62 @@ impl State<'_> {
         }
     }
 
-    /// The names written on the path the judgement walks now, for an item
-    /// group from it judged later ([`State::defer_judgement`]).
-    pub(super) fn speculatively_written(&mut self) -> std::rc::Rc<[String]> {
-        match self.speculation.as_mut() {
-            Some(speculation) => speculation
-                .snapshot
-                .get_or_insert_with(|| speculation.unheld.iter().cloned().collect())
-                .clone(),
-            None => std::rc::Rc::from([]),
-        }
+    /// The names written in the walk the judgement makes now, for an item
+    /// group from it judged later ([`State::defer_judgement`]); shared, and
+    /// still filling until the walk closes.
+    pub(super) fn speculatively_written(
+        &self,
+    ) -> Option<std::rc::Rc<std::cell::RefCell<PathWrites>>> {
+        self.speculation
+            .as_ref()
+            .map(|speculation| speculation.walk_written.clone())
     }
 
     /// Mark `names` written on the path the judgement walks now.
     fn mark_unheld(&mut self, names: impl IntoIterator<Item = String>) {
         if let Some(speculation) = self.speculation.as_mut() {
-            speculation.unheld.extend(names);
-            speculation.snapshot = None;
+            let mut walk_written = speculation.walk_written.borrow_mut();
+            for name in names {
+                walk_written.names.insert(name.clone());
+                speculation.unheld.insert(name);
+            }
         }
     }
 
     /// Judge, as [`judge_deferred`] does, an item group from content the walk
-    /// does not take, with `unheld` the names written on its path before it:
-    /// those whose final value is still not certain, since a certain write
-    /// after the path settles the value MSBuild reads in the item pass.
+    /// does not take, with `written` the names written in that walk, before
+    /// the group or after it: those whose final value is still not certain,
+    /// since a certain write after the walk settles the value MSBuild reads in
+    /// the item pass. Computed once per walk, the table being final.
     pub(super) fn judge_from_path(
         &mut self,
-        unheld: &[String],
+        written: Option<&std::rc::Rc<std::cell::RefCell<PathWrites>>>,
         judge: impl FnOnce(&mut State<'_>),
     ) {
-        let unheld = unheld
-            .iter()
-            .filter(|name| !directory_build::is_certain(self, name))
-            .cloned()
-            .collect();
+        let Some(written) = written else {
+            judge(self);
+            return;
+        };
+        let settled = written.borrow().settled.clone();
+        let settled = match settled {
+            Some(settled) => settled,
+            None => {
+                let names: HashSet<String> = written
+                    .borrow()
+                    .names
+                    .iter()
+                    .filter(|name| !directory_build::is_certain(self, name))
+                    .cloned()
+                    .collect();
+                let names = std::rc::Rc::new(names);
+                written.borrow_mut().settled = Some(names.clone());
+                names
+            }
+        };
         let saved = self.speculation.replace(Speculation {
-            unheld,
-            snapshot: None,
+            unheld: HashSet::new(),
+            walk_written: std::rc::Rc::default(),
+            inherited: Some(settled),
             depth: 1,
         });
         judge(self);
@@ -826,7 +851,6 @@ pub(super) fn judge_branch(
     if let Some(speculation) = state.speculation.as_mut() {
         written = speculation.unheld.difference(&before).cloned().collect();
         speculation.unheld = before;
-        speculation.snapshot = None;
     }
     state.close_speculation();
     written
@@ -927,11 +951,10 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
                         Some(body) => {
                             judge_unwalked_text(state, &body, body_reached, child.range())
                         }
-                        // A body holding an element MSBuild reads as serialized
-                        // XML (`InnerXml`), which the walk respells from the
-                        // source where it can ([`task_inner_xml`]); where it
-                        // cannot, an expression in it may throw on what the
-                        // walk does not see.
+                        // A body holding an element MSBuild reads as its inner
+                        // text or serialized XML ([`task_inner_xml`]); where the
+                        // walk cannot reproduce that, an expression in it may
+                        // throw on what the walk does not see.
                         None => match task_inner_xml(child) {
                             Some(body) => {
                                 judge_unwalked_text(state, &body, body_reached, child.range());
@@ -972,57 +995,115 @@ fn task_body(task: Node<'_, '_>) -> Option<String> {
     crate::document::inner_contents(&crate::document::element_content(task)?)
 }
 
-/// The inline task body at `task`, which holds an element, as MSBuild
-/// expands it: its inner XML as `XmlDocument` serializes it. Respelt from the
-/// source: a comment, CDATA section or processing instruction as written; in
-/// text, `&apos;` and `&quot;` as the characters they name (serializing
-/// escapes neither in text), `>` as `&gt;` (which it does), and `&amp;`,
-/// `&lt;` and `&gt;` kept; a tag as written. `None` where the source spells
-/// what this respelling does not reproduce: any other reference, or a tag
-/// holding an expression (serializing requotes and re-escapes attributes).
+/// The inline task body at `task`, which holds an element or a processing
+/// instruction, as MSBuild expands it (`Utilities.GetXmlNodeInnerContents`):
+/// its inner text where it starts with a CDATA section after any
+/// whitespace, else its inner XML as `XmlDocument` serializes it
+/// ([`serialize_inner_xml`]). `None` where the walk does not reproduce that
+/// reading: a carriage return in it (whose line-end reading `roxmltree`
+/// folds), a CDATA section past the first child, a namespace, or a value
+/// serializing would spell as a reference.
 fn task_inner_xml(task: Node<'_, '_>) -> Option<String> {
-    let source = &task.document().input_text()[task.range()];
-    let open_end = source.find('>')? + 1;
-    let close_start = source.rfind("</")?;
-    let inner = source.get(open_end..close_start)?;
-    let mut out = String::with_capacity(inner.len());
-    let mut rest = inner;
-    while !rest.is_empty() {
-        if let Some(after) = rest.strip_prefix("<!--") {
-            let end = after.find("-->")? + 3;
-            out.push_str(&rest[..4 + end]);
-            rest = &after[end..];
-        } else if let Some(after) = rest.strip_prefix("<![CDATA[") {
-            let end = after.find("]]>")? + 3;
-            out.push_str(&rest[..9 + end]);
-            rest = &after[end..];
-        } else if rest.starts_with('<') {
-            let end = rest.find('>')? + 1;
-            let tag = &rest[..end];
-            if tag.contains("$(") || tag.contains('&') {
-                return None;
-            }
-            out.push_str(tag);
-            rest = &rest[end..];
-        } else if rest.starts_with('&') {
-            let end = rest.find(';')? + 1;
-            match &rest[..end] {
-                "&apos;" => out.push('\''),
-                "&quot;" => out.push('"'),
-                kept @ ("&amp;" | "&lt;" | "&gt;") => out.push_str(kept),
-                _ => return None,
-            }
-            rest = &rest[end..];
-        } else if let Some(after) = rest.strip_prefix('>') {
-            out.push_str("&gt;");
-            rest = after;
-        } else {
-            let end = rest.find(['<', '&', '>']).unwrap_or(rest.len());
-            out.push_str(&rest[..end]);
-            rest = &rest[end..];
+    let source = task.document().input_text();
+    if source[task.range()].contains('\r') {
+        return None;
+    }
+    let first = task
+        .children()
+        .find(|child| !(child.is_text() && is_whitespace_node(*child)));
+    if let Some(first) = first
+        && first.is_text()
+        && source[first.range()].trim_start().starts_with("<![CDATA[")
+    {
+        // The inner text: every text and CDATA section beneath it, joined.
+        // With no carriage return in it, `roxmltree`'s reading is MSBuild's.
+        let mut text = String::new();
+        for descendant in task.descendants().filter(Node::is_text) {
+            #[allow(clippy::disallowed_methods)]
+            text.push_str(descendant.text()?);
         }
+        return Some(text);
+    }
+    let mut out = String::new();
+    for child in task.children() {
+        serialize_inner_xml(child, &mut out)?;
     }
     Some(out)
+}
+
+/// Whether the text node `node` is a whitespace node MSBuild's reader drops:
+/// XML whitespace alone, no decimal reference spelling any of it.
+fn is_whitespace_node(node: Node<'_, '_>) -> bool {
+    let raw = &node.document().input_text()[node.range()];
+    let is_xml_whitespace =
+        |text: &str| text.chars().all(|c| matches!(c, ' ' | '\t' | '\n' | '\r'));
+    crate::document::text(node).is_some_and(|value| is_xml_whitespace(&value))
+        && !raw
+            .match_indices("&#")
+            .any(|(at, _)| raw[at + 2..].starts_with(|c: char| c.is_ascii_digit()))
+}
+
+/// `node` written as `XmlTextWriter` writes it into an element's inner XML:
+/// an element as `<name a="v" />` or `<name a="v">…</name>` (`"` around
+/// every attribute value, its `&`, `<`, `>` and `"` as entities), text with
+/// its `&`, `<` and `>` as entities, a whitespace node not at all, a comment
+/// or processing instruction as written. `None` where that is not certain
+/// (see [`task_inner_xml`]).
+fn serialize_inner_xml(node: Node<'_, '_>, out: &mut String) -> Option<()> {
+    let source = node.document().input_text();
+    let raw = &source[node.range()];
+    let escape = |text: &str, attribute: bool| {
+        let mut escaped = String::with_capacity(text.len());
+        for c in text.chars() {
+            match c {
+                '&' => escaped.push_str("&amp;"),
+                '<' => escaped.push_str("&lt;"),
+                '>' => escaped.push_str("&gt;"),
+                '"' if attribute => escaped.push_str("&quot;"),
+                c if c.is_control() => return None,
+                c => escaped.push(c),
+            }
+        }
+        Some(escaped)
+    };
+    if node.is_element() {
+        if node.tag_name().namespace().is_some() {
+            return None;
+        }
+        let name = node.tag_name().name();
+        out.push('<');
+        out.push_str(name);
+        for attr in node.attributes() {
+            if attr.namespace().is_some() {
+                return None;
+            }
+            let value = attribute(node, attr.name())?;
+            out.push(' ');
+            out.push_str(attr.name());
+            out.push_str("=\"");
+            out.push_str(&escape(&value, true)?);
+            out.push('"');
+        }
+        if node.children().next().is_none() && raw.ends_with("/>") {
+            out.push_str(" />");
+        } else {
+            out.push('>');
+            for child in node.children() {
+                serialize_inner_xml(child, out)?;
+            }
+            out.push_str("</");
+            out.push_str(name);
+            out.push('>');
+        }
+    } else if node.is_text() {
+        if is_whitespace_node(node) {
+            return Some(());
+        }
+        out.push_str(&escape(&crate::document::text(node)?, false)?);
+    } else if node.is_comment() || node.is_pi() {
+        out.push_str(raw);
+    }
+    Some(())
 }
 
 /// Judge each metadatum of the item or item definition at `node` written as

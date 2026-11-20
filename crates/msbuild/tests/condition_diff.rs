@@ -47,6 +47,15 @@ fn illegal_corners() -> Vec<Case> {
         // it, so a syntax error rejects it whatever the values, and behind a
         // deciding `And`/`Or` operand too.
         ("tr ue", props(&[]), Verdict::Illegal),
+        // An item list its properties' values form is expanded by this
+        // evaluation, as by the item pass (to nothing here: false), which we do
+        // not model; the property pass reads it as text
+        // (`an_item_list_formed_in_a_property_condition_is_text`).
+        (
+            "'$(A)$(B)' != ''",
+            props(&[("A", "@"), ("B", "(I)")]),
+            Verdict::Unsupported,
+        ),
         // A typed result spliced among text in a version argument renders as
         // text; one alone is no string.
         (
@@ -1505,6 +1514,19 @@ fn using_task_texts_are_judged_where_msbuild_expands_them() {
     // An expression spelt with a reference in an attribute of the body.
     rows.push(format!(
         "<UsingTask {INLINE}><Task><Code Type=\"&#36;(P[9])\" /></Task></UsingTask>"
+    ));
+    // A body leading with a CDATA section is its inner text, an element's
+    // included.
+    rows.push(format!(
+        "<UsingTask {INLINE}><Task><![CDATA[$]]><Code>(P[9])</Code></Task></UsingTask>"
+    ));
+    // Serializing spells an empty element `<a />`.
+    rows.push(format!(
+        "<UsingTask {INLINE}><Task><Code>$([MSBuild]::EnsureTrailingSlash('<a/>')[5])</Code></Task></UsingTask>"
+    ));
+    // A plain reference in an attribute of the body.
+    rows.push(format!(
+        "<UsingTask {INLINE}><Task><Reference Include=\"$(Q)\" /><Code>x</Code></Task></UsingTask>"
     ));
     // The flag compared as expanded, escapes and all.
     rows.push(format!(

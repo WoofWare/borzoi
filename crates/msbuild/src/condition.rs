@@ -77,22 +77,28 @@ pub(crate) struct Probes<'a> {
     pub observer: &'a Observer,
 }
 
-/// How MSBuild evaluates a condition, which decides one thing about it:
-/// design-time evaluation of a condition of the property pass (a property, a
+/// Where MSBuild evaluates a condition, which decides two things about it.
+///
+/// Design-time evaluation of a condition of the property pass (a property, a
 /// property group, a `When`, an import or import group) records the
 /// conditioned properties, and so expands both sides of an equality in full
 /// even where one side's emptiness decides it
-/// (`MultipleComparisonExpressionNode.UpdateConditionedProperties`). A
-/// condition of the item pass (an item, a metadatum, an item group or item
-/// definition) records none, and expands no further (`Evaluator`'s
-/// `EvaluateConditionCollectingConditionedProperties`); nor does a build, nor
-/// the oracle's `eval` op, which `evaluate` is held to.
+/// (`MultipleComparisonExpressionNode.UpdateConditionedProperties`;
+/// `Evaluator`'s `EvaluateConditionCollectingConditionedProperties`); a
+/// condition of the item pass records none.
+///
+/// A condition of the item pass (an item, a metadatum, an item group or item
+/// definition) expands an item list or metadatum its properties' values form
+/// (`@(I)` from `$(A)$(B)`), and may throw on it; one of the property pass
+/// reads it as text (`'$(A)$(B)' != ''` is true there; probed,
+/// `msbuild-condition-oracle`, SDK 10.0.401). The oracle's `eval` op, which
+/// `evaluate` is held to, evaluates as the item pass does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Site {
     /// A condition of the property pass, in design-time evaluation.
     PropertyPass,
-    /// Any other: one of the item pass, or one evaluated as a build does.
-    Plain,
+    /// A condition of the item pass.
+    ItemPass,
 }
 
 /// What an evaluation reaches beyond the property table: the file system,
@@ -260,7 +266,7 @@ pub fn evaluate(source: &str, props: &PropertyMap) -> Eval {
         props,
         Ctx {
             probes: None,
-            site: Site::Plain,
+            site: Site::ItemPass,
         },
     )
 }
@@ -275,7 +281,7 @@ pub fn evaluate_with_exists(source: &str, props: &PropertyMap, probes: Probes<'_
         props,
         Ctx {
             probes: Some(probes),
-            site: Site::Plain,
+            site: Site::ItemPass,
         },
     )
 }
@@ -789,8 +795,10 @@ fn leaf_texts(expr: &BoolExpr) -> Option<Vec<String>> {
 
 /// The values an expression on an uncertain name is tried as returning, in
 /// [`throws_whatever_they_return`]: empty, a word, a number, a version, a
-/// boolean either way, a list.
-const RETURNED: &[&str] = &["", "x", "1", "1.2", "true", "false", "a;b"];
+/// boolean either way, a list, and the hyphen a prerelease version joins
+/// with (`1$(X)preview`). A sample, not a proof: a throw it shows is a
+/// Possible site, never a certain one.
+const RETURNED: &[&str] = &["", "x", "1", "1.2", "true", "false", "a;b", "-"];
 
 /// The innermost `$(…)` expressions of `text` that read a name `uncertain`
 /// names, by the scanner's extents: those holding no other such expression,
@@ -2113,11 +2121,11 @@ fn eval_bool(
         BoolExpr::Exists(raw) => {
             // MSBuild expands the argument, which may throw, and then asks
             // the file system, which does not (`FileOrDirectoryExistsNoThrow`).
-            let Some(fs) = fs.probes else {
-                expand_for_condition(raw, props, None, undefined)?;
+            let Some(probes) = fs.probes else {
+                expand_for_condition(raw, props, fs, undefined)?;
                 return Err(Reject::Undecided);
             };
-            let value = expand_for_condition(raw, props, Some(fs.observer), undefined)?;
+            let value = expand_for_condition(raw, props, fs, undefined)?;
             // MSBuild expands the argument into an item list and asks about
             // every entry: true when each exists, false for an empty list
             // (`ExpandArgumentAsFileList`). The split and the trim happen in
@@ -2139,10 +2147,13 @@ fn eval_bool(
             {
                 return Err(Reject::Undecided);
             }
-            Ok(!entries.is_empty() && entries.iter().all(|entry| (fs.exists)(&entry.unescape())))
+            Ok(!entries.is_empty()
+                && entries
+                    .iter()
+                    .all(|entry| (probes.exists)(&entry.unescape())))
         }
         BoolExpr::HasTrailingSlash(raw) => {
-            let value = expand_for_condition(raw, props, fs.observer(), undefined)
+            let value = expand_for_condition(raw, props, fs, undefined)
                 .map_err(Reject::read_by_throwing_leaf)?;
             // MSBuild expands the argument into an item list: each entry is
             // whitespace-trimmed and empty entries are dropped
@@ -2172,11 +2183,11 @@ fn eval_bool(
             Ok(item.is_some_and(|s: String| s.ends_with('/') || s.ends_with('\\')))
         }
         BoolExpr::MsbuildVersionFunction(inner) => {
-            eval_msbuild_version_function(inner, props, fs.observer(), undefined)
+            eval_msbuild_version_function(inner, props, fs, undefined)
                 .map_err(Reject::read_by_throwing_leaf)
         }
         BoolExpr::CoerceBool(scalar) => {
-            let value = match expand_scalar_for_condition(scalar, props, fs.observer(), undefined) {
+            let value = match expand_scalar_for_condition(scalar, props, fs, undefined) {
                 // A boolean we do not compute coerces without throwing.
                 Err(Reject::Undecided) if lone_boolean(scalar, props) => {
                     return Err(Reject::Undecided);
@@ -2219,7 +2230,6 @@ fn eval_bool(
                 }
             };
             let (lhs_scalar, rhs_scalar) = (lhs, rhs);
-            let observer = fs.observer();
             // Equality asks each side, left then right, whether it is empty
             // first, expanding only a side that is one reference whole
             // (`MultipleComparisonExpressionNode`, `EvaluatesToEmpty`); where
@@ -2232,18 +2242,18 @@ fn eval_bool(
             let (lhs_probe, rhs_probe, emptiness_unknown) = if relational {
                 (None, None, false)
             } else {
-                let lhs_probe = probe_emptiness(lhs_scalar, props, observer, undefined);
+                let lhs_probe = probe_emptiness(lhs_scalar, props, fs, undefined);
                 if let Probed::Expanded(Err(reject @ (Reject::Throws | Reject::Illegal))) =
                     lhs_probe
                 {
                     return Err(reject);
                 }
-                let rhs_probe = probe_emptiness(rhs_scalar, props, observer, undefined);
+                let rhs_probe = probe_emptiness(rhs_scalar, props, fs, undefined);
                 let mut emptiness_unknown = false;
                 match (lhs_probe.emptiness(), rhs_probe.emptiness()) {
                     (Ok(lhs_empty), Ok(rhs_empty)) if lhs_empty || rhs_empty => {
                         let decided = matches!(op, CompareOp::Eq) == (lhs_empty == rhs_empty);
-                        if fs.site == Site::Plain {
+                        if fs.site != Site::PropertyPass {
                             return Ok(decided);
                         }
                         // Right, then left, as `UpdateConditionedProperties`
@@ -2253,8 +2263,7 @@ fn eval_bool(
                             .filter_map(|(scalar, probe)| match probe {
                                 Probed::Expanded(result) => result.as_ref().err().copied(),
                                 Probed::NotExpanded => {
-                                    expand_scalar_for_condition(scalar, props, observer, undefined)
-                                        .err()
+                                    expand_scalar_for_condition(scalar, props, fs, undefined).err()
                                 }
                             })
                             .max();
@@ -2267,7 +2276,9 @@ fn eval_bool(
                     }
                     (Ok(true), Err(reject)) | (Err(reject), Ok(true)) => return Err(reject),
                     (_, Err(reject @ (Reject::Throws | Reject::Illegal))) => return Err(reject),
-                    (Err(_), _) | (_, Err(_)) => emptiness_unknown = fs.site == Site::Plain,
+                    (Err(_), _) | (_, Err(_)) => {
+                        emptiness_unknown = fs.site != Site::PropertyPass;
+                    }
                     _ => {}
                 }
                 (Some(lhs_probe), Some(rhs_probe), emptiness_unknown)
@@ -2283,7 +2294,7 @@ fn eval_bool(
             // expanded again.
             let mut expand = |scalar: &ScalarExpr, probe: Option<Probed>| match probe {
                 Some(Probed::Expanded(result)) => result,
-                _ => expand_scalar_for_condition(scalar, props, observer, undefined),
+                _ => expand_scalar_for_condition(scalar, props, fs, undefined),
             };
             let lhs = expand(lhs_scalar, lhs_probe)
                 .map_err(|reject| reached_perhaps(operand(reject, lhs_scalar)));
@@ -2367,7 +2378,7 @@ impl Probed {
 fn probe_emptiness(
     scalar: &ScalarExpr,
     props: &PropertyMap,
-    fs_observer: Option<&Observer>,
+    fs: Ctx<'_>,
     undefined: &mut Vec<String>,
 ) -> Probed {
     let raw = match scalar {
@@ -2377,12 +2388,7 @@ fn probe_emptiness(
             raw.as_str()
         }
         _ => {
-            return Probed::Expanded(expand_scalar_for_condition(
-                scalar,
-                props,
-                fs_observer,
-                undefined,
-            ));
+            return Probed::Expanded(expand_scalar_for_condition(scalar, props, fs, undefined));
         }
     };
     let bytes = raw.as_bytes();
@@ -2393,12 +2399,7 @@ fn probe_emptiness(
     {
         return Probed::NotExpanded;
     }
-    Probed::Expanded(expand_scalar_for_condition(
-        scalar,
-        props,
-        fs_observer,
-        undefined,
-    ))
+    Probed::Expanded(expand_scalar_for_condition(scalar, props, fs, undefined))
 }
 
 /// Whether the operand `scalar` is one `$(…)` whose only issue is a boolean
@@ -2417,7 +2418,7 @@ fn lone_boolean(scalar: &ScalarExpr, props: &PropertyMap) -> bool {
 fn expand_scalar_for_condition(
     scalar: &ScalarExpr,
     props: &PropertyMap,
-    fs_observer: Option<&Observer>,
+    fs: Ctx<'_>,
     undefined: &mut Vec<String>,
 ) -> Result<String, Reject> {
     match scalar {
@@ -2426,13 +2427,13 @@ fn expand_scalar_for_condition(
         // any `%`). Any other is compared as written, so its `\` never meets
         // the Unix path adjustment an expansion applies.
         ScalarExpr::String(raw) if !raw.contains("$(") && !raw.contains('%') => Ok(raw.clone()),
-        ScalarExpr::String(raw) => expand_operand(raw, props, fs_observer, undefined),
+        ScalarExpr::String(raw) => expand_operand(raw, props, fs, undefined),
         ScalarExpr::Bare(raw) => Ok(raw.clone()),
-        ScalarExpr::Property(raw) => expand_operand(raw, props, fs_observer, undefined),
+        ScalarExpr::Property(raw) => expand_operand(raw, props, fs, undefined),
         ScalarExpr::SystemVersionPart { arg, part } => {
             // `Parse` throws on what it cannot read, so an argument whose value
             // we do not know (a boolean we do not compute) may throw here.
-            let version = expand_system_version_parse_arg(arg, props, fs_observer, undefined)
+            let version = expand_system_version_parse_arg(arg, props, fs, undefined)
                 .map_err(|reject| reject.max(Reject::Unmodelled))?;
             let version = parse_system_version(&version).map_err(Reject::from)?;
             let idx = match part {
@@ -2463,7 +2464,7 @@ fn split_dash_zero_property(raw: &str) -> Option<&str> {
 fn expand_system_version_parse_arg(
     raw: &str,
     props: &PropertyMap,
-    fs_observer: Option<&Observer>,
+    fs: Ctx<'_>,
     undefined: &mut Vec<String>,
 ) -> Result<String, Reject> {
     if let Some(property) = split_dash_zero_property(raw) {
@@ -2483,20 +2484,20 @@ fn expand_system_version_parse_arg(
         .strip_prefix('\'')
         .and_then(|s| s.strip_suffix('\''))
         .unwrap_or(raw);
-    expand_operand(raw, props, fs_observer, undefined)
+    expand_operand(raw, props, fs, undefined)
 }
 
 fn eval_msbuild_version_function(
     inner: &str,
     props: &PropertyMap,
-    fs_observer: Option<&Observer>,
+    fs: Ctx<'_>,
     undefined: &mut Vec<String>,
 ) -> Result<bool, Reject> {
     // MSBuild expands the call as it expands any property function, and
     // reads the boolean it renders: the expression evaluator reads the
     // arguments (any of the three string delimiters) and classifies a
     // failure as MSBuild's throw or an unmodelled shape.
-    let value = expand_operand(&format!("$({inner})"), props, fs_observer, undefined)?;
+    let value = expand_operand(&format!("$({inner})"), props, fs, undefined)?;
     parse_msbuild_bool(&value).ok_or(Reject::Unmodelled)
 }
 
@@ -2767,12 +2768,12 @@ fn parse_system_version(value: &str) -> Result<[i64; 4], ()> {
 fn expand_for_condition(
     raw: &str,
     props: &PropertyMap,
-    fs_observer: Option<&Observer>,
+    fs: Ctx<'_>,
     undefined: &mut Vec<String>,
 ) -> Result<Escaped, Reject> {
     // FS-probing property functions follow the same split as `Exists()`:
     // available exactly when the caller supplied a filesystem oracle.
-    let (value, issues) = if let Some(observer) = fs_observer {
+    let (value, issues) = if let Some(observer) = fs.observer() {
         substitute_with_fs(raw, props, observer)
     } else {
         substitute(raw, props)
@@ -2812,7 +2813,9 @@ fn expand_for_condition(
     // we do not know still forms one (`$(…)$(A)$(B)` with `A` holding `@`):
     // the scan joins the issues' verdict rather than waiting on it. The text
     // of an expression we left unexpanded is scanned too, which only declines.
-    if value.as_escaped().contains("@(") || value.as_escaped().contains("%(") {
+    if fs.site == Site::ItemPass
+        && (value.as_escaped().contains("@(") || value.as_escaped().contains("%("))
+    {
         worst = worst.max(Some(Reject::Unmodelled));
     }
     if let Some(reject) = worst {
@@ -2833,10 +2836,10 @@ fn expand_for_condition(
 fn expand_operand(
     raw: &str,
     props: &PropertyMap,
-    fs_observer: Option<&Observer>,
+    fs: Ctx<'_>,
     undefined: &mut Vec<String>,
 ) -> Result<String, Reject> {
-    Ok(expand_for_condition(raw, props, fs_observer, undefined)?.unescape())
+    Ok(expand_for_condition(raw, props, fs, undefined)?.unescape())
 }
 
 #[cfg(test)]
@@ -2886,7 +2889,7 @@ mod tests {
                     blank,
                     &PropertyMap::new(),
                     None,
-                    crate::condition::Site::Plain,
+                    crate::condition::Site::ItemPass,
                     &|_| true
                 )
                 .throws,
@@ -2908,7 +2911,7 @@ mod tests {
                 "'$(P.Substring(5))' == '' And false",
                 &props,
                 None,
-                crate::condition::Site::Plain,
+                crate::condition::Site::ItemPass,
                 &never
             ),
             Decision::Unsupported
@@ -2917,7 +2920,7 @@ mod tests {
             "$([System.String]::Copy('')) Or true",
             &props,
             None,
-            crate::condition::Site::Plain,
+            crate::condition::Site::ItemPass,
             &never,
             &|_| false
         ));
@@ -2927,7 +2930,7 @@ mod tests {
                 "false And '$(P.Substring(5))' == ''",
                 &props,
                 None,
-                crate::condition::Site::Plain,
+                crate::condition::Site::ItemPass,
                 &never
             ),
             Decision::Decided(false)
@@ -2944,7 +2947,7 @@ mod tests {
             "'$(U)' == 'x' And 1 < abc And Exists('tail')",
             &PropertyMap::new(),
             None,
-            crate::condition::Site::Plain,
+            crate::condition::Site::ItemPass,
             &uncertain,
         );
         assert_eq!(judged.value, Some(false));
@@ -2996,7 +2999,7 @@ mod tests {
             "$([MSBuild]::AreFeaturesEnabled('99.99')) And 1 < abc",
             &props,
             None,
-            crate::condition::Site::Plain,
+            crate::condition::Site::ItemPass,
             &uncertain,
         );
         assert_ne!(judged.throws, Throws::Certainly, "{judged:?}");
@@ -3007,7 +3010,7 @@ mod tests {
                 "$([MSBuild]::AreFeaturesEnabled('bad')) And false",
                 &props,
                 None,
-                crate::condition::Site::Plain,
+                crate::condition::Site::ItemPass,
                 &uncertain
             ),
             Decision::Unsupported
@@ -4133,13 +4136,15 @@ mod tests {
 
     #[test]
     fn item_reference_introduced_via_substitution_makes_condition_unsupported() {
-        // The reference can also arrive via a property: a property
-        // whose value happens to be `@(Files)` substitutes cleanly
-        // (no $(...) inside), but the resulting condition string
-        // still contains the item-list reference and must be
-        // rejected.
+        // The reference can also arrive via a property: a property whose
+        // value happens to be `@(Files)` substitutes cleanly (no $(...)
+        // inside), and a condition of the item pass then expands the item
+        // list the substitution forms, which we do not model. One of the
+        // property pass reads it as text (`Site`).
         let p = props(&[("Sources", "@(Files)")]);
-        assert_eq!(evaluate("'$(Sources)' == ''", &p), Outcome::Unsupported);
+        let at = |site| super::evaluate_at("'$(Sources)' == ''", &p, None, site).outcome;
+        assert_eq!(at(super::Site::ItemPass), Outcome::Unsupported);
+        assert_eq!(at(super::Site::PropertyPass), Outcome::False);
     }
 
     #[test]
@@ -5206,7 +5211,7 @@ mod decide_without_props {
             v in value_choice(),
         ) {
             let base = map(&[("A", a), ("B", b), ("U", u), ("V", v)]);
-            let decision = decide_without(&source, &base, None, crate::condition::Site::Plain, &is_untrusted);
+            let decision = decide_without(&source, &base, None, crate::condition::Site::ItemPass, &is_untrusted);
             CASES.fetch_add(1, Ordering::Relaxed);
             let Decision::Decided(decided) = decision else {
                 return Ok(());
@@ -5244,7 +5249,7 @@ mod decide_without_props {
             v in value_choice(),
         ) {
             let props = map(&[("A", a), ("B", b), ("U", u), ("V", v)]);
-            let decision = decide_without(&source, &props, None, crate::condition::Site::Plain, &|_| false);
+            let decision = decide_without(&source, &props, None, crate::condition::Site::ItemPass, &|_| false);
             let expected = match evaluate(&source, &props).outcome {
                 Outcome::True => Decision::Decided(true),
                 Outcome::False => Decision::Decided(false),
@@ -5277,7 +5282,7 @@ mod decide_without_props {
             let base = map(&[("A", a), ("B", b), ("U", u), ("V", v)]);
             // Whether the judgement asked about an untrusted name it reached.
             let reached_untrusted = std::cell::Cell::new(false);
-            let judged = judge(&source, &base, None, crate::condition::Site::Plain, &|name: &str| {
+            let judged = judge(&source, &base, None, crate::condition::Site::ItemPass, &|name: &str| {
                 let is = is_untrusted(name);
                 reached_untrusted.set(reached_untrusted.get() || is);
                 is
@@ -5287,13 +5292,13 @@ mod decide_without_props {
             // the certainty-only walk claims a certain throw only where the
             // full judgement does.
             prop_assert_eq!(
-                may_throw(&source, &base, None, crate::condition::Site::Plain, &is_untrusted),
+                may_throw(&source, &base, None, crate::condition::Site::ItemPass, &is_untrusted),
                 judged.throws != Throws::Never,
                 "{}",
                 source
             );
             prop_assert!(
-                !throws_whatever(&source, &base, None, crate::condition::Site::Plain, &is_untrusted)
+                !throws_whatever(&source, &base, None, crate::condition::Site::ItemPass, &is_untrusted)
                     || judged.throws == Throws::Certainly,
                 "{}",
                 source

@@ -22,7 +22,7 @@ pub fn judge(condition: &str, props: &PropertyMap, uncertain: &dyn Fn(&str) -> b
         condition,
         props,
         None,
-        crate::condition::Site::Plain,
+        crate::condition::Site::ItemPass,
         uncertain,
     )
 }

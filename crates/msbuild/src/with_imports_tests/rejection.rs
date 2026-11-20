@@ -1675,3 +1675,68 @@ fn an_evaluate_flag_holding_an_item_list_reaches_the_body_perhaps() {
         );
     }
 }
+
+/// A condition of the property pass reads an item list its properties'
+/// values form as text: `'$(A)$(B)' != ''` is true, `@(I)` being no empty
+/// text (probed, `msbuild-condition-oracle`, SDK 10.0.401).
+#[test]
+fn an_item_list_formed_in_a_property_condition_is_text() {
+    let body = "<PropertyGroup><A>@</A><B>(I)</B><R Condition=\"'$(A)$(B)' != ''\">yes</R></PropertyGroup>";
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_eq!(parsed.rejection, None, "{body}: {:#?}", parsed.diagnostics);
+        assert_eq!(parsed.property("R").value(), Some("yes"), "{body}");
+    }
+}
+
+/// An inline task's body holding an element is its inner XML as serialized:
+/// a plain reference in an attribute (`<Reference Include="$(Lib)" />`) is
+/// no throw, as in any declaration that names a library by a property.
+#[test]
+fn a_plain_reference_in_an_inline_task_attribute_is_no_throw() {
+    let body = "<PropertyGroup><Lib>abc.dll</Lib></PropertyGroup>\
+                <UsingTask TaskName=\"X\" TaskFactory=\"RoslynCodeTaskFactory\" AssemblyFile=\"y.dll\">\
+                <Task><Reference Include=\"$(Lib)\" /><Code Type=\"Fragment\" Language=\"cs\">x</Code></Task></UsingTask>";
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_eq!(parsed.rejection, None, "{body}: {:#?}", parsed.diagnostics);
+    }
+}
+
+/// An item group from content the walk does not take is judged knowing the
+/// writes of its whole path, those after it included: MSBuild evaluates it
+/// after every property write there, when `P` is long enough to index.
+#[test]
+fn an_untaken_branchs_items_know_the_writes_after_them() {
+    let body = format!(
+        "<PropertyGroup><P>x</P></PropertyGroup><Choose><When Condition=\"{UNDECIDED_TRUE}\">\
+         <ItemGroup><I Include=\"$(P[4])\" /></ItemGroup>\
+         <PropertyGroup><P>long enough</P></PropertyGroup></When></Choose>"
+    );
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_eq!(parsed.rejection, None, "{body}: {:#?}", parsed.diagnostics);
+    }
+}
+
+/// The values an expression on an unheld name is tried as returning include
+/// the hyphen a prerelease version joins with: `1$(X)preview` is `1-preview`
+/// for MSBuild's `X`, a version, so the walk claims no throw on it.
+#[test]
+fn a_prerelease_spelling_is_among_the_values_tried() {
+    let body = "<PropertyGroup><X>$([System.String]::Copy('-'))</X>\
+                <R>$([MSBuild]::VersionLessThan('1$(X)preview', '2.0'))</R></PropertyGroup>";
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_eq!(parsed.rejection, None, "{body}: {:#?}", parsed.diagnostics);
+    }
+}
+
+/// An inline task's body that starts with a CDATA section is its inner text,
+/// an element's included: `$(P[9])` here, which MSBuild throws on, for
+/// certain.
+#[test]
+fn a_task_body_leading_with_cdata_is_its_inner_text() {
+    let body = "<PropertyGroup><P>x</P></PropertyGroup>\
+                <UsingTask TaskName=\"X\" TaskFactory=\"RoslynCodeTaskFactory\" AssemblyFile=\"y.dll\">\
+                <Task><![CDATA[$]]><Code>(P[9])</Code></Task></UsingTask>";
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_rejected(&parsed, &["Before", "After"]);
+    }
+}

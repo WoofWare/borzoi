@@ -218,7 +218,7 @@ fn text(rng: &mut SplitMix64, names: &[&str]) -> String {
 /// the values the walk's own judgement tries such an expression as returning
 /// (`condition::RETURNED`), so that a rejection that survives every one is
 /// one the walk claims.
-const STRUCK_AS: &[&str] = &["", "x", "1", "1.2", "true", "false", "a;b"];
+const STRUCK_AS: &[&str] = &["", "x", "1", "1.2", "true", "false", "a;b", "-"];
 
 /// The ways `n` struck expressions can each take a value of [`STRUCK_AS`]:
 /// all of them, where there are few enough (`n` ≤ 3), else each value for
@@ -609,13 +609,6 @@ fn project_sweep(
         for drawn in [&a, &b, &held, &real] {
             hostile.extend(drawn.hostile.iter().copied());
         }
-        // A later write is made of `A` and `B` alone (below): a value of `U`
-        // drawn as overwritten later is written once, and reaches nothing.
-        if !a.hostile.contains(&Dimension::OverwrittenLater)
-            && !b.hostile.contains(&Dimension::OverwrittenLater)
-        {
-            hostile.remove(&Dimension::OverwrittenLater);
-        }
         if hostile.iter().any(|d| excluded.contains(d)) {
             continue;
         }
@@ -624,6 +617,25 @@ fn project_sweep(
         let template = *rng.pick(SITES);
         let body = text(rng, &operands);
         let gate = condition(rng, &operands, 3);
+        // A later write is made of `A` and `B` alone (below), and a value it
+        // overwrites reaches only a read of the property pass between the
+        // two writes: of the site's piece, at a site of the property pass.
+        let piece = if template.contains("{t}") {
+            &body
+        } else {
+            &gate
+        };
+        let property_pass = ["<PropertyGroup", "<Choose", "<Import"]
+            .iter()
+            .any(|start| template.starts_with(start));
+        let overwritten_read = [("A", &a), ("B", &b)].into_iter().any(|(name, drawn)| {
+            drawn.hostile.contains(&Dimension::OverwrittenLater)
+                && property_pass
+                && property_references(piece).contains(&name)
+        });
+        if !overwritten_read {
+            hostile.remove(&Dimension::OverwrittenLater);
+        }
         let site = template
             .replace("{c}", &xml_attribute(&gate))
             .replace("{t}", &xml_attribute(&body))
@@ -905,14 +917,33 @@ fn project_sweep(
                 && std::iter::once(&"")
                     .chain(VARIED_VALUES)
                     .any(|value| evaluates(&mut oracle, &varied(value), &struck));
+            // Both gaps at once: the unmodelled expressions struck, and the
+            // ones on unsure names struck too, each set by each value.
+            let shown_with_unsure = !shown
+                && !unmodelled.is_empty()
+                && strike_sets.iter().any(|set| {
+                    STRUCK_AS.iter().any(|value| {
+                        let both = set.iter().fold(struck.clone(), |site, expression| {
+                            site.replace(&xml_attribute(expression), value)
+                        });
+                        both != struck && evaluates(&mut oracle, &varied(""), &both)
+                    })
+                });
             assert!(
-                shown,
+                shown || shown_with_unsure,
                 "certain-implies-exact violated: MSBuild rejects this project whatever the names \
                  the walk is not sure of hold, and the walk committed {ours:?}\n{}",
                 describe()
             );
             tally.rejected_on_an_unmodelled_body += 1;
-            answered_wrongly("unmodelled-body", grading.as_deref_mut());
+            answered_wrongly(
+                if shown {
+                    "unmodelled-body"
+                } else {
+                    "unmodelled-body-and-uncertain-value"
+                },
+                grading.as_deref_mut(),
+            );
             census.reached(&hostile, "msbuild-rejects-on-an-unmodelled-body");
             continue;
         };
