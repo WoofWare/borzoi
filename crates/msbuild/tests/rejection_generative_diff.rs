@@ -400,6 +400,12 @@ const SITES: &[&str] = &[
     "<Import Project=\"there.props\" Condition=\"{c}\" />",
     "<Choose><When Condition=\"{c}\"><PropertyGroup><R>x</R></PropertyGroup></When></Choose>",
     "<Choose><When Condition=\"UNDECIDED_FALSE\" /><When Condition=\"{c}\" /></Choose>",
+    // Content the walk does not take: a write then a read on one path, and a
+    // write in one branch beside a read in its sibling, items and conditions
+    // alike (what the walk judges there it judges with those names unknown).
+    "<PropertyGroup Condition=\"UNDECIDED_TRUE\"><A>1</A><R>{t}</R></PropertyGroup>",
+    "<Choose><When Condition=\"UNDECIDED_TRUE\"><Choose><When Condition=\"UNDECIDED_FALSE\"><PropertyGroup><A>abcdefghijklmnop</A></PropertyGroup></When><Otherwise><ItemGroup><I Include=\"{t}\" /></ItemGroup></Otherwise></Choose></When></Choose>",
+    "<Choose><When Condition=\"UNDECIDED_TRUE\"><Choose><When Condition=\"UNDECIDED_FALSE\"><PropertyGroup><B>abcdefghijklmnop</B></PropertyGroup></When><Otherwise><ItemGroup Condition=\"{c}\"><I Include=\"x\" /></ItemGroup></Otherwise></Choose></When></Choose>",
 ];
 
 /// Whether `template` puts its text in a metadatum's value, where MSBuild
