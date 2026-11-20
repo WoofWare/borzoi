@@ -14,7 +14,7 @@
 //! with their taint. The probe changes nothing about the walk, so the
 //! [`crate::ParsedProject`] beside it is the one the unprobed walk returns.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use std::path::PathBuf;
 
@@ -26,6 +26,7 @@ pub use super::property_reads::{InexactUnset, PropertyRead};
 use super::{EvaluatedItem, HelperMetadataUncertainty, HelperMetadataUncertaintyKind};
 use super::{State, item_key};
 use crate::PackageReferenceUncertaintyCauseKind;
+use crate::properties;
 
 /// The names a [`ReadProbe`]'s caller wants read at the end of the walk.
 #[derive(Debug, Clone, Default)]
@@ -45,6 +46,13 @@ pub struct ReadProbe {
 #[derive(Debug, Clone, Default)]
 pub struct EvaluationReads {
     pub properties: BTreeMap<String, PropertyRead>,
+    /// The values each probed property may hold in the real build at the end
+    /// of the walk, unescaped (its *candidates*, #1009); `None` where it may
+    /// hold any.
+    pub candidates: BTreeMap<String, Option<BTreeSet<String>>>,
+    /// Whether the candidate channel names no value of any name, an imported
+    /// document having opted a caller global out of protection (#1041).
+    pub candidates_withdrawn: bool,
     pub items: BTreeMap<String, ItemRead>,
     pub targets: BTreeMap<String, TargetRead>,
     /// The run [`ReadProbe::execute`] asked for, if it asked.
@@ -124,6 +132,35 @@ impl State<'_> {
             .iter()
             .map(|name| (name.clone(), self.read_property(name)))
             .collect();
+        // MSBuild may hold no value for anything (`ParsedProject::rejection`).
+        let rejected = self.rejection.is_some();
+        let candidates = probe
+            .properties
+            .iter()
+            .map(|name| {
+                if rejected {
+                    return (name.clone(), None);
+                }
+                // The current file's names hold the file's while the walk
+                // expands it, and nothing once it has finished, and MSBuild
+                // adds to `MSBuildAllProjects` once it has: what the walk
+                // holds at its end is no claim about either (#1043).
+                if properties::THIS_FILE_NAMES
+                    .iter()
+                    .chain(&["MSBuildAllProjects"])
+                    .any(|this| this.eq_ignore_ascii_case(name))
+                {
+                    return (name.clone(), None);
+                }
+                let values = self.candidates_of(name).values().map(|values| {
+                    values
+                        .iter()
+                        .map(|candidate| candidate.value().unescape())
+                        .collect()
+                });
+                (name.clone(), values)
+            })
+            .collect();
         // MSBuild may reject the project, and then has no item, target or run
         // to compare with (`ParsedProject::rejection`).
         let rejected = self.rejection.is_some();
@@ -152,6 +189,8 @@ impl State<'_> {
         });
         EvaluationReads {
             properties,
+            candidates,
+            candidates_withdrawn: self.candidates_withdrawn,
             items,
             targets,
             execution,

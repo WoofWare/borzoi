@@ -89,6 +89,14 @@
 //! (commits two or more distinct values for), and how the served mode declines
 //! each (untrusted, or never reached).
 //!
+//! ## The candidate channel
+//!
+//! At every point the walk run with a startup directory also names the values
+//! each read-back name may hold (`EvaluationReads::candidates`, #1009), and
+//! MSBuild's value must be among them unless the walk says the name may hold
+//! anything. `fsproj_candidates_diff` holds the channel to generated gates; this
+//! sweep holds it to the routes and the real SDK chain.
+//!
 //! ## The evaluation graded
 //!
 //! MSBuild is the oracle's `project` and `items` ops, which evaluate as a build
@@ -128,7 +136,7 @@ use std::path::{Path, PathBuf};
 
 use crate::common::parse_fsproj_with_imports;
 use borzoi_msbuild::observed::host_fs;
-use borzoi_msbuild::test_support::{ReadProbe, parse_fsproj_reads};
+use borzoi_msbuild::test_support::{EvaluationReads, PropertyRead, ReadProbe, parse_fsproj_reads};
 use borzoi_msbuild::{ParsedProject, resolve_sdk, workloads};
 use common::{Oracle, SplitMix64};
 use tempfile::TempDir;
@@ -596,6 +604,59 @@ fn assert_exact(
     }
 }
 
+/// Assert that every value MSBuild ends with is among the walk's candidates
+/// for it (#1009), or that the walk says it may hold anything.
+fn assert_among_candidates(
+    reads: &EvaluationReads,
+    theirs: Option<&HashMap<String, String>>,
+    what: &str,
+    globals: &[(String, String)],
+    xml: &str,
+) {
+    // A value the walk commits is its only candidate, whatever MSBuild does,
+    // unless the channel is withdrawn (#1041).
+    for (name, candidates) in reads
+        .candidates
+        .iter()
+        .filter(|_| !reads.candidates_withdrawn)
+    {
+        let committed = match &reads.properties[name] {
+            PropertyRead::Value(value) => Some(value.clone()),
+            PropertyRead::Unset => Some(String::new()),
+            PropertyRead::UnsetInexact(_) | PropertyRead::Untrusted(_) => None,
+        };
+        // Past the channel's byte budget (4096 escaped bytes, which number
+        // between one and three per decoded byte) it may keep none.
+        if let Some(committed) = committed {
+            let ok = match candidates {
+                Some(candidates) => *candidates == BTreeSet::from([committed.clone()]),
+                None => committed.len() * 3 > 4096,
+            };
+            assert!(
+                ok,
+                "{what}: we commit ${{{name}}} = {committed:?} under globals {globals:?}, so \
+                 that is its only candidate, not {candidates:?}\n--- xml ---\n{xml}"
+            );
+        }
+    }
+    let Some(theirs) = theirs else {
+        return;
+    };
+    for (name, candidates) in &reads.candidates {
+        let Some(candidates) = candidates else {
+            continue;
+        };
+        let their_value = theirs
+            .get(name)
+            .expect("oracle answers for every requested name");
+        assert!(
+            candidates.contains(their_value),
+            "MSBuild {what} ends with ${{{name}}} = {their_value:?} under globals \
+             {globals:?}, which is not among our candidates {candidates:?}\n--- xml ---\n{xml}"
+        );
+    }
+}
+
 /// Evaluate `dir/Demo.fsproj` under `globals`, both sides, in every mode, and
 /// assert the contract at each pairing.
 fn evaluate_both(
@@ -647,10 +708,26 @@ fn evaluate_both(
     let served = our_side(&served, read_names);
 
     let names: Vec<String> = read_names.iter().map(|n| (*n).to_string()).collect();
+    // The served walk's candidates, which every startup directory's MSBuild
+    // value must be among.
+    let (_, served_reads) = parse_fsproj_reads(
+        &borzoi_msbuild::ProjectFile::buffer(&project_path, xml)
+            .expect("a project path spelt as its full path"),
+        &extra,
+        &common::oracle_environment(),
+        sdk_resolver,
+        None,
+        None,
+        &ReadProbe {
+            properties: names.clone(),
+            ..ReadProbe::default()
+        },
+    )
+    .expect("well-formed XML parses");
     let mut supplied = Vec::new();
     let mut theirs = Vec::new();
     for startup in startups.iter_mut() {
-        let (parsed, _) = parse_fsproj_reads(
+        let (parsed, reads) = parse_fsproj_reads(
             &borzoi_msbuild::ProjectFile::buffer(&project_path, xml)
                 .expect("a project path spelt as its full path"),
             &extra,
@@ -658,7 +735,10 @@ fn evaluate_both(
             sdk_resolver,
             None,
             Some(&startup.dir),
-            &ReadProbe::default(),
+            &ReadProbe {
+                properties: names.clone(),
+                ..ReadProbe::default()
+            },
         )
         .expect("well-formed XML parses");
         let ours = our_side(&parsed, read_names);
@@ -666,6 +746,14 @@ fn evaluate_both(
             .oracle
             .project(xml, &names, Some(&project_path), globals);
         let what = format!("started in {}", startup.label);
+        assert_among_candidates(&reads, answer.as_ref(), &what, globals, xml);
+        assert_among_candidates(
+            &served_reads,
+            answer.as_ref(),
+            &format!("{what} (ours served, with no startup directory)"),
+            globals,
+            xml,
+        );
         assert_exact(
             &served,
             answer.as_ref(),

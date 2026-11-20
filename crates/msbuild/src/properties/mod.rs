@@ -25,12 +25,14 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+pub(crate) mod candidates;
 pub(crate) mod escaping;
 mod expr;
 pub(crate) use expr::is_name_byte;
 pub(crate) mod path_fixup;
 pub(crate) mod trust;
 
+use candidates::{Candidate, Candidates};
 use escaping::Escaped;
 use trust::{ResolvedProvenance, Trust};
 
@@ -90,7 +92,7 @@ struct Entry {
 /// the Unix path adjustment ([`path_fixup`]) yet: every expansion adjusts each
 /// piece it splices, but a value bound without one keeps its `\` until it is
 /// read.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Origin {
     /// Bound as given: a reserved, toolset, environment or global name, the
     /// `MSBuildThisFile*` frame, a task's output. MSBuild stores the text
@@ -110,6 +112,14 @@ pub struct PropertyMap {
     /// each latch's work to what changed since the last, rather than the
     /// whole table.
     fresh: Vec<String>,
+    /// Lowercase names' candidates ([`candidates`]), recorded by the walk where
+    /// it can bound what the real build holds and it may not be what the walk
+    /// does. A binding of the name drops its record, and so does
+    /// [`Self::go_stale`]; each record's name is in [`Self::fresh`].
+    candidates: HashMap<String, Candidates>,
+    /// The bytes of every candidate in [`Self::candidates`], held to
+    /// [`candidates::MAX_RECORDED_CANDIDATE_BYTES`].
+    candidate_bytes: usize,
 }
 
 /// A value read from a [`PropertyMap`]. The field is private: a reader says it
@@ -164,6 +174,8 @@ impl PropertyMap {
         Self {
             inner: HashMap::new(),
             fresh: Vec::new(),
+            candidates: HashMap::new(),
+            candidate_bytes: 0,
         }
     }
 
@@ -216,6 +228,7 @@ impl PropertyMap {
         let key = key.into();
         let lower = key.to_ascii_lowercase();
         self.fresh.push(lower.clone());
+        self.remove_record(&lower);
         match self.inner.entry(lower) {
             std::collections::hash_map::Entry::Occupied(mut slot) => {
                 let entry = slot.get_mut();
@@ -283,6 +296,7 @@ impl PropertyMap {
     /// substitutions resolve to the stale value rather than emit Undefined.
     pub(crate) fn unbind(&mut self, key: &str) {
         let lower = key.to_ascii_lowercase();
+        self.remove_record(&lower);
         if let std::collections::hash_map::Entry::Occupied(mut slot) = self.inner.entry(lower) {
             if slot.get().trust.is_certain() {
                 slot.remove();
@@ -346,6 +360,9 @@ impl PropertyMap {
         protected: &std::collections::HashSet<String>,
     ) {
         for lower in std::mem::take(&mut self.fresh) {
+            // The content just passed may have written any name, so no record
+            // bounds what it holds now.
+            self.remove_record(&lower);
             if let Some(entry) = self.inner.get_mut(&lower)
                 && entry.value.is_some()
                 && !protected.contains(&lower)
@@ -353,6 +370,65 @@ impl PropertyMap {
                 entry.trust.go_stale(cause);
             }
         }
+        debug_assert!(
+            self.candidates.is_empty() && self.candidate_bytes == 0,
+            "every record's name is fresh until the next latch"
+        );
+    }
+
+    /// The length, in escaped bytes, of the value bound to `key`.
+    pub(crate) fn held_len(&self, key: &str) -> Option<usize> {
+        let entry = self.inner.get(&key.to_ascii_lowercase())?;
+        Some(entry.value.as_ref()?.as_escaped().len())
+    }
+
+    /// The value bound to `key` as a candidate: its text and origin.
+    pub(crate) fn held_candidate(&self, key: &str) -> Option<Candidate> {
+        let entry = self.inner.get(&key.to_ascii_lowercase())?;
+        Some(Candidate::new(entry.value.as_ref()?, entry.origin))
+    }
+
+    /// The candidates recorded for `key` since it was last bound or the walk
+    /// last passed content it could not see ([`Self::record_candidates`]).
+    pub(crate) fn recorded_candidates(&self, key: &str) -> Option<&Candidates> {
+        self.candidates.get(&key.to_ascii_lowercase())
+    }
+
+    /// Record the values the real build may hold for `key` now: anything,
+    /// where keeping them would take the table's records past
+    /// [`candidates::MAX_RECORDED_CANDIDATE_BYTES`].
+    pub(crate) fn record_candidates(&mut self, key: &str, candidates: Candidates) {
+        let lower = key.to_ascii_lowercase();
+        self.remove_record(&lower);
+        // No record reads as anything, so anything is recorded as none.
+        if matches!(candidates, Candidates::Anything)
+            || self.candidate_bytes.saturating_add(candidates.bytes())
+                > candidates::MAX_RECORDED_CANDIDATE_BYTES
+        {
+            return;
+        }
+        self.candidate_bytes += candidates.bytes();
+        self.fresh.push(lower.clone());
+        self.candidates.insert(lower, candidates);
+    }
+
+    /// Drop the record of `lower`, a lowercase name, and its bytes.
+    fn remove_record(&mut self, lower: &str) {
+        if let Some(old) = self.candidates.remove(lower) {
+            self.candidate_bytes -= old.bytes();
+        }
+    }
+
+    /// A table holding only `bindings`, each name bound to its candidate (an
+    /// undefined name's is the empty string, which a plain reference to it
+    /// expands to): what an expansion of text that splices only those names
+    /// produces from those values ([`candidates`]).
+    pub(crate) fn of_candidates(bindings: &[(&str, &Candidate)]) -> PropertyMap {
+        let mut table = PropertyMap::new();
+        for (name, candidate) in bindings {
+            table.bind((*name).to_owned(), candidate.value(), candidate.origin);
+        }
+        table
     }
 
     /// The trust of `key`'s entry, `None` where it has none: what
@@ -483,6 +559,16 @@ pub fn well_known(project_path: &Path) -> PropertyMap {
     map
 }
 
+/// The names [`this_file_seeds`] binds, in its order.
+pub(crate) const THIS_FILE_NAMES: [&str; 6] = [
+    "MSBuildThisFile",
+    "MSBuildThisFileDirectory",
+    "MSBuildThisFileDirectoryNoRoot",
+    "MSBuildThisFileFullPath",
+    "MSBuildThisFileName",
+    "MSBuildThisFileExtension",
+];
+
 /// The `MSBuildThisFile*` reserved properties for the file at `path`, which
 /// MSBuild binds to whichever file is being walked: the project's own body,
 /// then each imported file for the duration of its import. Probed against
@@ -505,33 +591,25 @@ pub(crate) fn this_file_seeds(path: &Path) -> [(&'static str, Escaped); 6] {
     let path = normalised.as_path();
     let parent = path.parent();
     let (name, extension) = split_file_name(path);
-    [
-        (
-            "MSBuildThisFile",
-            path.file_name()
-                .map(|n| n.to_string_lossy().into_owned())
+    let values = [
+        path.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        with_trailing_separator(
+            parent
+                .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_default(),
         ),
-        (
-            "MSBuildThisFileDirectory",
-            with_trailing_separator(
-                parent
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .unwrap_or_default(),
-            ),
-        ),
-        (
-            "MSBuildThisFileDirectoryNoRoot",
-            with_trailing_separator_always(parent.map(no_root).unwrap_or_default()),
-        ),
-        (
-            "MSBuildThisFileFullPath",
-            path.to_string_lossy().into_owned(),
-        ),
-        ("MSBuildThisFileName", name),
-        ("MSBuildThisFileExtension", extension),
-    ]
-    .map(|(key, value)| (key, Escaped::from_xml(value)))
+        with_trailing_separator_always(parent.map(no_root).unwrap_or_default()),
+        path.to_string_lossy().into_owned(),
+        name,
+        extension,
+    ];
+    let mut values = values.into_iter();
+    THIS_FILE_NAMES.map(|key| {
+        let value = values.next().expect("a value per name");
+        (key, Escaped::from_xml(value))
+    })
 }
 
 /// `path` with `.` segments dropped and `..` segments resolved against what
@@ -669,6 +747,17 @@ pub(crate) fn substitute_in_target(
     input: &str,
     props: &PropertyMap,
 ) -> (Provenanced<Escaped>, Vec<Issue>) {
+    substitute_undecided(input, props)
+}
+
+/// [`substitute`] with no file system and no assumption about MSBuild's
+/// working directory: every probe the Unix path adjustment needs, relative or
+/// absolute, is an [`Issue::PathAdjustmentUndecided`]. For text expanded
+/// speculatively, whose result must not rest on what a probe would find.
+pub(crate) fn substitute_undecided(
+    input: &str,
+    props: &PropertyMap,
+) -> (Provenanced<Escaped>, Vec<Issue>) {
     substitute_adjusting(input, props, None, Relative::Undecided)
 }
 
@@ -706,9 +795,9 @@ pub(crate) enum Relative {
     /// `obj\`, and with it every import `MSBuildProjectExtensionsPath`
     /// chooses. A seed's backslash is not project text, and declines.
     MissForProjectText,
-    /// Every relative probe declines: a target's expansion
-    /// ([`substitute_in_target`]).
-    #[cfg(any(test, feature = "test-support"))]
+    /// Every relative probe declines: a speculative expansion
+    /// ([`substitute_undecided`]), as a target's does (`substitute_in_target`,
+    /// with the test support).
     Undecided,
 }
 

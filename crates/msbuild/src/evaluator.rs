@@ -84,6 +84,7 @@ use super::{
     SdkPaths, SdkResolution, SdkResolveError, SdkResolver,
 };
 
+mod candidates;
 mod directory_build;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) mod executor;
@@ -225,6 +226,11 @@ pub fn walk_with_imports<'r>(
         startup_directory,
         observer,
     );
+    state.candidates_withdrawn = local_overrides_are_computed(root);
+    #[cfg(any(test, feature = "test-support"))]
+    {
+        state.track_candidates = probe.is_some_and(|probe| !probe.properties.is_empty());
+    }
     // The entry project is never inside an SDK.
     state
         .foreign_definitions
@@ -482,7 +488,11 @@ fn item_full_path(path: &Path) -> PathBuf {
 fn resolve_project_sdk(root: Node<'_, '_>, state: &mut State<'_>) -> Option<SdkPaths> {
     let sdk = attribute(root, "Sdk")?;
     let sdk: &str = &sdk;
+    // The SDK's `Sdk.targets` runs after the body, unseen wherever the SDK
+    // does not resolve, and may rewrite what the body writes: the candidate
+    // channel names nothing past such a root (#1048).
     let Some(resolver) = state.sdk_resolver else {
+        state.candidates_withdrawn = true;
         state.push(
             DiagnosticKind::SdkResolverAbsent {
                 name: sdk.to_string(),
@@ -513,6 +523,7 @@ fn resolve_project_sdk(root: Node<'_, '_>, state: &mut State<'_>) -> Option<SdkP
             Some(paths)
         }
         Ok(SdkResolution::Roots(_)) => {
+            state.candidates_withdrawn = true;
             // A locator-style resolution has no Sdk.props/Sdk.targets entry
             // points, so it cannot back the `<Project Sdk="…">` shorthand.
             // No real project names a locator here; degrade like an
@@ -532,6 +543,7 @@ fn resolve_project_sdk(root: Node<'_, '_>, state: &mut State<'_>) -> Option<SdkP
             None
         }
         Err(err) => {
+            state.candidates_withdrawn = true;
             state.push(sdk_error_to_diagnostic(sdk, err), root.range());
             None
         }
@@ -693,6 +705,13 @@ pub(crate) fn is_msbuild_true(value: &str) -> bool {
 /// — a real-world divergence (the F# SDK uses this attribute for
 /// `RestoreAdditionalProjectSources`). Names are stored lowercased to
 /// match MSBuild's OrdinalIgnoreCase property-name comparison.
+/// Whether `root`'s `TreatAsLocalProperty` names anything through an
+/// expansion, which MSBuild evaluates and [`collect_local_overrides`] reads as
+/// text: the names it opts out are then unknown to the walk (#1045).
+fn local_overrides_are_computed(root: Node<'_, '_>) -> bool {
+    attribute(root, "TreatAsLocalProperty").is_some_and(|names| names.contains(['$', '@', '%']))
+}
+
 fn collect_local_overrides(root: Node<'_, '_>) -> HashSet<String> {
     attribute(root, "TreatAsLocalProperty")
         .as_deref()
@@ -737,6 +756,8 @@ fn walk_doc_body(root: Node<'_, '_>, current_file_dir: &Path, state: &mut State<
     // exactly-undefined by properties earlier in the document.
     for child in root.children().filter(Node::is_element) {
         if child.tag_name().name() == "Sdk" {
+            // Its `Sdk.targets`, after the body, goes unseen too (#1048).
+            state.candidates_withdrawn = true;
             let sdk = attribute(child, "Name").unwrap_or_default().to_string();
             state.push(
                 DiagnosticKind::UnsupportedConstruct {
@@ -859,6 +880,17 @@ struct State<'r> {
     /// Consulted only by the target executor ([`executor`]).
     #[cfg(any(test, feature = "test-support"))]
     sticky_globals: HashSet<String>,
+    /// Whether an imported document has opted a caller global out of
+    /// protection (`TreatAsLocalProperty`). MSBuild keeps the opt-out past
+    /// the import and the walk does not (#1041), so from then on a value the
+    /// walk holds of that global, or computes from it, may not be MSBuild's,
+    /// and the candidate channel names no value at all ([`candidates`]). So
+    /// does a root whose opt-out list the walk cannot read (#1045).
+    candidates_withdrawn: bool,
+    /// Whether the walk tracks candidates at all: only a probe that reads
+    /// properties consumes them yet ([`candidates`]), so no other evaluation
+    /// pays for them.
+    track_candidates: bool,
     /// What the caller's environment said about `MSBuildExtensionsPath`, held
     /// aside rather than promoted: whether that value survives is the one
     /// toolset behaviour that differs across the SDKs we support, so it cannot
@@ -1637,6 +1669,8 @@ impl<'r> State<'r> {
             reserved,
             #[cfg(any(test, feature = "test-support"))]
             sticky_globals,
+            candidates_withdrawn: false,
+            track_candidates: false,
             env_extensions_path,
             written: HashMap::new(),
             compile_first: Vec::new(),
@@ -2035,6 +2069,10 @@ impl<'r> State<'r> {
             if !self.lookup.is_bound(name)
                 && !self.env_property_names.contains(&name.to_ascii_lowercase())
             {
+                // A refused write unbound the slot this fills, and the build
+                // holds that write's value, not the toolset's (#1049): the
+                // candidate channel names nothing past it.
+                self.candidates_withdrawn |= self.trust_of(name).refused();
                 // Same provenance as the reserved seeds above: our own paths.
                 self.lookup.insert_computed(name, value);
             }
@@ -2050,6 +2088,8 @@ impl<'r> State<'r> {
         // `toolset_honours_env_extensions_path`. Now that an SDK has named the
         // toolset, the value parked in `State::new` can be adjudicated.
         if !self.lookup.is_bound("MSBuildExtensionsPath") {
+            // As for the names above (#1049).
+            self.candidates_withdrawn |= self.trust_of("MSBuildExtensionsPath").refused();
             let toolset_value = format!("{dir}/");
             match (
                 &self.env_extensions_path,
@@ -2123,6 +2163,8 @@ impl<'r> State<'r> {
             reserved: _,
             #[cfg(any(test, feature = "test-support"))]
                 sticky_globals: _,
+            candidates_withdrawn: _,
+            track_candidates: _,
             env_extensions_path: _,
             written,
             compile_first,
@@ -2797,6 +2839,11 @@ impl<'r> State<'r> {
         self.directory_build.note_write(name);
         let resolved = self.resolve_provenance(provenance);
         self.lookup.apply_provenance(name, resolved);
+        // A verdict without a value leaves no candidates the walk can name; a
+        // caller that can name them records them after. A name the walk still
+        // holds exactly reads as its value whatever is recorded
+        // ([`candidates`]).
+        self.record_candidates(name, properties::candidates::Candidates::Anything);
     }
 
     /// Store an evaluated write's value and its verdict together, so a value
@@ -3016,7 +3063,7 @@ impl<'r> State<'r> {
                     }
                 }
                 "Choose" => {
-                    let nested = self.choose_branches_from(child, 0, None);
+                    let nested = self.choose_branches_from(child, 0, None, true);
                     for name in self.skipped_branch_writes(&nested, current_file_dir, cause) {
                         mark(self, name);
                     }
@@ -3030,12 +3077,15 @@ impl<'r> State<'r> {
     /// on, but `walked` (the walk's, by index; the `<Otherwise>` is index
     /// `whens.len()`): each whose gate does not fail whatever the uncertain
     /// names hold, up to the first whose gate holds whatever they hold, and
-    /// the `<Otherwise>` only if none does.
+    /// the `<Otherwise>` only if none does. Gates are decided without the
+    /// file system where `probe_files` is false
+    /// ([`directory_build::decision_without_files`]).
     fn choose_branches_from<'a, 'input>(
         &self,
         choose: Node<'a, 'input>,
         first: usize,
         walked: Option<usize>,
+        probe_files: bool,
     ) -> Vec<Node<'a, 'input>> {
         let entry_dir = self.entry_project_dir.clone();
         let mut branches = Vec::new();
@@ -3049,7 +3099,11 @@ impl<'r> State<'r> {
                 continue;
             }
             let decision = attribute(when, "Condition").and_then(|condition| {
-                directory_build::decision_from_certain_inputs(self, &condition, &entry_dir)
+                if probe_files {
+                    directory_build::decision_from_certain_inputs(self, &condition, &entry_dir)
+                } else {
+                    directory_build::decision_without_files(self, &condition)
+                }
             });
             if decision == Some(false) {
                 continue;
@@ -3851,6 +3905,13 @@ fn walk_top_level(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State
                                 state.mark_skipped_write_stale(child.tag_name().name(), &cause);
                             }
                         }
+                    } else if !gate_certain
+                        && !(group_condition_maybe_wrong || sdk_group_condition_taint)
+                    {
+                        // Undecided for another reason the walk raises no
+                        // diagnostic for: what the group writes, the real build
+                        // may hold ([`candidates`]).
+                        state.widen_group_candidates(node);
                     }
                     state.define_context = prev;
                     state.package_context = prev_pkg;
@@ -4187,6 +4248,16 @@ fn handle_choose(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State<
             for name in written {
                 state.mark_skipped_write_stale(&name, &cause);
             }
+        } else if let Some(first) = first_unsure.filter(|_| state.track_candidates) {
+            // The branches before the undecided gate, from the first the walk
+            // did not decide from certain inputs for a reason that leaves no
+            // mark, may be the one MSBuild takes ([`candidates`]); the later
+            // ones' marks widened theirs.
+            for branch in &whens[first..from] {
+                if !state.ruled_out_without_files(*branch) {
+                    state.widen_branch_candidates(*branch);
+                }
+            }
         }
         // MSBuild may choose any of those branches, and evaluate the gates
         // after this one.
@@ -4220,7 +4291,7 @@ fn handle_choose(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State<
     // and marked once the walk's is walked.
     let alternatives = match (first_unsure, choice_stale.clone()) {
         (Some(first), Some(cause)) => {
-            let untaken = state.choose_branches_from(node, first, Some(walked));
+            let untaken = state.choose_branches_from(node, first, Some(walked), true);
             let written = state.skipped_branch_writes(&untaken, current_file_dir, &cause);
             Some((written, cause))
         }
@@ -4233,6 +4304,14 @@ fn handle_choose(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State<
             }
         }
     };
+    // From the first gate the walk did not decide from certain inputs for a
+    // reason that leaves no mark, MSBuild may take another branch than the
+    // walk's: what each writes, the real build may hold ([`candidates`]).
+    if let (Some(first), None, true) = (first_unsure, &choice_stale, state.track_candidates) {
+        for branch in state.choose_branches_from(node, first, Some(walked), false) {
+            state.widen_branch_candidates(branch);
+        }
+    }
     let Some(branch) = chosen.map(|(_, when)| when).or(otherwise) else {
         // Every gate cleanly false and no <Otherwise>: an exact no-op, but
         // for the branches MSBuild may take instead.
@@ -4468,12 +4547,20 @@ fn walk_property_child_inner(
                     .sdk_package()
                     .is_some()
             });
-    // Asked of the values the gate reads before its evaluation, and only of a
-    // gate that reads a stale one: nothing else needs it.
+    // Whether the gate is decided from certain inputs, asked of the values it
+    // reads before its evaluation, and only of a gate that reads a stale one:
+    // nothing else in the walk needs it.
     let own_gate_decided = attribute(node, "Condition").is_none_or(|condition| {
         state.trust_for_raw(&condition).stale().is_none()
             || directory_build::decided_from_certain_inputs(state, &condition, &entry_dir)
     });
+    // The candidate channel asks it of any gate reading a value the walk is not
+    // sure of, without the file system ([`candidates`]).
+    let own_gate_decided_for_candidates = !state.track_candidates
+        || attribute(node, "Condition").is_none_or(|condition| {
+            state.trust_for_raw(&condition).is_certain()
+                || directory_build::decision_without_files(state, &condition).is_some()
+        });
     let diagnostics_before_condition = state.diagnostics.len();
     let gate = evaluate_property_condition(node, state);
     let own_condition_maybe_wrong = state.diagnostics.len() != diagnostics_before_condition
@@ -4511,10 +4598,21 @@ fn walk_property_child_inner(
                 UnpinnedOutcome::Keep
             };
             // A gate decided on a stale value may hold in the real build.
-            let stale = match state.stale_gate_cause(node, own_gate_decided) {
+            let stale_gate = state.stale_gate_cause(node, own_gate_decided);
+            let stale = match stale_gate.clone() {
                 Some(cause) if state.skipped_write_needs_mark(&name) => StaleOutcome::Set(cause),
                 _ => StaleOutcome::Keep,
             };
+            // Its own gate decided from certain inputs, the write cannot run:
+            // the name holds what it held. A gate that raised a diagnostic, or
+            // is undecided for a reason that leaves no stale mark, may let it
+            // run: the name may hold either ([`candidates`]).
+            let widened = (own_condition_maybe_wrong
+                || (!own_gate_decided_for_candidates && stale_gate.is_none()))
+            .then(|| state.widened_candidates(node));
+            // What it may hold now, recorded or held: the verdict below may
+            // change its trust, though not what it holds.
+            let kept = state.candidates_of(&name);
             state.apply_property_provenance(
                 &name,
                 PropertyProvenance {
@@ -4526,6 +4624,15 @@ fn walk_property_child_inner(
                     stale,
                 },
             );
+            // A name the walk still holds exactly reads as its value, so it
+            // needs no record.
+            match widened {
+                Some(widened) => state.record_candidates(&name, widened),
+                None if !state.held_exactly_for_candidates(&name) => {
+                    state.record_candidates(&name, kept);
+                }
+                None => {}
+            }
             return;
         }
         CondGate::Unsupported => {
@@ -4535,6 +4642,8 @@ fn walk_property_child_inner(
                 }
                 None => UnpinnedOutcome::Keep,
             };
+            // The write may run: the name may hold either.
+            let candidates = state.widened_candidates(node);
             state.apply_property_provenance(
                 &name,
                 PropertyProvenance {
@@ -4544,6 +4653,7 @@ fn walk_property_child_inner(
                     stale: StaleOutcome::Keep,
                 },
             );
+            state.record_candidates(&name, candidates);
             emit_unsupported_condition(node, state);
             return;
         }
@@ -4754,7 +4864,23 @@ fn walk_property_child_inner(
         stale: StaleOutcome::after_write(stale_by, write_condition_maybe_wrong),
     };
     let (value, carried) = expansion.value.into_parts();
+    // A gate not decided from certain inputs may skip the write in the real
+    // build, which keeps what the name held; a value read from names the walk
+    // is not certain of may be another there ([`candidates`]). Both are
+    // computed before the write, which may read the name itself.
+    let doubted = write_condition_maybe_wrong
+        || !own_gate_decided
+        || !own_gate_decided_for_candidates
+        || state.inside_doubted_gate();
+    let before = doubted.then(|| state.candidates_of(&name));
+    // A doubted write's value is one the real build may not have written as
+    // the walk did, so it is expanded as speculatively as an untaken one
+    // ([`candidates`]): assuming nothing of MSBuild's working directory.
+    let value_candidates = (state.track_candidates && (doubted || !state.reads_only_certain(&raw)))
+        .then(|| state.value_candidates(&raw));
+    let carried_certain = carried.is_certain();
     state.write_property(&name, value, provenance);
+    state.record_write_candidates(&name, before, value_candidates, carried_certain);
     // The verdict above is computed from the value's text (the reference
     // scan) and the write's gate; the value itself carries the trust of what
     // its expansion actually read. The stored trust must hold everything the
@@ -5645,6 +5771,8 @@ fn mark_property_group_children_provenance(
         if state.protected.contains(&name.to_ascii_lowercase()) {
             continue;
         }
+        // The write may run: the name may hold either.
+        let candidates = state.widened_candidates(child);
         state.apply_property_provenance(
             name,
             PropertyProvenance {
@@ -5659,6 +5787,7 @@ fn mark_property_group_children_provenance(
                 stale: StaleOutcome::Keep,
             },
         );
+        state.record_candidates(name, candidates);
     }
 }
 
@@ -7188,6 +7317,8 @@ fn walk_import_file(path: &Path, span: Range<usize>, collapse: bool, state: &mut
         .into_iter()
         .filter(|name| !state.reserved.contains(name) && state.protected.remove(name))
         .collect();
+    state.candidates_withdrawn |=
+        !unprotected.is_empty() || local_overrides_are_computed(doc.root_element());
     // Nested SDK roots are spliced through the same machinery the
     // entry project uses: `resolve_project_sdk` returns paths on a
     // happy resolve and pushes the appropriate diagnostic for every

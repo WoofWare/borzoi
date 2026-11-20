@@ -28,7 +28,9 @@
 //! Each project is evaluated under three values of `G`, of which one takes the
 //! hidden file, so every gate sees both the value the walk holds and the
 //! rewritten one. Under each, whatever the walk commits, as served and through
-//! the read probe, must be MSBuild's value.
+//! the read probe, must be MSBuild's value. The same evaluations hold the
+//! candidate channel (#1009): MSBuild's value is among a name's candidates, and
+//! a value the walk commits is its only one.
 
 #![cfg(unix)]
 
@@ -438,7 +440,7 @@ fn sweep(
                 None,
             )
             .expect("well-formed");
-            let (_, reads) = parse_fsproj_reads(
+            let (probed, reads) = parse_fsproj_reads(
                 &project,
                 &extra,
                 &common::oracle_environment(),
@@ -448,6 +450,23 @@ fn sweep(
                 &probe,
             )
             .expect("well-formed");
+            // The probe changes nothing about the walk: tracking candidates
+            // leaves what it publishes as it is without them.
+            let (unprobed, _) = parse_fsproj_reads(
+                &project,
+                &extra,
+                &common::oracle_environment(),
+                None,
+                None,
+                None,
+                &ReadProbe::default(),
+            )
+            .expect("well-formed");
+            assert_eq!(
+                probed, unprobed,
+                "the walk publishes something else when the probe reads candidates\n{}",
+                case.project
+            );
             // The hidden import stays unseen, so the gate names, bound only
             // before it, are never committed: a walk that sees the hidden
             // file would grade no stale gate at all.
@@ -462,6 +481,29 @@ fn sweep(
             for name in READ {
                 let real = theirs["properties"][*name].as_str().map(str::to_owned);
                 theirs_by_name.entry(name).or_default().insert(real.clone());
+                // The candidate channel (#1009): MSBuild's value is among the
+                // candidates, and a value the walk commits is the only one.
+                if let Some(candidates) = &reads.candidates[*name] {
+                    let value = real.clone().unwrap_or_default();
+                    assert!(
+                        candidates.contains(&value),
+                        "MSBuild ends with ${name} = {value:?} under G={g}, not among the \
+                         candidates {candidates:?}\n{}\n--- hidden.props ---\n{}",
+                        case.project,
+                        case.hidden
+                    );
+                }
+                // Past the channel's byte budget (4096 escaped bytes) it may
+                // keep none; the generated values are far shorter.
+                if let Some(ours) = committed(&reads.properties[*name]) {
+                    assert_eq!(
+                        reads.candidates[*name],
+                        Some(BTreeSet::from([ours.unwrap_or_default().to_owned()])),
+                        "the walk commits ${name} under G={g}, so that is its only \
+                         candidate\n{}",
+                        case.project
+                    );
+                }
                 for (how, read) in [
                     ("served", served.property(name)),
                     ("probed", reads.properties[*name].clone()),

@@ -860,6 +860,18 @@ pub(super) fn decided_from_certain_inputs(state: &State<'_>, condition: &str, di
     decision_from_certain_inputs(state, condition, dir).is_some()
 }
 
+/// [`decision_from_certain_inputs`] without the file system: an `Exists` is
+/// outside the grammar, so a condition that turns on one is undecided. For
+/// questions only the candidate channel asks, whose answers must leave the
+/// evaluation's read set as it is.
+pub(super) fn decision_without_files(state: &State<'_>, condition: &str) -> Option<bool> {
+    let unknown = |name: &str| !is_certain(state, name);
+    match condition::decide_without(condition, &state.lookup, None, &unknown) {
+        condition::Decision::Decided(value) => Some(value),
+        _ => None,
+    }
+}
+
 /// The way `condition` decides whatever the names the walk is not certain of
 /// hold, where it does ([`decided_from_certain_inputs`]).
 pub(super) fn decision_from_certain_inputs(
