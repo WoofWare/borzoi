@@ -813,6 +813,28 @@ impl Oracle {
         BothEvaluations { build, design_time }
     }
 
+    /// [`Self::project_design_time`]'s verdict alone, where MSBuild's
+    /// evaluation may also fail by an exception other than an invalid
+    /// project's (an internal error, MSB1025, which fails a build alike):
+    /// `Err` with the oracle's report of it, rather than a panic.
+    pub fn design_time_verdict(&mut self, xml: &str, path: &Path) -> Result<bool, String> {
+        let line = serde_json::to_string(&serde_json::json!({
+            "op": "project",
+            "xml": xml,
+            "names": Vec::<String>::new(),
+            "path": path.to_string_lossy().into_owned(),
+            "globals": serde_json::Value::Null,
+            "designTime": true,
+        }))
+        .expect("serialise request");
+        let response: serde_json::Value =
+            serde_json::from_str(&self.child.request(&line)).expect("oracle response is JSON");
+        match response.get("error") {
+            Some(error) => Err(error.to_string()),
+            None => Ok(response["ok"].as_bool() == Some(true)),
+        }
+    }
+
     fn project_as(
         &mut self,
         xml: &str,

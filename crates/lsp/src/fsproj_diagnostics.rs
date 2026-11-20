@@ -1052,10 +1052,14 @@ fn rejection_message(cause: &RejectionCause, certain: bool) -> String {
             attribute,
             value,
         } => {
-            let rejects = if certain { "rejects" } else { "may reject" };
+            let (rejects, cannot) = if certain {
+                ("rejects", "cannot")
+            } else {
+                ("may reject", "may be unable to")
+            };
             format!(
                 "MSBuild {rejects} this project: a `<UsingTask>` of `{task}` has `{attribute}` \
-                 `{value}`, which it cannot register — no evaluated value is trusted"
+                 `{value}`, which it {cannot} register — no evaluated value is trusted"
             )
         }
     }
@@ -1103,6 +1107,22 @@ mod tests {
     use proptest::prelude::*;
     use std::fs;
     use tempfile::TempDir;
+
+    /// A registration the walk only doubts claims nothing of the value: the
+    /// message says MSBuild may be unable to register it, not that it cannot.
+    #[test]
+    fn a_possible_registration_refusal_claims_nothing_of_the_value() {
+        let cause = RejectionCause::UsingTaskRegistration {
+            task: "X".to_owned(),
+            attribute: "ParameterType".to_owned(),
+            value: "System.TimeSpan".to_owned(),
+        };
+        let possible = rejection_message(&cause, false);
+        assert!(possible.contains("may be unable to register"), "{possible}");
+        assert!(!possible.contains("cannot"), "{possible}");
+        let certain = rejection_message(&cause, true);
+        assert!(certain.contains("cannot register"), "{certain}");
+    }
 
     /// A `get_env` closure supplying `%LOCALAPPDATA%` (used only on Windows;
     /// the Unix branches read the home directory, not the environment).

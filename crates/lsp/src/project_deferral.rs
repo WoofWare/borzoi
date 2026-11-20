@@ -1028,10 +1028,17 @@ fn render_rejection_cause(cause: &RejectionCause, certain: bool) -> String {
             task,
             attribute,
             value,
-        } => format!(
-            "a `<UsingTask>` of `{task}` whose `{attribute}` reads `{value}`, which MSBuild \
-             cannot register, so MSBuild {rejects} the whole project"
-        ),
+        } => {
+            let cannot = if certain {
+                "cannot"
+            } else {
+                "may be unable to"
+            };
+            format!(
+                "a `<UsingTask>` of `{task}` whose `{attribute}` reads `{value}`, which MSBuild \
+                 {cannot} register, so MSBuild {rejects} the whole project"
+            )
+        }
     }
 }
 

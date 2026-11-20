@@ -87,12 +87,15 @@ fn grade(oracle: &mut Oracle, writes: &str, body: &str) -> Graded {
             "MSBuild evaluates, and the walk claims it rejects: {xml}\n{:#?}",
             parsed.rejection
         );
-        assert_eq!(
-            parsed.property("After").value(),
-            Some("ok"),
-            "MSBuild evaluates, and the walk withdrew: {xml}\n{:#?}",
-            parsed.rejection
-        );
+        // A possible rejection withdraws every value, which claims nothing;
+        // with none, the value after the task is MSBuild's.
+        if walk.is_none() {
+            assert_eq!(
+                parsed.property("After").value(),
+                Some("ok"),
+                "MSBuild evaluates, and the walk withdrew: {xml}"
+            );
+        }
     }
     Graded {
         msbuild_rejects,
@@ -273,6 +276,47 @@ fn hand_picked_registrations() {
             true,
             Some(Certain),
         ),
+        // A function that reads the file system, which finds nothing.
+        (
+            "<UsingTask TaskName=\"X\" AssemblyFile=\"$([MSBuild]::GetPathOfFileAbove('Missing.dll', '$(MSBuildProjectDirectory)'))\" />".to_owned(),
+            true,
+            Some(Certain),
+        ),
+        // `AssemblyFile`'s own `\` turned into `/` before it expands.
+        (
+            "<PropertyGroup><Slash>/foo</Slash></PropertyGroup>\
+             <UsingTask TaskName=\"X\" AssemblyFile=\"$(Slash.Split('\\')[0])\" />"
+                .to_owned(),
+            true,
+            Some(Certain),
+        ),
+        // A metadatum MSBuild leaves as written: a file name.
+        (
+            "<UsingTask TaskName=\"X\" AssemblyFile=\"%(M)\" />".to_owned(),
+            false,
+            None,
+        ),
+        // Parameters MSBuild keys case-insensitively
+        // ([`parameters_colliding_by_case_fail_the_registry`]).
+        (
+            inline_task("", "<ParameterGroup><A /><B /></ParameterGroup><Task>x</Task>"),
+            false,
+            None,
+        ),
+        (
+            inline_task(
+                " Condition=\"false\"",
+                "<ParameterGroup><A /><a /></ParameterGroup><Task>x</Task>",
+            ),
+            false,
+            None,
+        ),
+        // A factory name a fold outside ASCII may match: a decline.
+        (
+            "<UsingTask TaskName=\"X\" TaskFactory=\"É\" AssemblyFile=\"y.dll\"><Task>x</Task></UsingTask>".to_owned(),
+            false,
+            Some(Possible),
+        ),
     ];
     let mut oracle = Oracle::spawn();
     for (body, rejects, claim) in rows {
@@ -287,6 +331,43 @@ fn hand_picked_registrations() {
             "{body}"
         );
     }
+}
+
+/// Two parameters whose names fold to one: MSBuild's registry, keyed
+/// case-insensitively, fails on the second (an internal error, MSB1025,
+/// which the oracle reports as the exception), so the project does not
+/// evaluate, and the walk claims it is rejected.
+#[test]
+fn parameters_colliding_by_case_fail_the_registry() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let dir = borzoi_msbuild::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    let project_path = dir.join("Demo.fsproj");
+    let xml = format!(
+        "<Project><UsingTask {INLINE}><ParameterGroup><A /><a /></ParameterGroup><Task>x</Task>\
+         </UsingTask><PropertyGroup><After>ok</After></PropertyGroup></Project>"
+    );
+    std::fs::write(&project_path, &xml).unwrap();
+    let verdict = Oracle::spawn().design_time_verdict(&xml, &project_path);
+    assert!(
+        verdict
+            .as_ref()
+            .is_err_and(|error| error.contains("same key")),
+        "{verdict:?}"
+    );
+    let parsed = common::parse_fsproj_with_imports(
+        &borzoi_msbuild::ProjectFile::buffer(&project_path, &xml)
+            .expect("a project path spelt as its full path"),
+        &HashMap::new(),
+        &common::oracle_environment(),
+        None,
+        None,
+    )
+    .expect("well-formed");
+    assert_eq!(
+        parsed.rejection.as_ref().map(|r| r.certainty),
+        Some(RejectionCertainty::Certain),
+        "{xml}"
+    );
 }
 
 /// The values the sweep cannot carry.
@@ -345,6 +426,7 @@ fn registration_sweep(seed: u64, cases: usize) -> Census {
         let (writes, body) = document(place, &drawn.value, source);
         tally.cases += 1;
         let graded = grade(&mut oracle, &writes, &body);
+        tally.msbuild_rejects += usize::from(graded.msbuild_rejects);
         if graded.msbuild_rejects && graded.walk.is_none() {
             // `grade` let this pass only on a value the walk holds none of.
             // Shown to rest on that value: through a property the walk holds
@@ -360,7 +442,6 @@ fn registration_sweep(seed: u64, cases: usize) -> Census {
             census.reached(&drawn.hostile, "rejects-on-an-unheld-value");
             continue;
         }
-        tally.msbuild_rejects += usize::from(graded.msbuild_rejects);
         match graded.walk {
             Some(RejectionCertainty::Certain) => tally.certain += 1,
             Some(RejectionCertainty::Possible) => tally.possible += 1,
