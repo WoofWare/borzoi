@@ -907,13 +907,21 @@ pub(super) fn judge_branch(
 /// judgement walks the arm all the same; [`super::item_pass`]'s reference
 /// check does not count what it defers from there.
 ///
-/// The arms' fates are taken in one pass over the `<Choose>` per pass over its
-/// arms (`State::arm_decisions`, which [`judge_whens`] and `handle_choose`
-/// clear when the pass ends), each found again by its offset, and a gate after
-/// one that holds whatever the doubted names hold is not evaluated, as MSBuild
-/// does not evaluate it: so a chain of `n` arms costs `n` decisions, and the
-/// read set gains no probe MSBuild does not make.
+/// Only an arm holding a `<ProjectReference>` is asked about, as only such an
+/// arm defers a group the check reads, so an arm with none probes nothing.
+/// The arms' fates are taken in one forward pass over the `<Choose>` per pass
+/// over its arms (`State::arm_decisions`, which [`judge_whens`] and
+/// `handle_choose` clear when the pass ends), as far as the arm asked about
+/// and no further, and a gate after one that holds whatever the doubted names
+/// hold is not evaluated, as MSBuild does not evaluate it: so a chain of `n`
+/// arms costs at most `n` decisions, and the read set gains no probe MSBuild
+/// does not make.
 fn arm_is_dead(branch: Node<'_, '_>, state: &mut State<'_>) -> bool {
+    if !branch.descendants().any(|node| {
+        node.is_element() && node.has_tag_name("ProjectReference") && node.has_attribute("Include")
+    }) {
+        return false;
+    }
     // Once the walk has hidden content no arm is ruled out (a gate reading a
     // doubted name settles nothing then, `State::reference_gate_decision`),
     // and a gate decided on held values alone may itself rest on a value the
@@ -925,31 +933,20 @@ fn arm_is_dead(branch: Node<'_, '_>, state: &mut State<'_>) -> bool {
     let Some(choose) = branch.parent_element() else {
         return false;
     };
-    let fates = match state.arm_decisions.get(&choose_key(choose)) {
-        Some(fates) => std::rc::Rc::clone(fates),
-        None => {
-            let fates = std::rc::Rc::new(arm_fates(choose, state));
-            state
-                .arm_decisions
-                .insert(choose_key(choose), std::rc::Rc::clone(&fates));
-            fates
-        }
-    };
-    fates.get(&branch.range().start).copied().unwrap_or(false)
-}
-
-/// Whether each arm of the `<Choose>` at `choose` is one MSBuild cannot take
-/// ([`arm_is_dead`]), by the offset of its `<When>` or `<Otherwise>`.
-fn arm_fates(choose: Node<'_, '_>, state: &State<'_>) -> HashMap<usize, bool> {
-    let entry_dir = state.entry_project_dir.clone();
-    let mut fates = HashMap::new();
-    let mut taken = false;
-    for arm in choose.children().filter(Node::is_element) {
-        let dead = taken
+    let mut fates = state
+        .arm_decisions
+        .remove(&choose_key(choose))
+        .unwrap_or_default();
+    let from = fates.next;
+    for arm in choose
+        .children()
+        .filter(|arm| arm.is_element() && arm.range().start >= from)
+    {
+        let dead = fates.taken
             || match attribute(arm, "Condition").filter(|_| arm.has_tag_name("When")) {
-                Some(condition) => match state.reference_gate_decision(&condition, &entry_dir) {
+                Some(condition) => match state.reference_gate_decision(&condition, None) {
                     Some(true) => {
-                        taken = true;
+                        fates.taken = true;
                         false
                     }
                     Some(false) => true,
@@ -957,9 +954,32 @@ fn arm_fates(choose: Node<'_, '_>, state: &State<'_>) -> HashMap<usize, bool> {
                 },
                 None => false,
             };
-        fates.insert(arm.range().start, dead);
+        fates.dead.insert(arm.range().start, dead);
+        fates.next = arm.range().end;
+        if arm.id() == branch.id() {
+            break;
+        }
     }
-    fates
+    let dead = fates
+        .dead
+        .get(&branch.range().start)
+        .copied()
+        .unwrap_or(false);
+    state.arm_decisions.insert(choose_key(choose), fates);
+    dead
+}
+
+/// The arms of one `<Choose>` whose fates [`arm_is_dead`] has taken so far,
+/// in order.
+#[derive(Default)]
+pub(super) struct ArmFates {
+    /// Each arm's fate, by the offset of its `<When>` or `<Otherwise>`.
+    dead: HashMap<usize, bool>,
+    /// Whether an arm taken so far holds whatever the doubted names hold, so
+    /// that every later one is dead.
+    taken: bool,
+    /// The offset past the last arm taken so far.
+    next: usize,
 }
 
 /// The key of the `<Choose>` at `choose` in `State::arm_decisions`.

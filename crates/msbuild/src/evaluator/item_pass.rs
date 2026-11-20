@@ -720,8 +720,9 @@ fn evaluate_item_group(node: Node<'_, '_>, state: &mut State<'_>) {
 /// ([`State::reference_gate_decision`]).
 fn reference_gate_is_dead(element: Node<'_, '_>, state: &State<'_>) -> bool {
     let dir = state.entry_project_dir.clone();
-    attribute(element, "Condition")
-        .is_some_and(|condition| state.reference_gate_decision(&condition, &dir) == Some(false))
+    attribute(element, "Condition").is_some_and(|condition| {
+        state.reference_gate_decision(&condition, Some(&dir)) == Some(false)
+    })
 }
 
 /// Whether `node` is a `<ProjectReference>` `Include` whose `Include` or
@@ -761,7 +762,15 @@ fn reads_a_doubted_name(node: Node<'_, '_>, state: &State<'_>) -> bool {
                 .ignoring_trust()
                 .as_escaped()
                 .split(';')
-                .all(|fragment| fragment.trim().is_empty())
+                .all(|fragment| {
+                    // An item list the walk knows exactly to be empty is no
+                    // item either; one it does not know may hold some.
+                    let fragment = fragment.trim();
+                    fragment.is_empty()
+                        || exact_item_list_reference(fragment).is_some_and(|item_type| {
+                            item_list_view(item_type, state).is_some_and(|items| items.is_empty())
+                        })
+                })
     };
     attribute(node, "Exclude").is_some_and(|raw| state.raw_reads_a_doubted_name(&raw))
         && !include_is_empty()

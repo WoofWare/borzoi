@@ -755,6 +755,23 @@ fn the_arms_after_a_taken_one_are_not_probed() {
              <Choose><When{UNSUPPORTED_TRUE}><ItemGroup Condition=\"$(G) And Exists('not-reached')\">\
              <None Include=\"n\" /></ItemGroup></When></Choose></Project>"
         ),
+        // Arms that hold no reference: none of their gates is the check's
+        // to probe.
+        format!(
+            "<Project><PropertyGroup><G>{REFUSED_BODY}</G></PropertyGroup>\
+             <Choose><When{UNSUPPORTED_TRUE}><ItemGroup><None Include=\"a\" /></ItemGroup></When>\
+             <When Condition=\"'$(G.Substring(0))' == 'yes' And Exists('not-reached')\">\
+             <ItemGroup><None Include=\"b\" /></ItemGroup></When></Choose></Project>"
+        ),
+        // The same with a reference in the later arm: whether that arm is
+        // dead is asked with no file system, as MSBuild may evaluate its gate
+        // not at all.
+        format!(
+            "<Project><PropertyGroup><G>{REFUSED_BODY}</G></PropertyGroup>\
+             <Choose><When{UNSUPPORTED_TRUE}><ItemGroup><None Include=\"a\" /></ItemGroup></When>\
+             <When Condition=\"'$(G.Substring(0))' == 'yes' And Exists('not-reached')\">\
+             <ItemGroup><ProjectReference Include=\"$(G).fsproj\" /></ItemGroup></When></Choose></Project>"
+        ),
         // A nested `<Choose>` after hidden content (an import under a gate
         // the walk cannot decide), whose first `<When>` holds whatever any
         // name holds.
@@ -881,6 +898,16 @@ fn a_dead_reference_reading_a_refused_name_costs_no_certainty() {
         // holds: it excludes nothing.
         "<ItemGroup><ProjectReference Include=\"$(OptionalProjects)\" Exclude=\"$(P)\" /></ItemGroup>"
             .to_owned(),
+        // The same from an item list the walk knows to be empty.
+        "<ItemGroup><ProjectReference Include=\"@(OptionalProjects)\" Exclude=\"$(P)\" /></ItemGroup>"
+            .to_owned(),
+        // A name only a branch MSBuild cannot take writes, beside an
+        // undecided one: its write never happens, so a read of it is exact.
+        format!(
+            "<Choose><When{UNSUPPORTED_TRUE}><PropertyGroup><X>1</X></PropertyGroup></When>\
+             <When Condition=\"false\"><PropertyGroup><OptionalProjects>B.fsproj</OptionalProjects></PropertyGroup></When></Choose>\
+             <ItemGroup><ProjectReference Include=\"$(OptionalProjects)\" /></ItemGroup>"
+        ),
         // A gate false whatever a doubted name holds, which the walk cannot
         // evaluate on the value it holds (`É` against `é`).
         format!(

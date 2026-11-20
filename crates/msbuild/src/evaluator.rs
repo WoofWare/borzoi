@@ -1314,7 +1314,7 @@ struct State<'r> {
     /// The `<When>` decisions of each `<Choose>` the judgement is judging the
     /// arms of now, by the `<Choose>` (its document and offset), taken once on
     /// the state before it ([`rejection::judge_branch`]).
-    arm_decisions: HashMap<(usize, usize), std::rc::Rc<HashMap<usize, bool>>>,
+    arm_decisions: HashMap<(usize, usize), rejection::ArmFates>,
     /// The root each root-surfacing diagnostic stood for, by its index in
     /// `diagnostics`, captured when it was pushed. A diagnostic carries only a
     /// name, and that name's root may change later in the walk;
@@ -2950,12 +2950,15 @@ impl<'r> State<'r> {
     /// (the reference gates' policy: unpinned or SDK-tainted, held as no value
     /// it can show undefined, or written on the path the judgement walks), on
     /// the values it holds, three-valued (`condition::decide_without`), `Exists`
-    /// resolved against `dir`. A refusal a clean write overwrote leaves the
+    /// resolved against `dir`, or, with none, probing nothing (an `Exists` leaf
+    /// then decides nothing): a gate MSBuild may not evaluate (a `<When>` after
+    /// one it takes) is decided with none, so the read set gains no probe
+    /// MSBuild does not make. A refusal a clean write overwrote leaves the
     /// bound value deciding, as it does not for an import point
     /// ([`directory_build::decision_from_certain_inputs`]). Once the walk has
     /// hidden content, a doubted name it reads settles nothing
     /// ([`Self::condition_is_decided_exactly`] says why).
-    fn reference_gate_decision(&self, condition: &str, dir: &Path) -> Option<bool> {
+    fn reference_gate_decision(&self, condition: &str, dir: Option<&Path>) -> Option<bool> {
         let unknown = |name: &str| {
             self.trust_of(name).reference_is_untrusted()
                 || (!self.lookup.is_bound(name) && !self.undefined_read_is_exact(name))
@@ -2965,11 +2968,11 @@ impl<'r> State<'r> {
             return None;
         }
         let observer = self.observer;
-        let exists = |path: &str| condition_exists(observer, path, dir);
-        let probes = self.follow_imports.then_some(condition::Probes {
-            exists: &exists,
-            observer,
-        });
+        let exists = dir.map(|dir| move |path: &str| condition_exists(observer, path, dir));
+        let probes = match (&exists, self.follow_imports) {
+            (Some(exists), true) => Some(condition::Probes { exists, observer }),
+            _ => None,
+        };
         match condition::decide_without(
             condition,
             &self.lookup,
@@ -4354,8 +4357,44 @@ fn handle_choose(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State<
             rejection::judge_branch(*branch, current_file_dir, false, state);
         }
         rejection::judge_whens(node, from + 1, current_file_dir, false, state);
+        // The branches MSBuild may take: every one but those a gate false
+        // whatever the uncertain names hold rules out, and those after one
+        // whose gate holds whatever they hold, each decided on the state
+        // before the `<Choose>`, which is MSBuild's state when it evaluates
+        // the gates (so before any branch's writes are marked below). Decided
+        // with no file system: MSBuild may evaluate none of these gates, so
+        // asking probes nothing, and an `Exists` decides nothing.
+        let live: Vec<Node<'_, '_>> = {
+            let mut live = vec![whens[from]];
+            let mut taken = false;
+            for branch in whens[from + 1..].iter().copied() {
+                let decision = attribute(branch, "Condition").and_then(|condition| {
+                    match condition::decide_without(
+                        &condition,
+                        &state.lookup,
+                        None,
+                        state.condition_site(),
+                        &|name| !directory_build::is_certain(state, name),
+                    ) {
+                        condition::Decision::Decided(value) => Some(value),
+                        _ => None,
+                    }
+                });
+                if decision != Some(false) {
+                    live.push(branch);
+                }
+                if decision == Some(true) {
+                    taken = true;
+                    break;
+                }
+            }
+            if !taken {
+                live.extend(otherwise);
+            }
+            live
+        };
         let mut items = item_pass::UndecidedChooseItems::default();
-        for branch in whens[from..].iter().copied().chain(otherwise) {
+        for branch in live {
             scan_undecided_choose_branch(branch, unpinned_root.as_ref(), state, &mut items);
         }
         items.apply(node.range(), state);
