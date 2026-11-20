@@ -16,7 +16,8 @@
 //! evaluates one (and some it does not), over certain properties holding
 //! hostile values (`borzoi_oracle_harness::hostile`) and an uncertain one the
 //! walk holds one value of while MSBuild holds another, with operands that
-//! throw in every position of `And`/`Or` chains. Each project is graded
+//! throw in every position of `And`/`Or` chains, and a write after the site
+//! that the item pass reads and the property pass does not. Each project is graded
 //! certain-implies-exact against design-time evaluation, the evaluation the
 //! walk's rejection model follows (`evaluator/rejection.rs`):
 //!
@@ -69,6 +70,29 @@ fn draw_value(rng: &mut SplitMix64) -> hostile::Drawn<String> {
         Some(entry) => hostile::Drawn::of(entry).map(|v| v.render(plain)),
         None => hostile::Drawn::plain(plain.to_owned()),
     }
+}
+
+/// [`draw_value`] for a property's last write: no hostile value a later
+/// write would put back, as nothing does.
+fn draw_final_value(rng: &mut SplitMix64) -> hostile::Drawn<String> {
+    let plain = *rng.pick(PLAIN);
+    let finals = value::alphabet().filtered(|entry| entry.value.write == value::Write::Final);
+    match hostile::sample(&finals, rng.next()) {
+        Some(entry) => hostile::Drawn::of(entry).map(|v| v.render(plain)),
+        None => hostile::Drawn::plain(plain.to_owned()),
+    }
+}
+
+#[test]
+fn a_last_write_draws_no_value_a_later_write_puts_back() {
+    let mut rng = SplitMix64(0x1092);
+    let drawn: Vec<_> = (0..20_000).map(|_| draw_final_value(&mut rng)).collect();
+    assert!(drawn.iter().any(|d| !d.hostile.is_empty()));
+    assert!(
+        drawn
+            .iter()
+            .all(|d| !d.hostile.contains(&Dimension::OverwrittenLater))
+    );
 }
 
 /// An operand naming one of `names`: a literal, a reference, or a property
@@ -406,12 +430,56 @@ const SITES: &[&str] = &[
     "<PropertyGroup Condition=\"UNDECIDED_TRUE\"><A>1</A><R>{t}</R></PropertyGroup>",
     "<Choose><When Condition=\"UNDECIDED_TRUE\"><Choose><When Condition=\"UNDECIDED_FALSE\"><PropertyGroup><A>abcdefghijklmnop</A></PropertyGroup></When><Otherwise><ItemGroup><I Include=\"{t}\" /></ItemGroup></Otherwise></Choose></When></Choose>",
     "<Choose><When Condition=\"UNDECIDED_TRUE\"><Choose><When Condition=\"UNDECIDED_FALSE\"><PropertyGroup><B>abcdefghijklmnop</B></PropertyGroup></When><Otherwise><ItemGroup Condition=\"{c}\"><I Include=\"x\" /></ItemGroup></Otherwise></Choose></When></Choose>",
+    // An arm the walk does not take, whose items MSBuild evaluates in its item
+    // pass, against the final table, a write after the `<Choose>` included
+    // (#1092).
+    "<Choose><When Condition=\"UNDECIDED_TRUE\"><ItemGroup><I Include=\"x\" Condition=\"{c}\" /></ItemGroup></When></Choose>",
+    "<Choose><When Condition=\"UNDECIDED_TRUE\"><ItemGroup><I Include=\"x\"><M>{t}</M></I></ItemGroup></When></Choose>",
+    "<Choose><When Condition=\"UNDECIDED_FALSE\" /><Otherwise><ItemGroup><I Include=\"{t}\" /></ItemGroup></Otherwise></Choose>",
+    "<Choose><When Condition=\"UNDECIDED_TRUE\"><PropertyGroup><A>1</A></PropertyGroup><ItemGroup Condition=\"{c}\"><I Include=\"x\" /></ItemGroup></When></Choose>",
 ];
 
 /// Whether `template` puts its text in a metadatum's value, where MSBuild
 /// expands metadata references before properties.
 fn is_metadata_site(template: &str) -> bool {
     template.contains("<M>{t}") || template.contains("M=\"{t}")
+}
+
+/// Whether `template` puts its piece where MSBuild reads it after every
+/// property write: in an `<ItemGroup>`, an `<ItemDefinitionGroup>` or a
+/// `<UsingTask>`, however deep in a `<Choose>`. A condition of a `<When>` or a
+/// property is read by the property pass.
+fn read_in_item_pass(template: &str) -> bool {
+    let at = template
+        .find("{c}")
+        .or_else(|| template.find("{t}"))
+        .expect("a site holds a piece");
+    let before = &template[..at];
+    ["ItemGroup", "ItemDefinitionGroup", "UsingTask"]
+        .iter()
+        .any(|tag| {
+            before.matches(&format!("<{tag}")).count()
+                > before.matches(&format!("</{tag}>")).count()
+        })
+}
+
+#[test]
+fn sites_read_in_the_item_pass_are_the_item_groups_and_tasks() {
+    let item_pass: Vec<&str> = SITES
+        .iter()
+        .copied()
+        .filter(|t| read_in_item_pass(t))
+        .collect();
+    assert!(item_pass.iter().all(|t| !t.starts_with("<PropertyGroup")));
+    assert!(read_in_item_pass(
+        "<Choose><When Condition=\"UNDECIDED_TRUE\"><ItemGroup><I Include=\"{t}\" /></ItemGroup></When></Choose>"
+    ));
+    assert!(!read_in_item_pass(
+        "<ItemGroup><I Include=\"x\" /></ItemGroup><Choose><When Condition=\"{c}\" /></Choose>"
+    ));
+    assert!(read_in_item_pass(
+        "<UsingTask TaskName=\"X\" AssemblyFile=\"y.dll\" Runtime=\"{t}\" />"
+    ));
 }
 
 /// What became of a generated project, as the census counts it.
@@ -579,7 +647,210 @@ const REFUSED: &str = "$([System.String]::Copy('Debug'))";
 /// `""`), to show that MSBuild's rejection rests on them: a number, a word, a
 /// version, a boolean, and a long value every indexer and separator the
 /// generator uses finds room in.
-const VARIED_VALUES: &[&str] = &["1", "abc", "a;b\tc;d\te;f\tg;h\ti;j;k\tl", "1.2.3", "true"];
+const VARIED_VALUES: &[&str] = &[
+    "1",
+    "abc",
+    "a;b\tc;d\te;f\tg;h\ti;j;k\tl;m;n;o",
+    "1.2.3",
+    "true",
+];
+
+/// What a value of the overwritten-later dimension is reset to after the
+/// site.
+const RESET: &str = "1";
+
+/// The value of `name` (`A` or `B`, first written as `drawn`) that a site
+/// reads: the property pass reads the first write; the item pass the last,
+/// the rewrite, else the reset, else the first.
+fn value_read_at_site(
+    item_pass: bool,
+    name: &str,
+    drawn: &hostile::Drawn<String>,
+    rewrite: Option<&str>,
+    rewritten: &hostile::Drawn<String>,
+) -> hostile::Drawn<String> {
+    if item_pass && rewrite == Some(name) {
+        rewritten.clone()
+    } else if item_pass && drawn.hostile.contains(&Dimension::OverwrittenLater) {
+        hostile::Drawn::plain(RESET.to_owned())
+    } else {
+        drawn.clone()
+    }
+}
+
+#[test]
+fn a_site_reads_the_write_its_pass_sees() {
+    let reset = value::alphabet()
+        .of(Dimension::OverwrittenLater)
+        .next()
+        .map(|entry| hostile::Drawn::of(entry).map(|v| v.render("abc")))
+        .expect("the alphabet has an overwritten-later value");
+    let plain = hostile::Drawn::plain("abc".to_owned());
+    let rewritten = hostile::Drawn::plain("2.0".to_owned());
+    let read = |item_pass, drawn: &hostile::Drawn<String>, rewrite| {
+        value_read_at_site(item_pass, "A", drawn, rewrite, &rewritten).value
+    };
+    assert_eq!(read(false, &reset, Some("A")), reset.value);
+    assert_eq!(read(true, &reset, Some("A")), "2.0");
+    assert_eq!(read(true, &reset, Some("B")), RESET);
+    assert_eq!(read(true, &reset, None), RESET);
+    assert_eq!(read(true, &plain, Some("B")), "abc");
+    assert_eq!(read(true, &plain, Some("A")), "2.0");
+}
+
+/// Whether the rewrite after the site reaches what is graded: where MSBuild
+/// evaluates the property pass through to it, which it does wherever it
+/// evaluates the project (`evaluated`), and wherever the site is read in the
+/// item pass (`item_pass`), after every property write. A rejection in the
+/// property pass, before it, is none of the rewrite's.
+fn rewrite_is_graded(item_pass: bool, evaluated: bool) -> bool {
+    item_pass || evaluated
+}
+
+#[test]
+fn a_rejection_before_the_rewrite_is_none_of_its() {
+    assert!(!rewrite_is_graded(false, false));
+    assert!(rewrite_is_graded(false, true));
+    assert!(rewrite_is_graded(true, false));
+    assert!(rewrite_is_graded(true, true));
+}
+
+/// What one generated project is made of.
+struct Drawing {
+    /// The certain properties' values.
+    a: hostile::Drawn<String>,
+    b: hostile::Drawn<String>,
+    /// `U` as the walk holds it, and as MSBuild does.
+    held: hostile::Drawn<String>,
+    real: hostile::Drawn<String>,
+    /// A write of `A` or `B` after the site, of a value of its own: a read of
+    /// the item pass (and of `UsingTask`'s pass) is of this value, one of the
+    /// property pass of the value before it (#1092).
+    rewritten: hostile::Drawn<String>,
+    rewrite: Option<&'static str>,
+    /// Where the piece goes ([`SITES`]), and the pieces: a text and a
+    /// condition.
+    template: &'static str,
+    body: String,
+    gate: String,
+}
+
+/// A project drawn from `rng`, or `None` where a value it drew carries an
+/// `excluded` dimension, before it draws the pieces.
+fn draw_project(rng: &mut SplitMix64, excluded: &BTreeSet<Dimension>) -> Option<Drawing> {
+    let a = draw_value(rng);
+    let b = draw_value(rng);
+    let held = draw_value(rng);
+    let real = draw_value(rng);
+    let rewritten = draw_final_value(rng);
+    let rewrite: Option<&'static str> = *rng.pick(&[None, None, Some("A"), Some("B")]);
+    let carried = [&a, &b, &held, &real]
+        .into_iter()
+        .chain(rewrite.map(|_| &rewritten))
+        .flat_map(|drawn| drawn.hostile.iter());
+    if carried.into_iter().any(|d| excluded.contains(d)) {
+        return None;
+    }
+    // `X` is a write the walk refuses to compute: it holds no value of it.
+    let operands = ["A", "B", "U", "X"];
+    let template = *rng.pick(SITES);
+    let body = text(rng, &operands);
+    let gate = condition(rng, &operands, 3);
+    Some(Drawing {
+        a,
+        b,
+        held,
+        real,
+        rewritten,
+        rewrite,
+        template,
+        body,
+        gate,
+    })
+}
+
+/// A project held to the gap it pins, whatever the generator's stream
+/// draws: each of [`project_sweep`]'s classifications of a project MSBuild
+/// rejects and the walk commits keeps a witness, so that a classifier no
+/// drawn project reaches still answers for one.
+struct Witness {
+    /// `A`, `B`, `U` as the walk holds it, `U` as MSBuild holds it.
+    values: [&'static str; 4],
+    template: &'static str,
+    body: &'static str,
+    gate: &'static str,
+    /// The gap it pins (`manifests/rejection_projects_wrong.txt`'s spelling).
+    gap: &'static str,
+    /// Whether only striking both its unmodelled expressions and those on the
+    /// names the walk is not sure of shows the rejection, with the values the
+    /// classifier tries: held, so that a value added to them that rescues the
+    /// witness fails here rather than retiring the step it answers for.
+    both_strikes: bool,
+}
+
+impl Witness {
+    fn drawing(&self) -> Drawing {
+        let [a, b, held, real] = self.values.map(|v| hostile::Drawn::plain(v.to_owned()));
+        Drawing {
+            a,
+            b,
+            held,
+            real,
+            rewritten: hostile::Drawn::plain(String::new()),
+            rewrite: None,
+            template: self.template,
+            body: self.body.to_owned(),
+            gate: self.gate.to_owned(),
+        }
+    }
+}
+
+/// One witness per gap, each a project an earlier fixed seed drew.
+const WITNESSES: &[Witness] = &[
+    Witness {
+        values: ["1.2.3", "true @evil.rsp", "1", "1.2.3"],
+        template: "<Choose><When Condition=\"UNDECIDED_TRUE\"><Choose><When Condition=\"UNDECIDED_FALSE\"><PropertyGroup><B>abcdefghijklmnop</B></PropertyGroup></When><Otherwise><ItemGroup Condition=\"{c}\"><I Include=\"x\" /></ItemGroup></Otherwise></Choose></When></Choose>",
+        body: "",
+        gate: "!(Exists('$([MSBuild]::VersionLessThan(`$(X)`, `2.0`))'))",
+        gap: "uncertain-value",
+        both_strikes: false,
+    },
+    Witness {
+        values: ["1.2.3", "x;y;z", "1.2.3", "2.0"],
+        template: "<ItemGroup Condition=\"false\"><I Include=\"{t}\" /></ItemGroup>",
+        body: "$(A.Contains(NULL))",
+        gate: "",
+        gap: "unmodelled-body",
+        both_strikes: false,
+    },
+    // The same gap, beside an expression on `X` no value tried for it
+    // rescues (none is 41 characters long): the classifier reaches it only by
+    // striking both, so this keeps that step answering for a project.
+    Witness {
+        values: ["2.0", "true\n/out:obj/Evil.dll", "1.2.3", "abc"],
+        template: "<ItemGroup><I Include=\"{t}\" /></ItemGroup>",
+        body: "$([MSBuild]::VersionGreaterThan($(B), 1.0));$(X[40])",
+        gate: "",
+        gap: "unmodelled-body",
+        both_strikes: true,
+    },
+];
+
+/// The long value of [`VARIED_VALUES`] has room for every indexer
+/// [`operand`] writes: `Split(";")[9]`, `Split("\t")[1]` and `[9]`.
+#[test]
+fn a_varied_value_has_room_for_every_indexer() {
+    assert!(VARIED_VALUES.iter().any(|value| {
+        value.split(';').count() > 9 && value.split('\t').count() > 1 && value.chars().count() > 9
+    }));
+}
+
+#[test]
+fn every_witness_stands_at_a_site_the_generator_draws() {
+    for witness in WITNESSES {
+        assert!(SITES.contains(&witness.template), "{}", witness.template);
+    }
+}
 
 /// Generate `cases` projects from `rng` and grade each against MSBuild.
 fn project_sweep(
@@ -606,23 +877,76 @@ fn project_sweep(
         .map(String::from)
         .to_vec();
     let mut tally = ProjectCensus::default();
-    while tally.cases < cases {
-        let a = draw_value(rng);
-        let b = draw_value(rng);
-        let held = draw_value(rng);
-        let real = draw_value(rng);
+    // The witnesses first, each held to the gap it pins; then the drawn
+    // projects.
+    let mut witnesses = WITNESSES.iter().enumerate();
+    // The gap the case just graded was pinned as, and the witness's own
+    // expectation of it.
+    let gap_seen: std::cell::Cell<Option<&'static str>> = std::cell::Cell::new(None);
+    let strikes_seen = std::cell::Cell::new(false);
+    let mut expected: Option<(String, &'static str, bool)> = None;
+    let held_to = |expected: Option<(String, &'static str, bool)>| {
+        if let Some((key, gap, both_strikes)) = expected {
+            assert_eq!(
+                (gap_seen.get(), strikes_seen.get()),
+                (Some(gap), both_strikes),
+                "the witness {key} no longer pins the gap it stands for, by the step it stands for"
+            );
+        }
+    };
+    loop {
+        held_to(expected.take());
+        gap_seen.set(None);
+        strikes_seen.set(false);
+        let (drawing, witness) = match witnesses.next() {
+            Some((index, witness)) => (
+                witness.drawing(),
+                Some((index, witness.gap, witness.both_strikes)),
+            ),
+            None if tally.cases < cases => match draw_project(rng, &excluded) {
+                Some(drawing) => (drawing, None),
+                None => continue,
+            },
+            None => break,
+        };
+        let Drawing {
+            a,
+            b,
+            held,
+            real,
+            rewritten,
+            rewrite,
+            template,
+            body,
+            gate,
+        } = drawing;
         let mut hostile: BTreeSet<Dimension> = BTreeSet::new();
         for drawn in [&a, &b, &held, &real] {
             hostile.extend(drawn.hostile.iter().copied());
         }
-        if hostile.iter().any(|d| excluded.contains(d)) {
-            continue;
-        }
-        // `X` is a write the walk refuses to compute: it holds no value of it.
-        let operands = ["A", "B", "U", "X"];
-        let template = *rng.pick(SITES);
-        let body = text(rng, &operands);
-        let gate = condition(rng, &operands, 3);
+        assert!(
+            !hostile
+                .iter()
+                .chain(rewrite.iter().flat_map(|_| &rewritten.hostile))
+                .any(|d| excluded.contains(d)),
+            "an excluded dimension is drawn"
+        );
+        // A witness is graded by its own expectation, not by the baseline, and
+        // counted in neither the tally nor the census of drawn projects.
+        let mut grading = match witness {
+            Some(_) => None,
+            None => grading.as_deref_mut(),
+        };
+        let mut witness_counts = ProjectCensus::default();
+        let counts: &mut ProjectCensus = match witness {
+            Some(_) => &mut witness_counts,
+            None => &mut tally,
+        };
+        let reach = |hostile: &BTreeSet<Dimension>, outcome: &str| {
+            if witness.is_none() {
+                census.reached(hostile, outcome);
+            }
+        };
         // A later write is made of `A` and `B` alone (below), and a value it
         // overwrites reaches only a read of the property pass between the
         // two writes: of the site's piece, at a site of the property pass.
@@ -631,33 +955,41 @@ fn project_sweep(
         } else {
             &gate
         };
-        let property_pass = ["<PropertyGroup", "<Choose", "<Import"]
-            .iter()
-            .any(|start| template.starts_with(start));
+        let item_pass = read_in_item_pass(template);
         let overwritten_read = [("A", &a), ("B", &b)].into_iter().any(|(name, drawn)| {
             drawn.hostile.contains(&Dimension::OverwrittenLater)
-                && property_pass
+                && !item_pass
                 && property_references(piece).contains(&name)
         });
         if !overwritten_read {
             hostile.remove(&Dimension::OverwrittenLater);
         }
+        let read_at_site = |name: &str, drawn: &'_ hostile::Drawn<String>| {
+            value_read_at_site(item_pass, name, drawn, rewrite, &rewritten)
+        };
         let site = template
             .replace("{c}", &xml_attribute(&gate))
             .replace("{t}", &xml_attribute(&body))
             .replace("UNDECIDED_TRUE", &xml_attribute(UNDECIDED_TRUE))
             .replace("UNDECIDED_FALSE", &xml_attribute(UNDECIDED_FALSE));
         // A value overwritten later has been read by the site in between.
-        let mut later = String::new();
+        let mut resets = String::new();
         for (name, drawn) in [("A", &a), ("B", &b)] {
             if drawn.hostile.contains(&Dimension::OverwrittenLater) {
-                later.push_str(&format!("<{name}>1</{name}>"));
+                resets.push_str(&format!("<{name}>{RESET}</{name}>"));
             }
         }
+        // The writes after the site: the resets, then the rewrite, its body
+        // as given.
+        let after_site = |rewrite_body: &str| match rewrite {
+            Some(name) => format!("{resets}<{name}>{rewrite_body}</{name}>"),
+            None => resets.clone(),
+        };
+        let later = after_site(&xml_text(&rewritten.value));
         // The project, its first group's writes as given: `U` as the walk
         // holds it, then (`real`) as MSBuild holds it, which the walk cannot
         // know.
-        let document = |writes: &str, site: &str| {
+        let document = |(writes, later): &(String, String), site: &str| {
             format!(
                 "<Project>\n  <PropertyGroup>{writes}</PropertyGroup>\n  {ITEMS}\n  {site}\n  \
                  <PropertyGroup><After>ok</After>{later}</PropertyGroup>\n</Project>\n"
@@ -672,7 +1004,7 @@ fn project_sweep(
             xml_attribute(UNDECIDED_TRUE),
             xml_text(&real.value),
         );
-        let xml = document(&writes, &site);
+        let xml = document(&(writes.clone(), later.clone()), &site);
         std::fs::write(&project_path, &xml).unwrap();
         let parsed = parse_fsproj_with_imports(
             &borzoi_msbuild::ProjectFile::buffer(&project_path, &xml)
@@ -691,14 +1023,26 @@ fn project_sweep(
             })
             .collect();
         let describe = || format!("--- xml ---\n{}\n{:#?}", elide(&xml), parsed.rejection);
-        tally.cases += 1;
+        let key = match witness {
+            Some((index, gap, both_strikes)) => {
+                let key = format!("witness-{index}");
+                expected = Some((key.clone(), gap, both_strikes));
+                key
+            }
+            None => {
+                counts.cases += 1;
+                format!("case-{:04}", counts.cases)
+            }
+        };
         match parsed.rejection.as_ref().map(|r| r.certainty) {
-            Some(RejectionCertainty::Certain) => tally.certain += 1,
-            Some(RejectionCertainty::Possible) => tally.possible += 1,
+            Some(RejectionCertainty::Certain) => counts.certain += 1,
+            Some(RejectionCertainty::Possible) => counts.possible += 1,
             None => {}
         }
         let both = oracle.project_both(&xml, &names, Some(&project_path), &[]);
-        let key = format!("case-{:04}", tally.cases);
+        if rewrite.is_some() && rewrite_is_graded(item_pass, both.design_time.is_some()) {
+            hostile.extend(rewritten.hostile.iter().copied());
+        }
         let hash = fnv1a(&xml);
         // Whether the baseline answered this project wrongly, and a note of
         // the walk under test answering it wrongly.
@@ -714,8 +1058,9 @@ fn project_sweep(
             }
             wrong
         });
-        tally.baseline_wrong += usize::from(baseline_wrong == Some(true));
-        let answered_wrongly = |gap: &str, grading: Option<&mut Grading>| {
+        counts.baseline_wrong += usize::from(baseline_wrong == Some(true));
+        let answered_wrongly = |gap: &'static str, grading: Option<&mut Grading>| {
+            gap_seen.set(Some(gap));
             if let Some(grading) = grading {
                 grading.wrong.push((key.clone(), format!("{hash} {gap}")));
                 if baseline_wrong == Some(false) {
@@ -724,10 +1069,10 @@ fn project_sweep(
             }
         };
         let Some(theirs) = both.design_time else {
-            tally.msbuild_rejects += 1;
+            counts.msbuild_rejects += 1;
             if ours.is_empty() {
-                tally.baseline_wrong_now_not += usize::from(baseline_wrong == Some(true));
-                census.reached(&hostile, outcome(true, false));
+                counts.baseline_wrong_now_not += usize::from(baseline_wrong == Some(true));
+                reach(&hostile, outcome(true, false));
                 continue;
             }
             // MSBuild rejects, and the walk committed: wrong, unless the
@@ -740,8 +1085,9 @@ fn project_sweep(
             // some value, which the walk's judgement leaves to them: a throw
             // on the `""` the walk substitutes is no claim.
             // The walk's reading at the site, before a later write puts a
-            // name's plain value back.
-            let at_site = if later.is_empty() {
+            // name's plain value back: the property pass's. The item pass
+            // reads the final table.
+            let at_site = if later.is_empty() || item_pass {
                 None
             } else {
                 let xml = format!(
@@ -770,16 +1116,30 @@ fn project_sweep(
                 };
                 format!("<{name}>{text}</{name}>")
             };
+            // The rewrite the item pass reads, as the walk holds it; one only
+            // the property pass reads past, as given.
             let varied = |unheld: &str| {
-                format!(
+                let writes = format!(
                     "{}{}{}<X>{}</X>",
                     as_held("A", &a, unheld),
                     as_held("B", &b, unheld),
                     as_held("U", &held, unheld),
                     xml_text(unheld)
-                )
+                );
+                let later = match rewrite {
+                    Some(name) if item_pass => {
+                        let held = as_held(name, &rewritten, unheld);
+                        let body = held
+                            .strip_prefix(&format!("<{name}>"))
+                            .and_then(|rest| rest.strip_suffix(&format!("</{name}>")))
+                            .expect("as_held writes one element");
+                        after_site(body)
+                    }
+                    _ => later.clone(),
+                };
+                (writes, later)
             };
-            let evaluates = |oracle: &mut Oracle, writes: &str, site: &str| {
+            let evaluates = |oracle: &mut Oracle, writes: &(String, String), site: &str| {
                 oracle
                     .project_design_time(&document(writes, site), &names, Some(&project_path), &[])
                     .is_some()
@@ -788,9 +1148,9 @@ fn project_sweep(
                 .chain(VARIED_VALUES)
                 .any(|value| evaluates(&mut oracle, &varied(value), &site))
             {
-                tally.rejected_on_an_uncertain_value += 1;
+                counts.rejected_on_an_uncertain_value += 1;
                 answered_wrongly("uncertain-value", grading.as_deref_mut());
-                census.reached(&hostile, "msbuild-rejects-on-an-uncertain-value");
+                reach(&hostile, "msbuild-rejects-on-an-uncertain-value");
                 continue;
             }
             // MSBuild may throw on every value of a name the walk is not sure
@@ -872,9 +1232,9 @@ fn project_sweep(
                 }
             }
             if shown {
-                tally.rejected_on_an_uncertain_value += 1;
+                counts.rejected_on_an_uncertain_value += 1;
                 answered_wrongly("uncertain-value", grading.as_deref_mut());
-                census.reached(&hostile, "msbuild-rejects-on-an-uncertain-value");
+                reach(&hostile, "msbuild-rejects-on-an-uncertain-value");
                 continue;
             }
             // A text's expressions the walk does not model, on the values it
@@ -890,8 +1250,14 @@ fn project_sweep(
                 (_, None) => String::new(),
             };
             let held_values = property_map(&[
-                ("A".to_owned(), held_value("A", Some(&a))),
-                ("B".to_owned(), held_value("B", Some(&b))),
+                (
+                    "A".to_owned(),
+                    held_value("A", Some(&read_at_site("A", &a))),
+                ),
+                (
+                    "B".to_owned(),
+                    held_value("B", Some(&read_at_site("B", &b))),
+                ),
                 ("U".to_owned(), held_value("U", Some(&held))),
                 ("X".to_owned(), held_value("X", None)),
             ]);
@@ -923,8 +1289,10 @@ fn project_sweep(
                 && std::iter::once(&"")
                     .chain(VARIED_VALUES)
                     .any(|value| evaluates(&mut oracle, &varied(value), &struck));
-            // Both gaps at once: the unmodelled expressions struck, and the
-            // ones on unsure names struck too, each set by each value.
+            // Or with the expressions on unsure names struck too, each set by
+            // each value. Which of the two shows a rejection turns on the
+            // values tried for those names, so both are one gap: a body the
+            // walk does not model, perhaps beside an uncertain value.
             let shown_with_unsure = !shown
                 && !unmodelled.is_empty()
                 && strike_sets.iter().any(|set| {
@@ -941,16 +1309,10 @@ fn project_sweep(
                  the walk is not sure of hold, and the walk committed {ours:?}\n{}",
                 describe()
             );
-            tally.rejected_on_an_unmodelled_body += 1;
-            answered_wrongly(
-                if shown {
-                    "unmodelled-body"
-                } else {
-                    "unmodelled-body-and-uncertain-value"
-                },
-                grading.as_deref_mut(),
-            );
-            census.reached(&hostile, "msbuild-rejects-on-an-unmodelled-body");
+            counts.rejected_on_an_unmodelled_body += 1;
+            strikes_seen.set(shown_with_unsure);
+            answered_wrongly("unmodelled-body", grading);
+            reach(&hostile, "msbuild-rejects-on-an-unmodelled-body");
             continue;
         };
         assert_ne!(
@@ -961,7 +1323,7 @@ fn project_sweep(
             describe()
         );
         for (name, value) in &ours {
-            tally.committed += 1;
+            counts.committed += 1;
             assert_eq!(
                 Some(value),
                 theirs.get(*name),
@@ -970,10 +1332,11 @@ fn project_sweep(
             );
         }
         let committed = ours.iter().any(|(name, _)| name.as_str() == "After");
-        tally.evaluated_and_committed += usize::from(committed);
-        tally.baseline_wrong_now_not += usize::from(baseline_wrong == Some(true));
-        census.reached(&hostile, outcome(false, committed));
+        counts.evaluated_and_committed += usize::from(committed);
+        counts.baseline_wrong_now_not += usize::from(baseline_wrong == Some(true));
+        reach(&hostile, outcome(false, committed));
     }
+    held_to(expected);
     census.finish(
         "BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-msbuild --test \
          rejection_generative_diff project_sweep_fixed_seed",
@@ -1019,6 +1382,12 @@ fn project_sweep_fixed_seed() {
     // many the baseline answered wrongly that the walk under test does not is
     // reported, not floored: a baseline recorded at an unchanged evaluator
     // has none.
+    // What is counted is what is pinned: the drawn projects alone.
+    assert_eq!(
+        tally.rejected_on_an_uncertain_value + tally.rejected_on_an_unmodelled_body,
+        grading.wrong.len(),
+        "{tally:?}"
+    );
     assert!(tally.msbuild_rejects >= 200, "{tally:?}");
     assert!(tally.certain >= 100, "{tally:?}");
     assert!(tally.possible >= 100, "{tally:?}");
@@ -1029,7 +1398,11 @@ fn project_sweep_fixed_seed() {
             .join("tests/manifests/rejection_projects_wrong.txt"),
         &manifest,
         "BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-msbuild --test \
-         rejection_generative_diff project_sweep_fixed_seed",
+         rejection_generative_diff project_sweep_fixed_seed\n\
+         Gaps: `uncertain-value`, a throw on a value the walk does not hold (#1051); \
+         `unmodelled-body`, a text the walk does not model (#1094), perhaps beside an \
+         uncertain value: which of the two strikes shows such a rejection turns on the \
+         values tried, so it is one gap.",
     );
 }
 
