@@ -5,5 +5,5 @@ TypeEquality/TypeEquality/TypeEquality.fsproj	unknown: covers surplus(prefix 0, 
 WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj	unknown: unread TypeProvider(0); by spelling: exact []
 WoofWare.Incremental/WoofWare.Incremental/WoofWare.Incremental.fsproj	unknown: unread TypeProvider(0); by spelling: unread OutsideDomain(26, AugmentationHead)
 WoofWare.LiangHyphenation/WoofWare.LiangHyphenation/WoofWare.LiangHyphenation.fsproj	unknown: covers surplus(prefix 0, entity 0, lends 14, lender 0, auto-open 0, extension 0) [UncertainAttribute]; by spelling: exact []
-WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj	unknown: covers surplus(prefix 0, entity 0, lends 57, lender 0, auto-open 0, extension 16) [UncertainAttribute,BindingPattern]; by spelling: exact []
+WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj	unknown: covers surplus(prefix 0, entity 0, lends 57, lender 0, auto-open 0, extension 80) [UncertainAttribute,BindingPattern]; by spelling: exact []
 WoofWare.WeakHashTable/WoofWare.WeakHashTable/WoofWare.WeakHashTable.fsproj	unknown: covers surplus(prefix 0, entity 0, lends 3, lender 0, auto-open 0, extension 0) [UncertainAttribute]; by spelling: exact []
