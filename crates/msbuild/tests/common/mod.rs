@@ -22,6 +22,7 @@
 
 #![allow(dead_code)] // each importer uses a different subset.
 
+pub mod assembly_name;
 pub mod case_axis;
 #[cfg(unix)]
 pub mod odd_entry;
@@ -33,8 +34,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
-use std::time::Duration;
 
+use borzoi_oracle_harness::msbuild_oracle;
 use borzoi_oracle_harness::{BatchChild, BoundedCommand, default_timeout};
 
 use borzoi_msbuild::test_support::{Outcome, PropertyMap, evaluate, substitute};
@@ -94,15 +95,6 @@ pub fn parse_fsproj_with_imports(
     }
 }
 
-/// Budget for the one `dotnet build` this harness runs (the condition oracle).
-///
-/// A cold build restores packages and runs a compiler, which is legitimately
-/// minutes, so the bound sits far above the harness's per-request default: it is
-/// there to stop a build that has *stalled* — blocked on a NuGet lock held by a
-/// concurrent run in a sibling worktree, say — from hanging the suite forever,
-/// not to police a slow one.
-const BUILD_TIMEOUT: Duration = Duration::from_secs(1800);
-
 /// Root of the F# corpus the differential tests walk, taken from the
 /// `BORZOI_CORPUS` environment variable.
 ///
@@ -132,123 +124,17 @@ pub fn corpus_root() -> PathBuf {
 // tools/msbuild-condition-oracle harness
 // ============================================================================
 
-/// The workspace root, two `..` jumps above this crate's manifest dir;
-/// `tools/msbuild-condition-oracle` lives there.
-fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("crates/ parent")
-        .parent()
-        .expect("workspace root parent")
-        .to_path_buf()
-}
-
-fn oracle_project_dir() -> PathBuf {
-    workspace_root()
-        .join("tools")
-        .join("msbuild-condition-oracle")
-}
-
-/// Build `tools/msbuild-condition-oracle` (unless
-/// `BORZOI_MSBUILD_CONDITION_ORACLE` points at a prebuilt binary) and
-/// return the apphost path. Same content-bearing-marker scheme as the
-/// fcs-dump / nuget-oracle harnesses, and for the same reasons: a marker file
-/// whose *contents* fingerprint the tool's sources, so branch-switching can
-/// never leave a stale oracle answering for the wrong sources, while
-/// `cargo test`'s serial test binaries skip the `dotnet build` after the first
-/// has run it.
+/// Build `tools/msbuild-condition-oracle` once and return its apphost
+/// ([`msbuild_oracle::apphost`], shared with the crates that drive the
+/// `fscArgs` op).
 fn ensure_oracle_built() -> &'static Path {
-    static BUILT: OnceLock<PathBuf> = OnceLock::new();
-    BUILT
-        .get_or_init(|| {
-            if let Some(bin) = std::env::var_os("BORZOI_MSBUILD_CONDITION_ORACLE") {
-                return PathBuf::from(bin);
-            }
-            let project = oracle_project_dir();
-            let bin = project.join("bin");
-            let apphost = bin
-                .join("Release")
-                .join("net10.0")
-                .join("msbuild-condition-oracle");
-            let marker = bin.join(".msbuild-condition-oracle-built");
-            let want = format!("{:016x}", oracle_source_fingerprint(&project));
-
-            let fresh = apphost.host_exists()
-                && borzoi_msbuild::observed::host_fs::read_to_string(&marker)
-                    .map(|recorded| recorded.trim() == want)
-                    .unwrap_or(false);
-            if !fresh {
-                let mut cmd = Command::new("dotnet");
-                cmd.args(["build", "-c", "Release", "--nologo"])
-                    .arg(&project);
-                BoundedCommand::new(cmd)
-                    .timeout(BUILD_TIMEOUT)
-                    .run_ok("dotnet build msbuild-condition-oracle");
-                assert!(
-                    apphost.host_exists(),
-                    "dotnet build msbuild-condition-oracle produced no apphost at {apphost:?}"
-                );
-                write_marker_atomically(&marker, &want);
-            }
-            apphost
-        })
-        .as_path()
+    msbuild_oracle::apphost()
 }
 
 /// The oracle's managed assembly, which also holds the `ConeLogger` that
 /// `dotnet msbuild -logger:` can load.
 pub fn oracle_assembly() -> PathBuf {
     ensure_oracle_built().with_extension("dll")
-}
-
-/// Hash the inputs whose change should force a rebuild: the tool's sources
-/// and the flake lock (which pins the SDK and thus the MSBuild the oracle
-/// loads via MSBuildLocator).
-fn oracle_source_fingerprint(project: &Path) -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    let mut sources: Vec<PathBuf> = borzoi_msbuild::observed::host_fs::read_dir(project)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| {
-            matches!(
-                p.extension().and_then(|s| s.to_str()),
-                Some("fs" | "fsproj")
-            )
-        })
-        .collect();
-    sources.sort();
-    sources.push(workspace_root().join("flake.lock"));
-
-    let mut h = DefaultHasher::new();
-    for p in &sources {
-        // File name first so a rename can't alias two contents to one hash.
-        p.file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .hash(&mut h);
-        borzoi_msbuild::observed::host_fs::read(p)
-            .unwrap_or_default()
-            .hash(&mut h);
-    }
-    h.finish()
-}
-
-/// Write `contents` to `marker` atomically (temp + rename), best-effort.
-fn write_marker_atomically(marker: &Path, contents: &str) {
-    let Some(dir) = marker.parent() else {
-        return;
-    };
-    let tmp = dir.join(format!(
-        ".msbuild-condition-oracle-built.tmp-{}",
-        std::process::id()
-    ));
-    if std::fs::write(&tmp, contents).is_ok() && std::fs::rename(&tmp, marker).is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
 }
 
 /// Strip the oracle child's environment down to what the dotnet host needs,
@@ -313,7 +199,7 @@ pub fn oracle_environment() -> HashMap<String, String> {
 /// environment) and cached for the test binary's lifetime. .NET computes
 /// it from the OS user profile — probed: redirecting `$HOME` does *not*
 /// move it — so the only exact source is MSBuild itself.
-fn msbuild_user_extensions_path() -> &'static str {
+pub fn msbuild_user_extensions_path() -> &'static str {
     static PATH: OnceLock<String> = OnceLock::new();
     PATH.get_or_init(|| {
         let dir = tempfile::TempDir::new().expect("tempdir for MSBuildUserExtensionsPath probe");
@@ -971,18 +857,25 @@ pub fn dotnet_root_from_env() -> PathBuf {
 /// `dotnet msbuild` oracle child inherits, so both sides consult the same
 /// user-local workload roots.
 pub fn workload_env_from_process() -> (Option<PathBuf>, bool) {
+    let environment: HashMap<String, String> = std::env::vars().collect();
+    workload_env_from(&environment)
+}
+
+/// [`workload_env_from_process`] for the environment `environment`: the
+/// workload context a build under exactly that environment sees.
+pub fn workload_env_from(environment: &HashMap<String, String>) -> (Option<PathBuf>, bool) {
     // Empty home-ish values count as unset (`string.IsNullOrEmpty` in .NET's
     // CliFolderPathCalculatorCore) — match what the oracle child's dotnet host
     // does.
-    let non_empty = |var: &str| std::env::var_os(var).filter(|value| !value.is_empty());
+    let non_empty = |var: &str| environment.get(var).filter(|value| !value.is_empty());
     let user_dotnet_root = non_empty("DOTNET_CLI_HOME")
         .or_else(|| non_empty("HOME"))
         .map(|home| PathBuf::from(home).join(".dotnet"));
     // Per-variable effective-value semantics, mirroring the LSP's
     // `SdkDiscoveryEnv::from_process_env` (PACK_ROOTS goes through IsNullOrEmpty
     // upstream; the other two are presence checks).
-    let overrides_present = std::env::var_os("DOTNETSDK_WORKLOAD_MANIFEST_ROOTS").is_some()
-        || std::env::var_os("DOTNETSDK_WORKLOAD_MANIFEST_IGNORE_DEFAULT_ROOTS").is_some()
+    let overrides_present = environment.contains_key("DOTNETSDK_WORKLOAD_MANIFEST_ROOTS")
+        || environment.contains_key("DOTNETSDK_WORKLOAD_MANIFEST_IGNORE_DEFAULT_ROOTS")
         || non_empty("DOTNETSDK_WORKLOAD_PACK_ROOTS").is_some();
     (user_dotnet_root, overrides_present)
 }

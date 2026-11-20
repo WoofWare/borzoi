@@ -45,6 +45,40 @@ use super::diagnostic::{Diagnostic, DiagnosticKind, DiagnosticOrigin, ImplicitIm
 use super::dotnet_io;
 use super::observed::Observer;
 
+/// The [`crate::AutoResponseFile`] for the project at `project_path`, built
+/// by the MSBuild in `msbuild_dir`: a `MSBuild.rsp` beside MSBuild
+/// (`GatherAllSwitches` reads it first), or else one beside the project, or
+/// else the first `Directory.Build.rsp` in its directory or an ancestor, each
+/// asked about through `observer` with .NET's `File.Exists`, as MSBuild's
+/// command line looks for them. [`crate::AutoResponseFile::Unread`] for a
+/// path without a root, which no probe should resolve against the working
+/// directory, or no MSBuild directory.
+pub fn find_auto_response_file(
+    project_path: &Path,
+    msbuild_dir: Option<&Path>,
+    observer: &Observer,
+) -> crate::AutoResponseFile {
+    let normalised = normalise(project_path);
+    let Some(project_dir) = normalised.parent().filter(|dir| dir.has_root()) else {
+        return crate::AutoResponseFile::Unread;
+    };
+    let Some(msbuild_dir) = msbuild_dir.filter(|dir| dir.has_root()) else {
+        return crate::AutoResponseFile::Unread;
+    };
+    std::iter::once(msbuild_dir.join("MSBuild.rsp"))
+        .chain(std::iter::once(project_dir.join("MSBuild.rsp")))
+        .chain(
+            project_dir
+                .ancestors()
+                .map(|ancestor| ancestor.join("Directory.Build.rsp")),
+        )
+        .find(|candidate| dotnet_io::file_exists(observer, candidate))
+        .map_or(
+            crate::AutoResponseFile::Absent,
+            crate::AutoResponseFile::Present,
+        )
+}
+
 /// Walk `project_path`'s ancestor directories and return one diagnostic
 /// per implicit-import file kind that exists somewhere on the chain.
 ///
