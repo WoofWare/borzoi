@@ -106,21 +106,21 @@ gpt62/fa1007-codex1.log#5	crates/msbuild/src/lib.rs	none: document-structure	bra
 gpt62/fa1007-codex1.log#6	crates/oracle-harness/src/msbuild_oracle.rs	env.compiler-selector	branch: fsc-args-1007	Refuse compiler and restore selectors in build inputs
 gpt62/fa1007-codex1.log#7	crates/oracle-harness/src/msbuild_oracle.rs	fs.fifo	branch: fsc-args-1007	Avoid blocking on non-regular compiler outputs
 gpt62/issue-1031/i1031-codex1.log#1	tools/fcs-dump/Program.fs	source.script-directive	pending	Resolve references under the same defines as the project check
-gpt62/issue-1031/i1031-codex1.log#2	tools/fcs-dump/Program.fs	source.line-directive	pending	Attribute diagnostics to the physical source before #line remapping
-gpt62/issue-1031/i1031-codex1.log#3	tools/fcs-dump/Program.fs	change.same-stamp-replace	pending	Invalidate resident project results when source bytes change
+gpt62/issue-1031/i1031-codex1.log#2	tools/fcs-dump/Program.fs	source.line-directive	reproduces: fcs_dump_project	Attribute diagnostics to the physical source before #line remapping
+gpt62/issue-1031/i1031-codex1.log#3	tools/fcs-dump/Program.fs	change.same-stamp-replace	reproduces: fcs_dump_project	Invalidate resident project results when source bytes change
 gpt62/issue-1031/i1031-codex10.log#1	tools/fcs-dump/Program.fs	source.directive-lookalike	pending	Distinguish slashes in F# operators from line comments
 gpt62/issue-1031/i1031-codex10.log#3	tools/fcs-dump/Program.fs	source.long-run	pending	Make the line-directive scan linear on nonmatches
-gpt62/issue-1031/i1031-codex2.log#1	tools/fcs-dump/Program.fs	source.script-directive	pending	Honor active script references in project checks
-gpt62/issue-1031/i1031-codex2.log#2	tools/fcs-dump/Program.fs	source.line-directive	pending	Preserve #line semantics when locating project records
-gpt62/issue-1031/i1031-codex3.log#2	tools/fcs-dump/Program.fs	source.line-directive	pending	Detect line directives after other tokens on the same line
+gpt62/issue-1031/i1031-codex2.log#1	tools/fcs-dump/Program.fs	source.script-directive	reproduces: fcs_dump_project	Honor active script references in project checks
+gpt62/issue-1031/i1031-codex2.log#2	tools/fcs-dump/Program.fs	source.line-directive	reproduces: fcs_dump_project	Preserve #line semantics when locating project records
+gpt62/issue-1031/i1031-codex3.log#2	tools/fcs-dump/Program.fs	source.line-directive	reproduces: fcs_dump_project	Detect line directives after other tokens on the same line
 gpt62/issue-1031/i1031-codex3.log#3	crates/corpus-diff/src/lib.rs	none: fixture-logic	pending	Require the whole-project diagnostics field from the oracle
 gpt62/issue-1031/i1031-codex3.log#5	tools/fcs-dump/Program.fs	source.script-directive	pending	Do not refuse references that fsc ignores in nested modules
-gpt62/issue-1031/i1031-codex4.log#1	tools/fcs-dump/Program.fs	fs.missing	pending	Preserve reference-resolution errors in project-check records
-gpt62/issue-1031/i1031-codex6.log#2	tools/fcs-dump/Program.fs	change.same-stamp-replace	pending	Invalidate cached metadata when a referenced DLL changes
+gpt62/issue-1031/i1031-codex4.log#1	tools/fcs-dump/Program.fs	fs.missing	declines: fcs_dump_project	Preserve reference-resolution errors in project-check records
+gpt62/issue-1031/i1031-codex6.log#2	tools/fcs-dump/Program.fs	change.same-stamp-replace	reproduces: fcs_dump_project	Invalidate cached metadata when a referenced DLL changes
 gpt62/issue-1031/i1031-codex6.log#3	tools/fcs-dump/Program.fs	race.rewritten-during-request	pending	Scan the same source text that FCS checks for line directives
-gpt62/issue-1031/i1031-codex7.log#2	tools/fcs-dump/Program.fs	spelling.curdir	pending	Normalize reference paths before looking up their digests
+gpt62/issue-1031/i1031-codex7.log#2	tools/fcs-dump/Program.fs	spelling.curdir	reproduces: fcs_dump_project	Normalize reference paths before looking up their digests
 gpt62/issue-1031/i1031-codex7.log#3	tools/fcs-dump/Program.fs	race.replaced-after-hash	pending	Make FCS read the reference bytes that were digested
-gpt62/issue-1031/i1031-codex8.log#2	tools/fcs-dump/Program.fs	name.invisible	pending	Refuse source paths that FCS maps to the same file slot
+gpt62/issue-1031/i1031-codex8.log#2	tools/fcs-dump/Program.fs	name.invisible	reproduces: fcs_dump_project	Refuse source paths that FCS maps to the same file slot
 gpt62/issue-1031/i1031-codexs1.log#2	tools/fcs-dump/Program.fs	none: fixture-logic	branch: fcs-dump-reference-snapshots	Create the reference store as a fresh private directory
 gpt62/issue-1031/i1031-codexs1.log#5	tools/fcs-dump/Program.fs	fs.char-device	branch: fcs-dump-reference-snapshots	Reject non-regular references before hashing them
 gpt62/issue-1031/i1031-codexs2.log#1	tools/fcs-dump/Program.fs	fs.symlink	branch: fcs-dump-reference-snapshots	Measure the reference target, not the symbolic link
