@@ -1439,10 +1439,10 @@ struct Speculation {
     walk_written: std::rc::Rc<std::cell::RefCell<PathWrites>>,
     /// The `<Choose>` arms the walk is in now, outermost first.
     arms: Vec<Arm>,
-    /// While an item group deferred from a walk is judged, the names written
-    /// on its path in that walk whose final value is not certain
-    /// ([`State::judge_from_path`]).
-    inherited: Option<std::rc::Rc<HashSet<String>>>,
+    /// While an item group deferred from a walk is judged, where it stands
+    /// in that walk: a name written on its path there whose final value is
+    /// not certain is unknown to it ([`State::judge_from_path`]).
+    inherited: Option<PathOf>,
     /// How many nested walks are open.
     depth: usize,
 }
@@ -1456,15 +1456,11 @@ type Arm = ((usize, usize), usize);
 /// ([`Speculation::walk_written`]).
 #[derive(Default)]
 struct PathWrites {
-    /// Each name written, lower-cased, and the arms it was written in.
-    writes: Vec<(String, std::rc::Rc<[Arm]>)>,
+    /// Each name written, lower-cased, and the arms of each of its writes.
+    writes: HashMap<String, Vec<std::rc::Rc<[Arm]>>>,
     /// The names written whose final value is not certain, computed once, in
     /// the item pass, when the table is final.
     settled: Option<std::rc::Rc<HashSet<String>>>,
-    /// Of those, the ones that reach a group in each set of arms, computed
-    /// once per set ([`State::judge_from_path`]): the groups of one arm share
-    /// it.
-    reaching: HashMap<std::rc::Rc<[Arm]>, std::rc::Rc<HashSet<String>>>,
 }
 
 /// Where an item group deferred from a walk of content the walk does not
@@ -1476,22 +1472,30 @@ struct PathOf {
 }
 
 impl PathOf {
-    /// The names written on the path of the group: in no arm another arm of
-    /// whose `<Choose>` holds the group.
-    fn reaching(&self) -> HashSet<String> {
-        self.writes
-            .borrow()
-            .writes
-            .iter()
-            .filter(|(_, arms)| {
+    /// Whether `name` (lower-cased) is written on the path of the group: in
+    /// no arm another arm of whose `<Choose>` holds the group. Asked of the
+    /// names a judgement reads, so its cost is theirs, not the walk's.
+    fn reaches(&self, name: &str) -> bool {
+        self.writes.borrow().writes.get(name).is_some_and(|writes| {
+            writes.iter().any(|arms| {
                 arms.iter().all(|(choose, arm)| {
                     self.arms
                         .iter()
                         .all(|(other, other_arm)| other != choose || other_arm == arm)
                 })
             })
-            .map(|(name, _)| name.clone())
-            .collect()
+        })
+    }
+
+    /// Whether `name` (lower-cased) reaches the group with a final value that
+    /// is not certain ([`PathWrites::settled`], which must be computed).
+    fn unknown(&self, name: &str) -> bool {
+        self.writes
+            .borrow()
+            .settled
+            .as_ref()
+            .is_some_and(|settled| settled.contains(name))
+            && self.reaches(name)
     }
 }
 

@@ -249,7 +249,7 @@ impl State<'_> {
                 || speculation
                     .inherited
                     .as_ref()
-                    .is_some_and(|inherited| inherited.contains(&name))
+                    .is_some_and(|inherited| inherited.unknown(&name))
         })
     }
 
@@ -303,7 +303,9 @@ impl State<'_> {
                 .walk_written
                 .borrow_mut()
                 .writes
-                .push((name.clone(), arms));
+                .entry(name.clone())
+                .or_default()
+                .push(arms);
         }
         self.mark_unheld([name]);
     }
@@ -337,45 +339,23 @@ impl State<'_> {
             judge(self);
             return;
         };
-        let settled = written.writes.borrow().settled.clone();
-        let settled = match settled {
-            Some(settled) => settled,
-            None => {
-                let names: HashSet<String> = written
-                    .writes
-                    .borrow()
-                    .writes
-                    .iter()
-                    .map(|(name, _)| name)
-                    .filter(|name| !directory_build::is_certain(self, name))
-                    .cloned()
-                    .collect();
-                let names = std::rc::Rc::new(names);
-                written.writes.borrow_mut().settled = Some(names.clone());
-                names
-            }
-        };
-        let cached = written.writes.borrow().reaching.get(&written.arms).cloned();
-        let reaching = match cached {
-            Some(reaching) => reaching,
-            None => {
-                let mut reaching = written.reaching();
-                reaching.retain(|name| settled.contains(name));
-                let reaching = std::rc::Rc::new(reaching);
-                written
-                    .writes
-                    .borrow_mut()
-                    .reaching
-                    .insert(written.arms.clone(), reaching.clone());
-                reaching
-            }
-        };
+        if written.writes.borrow().settled.is_none() {
+            let names: HashSet<String> = written
+                .writes
+                .borrow()
+                .writes
+                .keys()
+                .filter(|name| !directory_build::is_certain(self, name))
+                .cloned()
+                .collect();
+            written.writes.borrow_mut().settled = Some(std::rc::Rc::new(names));
+        }
         let saved = self.speculation.replace(Speculation {
             unheld: HashSet::new(),
             gained: Vec::new(),
             walk_written: std::rc::Rc::default(),
             arms: Vec::new(),
-            inherited: Some(reaching),
+            inherited: Some(written.clone()),
             depth: 1,
         });
         judge(self);
@@ -1180,14 +1160,37 @@ fn without_markup(source: &str) -> String {
     while let Some(open) = rest.find('<') {
         out.push_str(&rest[..open]);
         rest = &rest[open..];
-        if let Some(after) = rest.strip_prefix("<![CDATA[") {
+        // A section's text is kept; a comment, a processing instruction and
+        // a tag end where their own syntax ends, a tag's `>` outside its
+        // attributes' quotes.
+        let (kept, end) = if let Some(after) = rest.strip_prefix("<![CDATA[") {
             let end = after.find("]]>").unwrap_or(after.len());
-            out.push_str(&after[..end]);
-            rest = after.get(end + 3..).unwrap_or("");
+            (&after[..end], "<![CDATA[".len() + end + "]]>".len())
+        } else if let Some(after) = rest.strip_prefix("<!--") {
+            let end = after.find("-->").unwrap_or(after.len());
+            ("", "<!--".len() + end + "-->".len())
+        } else if let Some(after) = rest.strip_prefix("<?") {
+            let end = after.find("?>").unwrap_or(after.len());
+            ("", "<?".len() + end + "?>".len())
         } else {
-            let end = rest.find('>').map_or(rest.len(), |end| end + 1);
-            rest = &rest[end..];
-        }
+            let mut quote = None;
+            let mut end = rest.len();
+            for (at, byte) in rest.bytes().enumerate() {
+                match quote {
+                    Some(open) if byte == open => quote = None,
+                    Some(_) => {}
+                    None if matches!(byte, b'"' | b'\'') => quote = Some(byte),
+                    None if byte == b'>' => {
+                        end = at + 1;
+                        break;
+                    }
+                    None => {}
+                }
+            }
+            ("", end)
+        };
+        out.push_str(kept);
+        rest = rest.get(end..).unwrap_or("");
     }
     out.push_str(rest);
     out
@@ -1197,11 +1200,8 @@ fn without_markup(source: &str) -> String {
 /// MSBuild's reader keeps whitespace the walk would drop: the walk declines
 /// such a reading.
 fn under_xml_space(node: Node<'_, '_>) -> bool {
-    let source = node.document().input_text();
-    node.ancestors().filter(Node::is_element).any(|element| {
-        let raw = &source[element.range()];
-        raw[..raw.find('>').unwrap_or(raw.len())].contains("xml:space")
-    })
+    node.ancestors()
+        .any(|element| crate::document::xml_space(element).is_some())
 }
 
 /// Whether the text node `node` is a whitespace node MSBuild's reader drops:

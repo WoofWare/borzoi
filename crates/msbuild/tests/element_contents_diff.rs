@@ -209,12 +209,18 @@ impl Case {
         }
     }
 
-    fn attribute(&mut self, rng: &mut SplitMix64) -> (String, String, char) {
-        let name = match rng.below(12) {
+    /// An attribute's name.
+    fn attribute_name(rng: &mut SplitMix64) -> String {
+        match rng.below(12) {
             0 => "p:a".to_owned(),
             1 => "xml:lang".to_owned(),
             _ => (*rng.pick(ATTRIBUTE_NAMES)).to_owned(),
-        };
+        }
+    }
+
+    /// An attribute named `name`, its value drawn (and its dimensions
+    /// recorded) only now that it is written.
+    fn attribute(&mut self, rng: &mut SplitMix64, name: String) -> (String, String, char) {
         let text = self.text(rng);
         let value = self.spell(rng, &text, xml::Place::Attribute);
         if rng.below(3) == 0 {
@@ -252,9 +258,10 @@ impl Case {
         };
         let mut attributes: Vec<(String, String, char)> = Vec::new();
         for _ in 0..rng.below(3) {
-            let attribute = self.attribute(rng);
-            // A name twice is malformed.
-            if attributes.iter().all(|(name, ..)| *name != attribute.0) {
+            let name = Self::attribute_name(rng);
+            // A name twice is malformed: one already written draws no value.
+            if attributes.iter().all(|(written, ..)| *written != name) {
+                let attribute = self.attribute(rng, name);
                 attributes.push(attribute);
             }
         }

@@ -511,26 +511,44 @@ fn many_groups_on_one_path(width: usize) -> String {
     format!("<Choose><When Condition=\"'É' == 'é'\">{writes}{groups}</When></Choose>")
 }
 
-/// The groups of [`many_groups_on_one_path`] share the set of writes that
-/// reach them, computed once: four times the width costs about four times
-/// the time, where computing it per group costs sixteen. Timed as a ratio,
-/// as [`wide_unheld_reads_are_struck_in_one_pass`] is.
+/// A `<When>` the walk cannot decide holding `width` sibling `<Choose>`s,
+/// each with a write and an item group reading a name, so that every group
+/// stands in arms of its own and every sibling's write may reach it.
+fn many_groups_on_sibling_paths(width: usize) -> String {
+    let chooses: String = (0..width)
+        .map(|i| {
+            format!(
+                "<Choose><When Condition=\"'É' == 'Ê'\"><PropertyGroup><P{i}>x</P{i}></PropertyGroup>\
+                 <ItemGroup><I Include=\"$(P0)\" /></ItemGroup></When></Choose>"
+            )
+        })
+        .collect();
+    format!("<Choose><When Condition=\"'É' == 'é'\">{chooses}</When></Choose>")
+}
+
+/// The groups of [`many_groups_on_one_path`] and of
+/// [`many_groups_on_sibling_paths`] ask only of the names they read whether a
+/// write reaches them: four times the width costs about four times the time,
+/// where gathering every write that reaches each group costs sixteen. Timed
+/// as a ratio, as [`wide_unheld_reads_are_struck_in_one_pass`] is.
 #[test]
-fn groups_on_one_path_share_the_writes_that_reach_them() {
-    let time = |width: usize| {
-        let body = many_groups_on_one_path(width);
-        let start = std::time::Instant::now();
-        evaluate_project(body);
-        start.elapsed()
-    };
-    time(100);
-    let narrow = time(400);
-    let wide = time(1_600);
-    let ratio = wide.as_secs_f64() / narrow.as_secs_f64().max(1e-6);
-    assert!(
-        ratio < 10.0,
-        "4× the groups took {ratio:.1}× the time ({narrow:?} → {wide:?})"
-    );
+fn groups_ask_only_of_the_writes_they_read() {
+    for shape in [many_groups_on_one_path, many_groups_on_sibling_paths] {
+        let time = |width: usize| {
+            let body = shape(width);
+            let start = std::time::Instant::now();
+            evaluate_project(body);
+            start.elapsed()
+        };
+        time(100);
+        let narrow = time(400);
+        let wide = time(1_600);
+        let ratio = wide.as_secs_f64() / narrow.as_secs_f64().max(1e-6);
+        assert!(
+            ratio < 10.0,
+            "4× the groups took {ratio:.1}× the time ({narrow:?} → {wide:?})"
+        );
+    }
 }
 
 /// The rejection judgement strikes each read of [`wide_unheld_reads`] with a

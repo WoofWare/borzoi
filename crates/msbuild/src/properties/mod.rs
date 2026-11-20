@@ -1179,6 +1179,21 @@ fn get_path_of_file_above(observer: &Observer, file: &str, start: &str) -> Optio
 /// working directory) or names a Windows drive on a unix host.
 fn normalize_path(parts: &[String]) -> Option<String> {
     let combined = combine_path(parts)?;
+    // A backslash is a name character to `Path.GetFullPath` on Unix, which
+    // resolves `.` and `..` and collapses separators with `a\b` still one
+    // component, and only then turns it into a separator (`a%5cb/..` is
+    // nothing, not `a`). Reading it as a separator first agrees only where
+    // nothing is resolved or collapsed.
+    if !cfg!(windows) && parts.iter().any(|part| part.contains('\\')) {
+        let body = combined.trim_start_matches('/');
+        let segments: Vec<&str> = body.split('/').collect();
+        let last = segments.len().saturating_sub(1);
+        if segments.iter().enumerate().any(|(at, segment)| {
+            matches!(*segment, "." | "..") || (segment.is_empty() && at != last)
+        }) {
+            return None;
+        }
+    }
     if !is_rooted(&combined) {
         return None;
     }

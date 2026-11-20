@@ -184,6 +184,18 @@ fn path_functions_commit_backslash_cwd_independently() {
     check_expr_cwd_independent("$([MSBuild]::NormalizePath('/r/a\\x'))");
     check_expr_cwd_independent("$([MSBuild]::NormalizeDirectory('/r/a\\x'))");
     check_expr_cwd_independent("$([MSBuild]::NormalizeDirectory('/r', 'a\\x\\'))");
+    // An escaped backslash is one component's character while `..` and `.`
+    // resolve, and a separator only after.
+    for function in ["NormalizeDirectory", "NormalizePath"] {
+        for args in [
+            "'/r','a%5cb/..'",
+            "'/r','a%5cb','..'",
+            "'/r/a%5c.'",
+            "'/r/a%5c/b'",
+        ] {
+            check_expr_cwd_independent(&format!("$([MSBuild]::{function}({args}))"));
+        }
+    }
     check_expr_cwd_independent("$([System.String]::Concat('a\\','x'))");
     check_expr_cwd_independent("$([System.String]::Copy('a\\x'))");
     check_expr_cwd_independent("$('a\\x'.Length)");

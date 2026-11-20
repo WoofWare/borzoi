@@ -1190,6 +1190,19 @@ fn host_properties_are_values_msbuild_does_not_throw_on() {
         ),
         RowVerdict::Commits,
     ));
+    // A bare `null` is a null argument, which a path function throws on; a
+    // quoted one names a directory. (The arguments are quoted with backticks:
+    // a `'` would end the condition's own quoted operand.)
+    rows.push((
+        "<PropertyGroup><R Condition=\"'$([MSBuild]::NormalizeDirectory(`/tmp`, null))' == ''\">x</R></PropertyGroup>"
+            .to_owned(),
+        RowVerdict::Rejects,
+    ));
+    rows.push((
+        "<PropertyGroup><R Condition=\"'$([MSBuild]::NormalizeDirectory(`/tmp`, `null`))' == '/tmp/null/'\">x</R></PropertyGroup>"
+            .to_owned(),
+        RowVerdict::Commits,
+    ));
     // The SDK's comparison of the publish directory, normalised, with its
     // project directory, in each shape it meets: MSBuild throws only on a
     // NUL its arguments decode to.
@@ -1249,8 +1262,14 @@ fn grade_rows_against_design_time(rows: Vec<(String, RowVerdict)>) {
     let project_path = dir.join("Demo.fsproj");
     for (row, verdict) in rows {
         let rejects = verdict == RowVerdict::Rejects;
+        // A row that opens the project itself, for its attributes.
+        let open = if row.starts_with("<Project") {
+            ""
+        } else {
+            "<Project>"
+        };
         let xml = format!(
-            "<Project>{}<PropertyGroup><After>ok</After></PropertyGroup></Project>",
+            "{open}{}<PropertyGroup><After>ok</After></PropertyGroup></Project>",
             row.replace('\'', "&apos;")
         );
         std::fs::write(&project_path, &xml).unwrap();
@@ -1340,6 +1359,22 @@ fn unread_texts_are_judged_as_msbuild_reads_them() {
              <R Condition=\"'$(P)' == 'x'\"><a xmlns=\"urn:test\"/></R></PropertyGroup>"
                 .to_owned(),
             RowVerdict::Commits,
+        ),
+        // A `>` inside an attribute's quotes ends no tag: here the inner
+        // text is `$(P[9])`, the whitespace node dropped.
+        (
+            "<PropertyGroup><P>abc</P>\
+             <R><![CDATA[$]]><a v=\">\" xml:space=\"default\"/>(P[9])</R></PropertyGroup>"
+                .to_owned(),
+            RowVerdict::Rejects,
+        ),
+        // Nor before an `xml:space` scope, under which MSBuild keeps the
+        // space, so that `$ (…)` calls nothing.
+        (
+            "<Project InitialTargets=\"a>b\" xml:space=\"preserve\"><PropertyGroup>\
+             <R><![CDATA[$]]><a> </a>([MSBuild]::VersionEquals('bad','1'))</R></PropertyGroup>"
+                .to_owned(),
+            RowVerdict::Withdraws,
         ),
     ];
     grade_rows_against_design_time(rows);

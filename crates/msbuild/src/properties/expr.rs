@@ -1742,9 +1742,13 @@ fn eval_str_template(
 /// decline rather than commit. Real SDK path calls only ever pass literals and
 /// bare `$(Name)` references. Each `arg` is checked as raw text (quoted or not),
 /// since [`only_bare_property_refs`] scans for `$(…)` regardless of surrounding
-/// quotes.
+/// quotes. An unquoted `null`, in any case, is no path: MSBuild binds it to a
+/// null argument, which the path functions throw on, where a quoted one
+/// names a file (probed, `msbuild-condition-oracle`, SDK 10.0.401,
+/// `tests/condition_diff.rs`).
 fn path_args_are_bare(args: &[&str]) -> bool {
-    args.iter().all(|a| only_bare_property_refs(a))
+    args.iter()
+        .all(|a| only_bare_property_refs(a) && !a.trim().eq_ignore_ascii_case("null"))
 }
 
 /// Whether every *balanced* `$(…)` in `body` is a bare property reference
@@ -1976,6 +1980,33 @@ mod tests {
             ev("[MSBuild]::NormalizePath('/a%5cb','c%5cf')", &map(&[])),
             Some(("/a/b/c/f".into(), vec![]))
         );
+        // A bare `null` is a null argument MSBuild throws on; a quoted one
+        // names a directory.
+        for arg in ["null", "NULL"] {
+            assert_eq!(
+                ev(
+                    &format!("[MSBuild]::NormalizeDirectory('/tmp', {arg})"),
+                    &map(&[])
+                ),
+                None,
+                "{arg}"
+            );
+        }
+        assert_eq!(
+            ev("[MSBuild]::NormalizeDirectory('/tmp', 'null')", &map(&[])),
+            Some(("/tmp/null/".into(), vec![]))
+        );
+        // Where it would be resolved past, or collapsed, a backslash is
+        // still a name character to MSBuild: declined.
+        for path in ["'/r','a%5cb/..'", "'/r/a%5c.'", "'/r/a%5c/b'"] {
+            for function in ["NormalizePath", "NormalizeDirectory"] {
+                assert_eq!(
+                    ev(&format!("[MSBuild]::{function}({path})"), &map(&[])),
+                    None,
+                    "{function}({path})"
+                );
+            }
+        }
     }
 
     // --- scanners ---------------------------------------------------------
