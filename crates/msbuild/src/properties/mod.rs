@@ -843,11 +843,23 @@ fn expand_in_every_world(
         }
         Err(TooManySegments) => {
             let (value, mut issues) = run(&World::absent_everywhere());
-            // The worlds left unenumerated may not throw.
+            // The worlds left unenumerated may not throw where this one did,
+            // and may where it did not, wherever an expression may throw.
             for issue in &mut issues {
                 if let Issue::Throws { everywhere, .. } = issue {
                     *everywhere = false;
                 }
+            }
+            if !crate::condition::plain_references_only(input)
+                && !issues
+                    .iter()
+                    .any(|issue| matches!(issue, Issue::Throws { .. }))
+            {
+                issues.push(Issue::Throws {
+                    expression: input.to_owned(),
+                    reads: Vec::new(),
+                    everywhere: false,
+                });
             }
             issues.push(Issue::PathAdjustmentUndecided {
                 value: input.to_owned(),

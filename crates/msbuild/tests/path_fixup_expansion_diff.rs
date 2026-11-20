@@ -1028,10 +1028,41 @@ fn expansions_hold_msbuilds_path_fixup() {
 const FIXED_SEED: u64 = 0x0993_0000_0000_0001;
 const FIXED_CASES: usize = 900;
 
-/// The text of a generated point with the fixture's root spelt `{ROOT}`, so
-/// that it names the same document in any checkout.
+/// The text of a generated point, or of a claim on it, with the fixture's
+/// root spelt `{ROOT}`, its parent `{TMP}`, and the host's
+/// `MSBuildUserExtensionsPath` spelt `{UEXT}`, so that it names the same document on any host and in any
+/// checkout.
 fn placeholder(text: &str, root: &str) -> String {
-    text.replace(root, "{ROOT}")
+    static UEXT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let uext = UEXT.get_or_init(|| {
+        common::oracle_environment()
+            .get("MSBuildUserExtensionsPath")
+            .cloned()
+            .unwrap_or_default()
+    });
+    // A value that climbs out of the root names its parent, a host's
+    // temporary directory.
+    let parent = std::path::Path::new(root)
+        .parent()
+        .and_then(std::path::Path::to_str)
+        .unwrap_or(root);
+    let text = text.replace(root, "{ROOT}").replace(parent, "{TMP}");
+    if uext.is_empty() {
+        text
+    } else {
+        text.replace(uext.as_str(), "{UEXT}")
+    }
+}
+
+/// `answer` with each value [`placeholder`]ed, as the baseline records its
+/// claims.
+fn placeheld(answer: &Option<Vec<String>>, root: &str) -> Option<Vec<String>> {
+    answer.as_ref().map(|values| {
+        values
+            .iter()
+            .map(|value| placeholder(value, root))
+            .collect()
+    })
 }
 
 /// FNV-1a over `text`'s bytes, as hex: a point's key against the baseline.
@@ -1133,7 +1164,13 @@ fn fixed_seed_sweep_regresses_nothing_main_answers() {
     // The claims `main` made wrongly that the walk under test does not.
     let mut righted = 0usize;
     for case in 0..FIXED_CASES {
-        let source = Source::ALL[case % Source::ALL.len()];
+        // The host's `MSBuildUserExtensionsPath` is no fact of the fixture: a
+        // point reading it would answer differently on another host, so this
+        // sweep draws the environment's generated values in its place.
+        let source = match Source::ALL[case % Source::ALL.len()] {
+            Source::UserExtensions => Source::Environment,
+            source => source,
+        };
         let site = match *rng.pick(&Site::ALL) {
             Site::Identity if source == Source::Global => Site::Item,
             site => site,
@@ -1162,16 +1199,26 @@ fn fixed_seed_sweep_regresses_nothing_main_answers() {
                     .collect(),
             }
         };
+        // The baseline's claims are in `{ROOT}`/`{UEXT}` spelling, and so are
+        // the answers it is held to.
+        let placeheld_answers = |mode: &str| -> Vec<Option<Vec<String>>> {
+            answers_of(mode)
+                .into_iter()
+                .map(|answer| placeheld(answer, &root))
+                .collect()
+        };
         righted += row
             .claims
             .iter()
             .filter(|(mode, claim)| {
-                contradicted(claim, &answers_of(mode))
+                let answers = placeheld_answers(mode);
+                contradicted(claim, &answers.iter().collect::<Vec<_>>())
                     && !seen.violations.iter().any(|(ours, _)| ours == *mode)
             })
             .count();
         for (mode, message) in &seen.violations {
-            let answers = answers_of(mode);
+            let answers = placeheld_answers(mode);
+            let answers: Vec<&Option<Vec<String>>> = answers.iter().collect();
             let main_claim = row.claims.get(mode).map_or("-", String::as_str);
             if contradicted(main_claim, &answers) {
                 pins.push((format!("{key} {mode}"), format!("{source:?}/{site:?}")));

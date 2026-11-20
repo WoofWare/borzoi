@@ -644,8 +644,37 @@ pub(super) fn judge_throwing_expression(
 fn judge_unwalked_text(state: &mut State<'_>, text: &str, reached: bool, span: Range<usize>) {
     let expressions = throwing_expressions(text, state);
     if !expressions.is_empty() {
-        judge_throwing_expression(state, expressions, reached, span);
+        judge_throwing_expression(state, expressions, reached, span.clone());
     }
+    judge_text_after_startup_decline(state, text, span);
+}
+
+/// After the walk declined a property write for MSBuild's startup directory
+/// (`State::startup_directory_declined`), `text` may throw on another value
+/// of a name the walk is not certain of: an expression in it beyond a plain
+/// reference (a method, an indexer), where it reads such a name, is a
+/// Possible site, as a condition's leaf is ([`condition::may_throw`]). That
+/// is #1009's second stage, which this stands in for where a startup
+/// decline left the value.
+pub(super) fn judge_text_after_startup_decline(
+    state: &mut State<'_>,
+    text: &str,
+    span: Range<usize>,
+) {
+    if !state.startup_directory_declined
+        || condition::plain_references_only(text)
+        || !properties::property_references(text)
+            .any(|name| !directory_build::is_certain(state, name))
+    {
+        return;
+    }
+    state.note_rejection(
+        RejectionCertainty::Possible,
+        RejectionCause::ThrowingExpression {
+            expression: text.to_owned(),
+        },
+        span,
+    );
 }
 
 /// Judge the body of the property write at `node`, which MSBuild evaluates
@@ -1490,8 +1519,9 @@ fn judge_metadata_text(state: &mut State<'_>, text: &str, reached: bool, span: R
     // finds in such text is MSBuild's perhaps.
     let reached = reached && !text.contains("%(");
     if !expressions.is_empty() {
-        judge_throwing_expression(state, expressions, reached, span);
+        judge_throwing_expression(state, expressions, reached, span.clone());
     }
+    judge_text_after_startup_decline(state, text, span);
 }
 
 /// Judge the `<ItemGroup>` at `node`, which MSBuild reaches as `reached` says.
@@ -1858,7 +1888,9 @@ fn sdk_import_may_load_nothing(
         .and_then(|resolver| resolver(sdk, state.observer).ok())?;
     let fixed = super::import_project_as_expanded(project);
     let expansion = expand_silent_paths(&fixed, state, super::sdk_import_collapse(project));
-    if path_undecided(project, state, expansion.had_unsupported) {
+    if path_undecided(project, state, expansion.had_unsupported)
+        || super::sdk_import_keeps_a_rooted_backslash(project, expansion.value.ignoring_trust())
+    {
         return Some(UnloadableImport::PathUndecided);
     }
     // Judged name by name just above.

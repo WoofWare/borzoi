@@ -178,19 +178,20 @@ again), so a value whose worlds agree is *committed determinate*, not degraded.
   property write for the startup directory (skips one under a gate whose
   outcome turns on it or asks past the segment cap, refuses one past the
   cap, or declines a `DefaultTargets` that turns on it, which it then
-  refuses rather than unsets), a later condition that may throw on any name
-  the walk is not certain of is a possible rejection
+  refuses rather than unsets), a later condition, property body or
+  metadatum that may throw on any name the walk is not certain of is a
+  possible rejection
   (`State::startup_directory_declined`): the declined write holds, in some
   world, a value the walk does not, under any name it is copied to and past
   any later write the walk is not sure ran. It does not track which names the
   write reaches (a group's own gates may read siblings it writes, an
   imported `DefaultTargets` may copy one, an import the walk follows may not
   run); no SDK write is declined so, so the coarse rule costs nothing
-  measured. The same through any other undecided gate waits on #1009, as
-  does a write the walk refuses because a property function fails in some
-  worlds: it does not tell a function MSBuild throws on from one it does not
-  model, and the SDK's own path functions over a value whose worlds differ
-  are the latter. An `Exists` guard over an import's list asks about each
+  measured. The same through any other undecided gate waits on #1009's
+  second stage. A property function that throws in some worlds only, or in
+  a computation past the segment cap, is a possible rejection, never a
+  certain one: a throw records whether it happens in every world
+  (`Issue::Throws`'s `everywhere`). An `Exists` guard over an import's list asks about each
   entry, as MSBuild's does. An import
   whose path the walk cannot compute is a possible rejection even under an
   `Exists` of that path: `Exists` is true of a directory and of a spelling the

@@ -427,10 +427,15 @@ fn evaluate_inner(source: &str, props: &PropertyMap, fs: Ctx<'_>) -> Eval {
                 undefined_outside_empty_comparison: Vec::new(),
             };
         }
-        // The worst of the worlds' rejections stands for them.
+        // A world that returns a boolean is one MSBuild may start in without
+        // throwing: no claim of a rejection. Where none does, the worst of the
+        // worlds' rejections stands for them.
         (Ok(split), _) => {
-            let worst = split
-                .values()
+            let values = split.values();
+            if values.iter().any(|value| value.is_ok()) {
+                return rejected(Reject::Unmodelled);
+            }
+            let worst = values
                 .into_iter()
                 .filter_map(|value| value.err())
                 .max()
@@ -1319,7 +1324,7 @@ fn leaf_may_throw_on_some_value(expr: &BoolExpr) -> bool {
 
 /// Whether every `$(` in `raw` opens a plain reference, `$(Name)`, whose
 /// expansion is the property's value and cannot throw.
-fn plain_references_only(raw: &str) -> bool {
+pub(crate) fn plain_references_only(raw: &str) -> bool {
     let mut rest = raw;
     while let Some(at) = rest.find("$(") {
         let after = &rest[at + 2..];

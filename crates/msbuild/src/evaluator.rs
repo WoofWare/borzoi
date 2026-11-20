@@ -962,8 +962,10 @@ struct State<'r> {
     /// segment cap, or declined a `DefaultTargets` that turns on it. Such a
     /// write holds, in some world, a value the walk does not, under any name
     /// it is copied to and past any later write the walk is not sure ran, so
-    /// a later condition that may throw on any name the walk is not certain
-    /// of is a possible rejection ([`rejection::judge_condition_rejection`]).
+    /// a later condition or text that may throw on any name the walk is not
+    /// certain of is a possible rejection
+    /// ([`rejection::judge_condition_rejection`],
+    /// [`rejection::judge_text_after_startup_decline`]).
     startup_directory_declined: bool,
     package_versions: Vec<PackageVersion>,
     package_versions_untracked: bool,
@@ -3751,12 +3753,34 @@ impl<'r> State<'r> {
         };
         let by_full_path = worlds.is_split()
             && matches!(worlds.map(&mut |value| key(value)).agreed(), Some(Some(_)));
-        if by_full_path {
+        let (mut expansion, spelling_known) = if by_full_path {
             let expansion =
                 path_worlds(expansion, |worlds| Some(worlds.absent_everywhere().clone()));
-            return (self.agreed(expansion, span), false);
+            (self.agreed(expansion, span.clone()), false)
+        } else {
+            (self.agreed(expansion, span.clone()), true)
+        };
+        // An `Exclude` matches a literal as written, a `\` it keeps a character
+        // of its spelling, which the walk does not model: one that keeps one,
+        // in any world, is declined.
+        let keeps_a_backslash = expansion
+            .value
+            .ignoring_trust()
+            .as_escaped()
+            .split(';')
+            .any(|fragment| {
+                fragment.contains('\\') && !properties::escaping::filespec_has_wildcards(fragment)
+            });
+        if has_exclude && keeps_a_backslash && !expansion.had_unsupported {
+            self.push(
+                DiagnosticKind::PathAdjustmentUndecided {
+                    value: expansion.value.ignoring_trust().as_escaped().to_owned(),
+                },
+                span,
+            );
+            expansion.had_unsupported = true;
         }
-        (self.agreed(expansion, span), true)
+        (expansion, spelling_known)
     }
 
     /// [`Self::expand`] of an item's metadatum, after the pass MSBuild makes
@@ -5082,6 +5106,7 @@ fn walk_property_child_inner(
         let expressions = expansion.throws.clone();
         rejection::judge_throwing_expression(state, expressions, reached, node.range());
     }
+    rejection::judge_text_after_startup_decline(state, &raw, node.range());
     // A value refused because it asks past the segment cap is one the walk
     // declines for the startup directory.
     if state.diagnostics[diagnostics_before_value..]
@@ -5297,10 +5322,14 @@ fn gate_may_skip_property_writes(node: Node<'_, '_>) -> bool {
     {
         return true;
     }
+    // A `When` decides whether each later arm runs too, so every arm of its
+    // `<Choose>` counts.
     ["When", "Otherwise"]
         .iter()
         .any(|tag| name.eq_ignore_ascii_case(tag))
         && node
+            .parent_element()
+            .unwrap_or(node)
             .descendants()
             .any(|descendant| descendant.is_element() && writes(descendant.tag_name().name()))
 }
@@ -6471,7 +6500,13 @@ fn follow_import_after_gate(node: Node<'_, '_>, current_file_dir: &Path, state: 
             node.range(),
             sdk_import_collapse(project_attr_raw),
         );
-        if expansion.had_issue() || expansion.unpinned_root.is_some() {
+        if expansion.had_issue()
+            || expansion.unpinned_root.is_some()
+            || sdk_import_keeps_a_rooted_backslash(
+                project_attr_raw,
+                expansion.value.ignoring_trust(),
+            )
+        {
             // An SDK import whose Project path we couldn't resolve is dropped;
             // an *unpinned* path (assembled from a property the property pass
             // couldn't pin down) is just as ambiguous — a real build may
@@ -6985,6 +7020,14 @@ fn sdk_project_under_root<'a>(raw: &str, relative: &'a str) -> &'a str {
     } else {
         relative.trim_start_matches('/')
     }
+}
+
+/// Whether an SDK import's `Project`, written as `raw` and expanded to
+/// `value`, is rooted and keeps a `\`: the path bypasses the SDK root, and
+/// MSBuild's `..` pops a segment the `\` joins to its neighbour, which the
+/// walk, reading every `\` as a separator, does not model.
+pub(super) fn sdk_import_keeps_a_rooted_backslash(raw: &str, value: &Escaped) -> bool {
+    sdk_project_written_rooted(raw) && value.as_escaped().contains('\\')
 }
 
 /// How an SDK import's `Project`, written as `raw`, collapses its worlds:

@@ -821,6 +821,68 @@ fn a_rooted_sdk_import_through_a_backslash_and_a_parent_hop_declines() {
     );
 }
 
+/// With the startup directory supplied and no `seg/` there, a rooted SDK
+/// import keeps the property's `\`, and MSBuild's `..` pops `seg\child`
+/// whole: it opens `work/T.props`. The walk does not model that spelling, and
+/// declines.
+#[test]
+#[cfg(not(windows))]
+fn a_rooted_sdk_import_keeping_a_backslash_declines_with_a_start() {
+    let layout = Layout::new();
+    let work = layout.root.join("work");
+    std::fs::create_dir_all(work.join("seg")).expect("mkdir work/seg");
+    for (file, marker) in [("T.props", "top"), ("seg/T.props", "seg")] {
+        std::fs::write(
+            work.join(file),
+            format!(
+                "<Project><PropertyGroup><Seen>$(Seen);{marker}</Seen></PropertyGroup></Project>"
+            ),
+        )
+        .expect("write marker");
+    }
+    let start = layout.empty_cwd();
+    let sdk_root = layout.sdk_root();
+    let resolver = |name: &str,
+                    _observer: &borzoi_msbuild::observed::Observer|
+     -> Result<SdkResolution, SdkResolveError> {
+        if name == "MySdk" {
+            Ok(SdkResolution::Single(SdkPaths {
+                root: sdk_root.clone(),
+                props: sdk_root.join("Sdk.props"),
+                targets: sdk_root.join("Sdk.targets"),
+            }))
+        } else {
+            Err(SdkResolveError::NotFound)
+        }
+    };
+    let xml = format!(
+        "<Project>\n  <PropertyGroup><G>seg\\child</G></PropertyGroup>\n  \
+         <Import Sdk=\"MySdk\" Project=\"/missing/..{}/$(G)/../T.props\" />\n</Project>\n",
+        work.display()
+    );
+    let proj = layout.root.join("proj").join("p.proj");
+    std::fs::create_dir_all(proj.parent().unwrap()).expect("mkdir proj");
+    std::fs::write(&proj, &xml).expect("write project");
+    let (parsed, _) = borzoi_msbuild::test_support::parse_fsproj_reads(
+        &borzoi_msbuild::ProjectFile::buffer(&proj, &xml).expect("a full path"),
+        &HashMap::new(),
+        &child_environment(&layout),
+        Some(&resolver),
+        None,
+        Some(&start),
+        &borzoi_msbuild::test_support::ReadProbe::default(),
+    )
+    .expect("well-formed");
+    assert!(
+        !matches!(
+            parsed.property("Seen"),
+            borzoi_msbuild::PropertyRead::Value(_)
+        ),
+        "we committed {:?}\n{xml}",
+        parsed.property("Seen")
+    );
+}
+
 /// A missing SDK import named through a property's `\` names one file under
 /// the SDK root from every startup directory, so its failure is certain.
 #[test]

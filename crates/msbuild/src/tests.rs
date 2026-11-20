@@ -12084,6 +12084,120 @@ fn an_item_function_formed_in_one_world_is_a_possible_rejection() {
     );
 }
 
+/// A `When` decides whether every later arm runs: one that turns on the
+/// startup directory over items alone still guards the `Otherwise`'s write,
+/// which a later condition coerces (MSBuild rejects where `seg/` is missing).
+#[test]
+#[cfg(not(windows))]
+fn a_startup_dependent_when_guards_the_later_arms_writes() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    let source = r#"<Project><PropertyGroup><P>seg\a</P><X>true</X></PropertyGroup>
+  <Choose>
+    <When Condition="'$(P)' == 'seg/a'"><ItemGroup><Compile Include="a.fs" /></ItemGroup></When>
+    <Otherwise><PropertyGroup><X>bad</X></PropertyGroup></Otherwise>
+  </Choose>
+  <PropertyGroup Condition="$(X)"><Mid>m</Mid></PropertyGroup>
+  <PropertyGroup><After>ok</After></PropertyGroup></Project>"#;
+    let p = crate::parse_fsproj_with_imports(
+        &crate::ProjectFile::buffer(&root.join("Demo.fsproj"), source).unwrap(),
+        &HashMap::new(),
+        &HashMap::new(),
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(p.rejection.is_some(), "{:?}", p.property("After"));
+}
+
+/// A property body may throw on another value of a write the walk skipped
+/// for the startup directory: `X` is `a` where the gate ran, and `[1]` is past
+/// the end of its split there (MSB4184).
+#[test]
+#[cfg(not(windows))]
+fn a_body_reading_a_skipped_write_may_reject() {
+    let p = parse(
+        r#"<Project><PropertyGroup>
+    <P>seg\a</P>
+    <X>a/b</X>
+    <X Condition="'$(P)' != 'seg/a'">a</X>
+    <Y>$(X.Split('/')[1])</Y>
+  </PropertyGroup>
+  <PropertyGroup><After>ok</After></PropertyGroup></Project>"#,
+    );
+    assert!(p.rejection.is_some(), "{:?}", p.property("After"));
+}
+
+/// A computation past the segment cap may throw in a world the walk does not
+/// enumerate: an expression that may throw makes it a possible rejection.
+#[test]
+#[cfg(not(windows))]
+fn a_capped_computation_that_may_throw_may_reject() {
+    let pieces: String = (0..crate::properties::worlds::MAX_SEGMENTS)
+        .map(|i| format!("s{i}\\x$(Empty)"))
+        .collect();
+    let p = parse(&format!(
+        r#"<Project><PropertyGroup>
+    <P>seg\a</P>
+    <Q>./$(P)//</Q>
+    <Len>$(Q.Length)x</Len>
+    <Y>$(Len.Split('8')[1]){pieces}</Y>
+  </PropertyGroup>
+  <PropertyGroup><After>ok</After></PropertyGroup></Project>"#
+    ));
+    assert!(p.rejection.is_some(), "{:?}", p.property("After"));
+}
+
+/// With the startup directory supplied, a literal `Include` beside a wildcard
+/// `Exclude` that keeps a `\` is matched as written, which the walk does not
+/// model: `seg\..\r.fs` is no `r*.fs` to MSBuild where `seg/` is missing.
+#[test]
+#[cfg(not(windows))]
+fn a_kept_backslash_beside_a_wildcard_exclude_is_no_list() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    std::fs::write(root.join("r.fs"), "").unwrap();
+    let start = root.join("start");
+    std::fs::create_dir_all(&start).unwrap();
+    let source =
+        r#"<Project><ItemGroup><Compile Include="$(P)" Exclude="r*.fs" /></ItemGroup></Project>"#;
+    let (p, _) = crate::test_support::parse_fsproj_reads(
+        &crate::ProjectFile::buffer(&root.join("Demo.fsproj"), source).unwrap(),
+        &[("P".to_owned(), "seg\\..\\r.fs".to_owned())].into(),
+        &HashMap::new(),
+        None,
+        Some(&crate::glob_resolver::resolve as &crate::GlobResolver<'_>),
+        Some(&start),
+        &crate::test_support::ReadProbe::default(),
+    )
+    .unwrap();
+    assert!(p.items_uncertain, "{:#?}", p.items);
+}
+
+/// `evaluate` claims MSBuild rejects a condition only where it does in every
+/// world: true where `seg/` is there, it throws on `maybe` only elsewhere.
+#[test]
+#[cfg(not(windows))]
+fn a_condition_throwing_in_one_world_is_not_illegal() {
+    let mut props = crate::properties::PropertyMap::default();
+    props.insert_worlds_for_test(
+        "X",
+        crate::properties::Worlds::branch(
+            "seg".into(),
+            crate::properties::Worlds::Same(crate::properties::escaping::Escaped::from_xml(
+                "seg/a",
+            )),
+            crate::properties::Worlds::Same(crate::properties::escaping::Escaped::from_xml(
+                "seg\\a",
+            )),
+        ),
+    );
+    assert_eq!(
+        crate::condition::evaluate("'$(X)' == 'seg/a' Or maybe", &props).outcome,
+        crate::condition::Outcome::Unsupported
+    );
+}
+
 /// `Q` is `./seg/a//` where `seg` is a directory under MSBuild's startup
 /// directory, and `./seg/a/` elsewhere: the whole value's pass respells it
 /// only where `S`'s `\` survived. Each reader below that would act on one of

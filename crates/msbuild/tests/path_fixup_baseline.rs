@@ -65,7 +65,36 @@ fn record_baseline() {
     for dir in ["proj-full", "proj-empty"] {
         std::fs::write(root.join(dir).join("a.fs"), "").unwrap();
     }
-    let unplace = |text: &str| text.replace("{ROOT}", &root_text);
+    let uext = common::oracle_environment()
+        .get("MSBuildUserExtensionsPath")
+        .cloned()
+        .unwrap_or_default();
+    let parent_text = root
+        .parent()
+        .and_then(std::path::Path::to_str)
+        .unwrap_or(&root_text)
+        .to_owned();
+    let unplace = |text: &str| text.replace("{ROOT}", &root_text).replace("{UEXT}", &uext);
+    // A claim is recorded in the sweep's spelling, the root and the host's
+    // `MSBuildUserExtensionsPath` placeholders, so that it compares on any
+    // host.
+    let place = |claim: Option<Vec<String>>| {
+        claim.map(|values| {
+            values
+                .into_iter()
+                .map(|value| {
+                    let value = value
+                        .replace(&root_text, "{ROOT}")
+                        .replace(&parent_text, "{TMP}");
+                    if uext.is_empty() {
+                        value
+                    } else {
+                        value.replace(&uext, "{UEXT}")
+                    }
+                })
+                .collect::<Vec<_>>()
+        })
+    };
     let mut env = common::oracle_environment();
     for line in host_fs::read_to_string(dump.join("env.txt"))
         .unwrap()
@@ -119,7 +148,7 @@ fn record_baseline() {
         let pure = borzoi_msbuild::parse_fsproj(&file, &extra, &env).ok();
         let mut row = format!("{key}\t{}", fnv1a(&text));
         let mut push = |mode: &str, claim: Option<Vec<String>>| {
-            row.push_str(&format!("\t{mode} {}", encode_claim(&claim)));
+            row.push_str(&format!("\t{mode} {}", encode_claim(&place(claim))));
         };
         push(
             "wi",
