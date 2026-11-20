@@ -1,6 +1,7 @@
 # Generated; do not edit by hand. One line per graded item, sorted.
 # Regenerate with:
 #   BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-msbuild --test rejection_generative_diff project_sweep_fixed_seed
+# Gaps: `uncertain-value`, a throw on a value the walk does not hold (#1051); `unmodelled-body`, a text the walk does not model (#1094), perhaps beside an uncertain value: which of the two strikes shows such a rejection turns on the values tried, so it is one gap.
 case-0001	9bf8d02c86387fa3 uncertain-value
 case-0015	6e6cd6cf0c7fd8f4 unmodelled-body
 case-0016	edaee90b3a389a8a uncertain-value

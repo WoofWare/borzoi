@@ -776,16 +776,6 @@ const WITNESSES: &[Witness] = &[
         gate: "",
         gap: "unmodelled-body",
     },
-    // Both gaps by construction: a version expression the walk does not
-    // model (an unquoted argument holding a line break) throws whatever the
-    // names hold, and no one value of `X` is both a version and ten fields.
-    Witness {
-        values: ["2.0", "true\n/out:obj/Evil.dll", "1.2.3", "abc"],
-        template: "<ItemGroup><I Include=\"{t}\" /></ItemGroup>",
-        body: "$([MSBuild]::VersionGreaterThan($(B), 1.0));$(X.Split(\";\")[9]);$([MSBuild]::VersionGreaterThan(\"$(X)\", \"1.0\"))",
-        gate: "",
-        gap: "unmodelled-body-and-uncertain-value",
-    },
 ];
 
 /// The long value of [`VARIED_VALUES`] has room for every indexer
@@ -1230,8 +1220,10 @@ fn project_sweep(
                 && std::iter::once(&"")
                     .chain(VARIED_VALUES)
                     .any(|value| evaluates(&mut oracle, &varied(value), &struck));
-            // Both gaps at once: the unmodelled expressions struck, and the
-            // ones on unsure names struck too, each set by each value.
+            // Or with the expressions on unsure names struck too, each set by
+            // each value. Which of the two shows a rejection turns on the
+            // values tried for those names, so both are one gap: a body the
+            // walk does not model, perhaps beside an uncertain value.
             let shown_with_unsure = !shown
                 && !unmodelled.is_empty()
                 && strike_sets.iter().any(|set| {
@@ -1249,14 +1241,7 @@ fn project_sweep(
                 describe()
             );
             counts.rejected_on_an_unmodelled_body += 1;
-            answered_wrongly(
-                if shown {
-                    "unmodelled-body"
-                } else {
-                    "unmodelled-body-and-uncertain-value"
-                },
-                grading,
-            );
+            answered_wrongly("unmodelled-body", grading);
             reach(&hostile, "msbuild-rejects-on-an-unmodelled-body");
             continue;
         };
@@ -1349,7 +1334,11 @@ fn project_sweep_fixed_seed() {
             .join("tests/manifests/rejection_projects_wrong.txt"),
         &manifest,
         "BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-msbuild --test \
-         rejection_generative_diff project_sweep_fixed_seed",
+         rejection_generative_diff project_sweep_fixed_seed\n\
+         Gaps: `uncertain-value`, a throw on a value the walk does not hold (#1051); \
+         `unmodelled-body`, a text the walk does not model (#1094), perhaps beside an \
+         uncertain value: which of the two strikes shows such a rejection turns on the \
+         values tried, so it is one gap.",
     );
 }
 
