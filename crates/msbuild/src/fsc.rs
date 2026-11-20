@@ -539,9 +539,8 @@ impl VariableClass {
 /// (exact name), an allowed property (any case, as MSBuild reads it), graded
 /// inert (exact name), NuGet's restore-only names, a property an SDK file or
 /// NuGet's restore file reads (any case), a variable the tools read (any
-/// case, by name or by a
-/// prefix), else inert. A tool's read compares without case, as a tool on
-/// Windows reads `Path` as `PATH`.
+/// case, by name or by a prefix), else inert. A tool's read compares without
+/// case, as a tool on Windows reads `Path` as `PATH`.
 pub fn classify_variable(sdk: &str, name: &str) -> Option<VariableClass> {
     let reads = environment_reads(sdk)?;
     let lower = name.to_ascii_lowercase();
@@ -2361,7 +2360,6 @@ fn sources_read_as_files(project_path: &Path, parsed: &ParsedProject) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{DefaultItemFiles, Grammar, default_item_files, may_read_as_option};
-
     use crate::observed::Observer;
     use std::fs::{create_dir_all, write};
     use std::path::Path;
