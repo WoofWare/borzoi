@@ -29,7 +29,8 @@
 //! The crate's `clippy.toml` bans the `std::fs` and `std::path::Path` calls
 //! that observe the file system, so a new reader that skips this module is a
 //! lint error. The calls here are the only ones allowed outside test code,
-//! which reaches them through `host_fs` (and its integration-test twin).
+//! which reaches them through `host_fs` (and its integration-test twin) and
+//! `held_still`.
 
 use std::io::Read as _;
 use std::path::Path;
@@ -227,8 +228,8 @@ fn stamp_of(meta: &std::fs::Metadata) -> Stamp {
 #[allow(clippy::disallowed_methods)]
 impl Disk for HostDisk {
     fn stat(&self, path: &Path) -> std::io::Result<Stamp> {
-        #[cfg(test)]
-        if let Some(stamp) = host_fs::held_stamp(path) {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(stamp) = held_still::held_stamp(path) {
             return Ok(stamp);
         }
         std::fs::metadata(path).map(|meta| stamp_of(&meta))
@@ -255,8 +256,8 @@ impl crate::read_checks::Probe for HostDisk {
     fn lstat(&self, path: &Path) -> std::io::Result<crate::read_checks::Lstat> {
         use crate::read_checks::{Kind, Lstat};
         let meta = std::fs::symlink_metadata(path)?;
-        #[cfg(test)]
-        if let Some(stamp) = host_fs::held_stamp(path) {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(stamp) = held_still::held_stamp(path) {
             return Ok(Lstat {
                 stamp,
                 kind: Kind::Dir,
@@ -511,12 +512,20 @@ pub(crate) mod host_fs {
             self.is_dir()
         }
     }
+}
+
+/// Holding the stamps of a test fixture's ancestors still, for a test that
+/// counts what confirming its tree costs: the lib's own tests, and, under the
+/// `test-support` feature, the integration tests.
+#[cfg(any(test, feature = "test-support"))]
+pub mod held_still {
+    use std::path::{Path, PathBuf};
 
     std::thread_local! {
         /// The directories [`hold_ancestors_still`] holds on this thread,
-        /// with the stamps they keep.
-        static HELD: std::cell::RefCell<Vec<(PathBuf, crate::vfs::Stamp)>> =
-            const { std::cell::RefCell::new(Vec::new()) };
+        /// with the stamps they keep, while a [`HeldStill`] lives.
+        static HELD: std::cell::RefCell<Option<Vec<(PathBuf, crate::vfs::Stamp)>>> =
+            const { std::cell::RefCell::new(None) };
     }
 
     /// The stamp [`super::HostDisk`]'s `stat` and `lstat` answer for `path`
@@ -524,6 +533,7 @@ pub(crate) mod host_fs {
     pub(super) fn held_stamp(path: &Path) -> Option<crate::vfs::Stamp> {
         HELD.with_borrow(|held| {
             held.iter()
+                .flatten()
                 .find(|(dir, _)| dir == path)
                 .map(|(_, stamp)| *stamp)
         })
@@ -545,17 +555,28 @@ pub(crate) mod host_fs {
     /// narrowed to their identities, which entries made beside them do not
     /// move; until then their stamps hold it too.) Only these stamps are
     /// held: every query is still answered by the disk.
+    ///
+    /// One hold at a time per thread: a second, while the first lives,
+    /// panics, so that dropping either can never leave the other's stamps
+    /// held.
     pub fn hold_ancestors_still(root: &Path) -> HeldStill {
         let held: Vec<(PathBuf, crate::vfs::Stamp)> = root
             .ancestors()
             .skip(1)
             .map(|dir| {
-                let stamp = super::stamp_of(&std::fs::metadata(dir).unwrap());
-                (dir.to_path_buf(), stamp)
+                #[allow(clippy::disallowed_methods)]
+                let meta = std::fs::metadata(dir).unwrap();
+                (dir.to_path_buf(), super::stamp_of(&meta))
             })
             .collect();
+        HELD.with_borrow_mut(|slot| {
+            assert!(
+                slot.is_none(),
+                "a thread holds one set of directories still at a time"
+            );
+            *slot = Some(held);
+        });
         HeldStill {
-            before: HELD.replace(held),
             _thread: std::marker::PhantomData,
         }
     }
@@ -564,14 +585,13 @@ pub(crate) mod host_fs {
     /// ([`hold_ancestors_still`]) until it is dropped.
     #[must_use]
     pub struct HeldStill {
-        before: Vec<(PathBuf, crate::vfs::Stamp)>,
         /// Not `Send`: what it holds is the making thread's.
         _thread: std::marker::PhantomData<*const ()>,
     }
 
     impl Drop for HeldStill {
         fn drop(&mut self) {
-            HELD.set(std::mem::take(&mut self.before));
+            HELD.set(None);
         }
     }
 }

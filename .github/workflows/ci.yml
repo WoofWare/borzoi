@@ -164,7 +164,7 @@ jobs:
       # an intra-doc link that a build without the feature cannot resolve.
       - name: Lint and document the test-support crates without it
         run: |
-          for crate in borzoi-assembly borzoi-msbuild borzoi-sema; do
+          for crate in borzoi-assembly borzoi-msbuild borzoi-sema borzoi; do
             nix develop --command cargo clippy -p "$crate" --lib -- -D warnings
             nix develop --command env RUSTDOCFLAGS="-D warnings" cargo doc -p "$crate" --no-deps --document-private-items
           done

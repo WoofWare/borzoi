@@ -4908,12 +4908,12 @@ mod tests {
     /// on the paths, however often it asks. The temporary directory's
     /// ancestors are on them, and concurrent tests make entries there,
     /// which would keep the witnesses wide; so they are held still
-    /// ([`crate::observed::host_fs::hold_ancestors_still`]).
+    /// ([`crate::observed::held_still::hold_ancestors_still`]).
     #[test]
     fn an_owner_is_walked_once_and_confirmed_by_stamps() {
         let tmp = TempDir::new().unwrap();
         let dir = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
-        let _still = crate::observed::host_fs::hold_ancestors_still(&dir);
+        let _still = crate::observed::held_still::hold_ancestors_still(&dir);
         let root = dir.join("Root.fsproj");
         let file = dir.join("sub").join("Foo.fs");
         write_file(&root, &fsproj_with_compile("sub/Foo.fs"));
@@ -4988,12 +4988,12 @@ mod tests {
     /// which a hint naming a sibling distrusts), so one runs between the
     /// hints; the temporary directory's ancestors, which concurrent tests
     /// change, are held still so that it narrows
-    /// ([`crate::observed::host_fs::hold_ancestors_still`]).
+    /// ([`crate::observed::held_still::hold_ancestors_still`]).
     #[test]
     fn a_hint_asks_again_what_was_read_at_the_paths_it_names() {
         let tmp = TempDir::new().unwrap();
         let dir = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
-        let _still = crate::observed::host_fs::hold_ancestors_still(&dir);
+        let _still = crate::observed::held_still::hold_ancestors_still(&dir);
         let root = dir.join("Root.fsproj");
         let file = dir.join("sub").join("Foo.fs");
         write_file(&root, &fsproj_with_compile("sub/Foo.fs"));
@@ -8456,13 +8456,13 @@ mod tests {
         /// temporary directory's ancestors among them, so those directories'
         /// entries decide some of the reads, and concurrent tests make and
         /// remove entries there; so the test holds them still
-        /// ([`crate::observed::host_fs::hold_ancestors_still`]), and the
+        /// ([`crate::observed::held_still::hold_ancestors_still`]), and the
         /// counts depend only on what it does to its own tree.
         #[test]
         fn a_project_evaluated_again_starts_with_the_dropped_ones_witnesses() {
             let tmp = TempDir::new().unwrap();
             let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
-            let _still = crate::observed::host_fs::hold_ancestors_still(&root);
+            let _still = crate::observed::held_still::hold_ancestors_still(&root);
             let (project, env) = world(&root, false);
             let file = root.join("repo/App/A.fs");
             let mut ws = Workspace::with_env(env);
