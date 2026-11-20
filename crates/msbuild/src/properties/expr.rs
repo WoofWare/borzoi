@@ -308,7 +308,7 @@ fn parse(inner: &str) -> Option<Expr<'_>> {
 
 fn parse_root<'a>(inner: &'a str, b: &[u8]) -> Option<(Root<'a>, usize)> {
     if b.first() == Some(&b'[') {
-        // `[Type]::Member(args)` static call.
+        // `[Type]::Member(args)` static call, or `[Type]::Property`.
         let close = b.iter().position(|&c| c == b']')?;
         let type_name = &inner[1..close];
         if type_name.is_empty() {
@@ -318,10 +318,10 @@ fn parse_root<'a>(inner: &'a str, b: &[u8]) -> Option<(Root<'a>, usize)> {
         let rest = b.get(after..)?;
         let rest = rest.strip_prefix(b"::")?;
         let member_start = after + 2;
+        // A method with its arguments, or a property without
+        // (`[Type]::Property`), which [`eval_static`] takes only from
+        // [`NON_THROWING_PROPERTIES`].
         let (member, pos) = parse_member(inner, b, member_start)?;
-        // A static call is always a method (it must carry `(...)`); a bare
-        // `[Type]::Field` static property is not in our grammar.
-        member.args.as_ref()?;
         let _ = rest;
         Some((Root::Static { type_name, member }, pos))
     } else {
@@ -461,7 +461,30 @@ pub(super) enum Failure {
     /// function that returns one for every argument, whose arguments
     /// evaluated. Outermost only, as [`Failure::Throws`].
     ReturnsBoolean,
+    /// MSBuild returns a value we do not compute, and does not throw: a
+    /// property it allows that every process answers
+    /// ([`NON_THROWING_PROPERTIES`]). Outermost only, as [`Failure::Throws`].
+    ReturnsValue,
 }
+
+/// The static properties MSBuild allows in a property function that return
+/// for every process, without arguments, and that the evaluation does not
+/// compute: their value is the host's (`$([System.Runtime.InteropServices.
+/// RuntimeInformation]::ProcessArchitecture)`, which real `Directory.Build.
+/// props` files compare), but no evaluation throws on them. Each is held to
+/// MSBuild by `tests/condition_diff.rs`'s
+/// `host_properties_are_values_msbuild_does_not_throw_on`. The type and the
+/// member are matched as MSBuild matches them, without case.
+const NON_THROWING_PROPERTIES: &[(&str, &[&str])] = &[(
+    "System.Runtime.InteropServices.RuntimeInformation",
+    &[
+        "ProcessArchitecture",
+        "OSArchitecture",
+        "OSDescription",
+        "FrameworkDescription",
+        "RuntimeIdentifier",
+    ],
+)];
 
 use Failure::Unsupported;
 
@@ -631,7 +654,7 @@ fn eval(
     // A step that returns a value we do not compute says nothing of a step
     // after it, which may throw on that value.
     let then = |failure: Failure, last: bool| match failure {
-        Failure::ReturnsBoolean if !last => Unsupported,
+        Failure::ReturnsBoolean | Failure::ReturnsValue if !last => Unsupported,
         other => other,
     };
     let mut value = eval_root(&expr.root, props, fs, issues, depth)
@@ -903,6 +926,14 @@ fn eval_static(
     issues: &mut Vec<Issue>,
     depth: usize,
 ) -> Result<Value, Failure> {
+    if member.args.is_none()
+        && NON_THROWING_PROPERTIES.iter().any(|(ty, members)| {
+            ty.eq_ignore_ascii_case(type_name)
+                && members.iter().any(|m| m.eq_ignore_ascii_case(member.name))
+        })
+    {
+        return Err(Failure::ReturnsValue);
+    }
     let args = member.args.as_deref().ok_or(Unsupported)?;
     let member_name = member.name;
     // MSBuild resolves the type name case-insensitively, exactly as it does the
@@ -1197,6 +1228,19 @@ fn eval_msbuild_static(
         let parts =
             super::eval_exact_path_args(&join_args(args), props, false).ok_or(Unsupported)?;
         return super::normalize_path(&parts)
+            .map(|p| str_result(&p))
+            .ok_or(Unsupported);
+    }
+    if member_name.eq_ignore_ascii_case("NormalizeDirectory") {
+        // `EnsureTrailingSlash(NormalizePath(…))`, as `IntrinsicFunctions`
+        // composes them.
+        if !path_args_are_bare(args) {
+            return Err(Unsupported);
+        }
+        let parts =
+            super::eval_exact_path_args(&join_args(args), props, false).ok_or(Unsupported)?;
+        return super::normalize_path(&parts)
+            .and_then(|p| ensure_trailing_slash(&p))
             .map(|p| str_result(&p))
             .ok_or(Unsupported);
     }

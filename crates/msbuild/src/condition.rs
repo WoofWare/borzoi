@@ -708,8 +708,19 @@ fn judge_expr(
                 // On a value held of a name the caller is not certain of, the
                 // boolean is none of MSBuild's: what comes after the leaf is
                 // reached perhaps, whichever way it went here.
+                // And an operand the evaluation skipped on that value (the
+                // other side of an equality one side's emptiness decided)
+                // MSBuild reaches perhaps: one that fails on what it reads of
+                // values MSBuild holds as held may throw.
                 Ok(_) if explicit_doubt || implicit_doubt => {
-                    Judgement::of(None, Throws::Never, false)
+                    let skipped_may_fail = leaf_texts(expr)
+                        .is_some_and(|texts| fails_on_held(&texts, props, fs, doubted));
+                    let throws = if skipped_may_fail {
+                        Throws::Maybe
+                    } else {
+                        Throws::Never
+                    };
+                    Judgement::of(None, throws, false)
                 }
                 Ok(value) => Judgement::of(Some(value), Throws::Never, false),
                 Err(reject) if reads_doubted => match doubted_failures(expr, props, fs, doubted) {
@@ -775,6 +786,33 @@ fn doubted_failures(
             .into_iter()
             .map(|(expression, _)| expression)
             .collect()
+    })
+}
+
+/// Whether one of `texts`, expanded in full on the values `props` holds,
+/// fails on what it reads of no name `doubted` names: a property function
+/// that throws, or that we do not model, on values MSBuild may hold as held.
+fn fails_on_held(
+    texts: &[String],
+    props: &PropertyMap,
+    fs: Ctx<'_>,
+    doubted: &dyn Fn(&str) -> bool,
+) -> bool {
+    texts.iter().any(|text| {
+        let (_, issues) = match fs.observer() {
+            Some(observer) => substitute_with_fs(text, props, observer),
+            None => substitute(text, props),
+        };
+        issues.into_iter().any(|issue| match issue {
+            Issue::Throws { reads, .. } => !reads.iter().any(|name| doubted(name)),
+            Issue::Unsupported { expression } => {
+                let mut names = Vec::new();
+                explicit_references(&expression, &mut names);
+                implicit_references(&expression, &mut names);
+                !names.iter().any(|name| doubted(name))
+            }
+            _ => false,
+        })
     })
 }
 
@@ -2805,9 +2843,9 @@ fn expand_for_condition(
             }
             Issue::Throws { .. } => Reject::Throws,
             Issue::Unsupported { .. } => Reject::Unmodelled,
-            Issue::ReturnsBoolean { .. } | Issue::PathAdjustmentUndecided { .. } => {
-                Reject::Undecided
-            }
+            Issue::ReturnsBoolean { .. }
+            | Issue::ReturnsValue { .. }
+            | Issue::PathAdjustmentUndecided { .. } => Reject::Undecided,
         };
         worst = worst.max(Some(reject));
     }

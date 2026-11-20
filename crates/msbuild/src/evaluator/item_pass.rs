@@ -3875,9 +3875,21 @@ fn evaluate_item_condition_silent_with_sdk_taint(
 /// `%(M)`; probed, `msbuild-condition-oracle`, SDK 10.0.401), as the walk
 /// does.
 fn expand_metadata(state: &mut State<'_>, raw: &str, span: Range<usize>) -> Expansion {
+    let before = state.diagnostics.len();
     let mut expansion = state.expand(raw, span.clone());
     for expression in properties::expressions_reading_metadata(raw) {
         expansion.had_unsupported = true;
+        // The expansion reports one it did not model already.
+        let reported = state.diagnostics[before..].iter().any(|diagnostic| {
+            matches!(
+                &diagnostic.kind,
+                DiagnosticKind::UnsupportedPropertyExpression { expression: seen }
+                    if seen == expression
+            )
+        });
+        if reported {
+            continue;
+        }
         state.push(
             DiagnosticKind::UnsupportedPropertyExpression {
                 expression: expression.to_owned(),
@@ -3923,6 +3935,7 @@ pub(super) fn expand_silent(raw: &str, state: &State<'_>) -> Expansion {
             }
             Issue::Unsupported { .. }
             | Issue::ReturnsBoolean { .. }
+            | Issue::ReturnsValue { .. }
             | Issue::Throws { .. }
             | Issue::PathAdjustmentUndecided { .. } => {
                 had_unsupported = true;

@@ -1854,6 +1854,30 @@ fn metadata_reference_in_include_emits_diagnostic_and_skips_entry() {
     assert!(p.is_partial);
 }
 
+/// A metadatum's property function reading a metadata reference, which the
+/// expansion does not model either, is reported once.
+#[test]
+fn an_unmodelled_metadata_reading_expression_is_reported_once() {
+    let src = r#"<Project>
+  <ItemGroup>
+    <PackageReference Include="P" Version="$([System.String]::Copy('%(V)'))" />
+  </ItemGroup>
+</Project>"#;
+    let p = parse(src);
+    let reports = p
+        .diagnostics
+        .iter()
+        .filter(|d| {
+            matches!(
+                &d.kind,
+                DiagnosticKind::UnsupportedPropertyExpression { expression }
+                    if expression == "$([System.String]::Copy('%(V)'))"
+            )
+        })
+        .count();
+    assert_eq!(reports, 1, "{:#?}", p.diagnostics);
+}
+
 #[test]
 fn import_group_flags_each_nested_import() {
     // ImportGroup with no condition (or one we evaluate true) — every

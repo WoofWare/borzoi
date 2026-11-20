@@ -182,6 +182,8 @@ fn path_functions_commit_backslash_cwd_independently() {
     check_expr_cwd_independent("$([System.IO.Path]::GetFileNameWithoutExtension('a\\x.fs'))");
     check_expr_cwd_independent("$([System.IO.Path]::GetFullPath('/r/a\\x'))");
     check_expr_cwd_independent("$([MSBuild]::NormalizePath('/r/a\\x'))");
+    check_expr_cwd_independent("$([MSBuild]::NormalizeDirectory('/r/a\\x'))");
+    check_expr_cwd_independent("$([MSBuild]::NormalizeDirectory('/r', 'a\\x\\'))");
     check_expr_cwd_independent("$([System.String]::Concat('a\\','x'))");
     check_expr_cwd_independent("$([System.String]::Copy('a\\x'))");
     check_expr_cwd_independent("$('a\\x'.Length)");

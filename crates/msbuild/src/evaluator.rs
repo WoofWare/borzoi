@@ -1461,6 +1461,10 @@ struct PathWrites {
     /// The names written whose final value is not certain, computed once, in
     /// the item pass, when the table is final.
     settled: Option<std::rc::Rc<HashSet<String>>>,
+    /// Of those, the ones that reach a group in each set of arms, computed
+    /// once per set ([`State::judge_from_path`]): the groups of one arm share
+    /// it.
+    reaching: HashMap<std::rc::Rc<[Arm]>, std::rc::Rc<HashSet<String>>>,
 }
 
 /// Where an item group deferred from a walk of content the walk does not
@@ -3500,6 +3504,7 @@ impl<'r> State<'r> {
                 }
                 Issue::Unsupported { expression }
                 | Issue::ReturnsBoolean { expression }
+                | Issue::ReturnsValue { expression }
                 | Issue::Throws { expression, .. } => {
                     had_unsupported = true;
                     DiagnosticKind::UnsupportedPropertyExpression { expression }

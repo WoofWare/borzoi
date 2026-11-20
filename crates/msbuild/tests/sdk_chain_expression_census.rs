@@ -144,13 +144,16 @@ fn sdk_chain_property_expressions_are_never_wrongly_committed() {
     // `[System.String]::IsNullOrEmpty` landed (Stage C keystone, 2026-07-14),
     // committing one more distinct call expression on *both* platforms (its
     // string logic carries no `cfg!(windows)` divergence), so 61→62 / 65→66.
+    // Then #1009 (2026-11-20): `[MSBuild]::NormalizeDirectory` and version
+    // arguments spliced from text commit, 66→68 on unix; the Windows floor,
+    // unmeasured, stays.
     // Raise it as stages land; never lower it without saying why — a drop means
     // the evaluator started declining something it used to model, which is a
     // capability regression even though it stays *sound*. The buckets printed
     // above say which functions to model, and that is where the coverage is:
     // no reserved-name seeding could move this count by more than 52, and the
     // names still unseeded are worth 4 (`sdk_chain_decline_attribution.rs`).
-    let floor = if cfg!(windows) { 62 } else { 66 };
+    let floor = if cfg!(windows) { 62 } else { 68 };
     assert!(
         exact >= floor,
         "SDK-chain expression coverage regressed: only {exact} of {total} \
@@ -214,8 +217,9 @@ fn sdk_chain_conditions_are_never_wrongly_committed() {
     // (`_TargetFrameworkVersionWithoutV` ×86, `OutputType` ×44, `Language` ×40),
     // which a context-free census cannot have. No reserved-name seeding could
     // move this count by more than 145, and the names still unseeded are worth
-    // 30 (`sdk_chain_decline_attribution.rs`).
-    let floor = if cfg!(windows) { 130 } else { 139 };
+    // 30 (`sdk_chain_decline_attribution.rs`). #1009 (2026-11-20) raised it
+    // to 140 on unix; the Windows floor, unmeasured, stays.
+    let floor = if cfg!(windows) { 130 } else { 140 };
     assert!(
         committed >= floor,
         "SDK-chain condition coverage regressed: only {committed} of {total} \

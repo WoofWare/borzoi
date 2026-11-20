@@ -355,14 +355,27 @@ impl State<'_> {
                 names
             }
         };
-        let mut reaching = written.reaching();
-        reaching.retain(|name| settled.contains(name));
+        let cached = written.writes.borrow().reaching.get(&written.arms).cloned();
+        let reaching = match cached {
+            Some(reaching) => reaching,
+            None => {
+                let mut reaching = written.reaching();
+                reaching.retain(|name| settled.contains(name));
+                let reaching = std::rc::Rc::new(reaching);
+                written
+                    .writes
+                    .borrow_mut()
+                    .reaching
+                    .insert(written.arms.clone(), reaching.clone());
+                reaching
+            }
+        };
         let saved = self.speculation.replace(Speculation {
             unheld: HashSet::new(),
             gained: Vec::new(),
             walk_written: std::rc::Rc::default(),
             arms: Vec::new(),
-            inherited: Some(std::rc::Rc::new(reaching)),
+            inherited: Some(reaching),
             depth: 1,
         });
         judge(self);
@@ -1037,20 +1050,55 @@ fn judge_element_contents(
         (Some(text), Contents::Metadata) => {
             judge_metadata_text(state, &text, reached, element.range());
         }
-        (None, _) => {
-            let source = &element.document().input_text()[element.range()];
-            let joined = without_markup(source);
-            if source.contains("$(") || source.contains("&#") || joined.contains("$(") {
-                let expression = properties::expression_texts(source)
-                    .next()
-                    .unwrap_or(source)
-                    .to_owned();
-                state.note_possible_rejection(
-                    RejectionCause::ThrowingExpression { expression },
-                    element.range(),
-                );
+        (None, _) => note_unread_contents(state, element_content_source(element), element.range()),
+    }
+}
+
+/// The source of `element`'s content: between its start tag and its end
+/// tag, so neither its own attributes, which MSBuild does not read as its
+/// text, nor its name. Empty for an empty element.
+fn element_content_source<'input>(element: Node<'_, 'input>) -> &'input str {
+    let source: &'input str = element.document().input_text();
+    let whole = &source[element.range()];
+    // The start tag ends at the first `>` outside an attribute's quotes; the
+    // end tag starts at the last `</`, as nothing follows it but its name.
+    let mut quote = None;
+    let mut start = None;
+    for (at, byte) in whole.bytes().enumerate() {
+        match quote {
+            Some(open) if byte == open => quote = None,
+            Some(_) => {}
+            None if matches!(byte, b'"' | b'\'') => quote = Some(byte),
+            None if byte == b'>' => {
+                start = Some(at + 1);
+                break;
             }
+            None => {}
         }
+    }
+    match (start, whole.rfind("</")) {
+        (Some(start), Some(end)) if start <= end => &whole[start..end],
+        _ => "",
+    }
+}
+
+/// Note what a text MSBuild reads, and the walk could not read as it does,
+/// may throw on: `source` is its markup as written. An expression may be
+/// spelt with a reference (`&#36;(…)`), may stand in an attribute, which
+/// serialized XML keeps, or may form across the markup an inner text drops,
+/// and across the whitespace nodes it drops with it: any of those in the
+/// source is a possible rejection.
+fn note_unread_contents(state: &mut State<'_>, source: &str, span: Range<usize>) {
+    let joined: String = without_markup(source)
+        .chars()
+        .filter(|c| !matches!(c, ' ' | '\t' | '\n' | '\r'))
+        .collect();
+    if source.contains("$(") || source.contains("&#") || joined.contains("$(") {
+        let expression = properties::expression_texts(source)
+            .next()
+            .unwrap_or(source)
+            .to_owned();
+        state.note_possible_rejection(RejectionCause::ThrowingExpression { expression }, span);
     }
 }
 
@@ -1310,9 +1358,15 @@ fn judge_metadata_attributes(node: Node<'_, '_>, reached: bool, state: &mut Stat
     for attr in node.attributes() {
         if attr.namespace().is_none()
             && item_attribute(node, attr.name()) == ItemAttribute::Metadata
-            && let Some(text) = metadata_attribute(node, &attr)
         {
-            judge_metadata_text(state, &text, reached, node.range());
+            match metadata_attribute(node, &attr) {
+                Some(text) => judge_metadata_text(state, &text, reached, node.range()),
+                // An XML fragment the walk does not read as MSBuild does.
+                None => {
+                    let value = crate::document::attribute(node, attr.name()).unwrap_or_default();
+                    note_unread_contents(state, &value, node.range());
+                }
+            }
         }
     }
 }

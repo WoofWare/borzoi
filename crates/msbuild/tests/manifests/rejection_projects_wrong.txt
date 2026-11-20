@@ -26,7 +26,6 @@ case-0190	29fe507ff647dd8a uncertain-value
 case-0194	5b05370484b37448 uncertain-value
 case-0199	123a2aa0b5652ed0 uncertain-value
 case-0216	8b7b165583d029aa unmodelled-body
-case-0217	2af273824307626c uncertain-value
 case-0225	81f1845b981305e0 uncertain-value
 case-0238	857f0fbc9f849014 uncertain-value
 case-0254	d1367cf9742521ae uncertain-value

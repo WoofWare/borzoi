@@ -75,6 +75,10 @@ pub enum Issue {
     /// compute (`expr::Failure::ReturnsBoolean`). Left literal in the output,
     /// as an unsupported one is.
     ReturnsBoolean { expression: String },
+    /// `$(...)` MSBuild evaluates without throwing, to a value we do not
+    /// compute (`expr::Failure::ReturnsValue`). Left literal in the output,
+    /// as an unsupported one is.
+    ReturnsValue { expression: String },
     /// MSBuild's Unix path adjustment of `value` (escaped text: one piece of
     /// the expansion, or the whole of it) turns on something the evaluation
     /// does not know: a directory relative to MSBuild's working directory, or
@@ -915,6 +919,7 @@ fn substitute_impl(
                                 reads: props.names_since(mark),
                             },
                             expr::Failure::ReturnsBoolean => Issue::ReturnsBoolean { expression },
+                            expr::Failure::ReturnsValue => Issue::ReturnsValue { expression },
                         });
                         out.push(
                             &Escaped::from_xml(format!("$({inner})")),

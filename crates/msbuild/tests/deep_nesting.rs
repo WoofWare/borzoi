@@ -500,6 +500,39 @@ fn wide_unheld_reads(width: usize) -> String {
     )
 }
 
+/// A `<When>` the walk cannot decide, with `width` property writes and
+/// `width` item groups after them, each group judged in the item pass
+/// knowing the writes that reach it.
+fn many_groups_on_one_path(width: usize) -> String {
+    let writes: String = (0..width)
+        .map(|i| format!("<PropertyGroup><P{i}>x</P{i}></PropertyGroup>"))
+        .collect();
+    let groups: String = (0..width).map(|_| "<ItemGroup />").collect();
+    format!("<Choose><When Condition=\"'É' == 'é'\">{writes}{groups}</When></Choose>")
+}
+
+/// The groups of [`many_groups_on_one_path`] share the set of writes that
+/// reach them, computed once: four times the width costs about four times
+/// the time, where computing it per group costs sixteen. Timed as a ratio,
+/// as [`wide_unheld_reads_are_struck_in_one_pass`] is.
+#[test]
+fn groups_on_one_path_share_the_writes_that_reach_them() {
+    let time = |width: usize| {
+        let body = many_groups_on_one_path(width);
+        let start = std::time::Instant::now();
+        evaluate_project(body);
+        start.elapsed()
+    };
+    time(100);
+    let narrow = time(400);
+    let wide = time(1_600);
+    let ratio = wide.as_secs_f64() / narrow.as_secs_f64().max(1e-6);
+    assert!(
+        ratio < 10.0,
+        "4× the groups took {ratio:.1}× the time ({narrow:?} → {wide:?})"
+    );
+}
+
 /// The rejection judgement strikes each read of [`wide_unheld_reads`] with a
 /// value in one pass over the text, so four times the width costs about four
 /// times the time; striking one read at a time over the whole text costs

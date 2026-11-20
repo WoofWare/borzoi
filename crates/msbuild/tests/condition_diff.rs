@@ -1154,6 +1154,197 @@ fn where_msbuild_evaluates_a_condition() {
     }
 }
 
+/// The host's runtime properties, which real projects compare
+/// (`'$([System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture)'
+/// == 'Ppc64le'` in dotnet/fsharp's `Directory.Build.props`): MSBuild
+/// evaluates each to a value the walk does not compute and never throws on
+/// it, in any case of the type's and the member's names; a step after one may
+/// throw, and the same name called as a method does. Each held to
+/// design-time evaluation, certain-implies-exact, and the walk withdraws
+/// nothing where MSBuild throws on none.
+#[test]
+fn host_properties_are_values_msbuild_does_not_throw_on() {
+    const T: &str = "System.Runtime.InteropServices.RuntimeInformation";
+    let mut rows: Vec<(String, RowVerdict)> = Vec::new();
+    for member in [
+        "ProcessArchitecture",
+        "OSArchitecture",
+        "OSDescription",
+        "FrameworkDescription",
+        "RuntimeIdentifier",
+        "processarchitecture",
+    ] {
+        for ty in [T.to_owned(), T.to_ascii_lowercase()] {
+            let call = format!("$([{ty}]::{member})");
+            rows.push((
+                format!(
+                    "<PropertyGroup><R Condition=\"'{call}' == 'Ppc64le'\">x</R><V>{call}</V></PropertyGroup>"
+                ),
+                RowVerdict::Commits,
+            ));
+        }
+    }
+    rows.push((
+        format!(
+            "<ItemGroup><I Include=\"x\" Condition=\"'$([{T}]::OSArchitecture)' != ''\" /></ItemGroup>"
+        ),
+        RowVerdict::Commits,
+    ));
+    // The SDK's comparison of the publish directory, normalised, with its
+    // project directory, in each shape it meets: MSBuild throws only on a
+    // NUL its arguments decode to.
+    for (publish_dir, verdict) in [
+        ("bin/publish/", RowVerdict::Commits),
+        ("bin\\x\\", RowVerdict::Commits),
+        ("", RowVerdict::Commits),
+        ("a%00b", RowVerdict::Rejects),
+    ] {
+        rows.push((
+            format!(
+                "<PropertyGroup><PublishDir>{publish_dir}</PublishDir></PropertyGroup>\
+                 <PropertyGroup Condition=\"'$(PublishDir)' != '' And '$([MSBuild]::NormalizeDirectory($(MSBuildProjectDirectory), $(PublishDir)))' != '$([MSBuild]::NormalizeDirectory($(MSBuildProjectDirectory)))'\"><X>1</X></PropertyGroup>"
+            ),
+            verdict,
+        ));
+    }
+    // A step after the value may throw on it, and a call is no property: in
+    // a condition, where the walk judges what it does not model as a possible
+    // throw (a walked body's is #1094).
+    rows.push((
+        format!(
+            "<PropertyGroup><R Condition=\"'$([{T}]::OSDescription.Substring(9999))' == ''\">x</R></PropertyGroup>"
+        ),
+        RowVerdict::Rejects,
+    ));
+    rows.push((
+        format!(
+            "<PropertyGroup><R Condition=\"'$([{T}]::ProcessArchitecture())' == ''\">x</R></PropertyGroup>"
+        ),
+        RowVerdict::Rejects,
+    ));
+    grade_rows_against_design_time(rows);
+}
+
+/// What a row of [`grade_rows_against_design_time`] pins.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum RowVerdict {
+    /// MSBuild rejects the project, and the walk claims it may.
+    Rejects,
+    /// MSBuild evaluates it, and the walk claims no rejection and commits a
+    /// value written after the row.
+    Commits,
+    /// MSBuild evaluates it, and the walk, not reading the row as MSBuild
+    /// does, claims it may reject: a decline, which makes no claim, pinned so
+    /// that its closing shows.
+    Withdraws,
+}
+
+/// Each row (a project's content, and what MSBuild and the walk make of it,
+/// pinned) held to design-time evaluation, and the walk to it,
+/// certain-implies-exact ([`RowVerdict`]).
+fn grade_rows_against_design_time(rows: Vec<(String, RowVerdict)>) {
+    let mut oracle = Oracle::spawn();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let dir = borzoi_msbuild::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    let project_path = dir.join("Demo.fsproj");
+    for (row, verdict) in rows {
+        let rejects = verdict == RowVerdict::Rejects;
+        let xml = format!(
+            "<Project>{}<PropertyGroup><After>ok</After></PropertyGroup></Project>",
+            row.replace('\'', "&apos;")
+        );
+        std::fs::write(&project_path, &xml).unwrap();
+        let msbuild_rejects = oracle
+            .project_design_time(&xml, &["After".to_string()], Some(&project_path), &[])
+            .is_none();
+        assert_eq!(msbuild_rejects, rejects, "MSBuild's verdict moved: {xml}");
+        let parsed = common::parse_fsproj_with_imports(
+            &borzoi_msbuild::ProjectFile::buffer(&project_path, &xml)
+                .expect("a project path spelt as its full path"),
+            &std::collections::HashMap::new(),
+            &common::oracle_environment(),
+            None,
+            None,
+        )
+        .expect("well-formed");
+        match verdict {
+            RowVerdict::Rejects => assert!(
+                parsed.rejection.is_some(),
+                "MSBuild rejects, and the walk claims nothing: {xml}"
+            ),
+            RowVerdict::Commits => {
+                assert_eq!(
+                    parsed.rejection, None,
+                    "MSBuild evaluates, and the walk withdrew: {xml}"
+                );
+                assert_eq!(parsed.property("After").value(), Some("ok"), "{xml}");
+            }
+            RowVerdict::Withdraws => assert_eq!(
+                parsed.rejection.as_ref().map(|r| r.certainty),
+                Some(borzoi_msbuild::RejectionCertainty::Possible),
+                "MSBuild evaluates, and the walk's decline moved: {xml}"
+            ),
+        }
+    }
+}
+
+/// An equality one side's emptiness decides, where that side's value is not
+/// certain: MSBuild may expand the other side, and throw on it. `U` is
+/// written under a gate the walk cannot decide (`'É' == 'é'`, true to
+/// MSBuild), so MSBuild compares `changed` and expands `a$(P[9])`. The same
+/// with the other side in range evaluates.
+#[test]
+fn an_uncertain_emptiness_reaches_the_other_side() {
+    let row = |index: usize| {
+        format!(
+            "<PropertyGroup><P>x</P></PropertyGroup>\
+             <PropertyGroup Condition=\"'É' == 'é'\"><U>changed</U></PropertyGroup>\
+             <ItemGroup><I Include=\"y\" Condition=\"'$(U)' == 'a$(P[{index}])'\" /></ItemGroup>"
+        )
+    };
+    grade_rows_against_design_time(vec![
+        (row(9), RowVerdict::Rejects),
+        (row(0), RowVerdict::Commits),
+    ]);
+}
+
+/// Texts MSBuild reads from markup the walk does not read exactly, each
+/// pinned against design-time evaluation and held to it, certain-implies-
+/// exact: an attribute's metadata holding XML, an inner text whose markup
+/// and the whitespace nodes MSBuild drops part an expression, and a body
+/// the walk declines whose own tag holds an expression MSBuild does not read
+/// as its text.
+#[test]
+fn unread_texts_are_judged_as_msbuild_reads_them() {
+    let rows = vec![
+        (
+            "<PropertyGroup><P>x</P></PropertyGroup>\
+             <ItemGroup><I Include=\"x\" M=\"&lt;b&gt;$(P[9])&lt;/b&gt;\" /></ItemGroup>"
+                .to_owned(),
+            RowVerdict::Rejects,
+        ),
+        (
+            "<PropertyGroup><P>x</P></PropertyGroup>\
+             <ItemGroup><I Include=\"x\" M=\"&lt;b&gt;$(P[0])&lt;/b&gt;\" /></ItemGroup>"
+                .to_owned(),
+            RowVerdict::Withdraws,
+        ),
+        (
+            "<PropertyGroup><P>abc</P>\
+             <R><![CDATA[$]]><a xml:space=\"default\"> </a>(P[9])</R></PropertyGroup>"
+                .to_owned(),
+            RowVerdict::Rejects,
+        ),
+        (
+            "<PropertyGroup><P>x</P>\
+             <R Condition=\"'$(P)' == 'x'\"><a xmlns=\"urn:test\"/></R></PropertyGroup>"
+                .to_owned(),
+            RowVerdict::Commits,
+        ),
+    ];
+    grade_rows_against_design_time(rows);
+}
+
 /// Each construct whose condition MSBuild evaluates, under two probes that
 /// tell its expansion options apart, pinned against design-time evaluation
 /// and the walk's rejection judgement held to it, certain-implies-exact:

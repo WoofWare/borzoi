@@ -1643,6 +1643,7 @@ fn gen_grammar_root(rng: &mut SplitMix64, depth: u32, spelled: bool) -> String {
         "IsPathRooted",
         "AreFeaturesEnabled",
         "NormalizePath",
+        "NormalizeDirectory",
         "Nope",
     ];
     const SPELLED_STATICS: &[&str] = &[

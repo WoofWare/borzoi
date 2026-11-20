@@ -311,7 +311,7 @@
 10.0.401 resolved WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj reads property SuppressObsoleteDotNetCliToolWarning	unset agrees
 10.0.401 resolved WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj reads property TargetFramework	value agrees
 10.0.401 resolved WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj reads property TargetFrameworkIdentifier	value agrees
-10.0.401 resolved WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj reads property TargetFrameworkMoniker	untrusted (unmodelled text); set in MSBuild
+10.0.401 resolved WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj reads property TargetFrameworkMoniker	value agrees
 10.0.401 resolved WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj reads property TargetFrameworkProfile	unset agrees
 10.0.401 resolved WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj reads property TargetFrameworkVersion	value agrees
 10.0.401 resolved WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj reads property TargetFrameworks	unset agrees
@@ -519,7 +519,7 @@
 10.0.401 resolved WoofWare.Incremental/WoofWare.Incremental/WoofWare.Incremental.fsproj reads property SuppressObsoleteDotNetCliToolWarning	unset agrees
 10.0.401 resolved WoofWare.Incremental/WoofWare.Incremental/WoofWare.Incremental.fsproj reads property TargetFramework	value agrees
 10.0.401 resolved WoofWare.Incremental/WoofWare.Incremental/WoofWare.Incremental.fsproj reads property TargetFrameworkIdentifier	value agrees
-10.0.401 resolved WoofWare.Incremental/WoofWare.Incremental/WoofWare.Incremental.fsproj reads property TargetFrameworkMoniker	untrusted (unmodelled text); set in MSBuild
+10.0.401 resolved WoofWare.Incremental/WoofWare.Incremental/WoofWare.Incremental.fsproj reads property TargetFrameworkMoniker	value agrees
 10.0.401 resolved WoofWare.Incremental/WoofWare.Incremental/WoofWare.Incremental.fsproj reads property TargetFrameworkProfile	unset agrees
 10.0.401 resolved WoofWare.Incremental/WoofWare.Incremental/WoofWare.Incremental.fsproj reads property TargetFrameworkVersion	value agrees
 10.0.401 resolved WoofWare.Incremental/WoofWare.Incremental/WoofWare.Incremental.fsproj reads property TargetFrameworks	unset agrees
@@ -711,7 +711,7 @@
 10.0.401 resolved WoofWare.LiangHyphenation/WoofWare.LiangHyphenation/WoofWare.LiangHyphenation.fsproj reads property SuppressObsoleteDotNetCliToolWarning	unset agrees
 10.0.401 resolved WoofWare.LiangHyphenation/WoofWare.LiangHyphenation/WoofWare.LiangHyphenation.fsproj reads property TargetFramework	value agrees
 10.0.401 resolved WoofWare.LiangHyphenation/WoofWare.LiangHyphenation/WoofWare.LiangHyphenation.fsproj reads property TargetFrameworkIdentifier	value agrees
-10.0.401 resolved WoofWare.LiangHyphenation/WoofWare.LiangHyphenation/WoofWare.LiangHyphenation.fsproj reads property TargetFrameworkMoniker	untrusted (unmodelled text); set in MSBuild
+10.0.401 resolved WoofWare.LiangHyphenation/WoofWare.LiangHyphenation/WoofWare.LiangHyphenation.fsproj reads property TargetFrameworkMoniker	value agrees
 10.0.401 resolved WoofWare.LiangHyphenation/WoofWare.LiangHyphenation/WoofWare.LiangHyphenation.fsproj reads property TargetFrameworkProfile	unset agrees
 10.0.401 resolved WoofWare.LiangHyphenation/WoofWare.LiangHyphenation/WoofWare.LiangHyphenation.fsproj reads property TargetFrameworkVersion	value agrees
 10.0.401 resolved WoofWare.LiangHyphenation/WoofWare.LiangHyphenation/WoofWare.LiangHyphenation.fsproj reads property TargetFrameworks	unset agrees
@@ -919,7 +919,7 @@
 10.0.401 resolved WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj reads property SuppressObsoleteDotNetCliToolWarning	unset agrees
 10.0.401 resolved WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj reads property TargetFramework	value agrees
 10.0.401 resolved WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj reads property TargetFrameworkIdentifier	value agrees
-10.0.401 resolved WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj reads property TargetFrameworkMoniker	untrusted (unmodelled text); set in MSBuild
+10.0.401 resolved WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj reads property TargetFrameworkMoniker	value agrees
 10.0.401 resolved WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj reads property TargetFrameworkProfile	unset agrees
 10.0.401 resolved WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj reads property TargetFrameworkVersion	value agrees
 10.0.401 resolved WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj reads property TargetFrameworks	unset agrees
@@ -1111,7 +1111,7 @@
 10.0.401 resolved WoofWare.WeakHashTable/WoofWare.WeakHashTable/WoofWare.WeakHashTable.fsproj reads property SuppressObsoleteDotNetCliToolWarning	unset agrees
 10.0.401 resolved WoofWare.WeakHashTable/WoofWare.WeakHashTable/WoofWare.WeakHashTable.fsproj reads property TargetFramework	value agrees
 10.0.401 resolved WoofWare.WeakHashTable/WoofWare.WeakHashTable/WoofWare.WeakHashTable.fsproj reads property TargetFrameworkIdentifier	value agrees
-10.0.401 resolved WoofWare.WeakHashTable/WoofWare.WeakHashTable/WoofWare.WeakHashTable.fsproj reads property TargetFrameworkMoniker	untrusted (unmodelled text); set in MSBuild
+10.0.401 resolved WoofWare.WeakHashTable/WoofWare.WeakHashTable/WoofWare.WeakHashTable.fsproj reads property TargetFrameworkMoniker	value agrees
 10.0.401 resolved WoofWare.WeakHashTable/WoofWare.WeakHashTable/WoofWare.WeakHashTable.fsproj reads property TargetFrameworkProfile	unset agrees
 10.0.401 resolved WoofWare.WeakHashTable/WoofWare.WeakHashTable/WoofWare.WeakHashTable.fsproj reads property TargetFrameworkVersion	value agrees
 10.0.401 resolved WoofWare.WeakHashTable/WoofWare.WeakHashTable/WoofWare.WeakHashTable.fsproj reads property TargetFrameworks	unset agrees
