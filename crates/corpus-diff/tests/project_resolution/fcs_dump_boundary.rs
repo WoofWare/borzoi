@@ -41,9 +41,9 @@ use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
 use borzoi_corpus_diff::fcs_dump_command;
@@ -144,8 +144,11 @@ fn refusal(line: &str) -> Option<String> {
 /// send: what the oracle does with them is the oracle's half of the contract.
 struct RawChild {
     child: Child,
-    /// `None` only while the child is dropped.
-    stdin: Option<ChildStdin>,
+    /// The lines to write, taken by a thread that owns the child's input: a
+    /// child that stops reading then blocks that thread, and the wait for
+    /// its answer ([`RawChild::answer`]) still ends. `None` only while the
+    /// child is dropped.
+    requests: Option<Sender<Vec<u8>>>,
     answers: Receiver<String>,
 }
 
@@ -157,8 +160,16 @@ impl RawChild {
             .stderr(Stdio::inherit());
         let mut child = borzoi_spawn::spawn_serialised(&mut cmd)
             .unwrap_or_else(|e| panic!("start fcs-dump {op}: {e}"));
-        let stdin = child.stdin.take().expect("piped stdin");
+        let mut stdin = child.stdin.take().expect("piped stdin");
         let stdout = child.stdout.take().expect("piped stdout");
+        let (requests, lines) = mpsc::channel::<Vec<u8>>();
+        std::thread::spawn(move || {
+            for line in lines {
+                if stdin.write_all(&line).and_then(|()| stdin.flush()).is_err() {
+                    break;
+                }
+            }
+        });
         let (tx, answers) = mpsc::channel();
         std::thread::spawn(move || {
             let mut reader = BufReader::new(stdout);
@@ -176,19 +187,16 @@ impl RawChild {
         });
         RawChild {
             child,
-            stdin: Some(stdin),
+            requests: Some(requests),
             answers,
         }
     }
 
-    /// Write `bytes` and a line feed.
+    /// Write `bytes` and a line feed. A write that fails or never ends shows
+    /// as an answer that does not come.
     fn send(&mut self, bytes: &[u8]) {
-        let stdin = self.stdin.as_mut().expect("a live child");
-        stdin
-            .write_all(bytes)
-            .and_then(|()| stdin.write_all(b"\n"))
-            .and_then(|()| stdin.flush())
-            .expect("write to the oracle");
+        let requests = self.requests.as_ref().expect("a live child");
+        let _ = requests.send([bytes, b"\n"].concat());
     }
 
     /// The next answer line.
@@ -210,7 +218,7 @@ impl Drop for RawChild {
     /// Close the child's input and let it exit ([`EXIT_GRACE`]), killing it
     /// only if it does not.
     fn drop(&mut self) {
-        drop(self.stdin.take());
+        drop(self.requests.take());
         let deadline = Instant::now() + EXIT_GRACE;
         while Instant::now() < deadline {
             if !matches!(self.child.try_wait(), Ok(None)) {
@@ -577,8 +585,10 @@ const LIB_FS_REWRITTEN: &[u8] =
 const LIB_FS_RESIZED: &[u8] =
     b"module Lib\nlet longer = A.a + 1\nlet t = typeof<System.CommandLine.RootCommand>\n";
 /// A script whose `#r` names `Hostile.dll` beside it, which
-/// [`Case::ScriptReferenceState`] puts in each state.
-const SCRIPT_REFERENCING: &[u8] = b"#r \"Hostile.dll\"\nlet z = 1\n";
+/// [`Case::ScriptReferenceState`] puts in each state, and which uses a type
+/// of the assembly, so that an answer shows whether FCS read it.
+const SCRIPT_REFERENCING: &[u8] =
+    b"#r \"Hostile.dll\"\nlet t = typeof<System.CommandLine.RootCommand>\n";
 /// A source beside a hostile name's twin.
 const TWIN_FS: &[u8] = b"module Twin\nlet z = 0\n";
 /// What follows each source mutation: a declaration FCS reports an error in.
@@ -588,6 +598,9 @@ const TWIN_FS: &[u8] = b"module Twin\nlet z = 0\n";
 const SENTINEL: &[u8] = b"\nmodule HostileSentinel =\n    let sentinel : int = \"\"\n";
 /// The declaration in [`SENTINEL`] FCS reports its error (FS0001) on.
 const SENTINEL_LINE: &[u8] = b"let sentinel : int";
+
+/// The name of the assembly the project references.
+const REFERENCE_ASSEMBLY_NAME: &str = "System.CommandLine";
 
 /// The assembly the project references: `System.CommandLine`, which no
 /// framework reference holds, from the SDK's own directory.
@@ -1113,7 +1126,7 @@ fn strings_of(request: &str, field: &str) -> Vec<String> {
 /// reference: the path read against the working directory
 /// (the children inherit this process's) unless it is rooted, each run of
 /// separators one separator, each `.` segment gone, and each `..` segment
-/// gone with the segment before it.
+/// gone with the segment before it. A separator that ends the path stays.
 fn full_path(path: &str) -> String {
     let rooted = if path.starts_with('/') {
         path.to_owned()
@@ -1131,7 +1144,11 @@ fn full_path(path: &str) -> String {
             other => segments.push(other),
         }
     }
-    format!("/{}", segments.join("/"))
+    let mut full = format!("/{}", segments.join("/"));
+    if rooted.ends_with('/') && !segments.is_empty() {
+        full.push('/');
+    }
+    full
 }
 
 /// Hold a successful answer to `request` to what the files hold: one record
@@ -1167,14 +1184,24 @@ fn check_records(answer: &Value, request: &str, texts: &[Option<Vec<u8>>]) -> Re
             ));
         }
         let last = last_line(text);
-        let uses = file["Uses"].as_array().cloned().unwrap_or_default();
-        let diagnostics = file["Diagnostics"].as_array().cloned().unwrap_or_default();
+        let (Some(uses), Some(diagnostics)) =
+            (file["Uses"].as_array(), file["Diagnostics"].as_array())
+        else {
+            return Err(format!(
+                "source {i}'s record holds no Uses or no Diagnostics: {file}"
+            ));
+        };
         for range in uses
             .iter()
             .chain(diagnostics.iter())
             .filter_map(|r| r.get("Range"))
             .filter(|r| !r.is_null())
         {
+            if range["File"].as_str() != Some(named.as_str()) {
+                return Err(format!(
+                    "source {i} is {named}, and its record holds a range in another file: {range}"
+                ));
+            }
             let line = range["Start"]["Line"].as_u64().unwrap_or(0) as usize;
             if line > last {
                 return Err(format!(
@@ -1304,35 +1331,50 @@ fn run_case(residents: &mut Residents, case: Case) -> Result<Verdict, String> {
             Change::SameStampReplace | Change::SameStampRewrite | Change::SameStampResize
         ) | Case::ReferenceSpelling(_)
     );
-    let precondition_refusal = world
-        .prime
-        .as_deref()
-        .filter(|_| rewrites_reference)
-        .and_then(|prime| {
-            let full = |request: &str| -> Vec<String> {
-                strings_of(request, "refs")
-                    .iter()
-                    .map(|reference| full_path(reference))
-                    .collect()
-            };
-            let primed = full(prime);
-            full(&world.request)
-                .into_iter()
-                .find(|reference| primed.contains(reference))
-        })
-        .map(|reference| {
-            format!("reference {reference} holds other bytes than when this oracle last read it")
-        });
-    let refused_by_precondition = match (&precondition_refusal, refusal(&resident_answer)) {
-        (Some(expected), Some(why)) => why.starts_with(expected.as_str()),
-        _ => false,
-    };
-    if resident_answer != fresh && !refused_by_precondition {
-        return Err(format!(
-            "the resident child answered\n    {}\n  and a fresh child\n    {}",
-            resident_answer.trim_end(),
-            fresh.trim_end()
-        ));
+    // A reference the request spells as an absolute path (any other is
+    // refused before it is read) with the full path of one the first request
+    // named.
+    let named_before = world.prime.as_deref().and_then(|prime| {
+        let primed: Vec<String> = strings_of(prime, "refs")
+            .iter()
+            .map(|reference| full_path(reference))
+            .collect();
+        strings_of(&world.request, "refs")
+            .iter()
+            .filter(|reference| reference.starts_with('/'))
+            .map(|reference| full_path(reference))
+            .find(|reference| primed.contains(reference))
+    });
+    let precondition_refusal =
+        named_before
+            .as_deref()
+            .filter(|_| rewrites_reference)
+            .map(|reference| {
+                format!(
+                    "reference {reference} holds other bytes than when this oracle last read it"
+                )
+            });
+    match &precondition_refusal {
+        // The precondition promises the refusal, whatever FCS would have
+        // answered from the new bytes.
+        Some(expected) => {
+            if !refusal(&resident_answer).is_some_and(|why| why.starts_with(expected.as_str())) {
+                return Err(format!(
+                    "the reference was rewritten under a path the resident child had read, which \
+                     it must refuse ({expected}), and it answered\n    {}",
+                    resident_answer.trim_end()
+                ));
+            }
+        }
+        None => {
+            if resident_answer != fresh {
+                return Err(format!(
+                    "the resident child answered\n    {}\n  and a fresh child\n    {}",
+                    resident_answer.trim_end(),
+                    fresh.trim_end()
+                ));
+            }
+        }
     }
     // The fresh child's answer is held to the files below either way; the
     // outcome is the resident child's, which is the one the suites ask.
@@ -1356,16 +1398,40 @@ fn run_case(residents: &mut Residents, case: Case) -> Result<Verdict, String> {
         },
         _ => false,
     };
+    // A script whose `#r` names a file FCS can read must be answered, from
+    // that file.
+    let reads_its_reference = matches!(
+        case,
+        Case::ScriptReferenceState(
+            State::Regular | State::Symlink | State::SymlinkOutOfTree | State::ReadOnly
+        )
+    );
     // What must be refused: a reference that is no readable assembly or is
-    // not spelt as an absolute path, a file gone, and a script that names
-    // code the check does not read (an active `#r` or `#load`: one under
-    // `#if` is in no branch the build reads).
+    // not spelt as an absolute path, a file gone, a source holding a line
+    // directive (which moves what the check reports out of the text), and a
+    // script that names code the check does not read (an active `#r` or
+    // `#load`: one under `#if` is in no branch the build reads).
     let must_refuse = match case {
         Case::ReferenceState(s) => !matches!(
             s,
             State::Regular | State::Symlink | State::SymlinkOutOfTree | State::ReadOnly
         ),
-        Case::ReferenceSpelling(e) => e.dimension == Dimension::Relative,
+        // A spelling of the reference that is not an absolute path, or that
+        // names no assembly: neither the file to the file system nor, once
+        // the oracle has made a full path of it, the path the first request
+        // named. What is at a path outside the fixture is the machine's to
+        // say.
+        Case::ReferenceSpelling(e) => {
+            e.dimension == Dimension::Relative
+                || (e.value.means != spelling::Means::Outside
+                    && !names_the_file
+                    && named_before.is_none())
+        }
+        Case::SourceMutation(e) | Case::ScriptMutation(e)
+            if e.dimension == Dimension::LineDirective =>
+        {
+            true
+        }
         Case::SourceChange(Change::Disappears) | Case::ReferenceChange(Change::Disappears) => true,
         // A script's `#r` of a file an open would wait on or read without end:
         // FCS checks the script as fsc would only if it opens the file, which
@@ -1385,17 +1451,37 @@ fn run_case(residents: &mut Residents, case: Case) -> Result<Verdict, String> {
         return Err(format!("answered what it must refuse: {fresh}"));
     }
     if let Some(why) = refusal(&fresh) {
-        if names_the_file {
+        if names_the_file || reads_its_reference {
             return Err(format!(
-                "refused a project whose files are all there: {why}"
+                "refused a request whose files are all there: {why}"
             ));
         }
         return Ok(Verdict::Reached(outcome("refused")));
     }
+    let value: Value = serde_json::from_str(&fresh).expect("an answer is JSON");
+    // An answer holds what its op's answers hold: an object that holds
+    // neither is no agreement between the two children.
+    let holds = |field: &str| -> Result<&Vec<Value>, String> {
+        value[field]
+            .as_array()
+            .ok_or_else(|| format!("an answer holds {field}: {fresh}"))
+    };
     if op == "file-batch" {
+        let uses = holds("Uses")?;
+        if reads_its_reference
+            && !uses
+                .iter()
+                .any(|u| u["Assembly"] == REFERENCE_ASSEMBLY_NAME)
+        {
+            return Err(format!(
+                "the script uses a type of the assembly its `#r` names, and the answer holds no \
+                 use from {REFERENCE_ASSEMBLY_NAME}: {fresh}"
+            ));
+        }
         return Ok(Verdict::Reached(outcome("answered")));
     }
-    let value: Value = serde_json::from_str(&fresh).expect("an answer is JSON");
+    holds("Files")?;
+    holds("Diagnostics")?;
     // A source spelling that leaves the fixture names a file of the
     // machine's, if any: what it holds is not the fixture's to say, and the
     // two children agreeing is all such an answer is held to.
