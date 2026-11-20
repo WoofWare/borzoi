@@ -740,8 +740,8 @@ fn receiver_named(cell: Cell) -> [bool; 5] {
     [!opaque, !opaque, true, true, !opaque]
 }
 
-/// The kinds whose declaration FCS binds a call to in some cell with no
-/// assembly-side open, and the open shapes it binds an extension through with
+/// The kinds whose declaration FCS binds a call to in some cell of the
+/// project's own with no assembly-side open, and the open shapes it binds an extension through with
 /// no project source. Pinned both ways: a cell that stops discriminating makes
 /// the soundness property vacuous for that kind, and one that starts names a
 /// kind the design must decline.
@@ -1149,7 +1149,10 @@ fn extension_scope_grid() {
             if cell.placement.referenced() && !binds_referenced.contains(&k) {
                 binds_referenced.push(k.clone());
             }
-            if cell.open == OpenShape::None && !binds_kinds.contains(&k) {
+            if cell.open == OpenShape::None
+                && !cell.placement.referenced()
+                && !binds_kinds.contains(&k)
+            {
                 binds_kinds.push(k);
             }
             let s = format!("{:?}", cell.open);

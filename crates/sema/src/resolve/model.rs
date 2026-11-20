@@ -4785,7 +4785,7 @@ impl ResolvedFile {
     /// [`Self::attribute_resolutions`] key), whose last identifier is
     /// `written`, may denote a type `is_target` picks out. An entity of a
     /// project reference read from source may (the resolver does not index
-    /// those: [`AssemblyEnv::source_reference_may_denote`]); otherwise:
+    /// those, and `AssemblyEnv::source_reference_may_denote` asks their rows); otherwise:
     ///
     /// - a [`Resolution::Deferred`] verdict may be anything;
     /// - a committed [`Resolution::Entity`] is the target exactly when
