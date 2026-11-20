@@ -99,7 +99,7 @@ const BASE: &[StaticTemplate] = &[
         label: "optional_augmentation",
         files: &[(
             "Lib.fs",
-            "module G\n{A}\ntype System.String with\n    member s.M() = 1\n",
+            "module G\n{A}\ntype System.Collections.Generic.List<'T> with\n    member s.M() = 1\n",
         )],
     },
     StaticTemplate {
@@ -218,7 +218,7 @@ const MEMBER_CONTEXTS: &[(&str, &str, &str, Option<&str>)] = &[
     ("class", "module G\ntype T() =\n", "    ", Some("T()")),
     (
         "optional_augmentation",
-        "module G\ntype System.String with\n",
+        "module G\ntype System.Collections.Generic.List<'T> with\n",
         "    ",
         Some("\"\""),
     ),
@@ -359,11 +359,11 @@ fn templates() -> Vec<Template> {
             files: vec![
                 (
                     "Lib.fsi".to_owned(),
-                    format!("module G\ntype System.String with\n    {{A}}\n    member S: {ty}\n"),
+                    format!("module G\ntype System.Collections.Generic.List<'T> with\n    {{A}}\n    member S: {ty}\n"),
                 ),
                 (
                     "Lib.fs".to_owned(),
-                    "module G\ntype System.String with\n    member s.S = 1\n".to_owned(),
+                    "module G\ntype System.Collections.Generic.List<'T> with\n    member s.S = 1\n".to_owned(),
                 ),
             ],
         });

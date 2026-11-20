@@ -69,7 +69,14 @@ each row's verdict, so the predicate and the table cannot drift apart. A
 clean producer's resolver fold is held to the walk too: every module and
 placed type `resolve_project_files` exports is one of its entities
 (`test_support::fold_entity_paths`). Every channel it reads is a `Channel` with a `Treatment`, and
-`the_inventory_is_what_the_walk_does` runs a witness of each. The harness
+`the_inventory_is_what_the_walk_does` runs a witness of each. The only
+positions the walk reads are the lines a marked class `let`'s head spans
+(`head_lines`): FCS mangles a taken name by its binder's line, and the walk
+emits every line of the head rather than model which token FCS takes the
+range from. `source_existence_layout` holds that to FCS with a line break
+before every token and a comment line before every line of each grid cell
+that reads a position, and the generator mixes the same layout trivia into
+random cases. The harness
 grades a hand-written grid (`source_existence_grid.rs`), generated projects
 (`source_existence_gen.rs`, `deep_` for more seeds), and the
 attribute-placement grid (`source_existence_placement.rs`: every

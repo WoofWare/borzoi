@@ -40,6 +40,7 @@ use borzoi_assembly::existence::{
 use borzoi_assembly::{Ecma335Assembly, EcmaView};
 use borzoi_cst::parser::{FileKind, ParseOptions, parse_with_options};
 use borzoi_cst::syntax::{AstNode, ImplFile, SigFile};
+use borzoi_oracle_harness::assembly_entities::{ExtensionStyle, FcsExtensionMember};
 use borzoi_oracle_harness::manifest::Manifest;
 use borzoi_oracle_harness::project_graph::{
     CompileResponse, FixtureFile, FixtureProject, PlainName, ProjectGraphFixture,
@@ -209,6 +210,40 @@ const PRODUCER: &str = "SourceExistenceProducer";
 
 /// Ask FCS about `cell`: its in-memory signature, and (D1 in rows) that the
 /// DLL FCS compiles reads the same.
+/// FCS's own view of a producer's extension members as rows: a lower bound
+/// on the rows its signature holds, for a signature the decoder cannot read.
+/// Each row names only what FCS reports (its logical and compiled name), and
+/// a C#-style accessor is left out, since FCS's view lists every accessor of
+/// a property one of whose accessors is marked and the signature marks only
+/// that one.
+fn view_extension_rows(members: &[FcsExtensionMember]) -> Vec<ExtensionRow> {
+    members
+        .iter()
+        .filter(|m| {
+            m.style != ExtensionStyle::Csharp
+                || !["get_", "set_"]
+                    .iter()
+                    .any(|p| m.logical_name.starts_with(p))
+        })
+        .map(|m| {
+            let mut names = vec![m.logical_name.clone(), m.compiled_name.clone()];
+            names.sort();
+            names.dedup();
+            ExtensionRow {
+                layer: IndexLayer::Pickle,
+                namespace: if m.namespace.is_empty() {
+                    Vec::new()
+                } else {
+                    m.namespace.split('.').map(str::to_owned).collect()
+                },
+                enclosing: m.enclosing.clone(),
+                names,
+                instance: Some(m.is_instance),
+            }
+        })
+        .collect()
+}
+
 pub fn fcs(cell: &Cell) -> Fcs {
     let mut projects: Vec<FixtureProject> = cell
         .refs
@@ -301,8 +336,10 @@ pub fn fcs(cell: &Cell) -> Fcs {
     //
     // A producer whose check fails may still be imported, with a recovered
     // signature `unpickle_signature` need not read (no compiler writes one
-    // to a DLL). Its entities are then graded by FCS's own view of them, and
-    // its extension rows not at all. So are those of a clean producer whose
+    // to a DLL). Its entities and extension rows are then graded by FCS's
+    // own view of them: the extension rows only as a lower bound
+    // ([`view_extension_rows`]), so its surplus counts against less than the
+    // signature holds. So are those of a clean producer whose
     // signature the decoder cannot read, provided the DLL FCS compiles fails
     // it identically (a decoder gap, #1081, not an in-memory layout).
     let mut undecodable = false;
@@ -320,7 +357,10 @@ pub fn fcs(cell: &Cell) -> Fcs {
                         decode_error = Some(e);
                     }
                     undecodable = true;
-                    (response.entities.iter().map(fcs_row).collect(), Vec::new())
+                    (
+                        response.entities.iter().map(fcs_row).collect(),
+                        view_extension_rows(&response.extension_members),
+                    )
                 }
             }
         }

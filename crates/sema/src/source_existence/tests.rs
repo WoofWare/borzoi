@@ -40,14 +40,14 @@ fn read(files: &[(&str, &str)]) -> SourceExistence {
 fn bare_member_heads_are_named() {
     for src in [
         "module M\nexception internal Item of string\n",
-        "module M\ntype System.String with\n    member x.Item with get () = 1 and set (v: int) = ()\n",
-        "module M\ntype System.String with\n    member x.ToString = 1\n",
+        "module M\ntype System.Collections.Generic.List<'T> with\n    member x.Item with get () = 1 and set (v: int) = ()\n",
+        "module M\ntype System.Collections.Generic.List<'T> with\n    member x.ToString = 1\n",
         "module M\nmodule internal ``member`` =\n    let x = 1\n",
         "exception internal Item of string\nmodule X =\n    let y = 1\n",
         "module M\ntype public ``member`` = delegate of int -> int\n",
-        "module M\ntype System.String with\n    static member ``odd member`` = 2\n",
-        "module M\ntype System.String with\n    member x.``odd member``() = 1\n",
-        "module M\ntype System.Int32 with\n    static member ``odd member``() = 1\n",
+        "module M\ntype System.Collections.Generic.List<'T> with\n    static member ``odd member`` = 2\n",
+        "module M\ntype System.Collections.Generic.List<'T> with\n    member x.``odd member``() = 1\n",
+        "module M\ntype System.Collections.Generic.HashSet<'T> with\n    static member ``odd member``() = 1\n",
     ] {
         let r = read(&[("A.fs", src)]);
         assert!(matches!(r, SourceExistence::Read(_)), "{src}: {r:?}");
@@ -318,9 +318,13 @@ fn witness(channel: Channel) -> Observed {
         ),
         Channel::AttributeTarget => observe(
             one(
-                "module M\ntype System.String with\n    [<return: CompiledName(\"Q\")>]\n    member s.Orig() = 1\n",
+                "module M\ntype System.Collections.Generic.List<'T> with\n    [<return: CompiledName(\"Q\")>]\n    member s.Orig() = 1\n",
             ),
-            |r| extension_names(r) == vec![vec!["Orig".to_owned(), "String.Orig".to_owned()]],
+            |r| {
+                let names = extension_names(r);
+                names.contains(&vec!["List`1.Orig".to_owned(), "Orig".to_owned()])
+                    && !names.iter().flatten().any(|n| n == "Q")
+            },
         ),
         Channel::UnreadableCompiledName => observe(
             one("namespace N\n[<CompiledName(Some.Constant)>]\ntype T() = class end\n"),
@@ -351,13 +355,15 @@ fn witness(channel: Channel) -> Observed {
             |_| true,
         ),
         Channel::OptionalExtensionMember => observe(
-            one("module M\ntype System.String with\n    member s.Shout = s\n"),
+            one(
+                "module M\ntype System.Collections.Generic.List<'T> with\n    member s.Shout = s\n",
+            ),
             |r| {
-                extension_names(r).contains(&vec![
-                    "Shout".to_owned(),
-                    "String.get_Shout".to_owned(),
-                    "get_Shout".to_owned(),
-                ])
+                extension_names(r).iter().any(|names| {
+                    let mut names = names.clone();
+                    names.sort();
+                    names == ["List`1.get_Shout", "Shout", "get_Shout"]
+                })
             },
         ),
         Channel::IntrinsicAugmentation => observe(
@@ -366,7 +372,7 @@ fn witness(channel: Channel) -> Observed {
         ),
         Channel::AugmentationKind => observe(
             one(
-                "module M\ntype T =\n    inherit System.Object\n    abstract M: int\ntype T with\n    member t.N = 1\n",
+                "module M\ntype T<'a> =\n    inherit System.Object\n    abstract M: int\ntype T<'a> with\n    member t.N = 1\n",
             ),
             |_| true,
         ),
@@ -412,7 +418,7 @@ fn witness(channel: Channel) -> Observed {
             observe(read(&[("Lib.fs", &src)]), |_| true)
         }
         Channel::RejectedShape => observe(
-            one("module M\ntype System.String with\n    abstract M: int\n"),
+            one("module M\ntype System.Collections.Generic.List<'T> with\n    abstract M: int\n"),
             |_| true,
         ),
         // The second `f` takes `f@7`: the walk emits every name it may.
@@ -682,6 +688,69 @@ fn repeated_readings_are_charged_by_the_declarations_they_visit() {
     assert!(
         matches!(r, SourceExistence::Unread(ExistenceUnread::TooManyReadings)),
         "{r:?}"
+    );
+}
+
+/// Each row repeats every name enclosing it, so long names under nested
+/// modules whose names end in `Module` copy far more bytes than they have
+/// rows: the walk charges the bytes and declines, where the same shape with
+/// short names is read.
+#[test]
+fn copied_path_bytes_are_charged_apart_from_rows() {
+    let shape = |pad: usize| {
+        let mut src = String::from("namespace N\n");
+        for depth in 0..12 {
+            src.push_str(&format!(
+                "{}module M{depth}{}Module =\n",
+                "    ".repeat(depth),
+                "x".repeat(pad)
+            ));
+        }
+        src.push_str(&format!("{}type T = int\n", "    ".repeat(12)));
+        src
+    };
+    let short = shape(1);
+    assert!(
+        matches!(read(&[("Lib.fs", &short)]), SourceExistence::Read(_)),
+        "the shape is within the row and visit budgets"
+    );
+    let long = shape(1000);
+    let r = read(&[("Lib.fs", &long)]);
+    assert!(
+        matches!(r, SourceExistence::Unread(ExistenceUnread::TooManyReadings)),
+        "{r:?}"
+    );
+}
+
+/// A marked class `let`'s mangled names are every line its head spans, by
+/// every binder count, and no more: a head on one line names one line, and
+/// a head broken across two names both.
+#[test]
+fn class_let_names_are_the_head_span_and_no_more() {
+    let names = |head: &str| -> BTreeSet<String> {
+        let src = format!(
+            "module S\nopen System.Runtime.CompilerServices\ntype T() =\n    [<Extension>]\n    static let {head} = x\n    member _.G = f 1\n"
+        );
+        let r = read(&[("Lib.fs", &src)]);
+        assert!(matches!(r, SourceExistence::Read(_)), "{head}: {r:?}");
+        extension_names(&r)
+            .into_iter()
+            .flatten()
+            .filter(|n| n.starts_with("f@"))
+            .collect()
+    };
+    let set = |xs: &[&str]| xs.iter().map(|s| (*s).to_owned()).collect::<BTreeSet<_>>();
+    // The binder bound counts every identifier of the head (`f`, `x`,
+    // `int`) and the binding's matched value.
+    assert_eq!(
+        names("f (x: int)"),
+        set(&["f@5", "f@5-1", "f@5-2", "f@5-3"])
+    );
+    assert_eq!(
+        names("f\n        (x: int)"),
+        set(&[
+            "f@5", "f@5-1", "f@5-2", "f@5-3", "f@6", "f@6-1", "f@6-2", "f@6-3"
+        ])
     );
 }
 

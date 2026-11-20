@@ -412,6 +412,31 @@ pub const LEAF_FORMS: &[LeafForm] = &[
         form: "qualified",
         source: "module D\ntype System.String with\n    member s.M() = 1\n",
         providers: ProviderReferences::None,
+        // No written parameters: the head does not bound the arity in the
+        // extension's compiled names.
+        verdict: Verdict::Declined,
+    },
+    LeafForm {
+        leaf: Leaf::AugmentationHead,
+        form: "arity_less_generic",
+        source: "module D\ntype list with\n    member xs.M() = 1\n",
+        providers: ProviderReferences::None,
+        verdict: Verdict::Declined,
+    },
+    LeafForm {
+        leaf: Leaf::AugmentationHead,
+        form: "qualified_generic",
+        source: "module D\ntype System.Collections.Generic.List<'T> with\n    member l.M() = 1\n",
+        providers: ProviderReferences::None,
+        verdict: Verdict::Read,
+    },
+    // Fewer parameters than the type has: FCS rejects it, and the domain
+    // grid shows whether its recovery keeps the written arity.
+    LeafForm {
+        leaf: Leaf::AugmentationHead,
+        form: "under_written_arity",
+        source: "module D\ntype System.Collections.Generic.Dictionary<'K> with\n    member d.M() = 1\n",
+        providers: ProviderReferences::None,
         verdict: Verdict::Read,
     },
     LeafForm {
@@ -431,7 +456,7 @@ pub const LEAF_FORMS: &[LeafForm] = &[
     LeafForm {
         leaf: Leaf::AugmentationHead,
         form: "module_alias",
-        source: "module rec D\nmodule Alias = D\ntype T() =\n    member _.X = 1\ntype Alias.T with\n    [<System.Runtime.CompilerServices.Extension>]\n    static member E(s: string) = s\n",
+        source: "module rec D\nmodule Alias = D\ntype T<'a>() =\n    member _.X = 1\ntype Alias.T<'a> with\n    [<System.Runtime.CompilerServices.Extension>]\n    static member E(s: string) = s\n",
         providers: ProviderReferences::None,
         verdict: Verdict::Read,
     },
@@ -774,6 +799,12 @@ pub enum Treatment {
 /// before it declines ([`ExistenceUnread::TooManyReadings`]).
 pub const MAX_ROWS: usize = 200_000;
 
+/// The most bytes of names the walk's rows copy, every row's path included,
+/// before it declines ([`ExistenceUnread::TooManyReadings`]). Each row
+/// repeats every name enclosing it, so [`MAX_ROWS`] alone does not bound
+/// them: long names under deep nesting multiply.
+pub const MAX_ROW_BYTES: usize = 64 << 20;
+
 /// A's existence surface, read from its source. See the module docs.
 pub fn source_existence(producer: Producer<'_>) -> SourceExistence {
     match producer {
@@ -904,6 +935,9 @@ struct Out {
     auto_opens: Vec<String>,
     approximations: BTreeSet<Approximation>,
     lender_sources: Vec<LenderSource>,
+    /// The bytes of names the rows so far copy, paths included
+    /// ([`MAX_ROW_BYTES`]).
+    bytes: usize,
 }
 
 /// Whether something holds: yes, no, or not known.
@@ -1219,6 +1253,26 @@ impl FileWalk<'_> {
         }
     }
 
+    /// Charge `rows` rows at `scope`, each copying its path and `names`
+    /// bytes of its own, before they are made.
+    fn charge(&mut self, scope: &Scope, rows: usize, names: usize) -> Result<(), ExistenceUnread> {
+        let path: usize = scope
+            .namespace
+            .iter()
+            .chain(&scope.enclosing)
+            .map(String::len)
+            .sum();
+        self.out.bytes = self
+            .out
+            .bytes
+            .saturating_add(rows.saturating_mul(path.saturating_add(names)));
+        if self.out.bytes > MAX_ROW_BYTES {
+            Err(ExistenceUnread::TooManyReadings)
+        } else {
+            Ok(())
+        }
+    }
+
     /// Charge one declaration visit: each reading of a module whose name
     /// ends in `Module` walks its contents again, rows or none, so the work
     /// is bounded apart from the rows.
@@ -1237,6 +1291,10 @@ impl FileWalk<'_> {
         if self.out.namespaces.len() + ns.len() * (ns.len() + 1) / 2 > MAX_ROWS {
             return Err(ExistenceUnread::TooManyReadings);
         }
+        let prefixes: usize = (1..=ns.len())
+            .map(|k| ns[..k].iter().map(String::len).sum::<usize>())
+            .sum();
+        self.charge(&Scope::root(Vec::new()), 1, prefixes)?;
         for k in 1..=ns.len() {
             self.out.namespaces.insert(ns[..k].to_vec());
         }
@@ -1617,12 +1675,15 @@ impl FileWalk<'_> {
             if self.paired {
                 approximations.insert(Approximation::SignaturePair);
             }
+            self.charge(scope, 1, 0)?;
             self.out.lender_sources.push(LenderSource {
                 namespace: scope.namespace.clone(),
                 enclosing: scope.enclosing.clone(),
                 approximations,
             });
         }
+        let names = logical.len() + compiled.iter().map(String::len).max().unwrap_or(0);
+        self.charge(scope, kinds.len() * compiled.len(), names)?;
         for &kind in kinds {
             for c in &compiled {
                 self.out.entities.push(PickledEntityRow {
@@ -1790,7 +1851,10 @@ impl FileWalk<'_> {
     /// identifier, `let` binder, a pattern's matched value) takes at most
     /// one fresh name, so their count bounds `k`; and a `let` that is a
     /// value has no val. The walk emits every one of those names for every
-    /// marked `let`, whatever its arity.
+    /// marked `let`, whatever its arity, and for every line its head spans
+    /// ([`head_lines`]) rather than the binder's alone: which token FCS
+    /// takes the binder's range from is a parser rule the walk need not
+    /// model, and no query names a mangled name but a backticked one.
     fn class_lets(
         &mut self,
         inner: &Scope,
@@ -1855,32 +1919,8 @@ impl FileWalk<'_> {
             let Some(pat) = b.pat() else {
                 return Err(ExistenceUnread::UnnamedDeclaration(self.index));
             };
-            let named: Vec<(String, TextSize)> = match binding_name(&pat) {
-                Some(name) => {
-                    // The binder's line is its name's: an active pattern's
-                    // `(|A|_|)`, else the identifier.
-                    let active = pat
-                        .syntax()
-                        .descendants()
-                        .find_map(borzoi_cst::syntax::ActivePatName::cast)
-                        .and_then(|ap| {
-                            // Its first token, past any trivia it holds.
-                            ap.syntax()
-                                .descendants_with_tokens()
-                                .filter_map(|el| el.into_token())
-                                .find(|t| !t.kind().is_trivia())
-                                .map(|t| t.fcs_range().start())
-                        });
-                    let at = active
-                        .or_else(|| {
-                            pattern_idents(&pat)
-                                .into_iter()
-                                .find(|(n, _)| *n == name)
-                                .map(|(_, at)| at)
-                        })
-                        .ok_or(ExistenceUnread::UnnamedDeclaration(self.index))?;
-                    vec![(name, at)]
-                }
+            let named: Vec<String> = match binding_name(&pat) {
+                Some(name) => vec![name],
                 None => {
                     if !certified_pattern(&pat) {
                         return Err(ExistenceUnread::OutsideDomain(
@@ -1898,24 +1938,36 @@ impl FileWalk<'_> {
                 return Err(ExistenceUnread::UnnamedDeclaration(self.index));
             }
             self.out.approximations.insert(Approximation::ClassLetName);
-            // Each name is a row per compiled name: charged before expanding.
-            let rows = named.len() * (binders + 1) * (marks.compiled_names.len() + 1);
+            // FCS mangles a taken name by its binder's line, which some token
+            // of the head holds: so every line the head spans, from its
+            // node's first byte (any trivia it holds included) to its last
+            // token's end. No query names a mangled name but a backticked
+            // one, so the span's surplus costs nothing a consumer reads.
+            let span =
+                head_lines(&pat, &lines).ok_or(ExistenceUnread::UnnamedDeclaration(self.index))?;
+            // Each name is a row per line, binder and compiled name: charged
+            // before expanding.
+            let rows = named.len()
+                * span.clone().count()
+                * (binders + 1)
+                * (marks.compiled_names.len() + 1);
             if self.out.entities.len() + self.out.extensions.len() + rows > MAX_ROWS {
                 return Err(ExistenceUnread::TooManyReadings);
             }
-            for (name, at) in named {
-                let line = lines.line(at);
+            for name in named {
                 let basic = match name.find('@') {
                     None | Some(0) => name.as_str(),
                     Some(n) => &name[..n],
                 };
                 let mut taken = vec![name.clone()];
-                for k in 0..binders {
-                    taken.push(if k == 0 {
-                        format!("{basic}@{line}")
-                    } else {
-                        format!("{basic}@{line}-{k}")
-                    });
+                for line in span.clone() {
+                    for k in 0..binders {
+                        taken.push(if k == 0 {
+                            format!("{basic}@{line}")
+                        } else {
+                            format!("{basic}@{line}-{k}")
+                        });
+                    }
                 }
                 for n in taken {
                     self.csharp_row(inner, &n, &marks)?;
@@ -2099,6 +2151,9 @@ impl FileWalk<'_> {
                             self.uncertain_renames(&marks);
                             compiled.extend(marks.compiled_names.iter().cloned());
                         }
+                        let names = 2 * v.logical.len()
+                            + compiled.iter().map(String::len).max().unwrap_or(0);
+                        self.charge(scope, compiled.len(), names)?;
                         for c in compiled {
                             self.out.extensions.push(ExtensionRow {
                                 layer: IndexLayer::Pickle,
@@ -2109,7 +2164,7 @@ impl FileWalk<'_> {
                             });
                         }
                     }
-                    None => self.csharp_val(scope, &v, &marks, renames),
+                    None => self.csharp_val(scope, &v, &marks, renames)?,
                 }
             }
         }
@@ -2119,12 +2174,26 @@ impl FileWalk<'_> {
     /// A C#-style extension row for a member val `v` of a type: one per
     /// compiled name it may have. `renames`: whether a `[<CompiledName>]`
     /// renames it (a method; never a property's or an event's accessor).
-    fn csharp_val(&mut self, scope: &Scope, v: &MemberVal, marks: &Marks, renames: bool) {
+    fn csharp_val(
+        &mut self,
+        scope: &Scope,
+        v: &MemberVal,
+        marks: &Marks,
+        renames: bool,
+    ) -> Result<(), ExistenceUnread> {
         let mut compiled: Vec<Option<&String>> = vec![None];
         if renames {
             self.uncertain_renames(marks);
             compiled.extend(marks.compiled_names.iter().map(Some));
         }
+        let names = 2 * v.logical.len()
+            + marks
+                .compiled_names
+                .iter()
+                .map(String::len)
+                .max()
+                .unwrap_or(0);
+        self.charge(scope, compiled.len(), names)?;
         for c in compiled {
             self.out.extensions.push(ExtensionRow {
                 layer: IndexLayer::Pickle,
@@ -2134,6 +2203,7 @@ impl FileWalk<'_> {
                 instance: None,
             });
         }
+        Ok(())
     }
 
     /// Name the surplus of a compiled name an attribute only may give.
@@ -2166,8 +2236,7 @@ impl FileWalk<'_> {
             is_static: true,
             own_lists: Vec::new(),
         };
-        self.csharp_val(scope, &v, marks, true);
-        Ok(())
+        self.csharp_val(scope, &v, marks, true)
     }
 
     /// A module `let` binding under `lists`: a C#-style row per bound value
@@ -2209,7 +2278,7 @@ impl FileWalk<'_> {
                 self.out
                     .approximations
                     .insert(Approximation::BindingPattern);
-                for (n, _) in names {
+                for n in names {
                     self.csharp_row(scope, &n, &marks)?;
                 }
                 Ok(())
@@ -2287,6 +2356,16 @@ impl FileWalk<'_> {
         } else {
             Maybe::No
         };
+        // An extension's compiled names carry the extended type's arity
+        // (``list`1.M``). A head that writes no parameters bounds it only
+        // for a type the walk knows: FCS rejects such a head on a generic
+        // type and imports the extension under the type's own arity.
+        if arity == 0 && intrinsic != Maybe::Yes {
+            return Err(ExistenceUnread::OutsideDomain(
+                self.index,
+                Leaf::AugmentationHead,
+            ));
+        }
         if intrinsic == Maybe::Possibly {
             self.out
                 .approximations
@@ -2531,16 +2610,30 @@ impl Lines {
     }
 }
 
-/// Every identifier in `pat`, with its offset: a superset of the binders of
-/// a certified pattern ([`certified_pattern`]), none of which holds an
-/// active pattern.
-fn pattern_idents(pat: &Pat) -> Vec<(String, TextSize)> {
+/// Every identifier in `pat`: a superset of the binders of a certified
+/// pattern ([`certified_pattern`]), none of which holds an active pattern.
+fn pattern_idents(pat: &Pat) -> Vec<String> {
     pat.syntax()
         .descendants_with_tokens()
         .filter_map(|el| el.into_token())
         .filter(|t| t.kind() == SyntaxKind::IDENT_TOK)
-        .map(|t| (id_text(&t).into_owned(), t.fcs_range().start()))
+        .map(|t| id_text(&t).into_owned())
         .collect()
+}
+
+/// Every line binding head `pat` spans: from its node's first byte, any
+/// trivia the node holds included, to the end of its last token. The only
+/// positions the walk reads.
+/// `None` for a head that holds no token, which names nothing.
+fn head_lines(pat: &Pat, lines: &Lines) -> Option<std::ops::RangeInclusive<u32>> {
+    let tokens = || {
+        pat.syntax()
+            .descendants_with_tokens()
+            .filter_map(|el| el.into_token())
+    };
+    let first = tokens().next()?.fcs_range().start();
+    let last = tokens().last()?.fcs_range().end();
+    Some(lines.line(first)..=lines.line(last))
 }
 
 /// Whether a binding's pattern, when it names no single value

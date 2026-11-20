@@ -150,7 +150,7 @@ pub fn cells() -> Vec<Cell> {
         // Attribute targets.
         one(
             "attribute_targets",
-            "namespace Targets\nopen System.Runtime.CompilerServices\n[<type: AutoOpen>]\ntype T() = static member M = 1\n[<type: CompiledName(\"Renamed\")>]\ntype U() = class end\ntype E =\n    [<return: Extension>]\n    static member R(s: string) = s\n    [<method: Extension>]\n    static member M(s: string) = s\nmodule Aug =\n    type System.String with\n        [<return: CompiledName(\"Q\")>]\n        member s.Orig() = 1\n",
+            "namespace Targets\nopen System.Runtime.CompilerServices\n[<type: AutoOpen>]\ntype T() = static member M = 1\n[<type: CompiledName(\"Renamed\")>]\ntype U() = class end\ntype E =\n    [<return: Extension>]\n    static member R(s: string) = s\n    [<method: Extension>]\n    static member M(s: string) = s\nmodule Aug =\n    type System.Collections.Generic.List<'T> with\n        [<return: CompiledName(\"Q\")>]\n        member s.Orig() = 1\n",
         ),
         one(
             "attribute_target_assembly_on_type",
@@ -167,7 +167,7 @@ pub fn cells() -> Vec<Cell> {
         ),
         one(
             "extension_cli_event",
-            "namespace ExtEvent\nmodule M =\n    let ev = Event<int>()\n    type System.String with\n        [<CLIEvent>]\n        member s.Something = ev.Publish\n",
+            "namespace ExtEvent\nmodule M =\n    let ev = Event<int>()\n    type System.Collections.Generic.List<'T> with\n        [<CLIEvent>]\n        member s.Something = ev.Publish\n",
         ),
         one(
             "extension_measure_arity",
@@ -353,7 +353,7 @@ pub fn cells() -> Vec<Cell> {
         ),
         one(
             "module_suffix_augmentation_only",
-            "module SuffixAug\ntype System.String with\n    member s.Len = s.Length\nmodule String =\n    let x = 1\n",
+            "module SuffixAug\ntype System.Collections.Generic.List<'T> with\n    member s.Len = s.Count\nmodule String =\n    let x = 1\n",
         ),
         // CompiledName.
         one(
@@ -416,7 +416,7 @@ pub fn cells() -> Vec<Cell> {
         // Extension members.
         one(
             "extension_forms",
-            "namespace Ext\nmodule Members =\n    type System.String with\n        member s.Method() = s.Length\n        member s.Prop = s.Length\n        member s.GetSet with get () = 1 and set (v: int) = ()\n        member s.OnlySet with set (v: int) = ()\n        static member Static() = 1\n        static member StaticProp = 1\n        static member (+++) (a: string, b: int) = a\n        member s.Item with get (i: int) = s.[i]\n        member s.Overload(x: int) = x\n        member s.Overload(x: string) = x\n",
+            "namespace Ext\nmodule Members =\n    type System.Collections.Generic.List<'T> with\n        member s.Method() = s.Count\n        member s.Prop = s.Count\n        member s.GetSet with get () = 1 and set (v: int) = ()\n        member s.OnlySet with set (v: int) = ()\n        static member Static() = 1\n        static member StaticProp = 1\n        static member (+++) (a: string, b: int) = a\n        member s.Item with get (i: int) = s.[i]\n        member s.Overload(x: int) = x\n        member s.Overload(x: string) = x\n",
         ),
         one(
             "extension_generic",
@@ -436,11 +436,11 @@ pub fn cells() -> Vec<Cell> {
         ),
         one(
             "extension_compiled_name",
-            "namespace ExtCn\nopen System.Runtime.CompilerServices\nmodule M =\n    type System.String with\n        [<CompiledName(\"Renamed\")>]\n        member s.Orig() = 1\n    [<Extension; CompiledName(\"renamedLet\")>]\n    let origLet (s: string) = s\n",
+            "namespace ExtCn\nopen System.Runtime.CompilerServices\nmodule M =\n    type System.Collections.Generic.List<'T> with\n        [<CompiledName(\"Renamed\")>]\n        member s.Orig() = 1\n    [<Extension; CompiledName(\"renamedLet\")>]\n    let origLet (s: string) = s\n",
         ),
         one(
             "extension_compiled_name_property",
-            "namespace ExtCnP\nopen System.Runtime.CompilerServices\ntype Holder =\n    [<Extension; CompiledName(\"RenamedProp\")>]\n    static member P(s: string) = 1\n    [<Extension; CompiledName(\"RenamedCsProp\")>]\n    static member Q = 1\nmodule M =\n    type System.String with\n        [<CompiledName(\"RenamedGetter\")>]\n        member s.Prop = 1\n        [<CompiledName(\"RenamedStatic\")>]\n        static member SProp with get () = 1 and set (v: int) = ()\n",
+            "namespace ExtCnP\nopen System.Runtime.CompilerServices\ntype Holder =\n    [<Extension; CompiledName(\"RenamedProp\")>]\n    static member P(s: string) = 1\n    [<Extension; CompiledName(\"RenamedCsProp\")>]\n    static member Q = 1\nmodule M =\n    type System.Collections.Generic.List<'T> with\n        [<CompiledName(\"RenamedGetter\")>]\n        member s.Prop = 1\n        [<CompiledName(\"RenamedStatic\")>]\n        static member SProp with get () = 1 and set (v: int) = ()\n",
         ),
         one(
             "extension_active_pattern",
@@ -482,7 +482,7 @@ pub fn cells() -> Vec<Cell> {
         ),
         one(
             "event_on_accessor_in_augmentation",
-            "module EvAcc\ntype System.String with\n    member x.Foo with [<CLIEvent>] get () = Event<int>().Publish\n",
+            "module EvAcc\ntype System.Collections.Generic.List<'T> with\n    member x.Foo with [<CLIEvent>] get () = Event<int>().Publish\n",
         ),
         Cell::new(
             "constrained_member_signature",
@@ -507,7 +507,7 @@ pub fn cells() -> Vec<Cell> {
         ),
         one(
             "augmentation_constructor",
-            "module AugCtor\ntype System.String with\n    new(x: string) = \"\"\n",
+            "module AugCtor\ntype System.Collections.Generic.List<'T> with\n    new(x: string) = \"\"\n",
         ),
         one(
             "self_named_generic_abbreviation",
@@ -518,6 +518,12 @@ pub fn cells() -> Vec<Cell> {
         one(
             "class_let_active_pattern_on_next_line",
             "module ApLine\nopen System.Runtime.CompilerServices\ntype T() =\n    static let (|A|_|) (x: int) = Some x\n    [<Extension>]\n    static let\n        (|A|_|) (x: int) = Some x\n    member _.G = match 1 with A x -> x | _ -> 0\n",
+        ),
+        // A head whose argument pattern holds an active pattern on a later
+        // line: FCS mangles by the binder's line, the head's first.
+        one(
+            "class_let_active_pattern_argument",
+            "module ApArg\nopen System.Runtime.CompilerServices\ntype T(f: int) =\n    [<Extension>] static let f\n                    ((|Hi|_|): string -> unit option) = 1\n    member _.G = f (fun _ -> None) + f\n",
         ),
         one(
             "quoted_load_directive",
@@ -557,7 +563,7 @@ pub fn cells() -> Vec<Cell> {
             &[
                 (
                     "Lib.fsi",
-                    "module StaticAbstractSig\ntype System.String with\n    static abstract member Foo: int -> int\n",
+                    "module StaticAbstractSig\ntype System.Collections.Generic.List<'T> with\n    static abstract member Foo: int -> int\n",
                 ),
                 ("Lib.fs", "module StaticAbstractSig\nlet x = 1\n"),
             ],
@@ -585,11 +591,11 @@ pub fn cells() -> Vec<Cell> {
             &[
                 (
                     "Lib.fsi",
-                    "module SigAug\ntype System.String with\n    member S: int\n",
+                    "module SigAug\ntype System.Collections.Generic.List<'T> with\n    member S: int\n",
                 ),
                 (
                     "Lib.fs",
-                    "module SigAug\ntype System.String with\n    member s.S = 1\n",
+                    "module SigAug\ntype System.Collections.Generic.List<'T> with\n    member s.S = 1\n",
                 ),
             ],
         ),
@@ -598,7 +604,7 @@ pub fn cells() -> Vec<Cell> {
             &[
                 (
                     "Lib.fsi",
-                    "module SigAugMissing\ntype System.String with\n    member S: int\n",
+                    "module SigAugMissing\ntype System.Collections.Generic.List<'T> with\n    member S: int\n",
                 ),
                 ("Lib.fs", "module SigAugMissing\nlet x = 1\n"),
             ],
@@ -662,7 +668,7 @@ pub fn cells() -> Vec<Cell> {
         ),
         one(
             "names_operators_and_keywords",
-            "namespace Ops\nmodule M =\n    type System.String with\n        static member (|>>) (a: string, b: int) = a\n        member s.``member`` = 1\n        member s.``type`` () = 2\n",
+            "namespace Ops\nmodule M =\n    type System.Collections.Generic.List<'T> with\n        static member (|>>) (a: string, b: int) = a\n        member s.``member`` = 1\n        member s.``type`` () = 2\n",
         ),
         // Declines.
         one(
