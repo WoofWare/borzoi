@@ -196,22 +196,23 @@ impl ReadDocument {
             .map(|i| {
                 let name = *rng.pick(&READ_NAMES);
                 let pad = *rng.pick(RECEIVER_PADDING);
+                let trail = *rng.pick(RECEIVER_PADDING);
                 // MSBuild reads a receiver past padding only before a member:
-                // a padded bare `$( P)` reads nothing (MSBuild 10.0.401).
+                // a bare `$( P)` or `$(P )` reads nothing (MSBuild 10.0.401).
                 let bare = |reads: &[&'static str]| -> Vec<&'static str> {
-                    if pad.is_empty() {
+                    if pad.is_empty() && trail.is_empty() {
                         reads.to_vec()
                     } else {
                         Vec::new()
                     }
                 };
                 let (include, reads) = match rng.below(3) {
-                    0 => (format!("E{i}_$({pad}{name}).fsproj"), bare(&[name])),
+                    0 => (format!("E{i}_$({pad}{name}{trail}).fsproj"), bare(&[name])),
                     1 => (format!("E{i}_$({pad}{name}.Length).fsproj"), vec![name]),
                     _ => {
                         let mut reads = bare(&["P"]);
                         reads.push("Q");
-                        (format!("E{i}_$({pad}P)_$(Q).fsproj"), reads)
+                        (format!("E{i}_$({pad}P{trail})_$(Q).fsproj"), reads)
                     }
                 };
                 ReadReference {
@@ -713,6 +714,12 @@ fn a_dead_reference_reading_a_refused_name_costs_no_certainty() {
         // A padded bare read, which MSBuild expands to empty whatever `P`
         // holds.
         "<ItemGroup><ProjectReference Include=\"B$( P).fsproj\" /></ItemGroup>".to_owned(),
+        "<ItemGroup><ProjectReference Include=\"B$(P ).fsproj\" /></ItemGroup>".to_owned(),
+        // The same of a name written under a gate the walk cannot decide.
+        format!(
+            "<PropertyGroup><G{UNSUPPORTED_TRUE}>x</G></PropertyGroup>\
+             <ItemGroup><ProjectReference Include=\"B$( G).fsproj\" /></ItemGroup>"
+        ),
     ];
     for row in rows {
         dead_reference_row(&row);

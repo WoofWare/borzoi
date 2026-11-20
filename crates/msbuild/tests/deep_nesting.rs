@@ -551,6 +551,43 @@ fn groups_ask_only_of_the_writes_they_read() {
     }
 }
 
+/// A `<Choose>` of `width` `<When>`s the walk cannot decide, each holding a
+/// write.
+fn wide_undecided_choose(width: usize) -> String {
+    let whens: String = (0..width)
+        .map(|i| {
+            format!(
+                "<When Condition=\"'É' == 'é' And '$(P{i})' == ''\">\
+                 <PropertyGroup><P{i}>x</P{i}></PropertyGroup></When>"
+            )
+        })
+        .collect();
+    format!("<Choose>{whens}</Choose>")
+}
+
+/// Whether each arm of [`wide_undecided_choose`] is one MSBuild cannot take
+/// is decided once per `<When>` for the whole chain (`rejection::arm_is_dead`):
+/// four times the arms cost about four times the time, where deciding every
+/// earlier `<When>` again for each arm costs sixteen. Timed as a ratio, as
+/// [`wide_unheld_reads_are_struck_in_one_pass`] is.
+#[test]
+fn a_wide_undecided_choose_decides_each_when_once() {
+    let time = |width: usize| {
+        let body = wide_undecided_choose(width);
+        let start = std::time::Instant::now();
+        evaluate_project(body);
+        start.elapsed()
+    };
+    time(100);
+    let narrow = time(400);
+    let wide = time(1_600);
+    let ratio = wide.as_secs_f64() / narrow.as_secs_f64().max(1e-6);
+    assert!(
+        ratio < 10.0,
+        "4× the arms took {ratio:.1}× the time ({narrow:?} → {wide:?})"
+    );
+}
+
 /// The rejection judgement strikes each read of [`wide_unheld_reads`] with a
 /// value in one pass over the text, so four times the width costs about four
 /// times the time; striking one read at a time over the whole text costs

@@ -253,8 +253,9 @@ pub(crate) fn property_references(raw: &str) -> impl Iterator<Item = &str> {
 }
 
 /// [`property_references`] for an item's spec, where MSBuild reads a receiver
-/// past padding only before a member: a padded bare `$( P)` expands to empty
-/// whatever `P` holds (MSBuild 10.0.401), so it reads nothing, while
+/// past padding only before a member: a bare `$( P)` or `$(P )`, padded on
+/// either side, expands to empty whatever `P` holds (MSBuild 10.0.401), so it
+/// reads nothing, while
 /// `$( P.Length)` reads `P`. Every other reference is reported as
 /// [`property_references`] reports it.
 pub(crate) fn item_spec_references(raw: &str) -> impl Iterator<Item = &str> {
@@ -266,10 +267,10 @@ pub(crate) fn item_spec_references(raw: &str) -> impl Iterator<Item = &str> {
         let interior = raw[open..].trim_start_matches(char::is_whitespace);
         let padded = interior.len() != raw.len() - open;
         if let Some(name) = receiver_name(interior) {
-            let bare = interior[name.len()..]
-                .trim_start_matches(char::is_whitespace)
-                .starts_with(')');
-            if !(padded && bare) {
+            let after = &interior[name.len()..];
+            let rest = after.trim_start_matches(char::is_whitespace);
+            let trailing = rest.len() != after.len();
+            if !((padded || trailing) && rest.starts_with(')')) {
                 refs.push(name);
             }
         }

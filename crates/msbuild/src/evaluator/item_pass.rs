@@ -4049,8 +4049,9 @@ pub(super) fn item_key(name: &str) -> String {
 
 /// Flag [`ParsedProject::project_references_uncertain`] when the `Include` or
 /// `Exclude` of the `<ProjectReference>` at `node`, which MSBuild evaluates,
-/// reads a name the walk doubts ([`State::raw_reads_a_doubted_name`]), or an
-/// SDK-package-tainted one. A value the walk computes from one may name a
+/// reads a name the walk doubts ([`State::raw_reads_a_doubted_name`]: unpinned,
+/// SDK-tainted, or held as no value it can show undefined), read as an item
+/// spec reads it. A value the walk computes from one may name a
 /// different target (`Include`) or strip one it kept (`Exclude`): a phantom
 /// edge for a reference-semantics consumer. One it does not compute, it drops
 /// with the element, though MSBuild holds items there that the list then
@@ -4059,7 +4060,7 @@ pub(super) fn item_key(name: &str) -> String {
 fn taint_reference_list_on_doubted_reads(node: Node<'_, '_>, state: &mut State<'_>) {
     for name in ["Include", "Exclude"] {
         if let Some(raw) = attribute(node, name)
-            && (state.raw_reads_a_doubted_name(&raw) || state.raw_uses_sdk_package_taint(&raw))
+            && state.raw_reads_a_doubted_name(&raw)
         {
             state.project_references_uncertain = true;
         }

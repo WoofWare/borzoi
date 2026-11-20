@@ -1311,6 +1311,10 @@ struct State<'r> {
     /// written on that path before what it judges, whose value there the walk
     /// does not hold. `None` outside one.
     speculation: Option<Speculation>,
+    /// The `<When>` decisions of each `<Choose>` the judgement is judging the
+    /// arms of now, by the `<Choose>` (its document and offset), taken once on
+    /// the state before it ([`rejection::judge_branch`]).
+    arm_decisions: HashMap<(usize, usize), std::rc::Rc<[Option<bool>]>>,
     /// The root each root-surfacing diagnostic stood for, by its index in
     /// `diagnostics`, captured when it was pushed. A diagnostic carries only a
     /// name, and that name's root may change later in the walk;
@@ -1841,6 +1845,7 @@ impl<'r> State<'r> {
             taken_import_path_certain: false,
             item_pass: None,
             speculation: None,
+            arm_decisions: HashMap::new(),
             diagnostic_roots: HashMap::new(),
         }
     }
@@ -2325,6 +2330,7 @@ impl<'r> State<'r> {
             taken_import_path_certain: _,
             item_pass: _,
             speculation: _,
+            arm_decisions: _,
             diagnostic_roots: _,
         } = self;
         // Central Package Management opt-in: a versionless
@@ -4337,6 +4343,7 @@ fn handle_choose(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State<
     if !chosen_is_certain {
         rejection::judge_whens(node, walked + 1, current_file_dir, false, state);
     }
+    state.arm_decisions.remove(&rejection::choose_key(node));
     // From the first gate the walk decided on a stale value, MSBuild may take
     // any branch but the walk's up to the first whose gate holds whatever the
     // uncertain names hold (and `<Otherwise>` only if none does), skipping
