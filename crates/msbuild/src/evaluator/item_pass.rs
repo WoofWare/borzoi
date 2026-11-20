@@ -155,7 +155,7 @@ pub(super) struct DeferredItemGroup {
     judge_only: bool,
     /// For a judge-only group, the names written on its path before it,
     /// whose value there the walk does not hold.
-    unheld: Vec<String>,
+    unheld: std::rc::Rc<[String]>,
 }
 
 impl<'r> State<'r> {
@@ -236,7 +236,7 @@ impl<'r> State<'r> {
         let unheld = if judge_only {
             self.speculatively_written()
         } else {
-            Vec::new()
+            std::rc::Rc::from([])
         };
         self.deferred_item_groups.push(DeferredItemGroup {
             kind,

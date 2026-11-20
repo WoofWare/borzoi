@@ -256,6 +256,7 @@ impl State<'_> {
             None => {
                 self.speculation = Some(Speculation {
                     unheld: HashSet::new(),
+                    snapshot: None,
                     depth: 1,
                 });
             }
@@ -273,22 +274,41 @@ impl State<'_> {
 
     /// The names written on the path the judgement walks now, for an item
     /// group from it judged later ([`State::defer_judgement`]).
-    pub(super) fn speculatively_written(&self) -> Vec<String> {
-        self.speculation
-            .as_ref()
-            .map(|speculation| speculation.unheld.iter().cloned().collect())
-            .unwrap_or_default()
+    pub(super) fn speculatively_written(&mut self) -> std::rc::Rc<[String]> {
+        match self.speculation.as_mut() {
+            Some(speculation) => speculation
+                .snapshot
+                .get_or_insert_with(|| speculation.unheld.iter().cloned().collect())
+                .clone(),
+            None => std::rc::Rc::from([]),
+        }
+    }
+
+    /// Mark `names` written on the path the judgement walks now.
+    fn mark_unheld(&mut self, names: impl IntoIterator<Item = String>) {
+        if let Some(speculation) = self.speculation.as_mut() {
+            speculation.unheld.extend(names);
+            speculation.snapshot = None;
+        }
     }
 
     /// Judge, as [`judge_deferred`] does, an item group from content the walk
-    /// does not take, with `unheld` the names written on its path before it.
+    /// does not take, with `unheld` the names written on its path before it:
+    /// those whose final value is still not certain, since a certain write
+    /// after the path settles the value MSBuild reads in the item pass.
     pub(super) fn judge_from_path(
         &mut self,
         unheld: &[String],
         judge: impl FnOnce(&mut State<'_>),
     ) {
+        let unheld = unheld
+            .iter()
+            .filter(|name| !directory_build::is_certain(self, name))
+            .cloned()
+            .collect();
         let saved = self.speculation.replace(Speculation {
-            unheld: unheld.iter().cloned().collect(),
+            unheld,
+            snapshot: None,
             depth: 1,
         });
         judge(self);
@@ -296,13 +316,10 @@ impl State<'_> {
     }
 }
 
-/// On the path the judgement walks, the write at `node`: its name's value is
-/// unknown to what follows there, whether or not its gate holds.
+/// On the path the judgement walks, the write at `node`, whose gate may hold:
+/// its name's value is unknown to what follows there.
 fn speculative_write(node: Node<'_, '_>, state: &mut State<'_>) {
-    let name = node.tag_name().name().to_ascii_lowercase();
-    if let Some(speculation) = state.speculation.as_mut() {
-        speculation.unheld.insert(name);
-    }
+    state.mark_unheld([node.tag_name().name().to_ascii_lowercase()]);
 }
 
 /// Whether the walk names the `Project` of the import at `node` from certain
@@ -728,10 +745,11 @@ pub(super) fn judge_properties(node: Node<'_, '_>, reached: bool, state: &mut St
         {
             continue;
         }
+        // A write whose gate is certainly false there writes nothing.
         if let Some(body_reached) = judge_gate(child, &entry_dir, reached, state).inner(reached) {
             judge_unwalked_body(child, body_reached, state);
+            speculative_write(child, state);
         }
-        speculative_write(child, state);
     }
     state.close_speculation();
 }
@@ -785,9 +803,7 @@ pub(super) fn judge_whens(
     {
         written.extend(judge_branch(otherwise, dir, at, state));
     }
-    if let Some(speculation) = state.speculation.as_mut() {
-        speculation.unheld.extend(written);
-    }
+    state.mark_unheld(written);
 }
 
 /// Judge what the `<When>` or `<Otherwise>` at `branch` holds, which MSBuild
@@ -810,6 +826,7 @@ pub(super) fn judge_branch(
     if let Some(speculation) = state.speculation.as_mut() {
         written = speculation.unheld.difference(&before).cloned().collect();
         speculation.unheld = before;
+        speculation.snapshot = None;
     }
     state.close_speculation();
     written
@@ -858,9 +875,9 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
     for name in USING_TASK_EXPANDED {
         if let Some(text) = attribute(node, name) {
             // MSBuild turns `AssemblyFile`'s own `\` into `/` before it expands
-            // it (`ProjectUsingTaskElement.AssemblyFile`, `FixFilePath`), as an
-            // import's `Project`.
-            let text = if *name == "AssemblyFile" {
+            // it, where `\` is no separator (`ProjectUsingTaskElement.
+            // AssemblyFile`, `FixFilePath`), as an import's `Project`.
+            let text = if *name == "AssemblyFile" && std::path::MAIN_SEPARATOR != '\\' {
                 text.replace('\\', "/")
             } else {
                 text.into_owned()
@@ -890,7 +907,13 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
                         // (`%66alse` is no `false`; probed,
                         // `msbuild-condition-oracle`, SDK 10.0.401).
                         let value = value.ignoring_trust().as_escaped().to_owned();
-                        if !issues.is_empty() || !operands_are_certain(state, &evaluate) {
+                        // An item list or metadatum MSBuild expands into it
+                        // the walk does not.
+                        if !issues.is_empty()
+                            || !operands_are_certain(state, &evaluate)
+                            || value.contains("@(")
+                            || value.contains("%(")
+                        {
                             Some(false)
                         } else if value.trim().eq_ignore_ascii_case("false") {
                             None
@@ -939,24 +962,14 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
 }
 
 /// The text MSBuild expands of the inline task body at `task`, where it holds
-/// text, CDATA sections and comments alone: its text and sections joined, as
-/// MSBuild reads them (`InnerText`; `<![CDATA[$]]>(P[9])` is `$(P[9])`).
-/// `None` where it holds an element or a processing instruction, which
-/// MSBuild expands as serialized XML ([`task_inner_xml`]).
+/// text, CDATA sections and comments alone: as MSBuild reads such an element
+/// (`document::inner_contents`: its text, or its inner XML where markup
+/// besides comments leads, so `<![CDATA[$]]>(P[9])` is `$(P[9])` and
+/// `$<![CDATA[(P[9])]]>` is not). `None` where it holds an element or a
+/// processing instruction, which MSBuild expands as serialized XML
+/// ([`task_inner_xml`]).
 fn task_body(task: Node<'_, '_>) -> Option<String> {
-    let mut body = String::new();
-    for content in crate::document::element_content(task)? {
-        match content {
-            crate::document::Content::Text { value, whitespace } => {
-                if !whitespace {
-                    body.push_str(&value);
-                }
-            }
-            crate::document::Content::CData(text) => body.push_str(text),
-            crate::document::Content::Comment(_) => {}
-        }
-    }
-    Some(body)
+    crate::document::inner_contents(&crate::document::element_content(task)?)
 }
 
 /// The inline task body at `task`, which holds an element, as MSBuild
@@ -986,7 +999,7 @@ fn task_inner_xml(task: Node<'_, '_>) -> Option<String> {
         } else if rest.starts_with('<') {
             let end = rest.find('>')? + 1;
             let tag = &rest[..end];
-            if tag.contains("$(") {
+            if tag.contains("$(") || tag.contains('&') {
                 return None;
             }
             out.push_str(tag);

@@ -114,7 +114,7 @@ fn sdk_chain_property_expressions_are_never_wrongly_committed() {
         for props in [&empty, &seeded] {
             match check_expand_certain_implies_exact(&mut oracle, expr, props) {
                 ExpandVerdict::Exact => committed = true,
-                ExpandVerdict::Partial => {}
+                ExpandVerdict::Partial | ExpandVerdict::Throws => {}
             }
         }
         if committed {

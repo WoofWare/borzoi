@@ -276,7 +276,8 @@ fn hand_picked_corners() {
             props(&[("V", "a-b-c")]),
             ExpandVerdict::Exact,
         ),
-        // Terminal array (`System.String[]`) and out-of-range index → declined.
+        // Terminal array (`System.String[]`) → declined; an out-of-range index
+        // → a throw MSBuild makes.
         (
             "$(V.Split('-'))",
             props(&[("V", "a-b")]),
@@ -285,15 +286,11 @@ fn hand_picked_corners() {
         (
             "$(V.Split('-')[9])",
             props(&[("V", "a-b")]),
-            ExpandVerdict::Partial,
+            ExpandVerdict::Throws,
         ),
-        // String indexer → char; out-of-range and `Char.Length` declined.
+        // String indexer → char; out-of-range → a throw; `Char.Length` declined.
         ("$(Foo[0])", props(&[("Foo", "abc")]), ExpandVerdict::Exact),
-        (
-            "$(Foo[9])",
-            props(&[("Foo", "abc")]),
-            ExpandVerdict::Partial,
-        ),
+        ("$(Foo[9])", props(&[("Foo", "abc")]), ExpandVerdict::Throws),
         (
             "$(Foo[0].Length)",
             props(&[("Foo", "abc")]),
@@ -708,13 +705,13 @@ fn hand_picked_corners() {
         (
             "$(P.Split(';')[3])",
             props(&[("P", "a;b")]),
-            ExpandVerdict::Partial,
+            ExpandVerdict::Throws,
         ),
-        ("$(P[9])x", props(&[("P", "abc")]), ExpandVerdict::Partial),
+        ("$(P[9])x", props(&[("P", "abc")]), ExpandVerdict::Throws),
         (
             "$([MSBuild]::VersionLessThan('$(P)', '18.9'))",
             props(&[("P", "")]),
-            ExpandVerdict::Partial,
+            ExpandVerdict::Throws,
         ),
     ];
 
@@ -728,7 +725,7 @@ fn hand_picked_corners() {
         );
         match got {
             ExpandVerdict::Exact => exact += 1,
-            ExpandVerdict::Partial => partial += 1,
+            ExpandVerdict::Partial | ExpandVerdict::Throws => partial += 1,
         }
     }
     // Sanity: the corner list exercises both branches (guards against the
@@ -758,7 +755,7 @@ fn fixed_seed_sweep() {
         let props = gen_expand_props(&mut rng);
         match check_expand_certain_implies_exact(&mut oracle, &value, &props) {
             ExpandVerdict::Exact => exact += 1,
-            ExpandVerdict::Partial => partial += 1,
+            ExpandVerdict::Partial | ExpandVerdict::Throws => partial += 1,
         }
     }
 
@@ -791,7 +788,7 @@ fn grammar_acceptance_sweep() {
         let props = gen_expand_props(&mut rng);
         match check_expand_certain_implies_exact(&mut oracle, &value, &props) {
             ExpandVerdict::Exact => exact += 1,
-            ExpandVerdict::Partial => partial += 1,
+            ExpandVerdict::Partial | ExpandVerdict::Throws => partial += 1,
         }
     }
 

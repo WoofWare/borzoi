@@ -1586,7 +1586,9 @@ fn a_branch_does_not_see_its_siblings_writes() {
 }
 
 /// MSBuild turns a `UsingTask`'s `AssemblyFile`'s own `\` into `/` before it
-/// expands it: `$(P.Split('\')[1])` splits `a/b` on `/`.
+/// expands it where `\` is no separator: `$(P.Split('\')[1])` splits `a/b`
+/// on `/`.
+#[cfg(not(windows))]
 #[test]
 fn a_using_task_assembly_file_is_read_with_its_slashes_turned() {
     let body = "<PropertyGroup><P>a/b</P></PropertyGroup><UsingTask TaskName=\"X\" AssemblyFile=\"$(P.Split('\\')[1])\" />";
@@ -1625,5 +1627,51 @@ fn an_untaken_branchs_items_know_the_writes_before_them() {
     );
     for parsed in both_walkers(&format!("  {body}")) {
         assert_eq!(parsed.rejection, None, "{body}: {:#?}", parsed.diagnostics);
+    }
+}
+
+/// A certain write after the path settles what the item pass reads: `P` is
+/// `z` there, which has no index 9, whatever the branch wrote.
+#[test]
+fn a_certain_write_after_the_path_settles_an_items_value() {
+    let body = format!(
+        "<PropertyGroup><P>abc</P></PropertyGroup><Choose><When Condition=\"{UNDECIDED_TRUE}\">\
+         <PropertyGroup><P>abcdefghijkl</P></PropertyGroup>\
+         <ItemGroup><I Include=\"$(P[9])\" /></ItemGroup></When></Choose>\
+         <PropertyGroup><P>z</P></PropertyGroup>"
+    );
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_withdrawn(&parsed, &["Before", "After"]);
+    }
+}
+
+/// A write whose gate is certainly false on the path writes nothing there:
+/// `P` is still `a`, which has no index 9.
+#[test]
+fn a_write_under_a_false_gate_leaves_its_name_as_it_was() {
+    let body = format!(
+        "<PropertyGroup><P>a</P></PropertyGroup><PropertyGroup Condition=\"{UNDECIDED_TRUE}\">\
+         <P Condition=\"false\">abcdefghijkl</P><Q>$(P[9])</Q></PropertyGroup>"
+    );
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_withdrawn(&parsed, &["Before", "After"]);
+    }
+}
+
+/// An inline task's `Evaluate` holding an item list is one the walk does not
+/// expand: `@(Flag)` is `false` to MSBuild, which then skips the body, so a
+/// throw in the body is no certain rejection.
+#[test]
+fn an_evaluate_flag_holding_an_item_list_reaches_the_body_perhaps() {
+    let body = "<PropertyGroup><P>a</P></PropertyGroup><ItemGroup><Flag Include=\"false\" /></ItemGroup>\
+                <UsingTask TaskName=\"X\" TaskFactory=\"RoslynCodeTaskFactory\" AssemblyFile=\"y.dll\">\
+                <Task Evaluate=\"@(Flag)\">$(P[9])</Task></UsingTask>";
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_ne!(
+            parsed.rejection.as_ref().map(|r| r.certainty),
+            Some(RejectionCertainty::Certain),
+            "{body}: {:#?}",
+            parsed.rejection
+        );
     }
 }

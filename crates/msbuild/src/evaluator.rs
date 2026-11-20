@@ -1425,6 +1425,9 @@ struct Expansion {
 struct Speculation {
     /// Lower-cased names written on the path, whose value there is unknown.
     unheld: HashSet<String>,
+    /// [`Self::unheld`] as the item groups deferred from the path share it
+    /// ([`State::defer_judgement`]), until it next changes.
+    snapshot: Option<std::rc::Rc<[String]>>,
     /// How many nested walks are open.
     depth: usize,
 }

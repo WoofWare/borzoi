@@ -1497,6 +1497,15 @@ fn using_task_texts_are_judged_where_msbuild_expands_them() {
     rows.push(format!(
         "<UsingTask {INLINE}><Task><?note {T}?></Task></UsingTask>"
     ));
+    // Text before a CDATA section makes the body inner XML, where `$` and
+    // `(` are apart.
+    rows.push(format!(
+        "<UsingTask {INLINE}><Task>$<![CDATA[(P[9])]]></Task></UsingTask>"
+    ));
+    // An expression spelt with a reference in an attribute of the body.
+    rows.push(format!(
+        "<UsingTask {INLINE}><Task><Code Type=\"&#36;(P[9])\" /></Task></UsingTask>"
+    ));
     // The flag compared as expanded, escapes and all.
     rows.push(format!(
         "<UsingTask {INLINE}><Task Evaluate=\"%66alse\">{T}</Task></UsingTask>"
