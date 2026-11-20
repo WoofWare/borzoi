@@ -21,6 +21,7 @@
 #![forbid(unsafe_code)]
 
 mod condition;
+mod cost;
 mod diagnostic;
 pub mod document;
 mod dotnet_io;

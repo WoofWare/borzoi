@@ -942,16 +942,20 @@ fn arm_is_dead(branch: Node<'_, '_>, state: &mut State<'_>) -> bool {
         .children()
         .filter(|arm| arm.is_element() && arm.range().start >= from)
     {
+        let gate = attribute(arm, "Condition").filter(|_| arm.has_tag_name("When"));
         let dead = fates.taken
-            || match attribute(arm, "Condition").filter(|_| arm.has_tag_name("When")) {
-                Some(condition) => match state.reference_gate_decision(&condition, None) {
-                    Some(true) => {
-                        fates.taken = true;
-                        false
+            || match gate {
+                Some(condition) => {
+                    crate::cost::count(|costs| costs.arm_gate_decisions += 1);
+                    match state.reference_gate_decision(&condition, None) {
+                        Some(true) => {
+                            fates.taken = true;
+                            false
+                        }
+                        Some(false) => true,
+                        None => false,
                     }
-                    Some(false) => true,
-                    None => false,
-                },
+                }
                 None => false,
             };
         fates.dead.insert(arm.range().start, dead);

@@ -14,6 +14,16 @@
 //! [`evaluate_with_exists`] answers it from the file system, as the walk does.
 
 pub use crate::condition::{Eval, Judgement, MAX_CONDITION_NESTING, Outcome, Throws, evaluate};
+pub use crate::cost::WalkCosts;
+
+/// Run `walk` and count the work it did on this thread ([`WalkCosts`]), so
+/// that a test holds the walk's cost to a bound by counts, which no load on
+/// the machine moves.
+pub fn count_walk_costs<T>(walk: impl FnOnce() -> T) -> (T, WalkCosts) {
+    crate::cost::take();
+    let value = walk();
+    (value, crate::cost::take())
+}
 
 /// The condition module's `judge` with no file system: what MSBuild makes of
 /// `condition` without the values of the properties `uncertain` names.
