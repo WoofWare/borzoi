@@ -42,7 +42,8 @@ pub use expr::MAX_EXPRESSION_NESTING;
 #[cfg(not(feature = "test-support"))]
 pub(crate) use expr::MAX_EXPRESSION_NESTING;
 pub(crate) use expr::{
-    expression_texts, expressions_reading_metadata, is_referenceable_name, property_references,
+    expression_texts, expressions_reading_metadata, is_referenceable_name, item_spec_references,
+    property_references,
 };
 
 const MAX_TARGET_FRAMEWORK_VERSION_PARTS: usize = 4;

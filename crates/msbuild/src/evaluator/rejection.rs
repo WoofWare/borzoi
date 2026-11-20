@@ -269,6 +269,7 @@ impl State<'_> {
                     arms: Vec::new(),
                     inherited: None,
                     depth: 1,
+                    dead_arms: 0,
                 });
             }
         }
@@ -357,6 +358,7 @@ impl State<'_> {
             arms: Vec::new(),
             inherited: Some(written.clone()),
             depth: 1,
+            dead_arms: 0,
         });
         judge(self);
         self.speculation = saved;
@@ -860,6 +862,9 @@ pub(super) fn judge_branch(
     reached: bool,
     state: &mut State<'_>,
 ) -> HashSet<String> {
+    // Decided before the walk opens, on the path as it stands at the
+    // `<Choose>`.
+    let dead = arm_is_dead(branch, state);
     state.open_speculation();
     let choose = branch.parent_element().unwrap_or(branch);
     let arm: Arm = (
@@ -872,6 +877,7 @@ pub(super) fn judge_branch(
     let mark = match state.speculation.as_mut() {
         Some(speculation) => {
             speculation.arms.push(arm);
+            speculation.dead_arms += usize::from(dead);
             speculation.gained.len()
         }
         None => 0,
@@ -880,6 +886,7 @@ pub(super) fn judge_branch(
     let mut written = HashSet::new();
     if let Some(speculation) = state.speculation.as_mut() {
         speculation.arms.pop();
+        speculation.dead_arms -= usize::from(dead);
         for name in speculation.gained.drain(mark..) {
             speculation.unheld.remove(&name);
             written.insert(name);
@@ -887,6 +894,52 @@ pub(super) fn judge_branch(
     }
     state.close_speculation();
     written
+}
+
+/// Whether MSBuild cannot take the `<When>` or `<Otherwise>` at `branch`, by
+/// the gates of its `<Choose>`, which MSBuild evaluates on the state before
+/// the `<Choose>`: an earlier `<When>`'s true, or its own false, each on
+/// values the walk holds and decided exactly
+/// ([`State::condition_is_decided_exactly`], the reference gates' policy),
+/// reading no name the path it judges leaves unknown. A refusal a clean
+/// write overwrote does not keep such a gate open, as it keeps an import
+/// point's ([`directory_build::decision_from_certain_inputs`]): the rejection
+/// judgement walks the arm all the same; [`super::item_pass`]'s reference
+/// check does not count what it defers from there.
+fn arm_is_dead(branch: Node<'_, '_>, state: &State<'_>) -> bool {
+    let Some(choose) = branch.parent_element() else {
+        return false;
+    };
+    let entry_dir = state.entry_project_dir.clone();
+    let decision = |when: Node<'_, '_>| -> Option<bool> {
+        let condition = attribute(when, "Condition")?;
+        if properties::property_references(&condition).any(|name| state.speculatively_unheld(name))
+            || !state.condition_is_decided_exactly(&condition, Some(&entry_dir), &|name| {
+                state.undefined_read_is_exact(name)
+            })
+        {
+            return None;
+        }
+        let observer = state.observer;
+        let exists = |path: &str| condition_exists(observer, path, &entry_dir);
+        let probes = state.follow_imports.then_some(condition::Probes {
+            exists: &exists,
+            observer,
+        });
+        match condition::evaluate_at(&condition, &state.lookup, probes, state.condition_site())
+            .outcome
+        {
+            condition::Outcome::True => Some(true),
+            condition::Outcome::False => Some(false),
+            _ => None,
+        }
+    };
+    let earlier_holds = choose
+        .children()
+        .filter(|c| c.has_tag_name("When"))
+        .take_while(|when| when.id() != branch.id())
+        .any(|when| decision(when) == Some(true));
+    earlier_holds || (branch.has_tag_name("When") && decision(branch) == Some(false))
 }
 
 /// [`judge_branch`] within its speculative walk.

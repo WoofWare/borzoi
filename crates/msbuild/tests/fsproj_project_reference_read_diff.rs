@@ -78,14 +78,38 @@ fn read_sweep_values(plain: &str) -> Vec<hostile::Entry<value::Value>> {
     })
 }
 
-/// A write's body in the doubted-read sweep: a hostile or plain literal, a
-/// function the walk does not compute, or a read of the other name.
+/// The hostile file names a literal of the doubted-read sweep is drawn from,
+/// as its value is spliced into a reference's file name
+/// ([`hostile::name::as_text`], as `hostile::value` asks of a value used as a
+/// name): those XML can spell, holding no NUL, raw or escaped
+/// ([`read_sweep_values`]).
+fn read_sweep_names(plain: &str) -> Vec<hostile::Entry<String>> {
+    hostile::name::as_text(plain, "")
+        .into_iter()
+        .filter(|entry| {
+            entry.value.chars().all(hostile::xml::representable)
+                && !entry.value.contains('\0')
+                && !entry.value.to_ascii_lowercase().contains("%00")
+        })
+        .collect()
+}
+
+/// A write's body in the doubted-read sweep: a hostile or plain literal (a
+/// value, or a file name), a function the walk does not compute, or a read
+/// of the other name.
 fn read_sweep_body(rng: &mut SplitMix64, other: &str) -> hostile::Drawn<String> {
-    match rng.below(4) {
+    match rng.below(5) {
         0 => {
             let plain = *rng.pick(&["a", "lib", "B1"]);
             match hostile::sample(&read_sweep_values(plain), rng.next()) {
                 Some(entry) => hostile::Drawn::of(entry).map(|v| v.render(plain)),
+                None => hostile::Drawn::plain(plain.to_owned()),
+            }
+        }
+        4 => {
+            let plain = *rng.pick(&["a", "lib", "B1"]);
+            match hostile::sample(&read_sweep_names(plain), rng.next()) {
+                Some(entry) => hostile::Drawn::of(entry),
                 None => hostile::Drawn::plain(plain.to_owned()),
             }
         }
@@ -307,10 +331,16 @@ struct ReadCensus {
 }
 
 /// The hostile values the doubted-read sweep cannot carry.
-const READ_EXCLUDED: &[(Dimension, &str)] = &[(
-    Dimension::OverwrittenLater,
-    "a value a reference reads is its name's last write here, which nothing puts back",
-)];
+const READ_EXCLUDED: &[(Dimension, &str)] = &[
+    (
+        Dimension::OverwrittenLater,
+        "a value a reference reads is its name's last write here, which nothing puts back",
+    ),
+    (
+        Dimension::NonUtf8,
+        "a property value is text: no project spells bytes that are not UTF-8 (`name::as_text`)",
+    ),
+];
 
 /// How one doubted-read document went.
 enum ReadOutcome {
@@ -432,8 +462,8 @@ fn grade_read_document(oracle: &mut Oracle, document: &ReadDocument) -> (ReadOut
 fn doubted_read_sweep(oracle: &mut Oracle, seed: u64, cases: usize) -> ReadCensus {
     let census = coverage::open(file!(), "reference_reads", READ_EXCLUDED);
     let excluded: BTreeSet<Dimension> = READ_EXCLUDED.iter().map(|(d, _)| *d).collect();
-    // A plain witness, and one of each hostile value, so that the census owes
-    // nothing to what the seed draws.
+    // A plain witness, and one of each hostile value and file name, so that
+    // the census owes nothing to what the seed draws.
     let witnesses: Vec<ReadDocument> = std::iter::once(hostile::Drawn::plain("lib".to_owned()))
         .chain(
             read_sweep_values("lib")
@@ -441,6 +471,7 @@ fn doubted_read_sweep(oracle: &mut Oracle, seed: u64, cases: usize) -> ReadCensu
                 .filter(|entry| !excluded.contains(&entry.dimension))
                 .map(|entry| hostile::Drawn::of(entry).map(|v| v.render("lib"))),
         )
+        .chain(read_sweep_names("lib").iter().map(hostile::Drawn::of))
         .map(ReadDocument::witness)
         .collect();
     let mut rng = SplitMix64(seed);
@@ -596,6 +627,52 @@ fn a_reference_reading_a_refused_name_is_no_certain_omission() {
     }
 }
 
+/// A function that reads a name without naming it (`AreFeaturesEnabled`
+/// reads `MSBuildDisableFeaturesFromVersion`), with that name set in the
+/// environment of both MSBuild and the walk: a certain list is MSBuild's.
+#[test]
+fn an_implicit_read_leaves_no_certain_list_short() {
+    let env = [(
+        "MSBUILDDISABLEFEATURESFROMVERSION".to_owned(),
+        "17.4".to_owned(),
+    )];
+    let xml = "<Project><ItemGroup>\
+               <ProjectReference Include=\"$([MSBuild]::AreFeaturesEnabled('17.10')).fsproj\" />\
+               <ProjectReference Include=\"A.fsproj\" /></ItemGroup></Project>";
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let root = borzoi_msbuild::observed::host_fs::canonicalize(dir.path()).expect("canonicalize");
+    let proj = layout(&root);
+    std::fs::write(&proj, xml).unwrap();
+    let mut theirs: Vec<PathBuf> = Oracle::spawn_in_dir_with_env(&root, &env)
+        .items(xml, &proj, "ProjectReference", &[])
+        .expect("MSBuild evaluates this document")
+        .iter()
+        .map(|p| lexical(p))
+        .collect();
+    let mut environment = common::oracle_environment();
+    environment.extend(env.iter().cloned());
+    let parsed = parse_fsproj_with_imports(
+        &borzoi_msbuild::ProjectFile::buffer(&proj, xml)
+            .expect("a project path spelt as its full path"),
+        &HashMap::new(),
+        &environment,
+        None,
+        None,
+    )
+    .expect("well-formed XML parses");
+    assert_eq!(theirs.len(), 2, "{theirs:?}");
+    if !parsed.project_references_uncertain {
+        let mut ours: Vec<PathBuf> = parsed
+            .project_references
+            .iter()
+            .map(|item| lexical(&item.include.to_string_lossy()))
+            .collect();
+        ours.sort();
+        theirs.sort();
+        assert_eq!(ours, theirs, "a certain list is MSBuild's: {xml}");
+    }
+}
+
 /// A reference behind a gate false whatever any name holds reads nothing
 /// MSBuild uses, however doubted the names it reads, beside a live sibling
 /// in a group the walk cannot decide: the list keeps every edge it knows,
@@ -625,6 +702,17 @@ fn a_dead_reference_reading_a_refused_name_costs_no_certainty() {
              <Choose><When{UNSUPPORTED_TRUE}><PropertyGroup><Off>true</Off></PropertyGroup></When>\
              <When Condition=\"$(Off)\"><ItemGroup><ProjectReference Include=\"$(P).fsproj\" /></ItemGroup></When></Choose>"
         ),
+        // A `<When>` false on a name a refused write and then a clean one
+        // wrote, after one the walk cannot decide.
+        format!(
+            "<PropertyGroup><Gate>{REFUSED_BODY}</Gate></PropertyGroup>\
+             <PropertyGroup><Gate>false</Gate></PropertyGroup>\
+             <Choose><When{UNSUPPORTED_TRUE}><PropertyGroup><X>1</X></PropertyGroup></When>\
+             <When Condition=\"$(Gate)\"><ItemGroup><ProjectReference Include=\"$(P).fsproj\" /></ItemGroup></When></Choose>"
+        ),
+        // A padded bare read, which MSBuild expands to empty whatever `P`
+        // holds.
+        "<ItemGroup><ProjectReference Include=\"B$( P).fsproj\" /></ItemGroup>".to_owned(),
     ];
     for row in rows {
         dead_reference_row(&row);

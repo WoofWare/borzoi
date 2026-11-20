@@ -252,6 +252,31 @@ pub(crate) fn property_references(raw: &str) -> impl Iterator<Item = &str> {
     refs.into_iter()
 }
 
+/// [`property_references`] for an item's spec, where MSBuild reads a receiver
+/// past padding only before a member: a padded bare `$( P)` expands to empty
+/// whatever `P` holds (MSBuild 10.0.401), so it reads nothing, while
+/// `$( P.Length)` reads `P`. Every other reference is reported as
+/// [`property_references`] reports it.
+pub(crate) fn item_spec_references(raw: &str) -> impl Iterator<Item = &str> {
+    let mut refs = Vec::new();
+    let mut search_from = 0;
+    while let Some(relative_idx) = raw[search_from..].find("$(") {
+        let open = search_from + relative_idx + 2;
+        search_from = open;
+        let interior = raw[open..].trim_start_matches(char::is_whitespace);
+        let padded = interior.len() != raw.len() - open;
+        if let Some(name) = receiver_name(interior) {
+            let bare = interior[name.len()..]
+                .trim_start_matches(char::is_whitespace)
+                .starts_with(')');
+            if !(padded && bare) {
+                refs.push(name);
+            }
+        }
+    }
+    refs.into_iter()
+}
+
 /// The outermost `$(…)` expressions of `raw`, in order. Each opener's close
 /// is found once, from the end of the last, so the scan is linear.
 pub(crate) fn expression_texts(raw: &str) -> impl Iterator<Item = &str> {

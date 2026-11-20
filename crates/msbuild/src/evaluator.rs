@@ -1447,6 +1447,11 @@ struct Speculation {
     inherited: Option<PathOf>,
     /// How many nested walks are open.
     depth: usize,
+    /// How many of [`Self::arms`] MSBuild cannot take, by gates the walk
+    /// decides exactly on the state before their `<Choose>`
+    /// ([`rejection::judge_branch`]): an item group deferred from within one
+    /// holds no reference the build makes.
+    dead_arms: usize,
 }
 
 /// An arm of a `<Choose>` the judgement walks: the `<Choose>` (its document
@@ -2938,14 +2943,20 @@ impl<'r> State<'r> {
     /// otherwise than the walk: one it holds and doubts (unpinned or
     /// SDK-tainted, [`Trust::reference_is_untrusted`]), or one it holds no
     /// value of and cannot show undefined (a write it refused to compute,
-    /// [`Self::undefined_read_is_exact`]). Read off the text, so that what
-    /// the expansion did with the name (stop at a function it does not
-    /// model, say) cannot hide the read.
+    /// [`Self::undefined_read_is_exact`]). Read off the text of an item's
+    /// spec ([`properties::item_spec_references`]), so that what the
+    /// expansion did with the name (stop at a function it does not model,
+    /// say) cannot hide the read, with the names a function reads without
+    /// naming them ([`condition::implicit_references`]).
     fn raw_reads_a_doubted_name(&self, raw: &str) -> bool {
-        properties::property_references(raw).any(|name| {
+        let doubted = |name: &str| {
             self.trust_of(name).reference_is_untrusted()
                 || (!self.lookup.is_bound(name) && !self.undefined_read_is_exact(name))
-        })
+        };
+        let mut implicit = Vec::new();
+        condition::implicit_references(raw, &mut implicit);
+        properties::item_spec_references(raw).any(doubted)
+            || implicit.iter().any(|name| doubted(name))
     }
 
     /// The root to record for a value that read `name` while it was

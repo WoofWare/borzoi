@@ -157,6 +157,10 @@ pub(super) struct DeferredItemGroup {
     /// from: the writes there that reach it, whose value the walk does not
     /// hold.
     written: Option<super::PathOf>,
+    /// For a judge-only group, whether an arm it stands in is one MSBuild
+    /// cannot take (`Speculation::dead_arms`): it holds no reference the
+    /// build makes.
+    in_dead_arm: bool,
 }
 
 impl<'r> State<'r> {
@@ -239,6 +243,11 @@ impl<'r> State<'r> {
         } else {
             None
         };
+        let in_dead_arm = judge_only
+            && self
+                .speculation
+                .as_ref()
+                .is_some_and(|speculation| speculation.dead_arms > 0);
         self.deferred_item_groups.push(DeferredItemGroup {
             kind,
             file,
@@ -249,6 +258,7 @@ impl<'r> State<'r> {
             reach_certain,
             judge_only,
             written,
+            in_dead_arm,
         });
     }
 }
@@ -288,7 +298,7 @@ pub(super) fn replay_deferred_item_groups(entry_doc: &Document<'_>, state: &mut 
             state.judge_from_path(group.written.as_ref(), |state| {
                 rejection::judge_deferred(node, dir, group.reach_certain, state);
             });
-            if group.kind == DeferredGroupKind::ItemGroup {
+            if group.kind == DeferredGroupKind::ItemGroup && !group.in_dead_arm {
                 taint_group_references_on_doubted_reads(node, state);
             }
         };
