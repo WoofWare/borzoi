@@ -437,6 +437,11 @@ const TABLE: &[(Dimension, Value, &str)] = &[
         last("yeſ"),
         "a boolean only ordinal-ignore-case folds",
     ),
+    (
+        Dimension::BooleanSpelling,
+        last("false%00"),
+        "a boolean padded with an escaped NUL, which a property function hands on as a NUL and `Boolean.TryParse` trims as padding",
+    ),
     // List separators.
     (Dimension::ItemSeparator, last("{};{}"), "two items"),
     (Dimension::ItemSeparator, last(";"), "a separator alone"),

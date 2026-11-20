@@ -244,17 +244,27 @@ pub fn compiled_assembly_name_grading(
     )
 }
 
-/// What the walk reads as the inline task body of the first `<UsingTask>` in
-/// `xml` (its `<Task>`), unexpanded, where it reproduces MSBuild's reading
-/// (`ProjectUsingTaskBodyElement.TaskBody`); `None` where it declines, or
-/// where there is none. Held to MSBuild's by `tests/inline_task_body_diff.rs`.
-pub fn inline_task_body(xml: &str) -> Option<String> {
+/// What the walk reads as the text of the first element in `xml` that
+/// MSBuild reads by its contents (a property, an item's or an item
+/// definition's metadatum written as an element, or a `<UsingTask>`'s
+/// `<Task>`), unexpanded, where it reproduces MSBuild's reading
+/// (`Utilities.GetXmlNodeInnerContents`); `None` where it declines, or where
+/// there is none. Held to MSBuild's by `tests/element_contents_diff.rs`.
+pub fn element_contents(xml: &str) -> Option<String> {
     let document = crate::document::parse(xml).ok()?;
-    let task = document
-        .root_element()
-        .children()
-        .filter(|node| node.is_element() && node.tag_name().name() == "UsingTask")
-        .flat_map(|using_task| using_task.children())
-        .find(|node| node.is_element() && node.tag_name().name() == "Task")?;
-    crate::evaluator::inline_task_body(task)
+    let named = |node: &roxmltree::Node<'_, '_>, names: &[&str]| {
+        node.is_element() && names.contains(&node.tag_name().name())
+    };
+    let element = document.root_element().descendants().find(|node| {
+        let Some(parent) = node.parent_element() else {
+            return false;
+        };
+        node.is_element()
+            && (named(&parent, &["PropertyGroup"])
+                || (named(node, &["Task"]) && named(&parent, &["UsingTask"]))
+                || parent
+                    .parent_element()
+                    .is_some_and(|group| named(&group, &["ItemGroup", "ItemDefinitionGroup"])))
+    })?;
+    crate::evaluator::element_inner_contents(element)
 }

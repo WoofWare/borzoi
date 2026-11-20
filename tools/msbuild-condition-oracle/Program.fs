@@ -37,14 +37,16 @@
 ///     per-case `dotnet msbuild` pays .NET startup every time, which a
 ///     generative sweep cannot afford.
 ///
-///   {"op":"taskBodies","xml":s,"path":s}
-///     -> {"ok":true,"bodies":[s|null, ..]}      // each UsingTask's inline
-///                                               //   task body, unexpanded
+///   {"op":"elementContents","xml":s,"path":s}
+///     -> {"ok":true,"contents":[s, ..]}         // each property's, metadatum's
+///                                               //   and inline task body's
+///                                               //   text, unexpanded
 ///      | {"ok":false}                           // MSBuild refuses to load it
-///     What MSBuild reads as an inline task's body
-///     (`ProjectUsingTaskBodyElement.TaskBody`: an element's inner text or
-///     inner XML, `Utilities.GetXmlNodeInnerContents`), for the rejection
-///     judgement's reading of it to be held to.
+///     What MSBuild reads as the text of each element it reads by its
+///     contents (`ProjectPropertyElement.Value`, `ProjectMetadataElement.Value`,
+///     `ProjectUsingTaskBodyElement.TaskBody`: an element's inner text or
+///     inner XML, `Utilities.GetXmlNodeInnerContents`), in document order,
+///     for the rejection judgement's reading of them to be held to.
 ///
 ///   {"op":"itemsMeta","xml":s,"path":s,"itemType":s,"metadata":[name, ..]}
 ///     -> {"ok":true,"items":[{"identity":s,"escaped":s,"metadata":{name:value, ..}}, ..]}
@@ -525,35 +527,40 @@ let private readGlobals (root: JsonElement) : Collections.Generic.IDictionary<st
         table :> Collections.Generic.IDictionary<string, string>
     | _ -> null
 
-/// The `taskBodies` op: each `<UsingTask>`'s inline task body as MSBuild
-/// reads it, unexpanded (`ProjectUsingTaskBodyElement.TaskBody`, which is
-/// `Utilities.GetXmlNodeInnerContents`), in document order; `null` for one
-/// with no body. The document is written to `path` and opened as that file,
-/// so it is read exactly as a project file is (whitespace nodes dropped).
-/// `None` when MSBuild refuses to load it.
-let private taskBodies (path: string) (xml: string) : string array option =
+/// The `elementContents` op: the text MSBuild reads of each property,
+/// metadatum (an element's, not an attribute's) and inline task body,
+/// unexpanded (`Utilities.GetXmlNodeInnerContents`), in document order. The
+/// document is written to `path` and opened as that file, so it is read
+/// exactly as a project file is (whitespace nodes dropped). `None` when
+/// MSBuild refuses to load it.
+let private elementContents (path: string) (xml: string) : string array option =
     use collection = new ProjectCollection()
 
     try
         writeProject path xml
         let element = Microsoft.Build.Construction.ProjectRootElement.Open(path, collection)
 
-        element.UsingTasks
-        |> Seq.map (fun usingTask ->
-            match usingTask.TaskBody with
-            | null -> null
-            | body -> body.TaskBody)
+        element.AllChildren
+        |> Seq.choose (fun child ->
+            match child with
+            | :? Microsoft.Build.Construction.ProjectPropertyElement as property -> Some property.Value
+            | :? Microsoft.Build.Construction.ProjectMetadataElement as metadata when
+                not metadata.ExpressedAsAttribute
+                ->
+                Some metadata.Value
+            | :? Microsoft.Build.Construction.ProjectUsingTaskBodyElement as body -> Some body.TaskBody
+            | _ -> None)
         |> Seq.toArray
         |> Some
     with :? InvalidProjectFileException ->
         None
 
-let private respondTaskBodies (root: JsonElement) : string =
+let private respondElementContents (root: JsonElement) : string =
     let xml = root.GetProperty("xml").GetString()
     let path = root.GetProperty("path").GetString()
 
-    match taskBodies path xml with
-    | Some bodies -> JsonSerializer.Serialize {| ok = true; bodies = bodies |}
+    match elementContents path xml with
+    | Some contents -> JsonSerializer.Serialize {| ok = true; contents = contents |}
     | None -> JsonSerializer.Serialize {| ok = false |}
 
 let private respondItems (root: JsonElement) : string =
@@ -1744,7 +1751,7 @@ let main argv =
                     | "project" -> respondProject root
                     | "items" -> respondItems root
                     | "itemsMeta" -> respondItemsMeta root
-                    | "taskBodies" -> respondTaskBodies root
+                    | "elementContents" -> respondElementContents root
                     | "restoreCone" -> respondRestoreCone root
                     | "evaluated" -> respondEvaluated root
                     | "targetItems" -> respondTargetItems root

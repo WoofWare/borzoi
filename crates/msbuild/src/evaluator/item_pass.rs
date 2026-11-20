@@ -153,9 +153,10 @@ pub(super) struct DeferredItemGroup {
     /// decide) that MSBuild may: judged in the item pass, against the final
     /// property table, and not evaluated ([`State::defer_judgement`]).
     judge_only: bool,
-    /// For a judge-only group, the names written on its path before it,
-    /// whose value there the walk does not hold.
-    written: Option<std::rc::Rc<std::cell::RefCell<super::PathWrites>>>,
+    /// For a judge-only group, where it stands in the walk it was deferred
+    /// from: the writes there that reach it, whose value the walk does not
+    /// hold.
+    written: Option<super::PathOf>,
 }
 
 impl<'r> State<'r> {
@@ -269,8 +270,8 @@ pub(super) fn replay_deferred_item_groups(entry_doc: &Document<'_>, state: &mut 
     let using_tasks = groups
         .iter()
         .filter(|group| group.kind == DeferredGroupKind::UsingTask);
-    state.in_item_pass = true;
     for group in definition_groups.chain(item_groups).chain(using_tasks) {
+        state.item_pass = Some(group.kind);
         // Reinstate the positional context the group was recorded under, so
         // diagnostics/origins/SDK tolerance match inline evaluation.
         let saved_span =
@@ -323,7 +324,7 @@ pub(super) fn replay_deferred_item_groups(entry_doc: &Document<'_>, state: &mut 
         state.import_site_span = saved_span;
         state.in_sdk_subtree = saved_sdk;
     }
-    state.in_item_pass = false;
+    state.item_pass = None;
     // All items captured: collapse Include + Update into the effective set and
     // detect the versionless symptom on it (both need every item present).
     #[cfg(any(test, feature = "test-support"))]

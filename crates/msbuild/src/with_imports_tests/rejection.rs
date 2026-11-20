@@ -1701,6 +1701,64 @@ fn a_plain_reference_in_an_inline_task_attribute_is_no_throw() {
     }
 }
 
+/// An inline task's `Evaluate` flag is read as `Boolean.TryParse` reads it,
+/// which takes `false` padded with NULs as with whitespace: the body is then
+/// not expanded, and its throw is none.
+#[test]
+fn an_evaluate_flag_padded_with_a_nul_is_false() {
+    let task = |flag: &str| {
+        format!(
+            "<PropertyGroup><P>x</P><N>%00</N></PropertyGroup>\
+             <UsingTask TaskName=\"X\" TaskFactory=\"RoslynCodeTaskFactory\" AssemblyFile=\"y.dll\">\
+             <Task Evaluate=\"{flag}\">$(P[9])</Task></UsingTask>"
+        )
+    };
+    let padded = task("false$(N[0])");
+    for parsed in both_walkers(&format!("  {padded}")) {
+        assert_eq!(
+            parsed.rejection, None,
+            "{padded}: {:#?}",
+            parsed.diagnostics
+        );
+    }
+    let evaluated = task("true$(N[0])");
+    for parsed in both_walkers(&format!("  {evaluated}")) {
+        assert_rejected(&parsed, &["Before", "After"]);
+    }
+}
+
+/// A property's or metadatum's body holding an element is its inner XML,
+/// which MSBuild expands like any other body: a throw in it rejects the
+/// project, and the same body with an index in range does not.
+#[test]
+fn an_element_valued_body_is_judged_as_its_inner_xml() {
+    let sites = [
+        "<PropertyGroup><Q><Data>$(P[INDEX])</Data></Q></PropertyGroup>",
+        "<ItemGroup><I Include=\"a\"><M><Data>$(P[INDEX])</Data></M></I></ItemGroup>",
+        "<ItemDefinitionGroup><I><M><Data>$(P[INDEX])</Data></M></I></ItemDefinitionGroup>",
+    ];
+    for site in sites {
+        let throwing = format!(
+            "<PropertyGroup><P>x</P></PropertyGroup>{}",
+            site.replace("INDEX", "9")
+        );
+        for parsed in both_walkers(&format!("  {throwing}")) {
+            assert_rejected(&parsed, &["Before", "After"]);
+        }
+        let in_range = format!(
+            "<PropertyGroup><P>x</P></PropertyGroup>{}",
+            site.replace("INDEX", "0")
+        );
+        for parsed in both_walkers(&format!("  {in_range}")) {
+            assert_eq!(
+                parsed.rejection, None,
+                "{in_range}: {:#?}",
+                parsed.diagnostics
+            );
+        }
+    }
+}
+
 /// An inline task written with Windows line ends is read as MSBuild reads it:
 /// its whitespace nodes, carriage returns and all, are dropped, and a plain
 /// reference in an attribute is no throw.
@@ -1749,6 +1807,23 @@ fn an_untaken_branchs_items_know_the_writes_after_them() {
     );
     for parsed in both_walkers(&format!("  {body}")) {
         assert_eq!(parsed.rejection, None, "{body}: {:#?}", parsed.diagnostics);
+    }
+}
+
+/// An item group from content the walk does not take knows only the writes
+/// that can reach it: one in another arm of a `<Choose>` that holds it is
+/// none. MSBuild takes the `<Otherwise>` here, where `P` is short, and
+/// rejects; the long `P` of the `<When>` beside it never reaches the item.
+#[test]
+fn an_untaken_branchs_items_know_no_write_of_a_sibling_arm() {
+    let body = format!(
+        "<PropertyGroup><P>x</P></PropertyGroup><Choose><When Condition=\"{UNDECIDED_TRUE}\">\
+         <Choose><When Condition=\"'É' == 'Ê'\"><PropertyGroup><P>long enough</P></PropertyGroup></When>\
+         <Otherwise><ItemGroup><I Include=\"$(P[9])\" /></ItemGroup></Otherwise></Choose>\
+         </When></Choose>"
+    );
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_withdrawn(&parsed, &["Before", "After"]);
     }
 }
 
@@ -1857,13 +1932,14 @@ fn a_throw_beside_a_metadata_reference_is_no_certain_rejection() {
 }
 
 /// An inline task's body the walk cannot read as MSBuild does (a carriage
-/// return in it) is checked for an expression across its markup, as its
-/// inner text joins it: `$` and `(P[9])` in separate pieces still form one.
+/// return in a text, whose line end `roxmltree` folds and MSBuild's reader
+/// keeps) is checked for an expression across its markup, as its inner text
+/// joins it: `$` and `(P[9])` in separate pieces still form one.
 #[test]
 fn a_task_body_read_apart_is_checked_across_its_markup() {
     let body = "<PropertyGroup><P>abc</P></PropertyGroup>\
                 <UsingTask TaskName=\"X\" TaskFactory=\"RoslynCodeTaskFactory\" AssemblyFile=\"y.dll\">\
-                <Task><![CDATA[$]]><Code>(P[9])</Code>\r</Task></UsingTask>";
+                <Task><![CDATA[$]]><Code>(P[9])\r</Code></Task></UsingTask>";
     for parsed in both_walkers(&format!("  {body}")) {
         assert_withdrawn(&parsed, &["Before", "After"]);
     }

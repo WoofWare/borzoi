@@ -601,12 +601,13 @@ impl Oracle {
     /// project. This is what lets a generative sweep diff a `<PackageReference>`
     /// `Include`+`Update` collapse — identity matching and per-key metadata
     /// merge — against the real evaluator, resident.
-    /// Each `<UsingTask>`'s inline task body in `xml`, unexpanded, as MSBuild
-    /// reads it (the `taskBodies` op): `None` where MSBuild refuses to load
-    /// the document, a `None` entry for a `<UsingTask>` with no body.
-    pub fn task_bodies(&mut self, xml: &str, path: &Path) -> Option<Vec<Option<String>>> {
+    /// The text MSBuild reads of each property, metadatum (an element's) and
+    /// inline task body in `xml`, unexpanded, in document order (the
+    /// `elementContents` op): `None` where MSBuild refuses to load the
+    /// document.
+    pub fn element_contents(&mut self, xml: &str, path: &Path) -> Option<Vec<String>> {
         let resp = self.request(&serde_json::json!({
-            "op": "taskBodies",
+            "op": "elementContents",
             "xml": xml,
             "path": path.to_string_lossy().into_owned(),
         }));
@@ -614,11 +615,11 @@ impl Oracle {
             return None;
         }
         Some(
-            resp["bodies"]
+            resp["contents"]
                 .as_array()
-                .expect("bodies is an array")
+                .expect("contents is an array")
                 .iter()
-                .map(|body| body.as_str().map(str::to_owned))
+                .map(|text| text.as_str().expect("each content is a string").to_owned())
                 .collect(),
         )
     }

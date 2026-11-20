@@ -105,7 +105,7 @@ use property_reads::PropertyRead;
 #[cfg(any(test, feature = "test-support"))]
 use reads::{EvaluationReads, ReadProbe};
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use rejection::inline_task_body;
+pub(crate) use rejection::element_inner_contents;
 
 /// Maximum recursion depth for `<Import>` following. MSBuild itself
 /// caps at ~100; we pick a number well above any sane real-world
@@ -1298,9 +1298,11 @@ struct State<'r> {
     /// certain values, so that its failure to load is MSBuild's
     /// ([`rejection`]). Set for each explicit import, and `false` for any other.
     taken_import_path_certain: bool,
-    /// Set while the item pass runs: its conditions are judged group by group
-    /// ([`rejection::judge_deferred`]), not where the walk evaluates them.
-    in_item_pass: bool,
+    /// The kind of group the item pass replays, while it runs: its
+    /// conditions are judged group by group ([`rejection::judge_deferred`]),
+    /// not where the walk evaluates them, and each kind's conditions are
+    /// evaluated at its own [`condition::Site`].
+    item_pass: Option<DeferredGroupKind>,
     /// While the rejection judgement walks content the walk does not take
     /// ([`rejection::judge_branch`], [`rejection::judge_properties`]), or
     /// judges an item group from it ([`State::defer_judgement`]): the names
@@ -1430,26 +1432,63 @@ struct Speculation {
     /// The names [`Self::unheld`] gained, in order, so that a branch can undo
     /// its own on leaving ([`rejection::judge_branch`]).
     gained: Vec<String>,
-    /// Every name written anywhere in the outermost walk, which the item
-    /// groups deferred from it share ([`State::defer_judgement`]): MSBuild
-    /// evaluates an item group after every property write on its path,
-    /// those after the group included.
+    /// Every write anywhere in the outermost walk, which the item groups
+    /// deferred from it share ([`State::defer_judgement`]): MSBuild evaluates
+    /// an item group after every property write on its path, those after the
+    /// group included.
     walk_written: std::rc::Rc<std::cell::RefCell<PathWrites>>,
-    /// While an item group deferred from a walk is judged, the names of that
-    /// walk whose final value is not certain ([`PathWrites::settled`]).
+    /// The `<Choose>` arms the walk is in now, outermost first.
+    arms: Vec<Arm>,
+    /// While an item group deferred from a walk is judged, the names written
+    /// on its path in that walk whose final value is not certain
+    /// ([`State::judge_from_path`]).
     inherited: Option<std::rc::Rc<HashSet<String>>>,
     /// How many nested walks are open.
     depth: usize,
 }
 
-/// The names written in one walk of content the walk does not take
+/// An arm of a `<Choose>` the judgement walks: the `<Choose>` (its document
+/// and offset) and the `<When>` or `<Otherwise>` (its offset). Two arms of
+/// one `<Choose>` are never both taken.
+type Arm = ((usize, usize), usize);
+
+/// The writes in one walk of content the walk does not take
 /// ([`Speculation::walk_written`]).
 #[derive(Default)]
 struct PathWrites {
-    names: HashSet<String>,
-    /// Those whose final value is not certain, computed once, in the item
-    /// pass, when the table is final.
+    /// Each name written, lower-cased, and the arms it was written in.
+    writes: Vec<(String, std::rc::Rc<[Arm]>)>,
+    /// The names written whose final value is not certain, computed once, in
+    /// the item pass, when the table is final.
     settled: Option<std::rc::Rc<HashSet<String>>>,
+}
+
+/// Where an item group deferred from a walk of content the walk does not
+/// take stands in that walk: the walk's writes, and the arms the group is in.
+#[derive(Clone)]
+struct PathOf {
+    writes: std::rc::Rc<std::cell::RefCell<PathWrites>>,
+    arms: std::rc::Rc<[Arm]>,
+}
+
+impl PathOf {
+    /// The names written on the path of the group: in no arm another arm of
+    /// whose `<Choose>` holds the group.
+    fn reaching(&self) -> HashSet<String> {
+        self.writes
+            .borrow()
+            .writes
+            .iter()
+            .filter(|(_, arms)| {
+                arms.iter().all(|(choose, arm)| {
+                    self.arms
+                        .iter()
+                        .all(|(other, other_arm)| other != choose || other_arm == arm)
+                })
+            })
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
 }
 
 impl Expansion {
@@ -1785,7 +1824,7 @@ impl<'r> State<'r> {
             rejection: None,
             reach_doubted: 0,
             taken_import_path_certain: false,
-            in_item_pass: false,
+            item_pass: None,
             speculation: None,
             diagnostic_roots: HashMap::new(),
         }
@@ -2269,7 +2308,7 @@ impl<'r> State<'r> {
             rejection,
             reach_doubted: _,
             taken_import_path_certain: _,
-            in_item_pass: _,
+            item_pass: _,
             speculation: _,
             diagnostic_roots: _,
         } = self;
@@ -4626,6 +4665,10 @@ fn walk_property_child_inner(
     // — distinct from "undefined", and used in real projects to clear an
     // inherited value.
     let Some(raw) = collect_element_text(node) else {
+        // MSBuild expands the body as it reads it, its inner XML included,
+        // and may throw on an expression there.
+        let reached = rejection::reach_is_certain(state) && own_gate(state) == Some(true);
+        rejection::judge_unwalked_body(node, reached, state);
         // A body we cannot model (an element or processing instruction). Same
         // treatment as an unevaluable expansion below: drop any prior binding
         // rather than let a stale value stand in for a write whose result we
@@ -5082,7 +5125,7 @@ fn evaluate_condition_with_exemptions(
     // project with it. The item pass judges its conditions group by group
     // instead ([`rejection::judge_deferred`]): MSBuild evaluates some the walk
     // does not.
-    if !state.in_item_pass {
+    if state.item_pass.is_none() {
         let reached = rejection::reach_is_certain(state);
         rejection::judge_condition_rejection(
             state,

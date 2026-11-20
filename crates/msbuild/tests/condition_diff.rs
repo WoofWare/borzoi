@@ -1154,6 +1154,126 @@ fn where_msbuild_evaluates_a_condition() {
     }
 }
 
+/// Each construct whose condition MSBuild evaluates, under two probes that
+/// tell its expansion options apart, pinned against design-time evaluation
+/// and the walk's rejection judgement held to it, certain-implies-exact:
+///
+/// - `'' == 'a$(P[9])'` throws only where design-time evaluation records the
+///   conditioned properties, which expands both sides of an equality even
+///   where the empty one decides it: the property pass's conditions, and no
+///   item definition's;
+/// - `'$(A)$(B)' != ''`, `A` and `B` forming `@(J->Nope())` over an item type
+///   with items, throws only where the condition expands an item list its
+///   properties form: an item's, an item group's and its metadata's, a
+///   `<UsingTask>`'s, and no item definition's (probed,
+///   `msbuild-condition-oracle`, SDK 10.0.401).
+#[test]
+fn condition_sites_expand_as_msbuild_does() {
+    const COLLECTS: &str = "'' == 'a$(P[9])'";
+    const FORMS_ITEMS: &str = "'$(A)$(B)' != ''";
+    // Each site, and whether MSBuild rejects under each probe: collecting,
+    // forming items.
+    let sites: &[(&str, bool, bool)] = &[
+        (
+            "<PropertyGroup Condition=\"{c}\"><R>x</R></PropertyGroup>",
+            true,
+            false,
+        ),
+        (
+            "<PropertyGroup><R Condition=\"{c}\">x</R></PropertyGroup>",
+            true,
+            false,
+        ),
+        (
+            "<Choose><When Condition=\"{c}\"><PropertyGroup><R>x</R></PropertyGroup></When></Choose>",
+            true,
+            false,
+        ),
+        (
+            "<ItemGroup Condition=\"{c}\"><I Include=\"x\" /></ItemGroup>",
+            false,
+            true,
+        ),
+        (
+            "<ItemGroup><I Include=\"x\" Condition=\"{c}\" /></ItemGroup>",
+            false,
+            true,
+        ),
+        (
+            "<ItemGroup><I Include=\"x\"><M Condition=\"{c}\">m</M></I></ItemGroup>",
+            false,
+            true,
+        ),
+        (
+            "<ItemDefinitionGroup Condition=\"{c}\"><I><M>m</M></I></ItemDefinitionGroup>",
+            false,
+            false,
+        ),
+        (
+            "<ItemDefinitionGroup><I Condition=\"{c}\"><M>m</M></I></ItemDefinitionGroup>",
+            false,
+            false,
+        ),
+        (
+            "<ItemDefinitionGroup><I><M Condition=\"{c}\">m</M></I></ItemDefinitionGroup>",
+            false,
+            false,
+        ),
+        (
+            "<UsingTask TaskName=\"X\" AssemblyFile=\"y.dll\" Condition=\"{c}\" />",
+            false,
+            true,
+        ),
+        ("<ImportGroup Condition=\"{c}\" />", true, false),
+    ];
+    let mut oracle = Oracle::spawn();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let dir = borzoi_msbuild::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    let project_path = dir.join("Demo.fsproj");
+    for (site, collects, forms_items) in sites {
+        for (probe, expected) in [(COLLECTS, *collects), (FORMS_ITEMS, *forms_items)] {
+            let xml = format!(
+                "<Project><PropertyGroup><P>x</P><A>@</A><B>(J->Nope())</B></PropertyGroup><ItemGroup><J Include=\"j\" /></ItemGroup>{}\
+                 <PropertyGroup><After>ok</After></PropertyGroup></Project>",
+                site.replace("{c}", &probe.replace('\'', "&apos;"))
+            );
+            std::fs::write(&project_path, &xml).unwrap();
+            let msbuild_rejects = oracle
+                .project_design_time(&xml, &["After".to_string()], Some(&project_path), &[])
+                .is_none();
+            assert_eq!(msbuild_rejects, expected, "MSBuild's verdict moved: {xml}");
+            let parsed = common::parse_fsproj_with_imports(
+                &borzoi_msbuild::ProjectFile::buffer(&project_path, &xml)
+                    .expect("a project path spelt as its full path"),
+                &std::collections::HashMap::new(),
+                &common::oracle_environment(),
+                None,
+                None,
+            )
+            .expect("well-formed");
+            let certainty = parsed.rejection.as_ref().map(|r| r.certainty);
+            if msbuild_rejects {
+                assert!(
+                    certainty.is_some(),
+                    "MSBuild rejects, and the walk claims nothing: {xml}"
+                );
+            } else {
+                assert_ne!(
+                    certainty,
+                    Some(borzoi_msbuild::RejectionCertainty::Certain),
+                    "MSBuild evaluates, and the walk claims it rejects: {xml}"
+                );
+                assert_eq!(
+                    parsed.property("After").value(),
+                    Some("ok"),
+                    "MSBuild evaluates, and the walk withdrew: {xml}\n{:#?}",
+                    parsed.rejection
+                );
+            }
+        }
+    }
+}
+
 /// Where MSBuild expands a text holding a property function it throws on
 /// (`$(P.Split(';')[3])` with `P` holding `a;b`: MSB4184), each row pinned
 /// against both evaluations (#1009). A property's body is expanded only under
@@ -1554,6 +1674,21 @@ fn using_task_texts_are_judged_where_msbuild_expands_them() {
     rows.push(format!(
         "<UsingTask {INLINE}><Task Evaluate=\"%66alse\">{T}</Task></UsingTask>"
     ));
+    // The flag parsed as `Boolean.TryParse` parses it, padded with
+    // whitespace (Unicode's included) or with a NUL, which `$(Nul[0])`
+    // supplies as itself.
+    for evaluate in [
+        "false$(Nul[0])",
+        "$(Nul[0])false",
+        "true$(Nul[0])",
+        "&#xA0;false",
+        "&#x2003;false&#x85;",
+        "&#x200B;false",
+    ] {
+        rows.push(format!(
+            "<UsingTask {INLINE}><Task Evaluate=\"{evaluate}\">{T}</Task></UsingTask>"
+        ));
+    }
     let mut oracle = Oracle::spawn();
     let tmp = tempfile::TempDir::new().unwrap();
     let dir = borzoi_msbuild::observed::host_fs::canonicalize(tmp.path()).unwrap();
@@ -1561,7 +1696,7 @@ fn using_task_texts_are_judged_where_msbuild_expands_them() {
     let (mut rejects, mut evaluates) = (0, 0);
     for row in rows {
         let xml = format!(
-            "<Project><PropertyGroup><P>abc</P><Q>quiet</Q><G>x&gt;y</G><S>a b</S><Fa>false</Fa></PropertyGroup>{}\
+            "<Project><PropertyGroup><P>abc</P><Q>quiet</Q><G>x&gt;y</G><S>a b</S><Fa>false</Fa><Nul>%00</Nul></PropertyGroup>{}\
              <PropertyGroup><After>ok</After></PropertyGroup></Project>",
             row.replace('\'', "&apos;")
         );

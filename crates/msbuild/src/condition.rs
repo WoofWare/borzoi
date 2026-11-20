@@ -87,18 +87,24 @@ pub(crate) struct Probes<'a> {
 /// `Evaluator`'s `EvaluateConditionCollectingConditionedProperties`); a
 /// condition of the item pass records none.
 ///
-/// A condition of the item pass (an item, a metadatum, an item group or item
-/// definition) expands an item list or metadatum its properties' values form
-/// (`@(I)` from `$(A)$(B)`), and may throw on it; one of the property pass
-/// reads it as text (`'$(A)$(B)' != ''` is true there; probed,
-/// `msbuild-condition-oracle`, SDK 10.0.401). The oracle's `eval` op, which
-/// `evaluate` is held to, evaluates as the item pass does.
+/// A condition of the item pass (an item, a metadatum, an item group, a
+/// `<UsingTask>`) expands an item list or metadatum its properties' values
+/// form (`@(I)` from `$(A)$(B)`), and may throw on it; one of the property
+/// pass reads it as text (`'$(A)$(B)' != ''` is true there; probed,
+/// `msbuild-condition-oracle`, SDK 10.0.401), and so does one of an item
+/// definition, which expands properties and metadata alone and records no
+/// conditioned properties. The oracle's `eval` op, which `evaluate` is held
+/// to, evaluates as the item pass does. `tests/condition_diff.rs`'s
+/// `condition_sites_expand_as_msbuild_does` pins each construct's site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Site {
     /// A condition of the property pass, in design-time evaluation.
     PropertyPass,
-    /// A condition of the item pass.
+    /// A condition of the item pass but an item definition's.
     ItemPass,
+    /// A condition of an item definition group, a definition in it, or one of
+    /// its metadata.
+    ItemDefinition,
 }
 
 /// What an evaluation reaches beyond the property table: the file system,

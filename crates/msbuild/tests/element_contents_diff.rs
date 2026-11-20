@@ -1,25 +1,28 @@
-//! Generated inline task bodies, each held to what MSBuild reads as the body
-//! (`ProjectUsingTaskBodyElement.TaskBody`, `Utilities.GetXmlNodeInnerContents`)
-//! through `tools/msbuild-condition-oracle`'s `taskBodies` op.
+//! Generated element contents, each held to the text MSBuild reads of the
+//! element (`Utilities.GetXmlNodeInnerContents`, behind
+//! `ProjectPropertyElement.Value`, `ProjectMetadataElement.Value` and
+//! `ProjectUsingTaskBodyElement.TaskBody`) through
+//! `tools/msbuild-condition-oracle`'s `elementContents` op.
 //!
-//! The rejection judgement expands a `<UsingTask>`'s `<Task>` body as MSBuild
-//! does, so it must first read the body as MSBuild does: the element's text,
-//! its inner text where a CDATA section leads, or its inner XML as
-//! `XmlDocument` serializes it, which writes back namespace declarations,
-//! quotes and escapes attribute values its own way, and drops whitespace
-//! nodes. The walk reproduces that reading where it can and declines
-//! elsewhere ([`borzoi_msbuild::test_support::inline_task_body`]).
+//! The rejection judgement expands a property's body, a metadatum's and an
+//! inline task's as MSBuild does, so it must first read each as MSBuild
+//! does: the element's text, its inner text where a CDATA section leads, or
+//! its inner XML as `XmlDocument` serializes it, which writes back namespace
+//! declarations, quotes and escapes attribute values its own way, and drops
+//! whitespace nodes. The walk reproduces that reading where it can and
+//! declines elsewhere ([`borzoi_msbuild::test_support::element_contents`]).
 //!
-//! The generator writes bodies over the shapes that reading turns on: default
-//! and prefixed namespaces, inherited from the project or redeclared,
-//! `xml:space` scopes, CDATA sections, comments, processing instructions and
-//! whitespace nodes at every position, entity and character references,
-//! attributes in either quote on nested elements, and nesting to past the
-//! walk's depth bound. Its texts and namespace names are drawn from the
-//! hostile name alphabet and spelled through the hostile XML alphabet
-//! (`borzoi_oracle_harness::hostile`). Each is graded certain-implies-exact:
-//! where the walk reads a body, it is MSBuild's, byte for byte; a decline
-//! makes no claim.
+//! The generator writes contents over the shapes that reading turns on:
+//! default and prefixed namespaces, inherited from the project or
+//! redeclared, `xml:space` scopes, CDATA sections, comments, processing
+//! instructions and whitespace nodes at every position, entity and character
+//! references, attributes in either quote on nested elements, nesting to past
+//! the walk's depth bound, and Windows line ends; and puts them in each
+//! element MSBuild reads so ([`Site`]). Its texts and namespace names are
+//! drawn from the hostile name alphabet and spelled through the hostile XML
+//! alphabet (`borzoi_oracle_harness::hostile`). Each is graded
+//! certain-implies-exact: where the walk reads an element's text, it is
+//! MSBuild's, byte for byte; a decline makes no claim.
 
 mod common;
 
@@ -301,8 +304,29 @@ impl Case {
     }
 }
 
-/// One generated project: its source, and the hostile dimensions in it.
-fn generate(rng: &mut SplitMix64, texts: &[hostile::Entry<String>]) -> (String, Case) {
+/// The element the generated contents stand in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Site {
+    /// A `<UsingTask>`'s `<Task>`.
+    TaskBody,
+    /// A property.
+    Property,
+    /// An item's metadatum.
+    ItemMetadata,
+    /// An item definition's metadatum.
+    DefinitionMetadata,
+}
+
+const SITES: [Site; 4] = [
+    Site::TaskBody,
+    Site::Property,
+    Site::ItemMetadata,
+    Site::DefinitionMetadata,
+];
+
+/// One generated project: its source, the site of its contents, and the
+/// hostile dimensions in it.
+fn generate(rng: &mut SplitMix64, texts: &[hostile::Entry<String>]) -> (String, Site, Case) {
     let mut case = Case {
         hostile: BTreeSet::new(),
         texts: texts.to_vec(),
@@ -343,28 +367,45 @@ fn generate(rng: &mut SplitMix64, texts: &[hostile::Entry<String>]) -> (String, 
         };
         project_extra.push_str(&format!(" xmlns:p=\"{uri}\""));
     }
-    let using_extra = "";
-    let task_extra = if rng.below(10) == 0 {
-        " Evaluate=\"true\""
-    } else {
-        ""
-    };
     let mut inner = String::new();
     for node in &body {
         render(node, &mut inner);
     }
-    let source = format!(
-        "<Project{project_ns}{project_extra}>\n  <UsingTask TaskName=\"T\" \
-         TaskFactory=\"RoslynCodeTaskFactory\" AssemblyFile=\"y.dll\"{using_extra}>\n    \
-         <Task{task_extra}>{inner}</Task>\n  </UsingTask>\n</Project>\n"
-    );
+    // Half the cases are inline tasks, whose bodies are where XML is written.
+    let site = match rng.below(6) {
+        0..3 => Site::TaskBody,
+        3 => Site::Property,
+        4 => Site::ItemMetadata,
+        _ => Site::DefinitionMetadata,
+    };
+    let element = match site {
+        Site::TaskBody => {
+            let evaluate = if rng.below(10) == 0 {
+                " Evaluate=\"true\""
+            } else {
+                ""
+            };
+            format!(
+                "<UsingTask TaskName=\"T\" TaskFactory=\"RoslynCodeTaskFactory\" \
+                 AssemblyFile=\"y.dll\">\n    <Task{evaluate}>{inner}</Task>\n  </UsingTask>"
+            )
+        }
+        Site::Property => format!("<PropertyGroup>\n    <P>{inner}</P>\n  </PropertyGroup>"),
+        Site::ItemMetadata => {
+            format!("<ItemGroup>\n    <I Include=\"a\"><M>{inner}</M></I>\n  </ItemGroup>")
+        }
+        Site::DefinitionMetadata => {
+            format!("<ItemDefinitionGroup>\n    <I><M>{inner}</M></I>\n  </ItemDefinitionGroup>")
+        }
+    };
+    let source = format!("<Project{project_ns}{project_extra}>\n  {element}\n</Project>\n");
     // A document written with Windows line ends.
     let source = if rng.below(6) == 0 {
         source.replace("\r\n", "\n").replace('\n', "\r\n")
     } else {
         source
     };
-    (source, case)
+    (source, site, case)
 }
 
 #[derive(Debug, Default)]
@@ -380,17 +421,26 @@ struct Tally {
     committed_with_elements: usize,
     /// Committed bodies whose serialization declares a namespace.
     committed_with_namespace: usize,
+    /// Committed bodies serialized from elements, by site ([`SITES`]).
+    committed_with_elements_by_site: [usize; 4],
     /// Each body the walk reads otherwise than MSBuild: the project, ours,
     /// MSBuild's.
     wrong: Vec<(String, String, Option<String>)>,
 }
 
-/// Grade `source` (a project at `path`): the walk's reading of the first
-/// inline task body is MSBuild's, or a decline. The outcome, for the census.
-fn grade(oracle: &mut Oracle, source: &str, path: &Path, tally: &mut Tally) -> &'static str {
+/// Grade `source` (a project at `path` whose contents stand at `site`): the
+/// walk's reading of the element is MSBuild's, or a decline. The outcome,
+/// for the census.
+fn grade(
+    oracle: &mut Oracle,
+    source: &str,
+    site: Site,
+    path: &Path,
+    tally: &mut Tally,
+) -> &'static str {
     tally.cases += 1;
-    let ours = borzoi_msbuild::test_support::inline_task_body(source);
-    let Some(theirs) = oracle.task_bodies(source, path) else {
+    let ours = borzoi_msbuild::test_support::element_contents(source);
+    let Some(theirs) = oracle.element_contents(source, path) else {
         tally.msbuild_refused += 1;
         return "msbuild-refuses";
     };
@@ -398,7 +448,7 @@ fn grade(oracle: &mut Oracle, source: &str, path: &Path, tally: &mut Tally) -> &
         tally.declined += 1;
         return "decline";
     };
-    let theirs = theirs.first().cloned().flatten();
+    let theirs = theirs.first().cloned();
     if theirs.as_ref() != Some(&ours) {
         tally.wrong.push((source.to_owned(), ours, theirs));
         return "wrong";
@@ -406,6 +456,8 @@ fn grade(oracle: &mut Oracle, source: &str, path: &Path, tally: &mut Tally) -> &
     tally.committed += 1;
     if ours.contains('<') {
         tally.committed_with_elements += 1;
+        let at = SITES.iter().position(|s| *s == site).expect("a site");
+        tally.committed_with_elements_by_site[at] += 1;
     }
     if ours.contains("xmlns=") {
         tally.committed_with_namespace += 1;
@@ -426,7 +478,7 @@ fn assert_read_as_msbuild_reads(tally: &Tally) {
         .collect();
     assert!(
         tally.wrong.is_empty(),
-        "the walk reads {} of {} inline task bodies otherwise than MSBuild does:\n\n{}",
+        "the walk reads {} of {} elements' contents otherwise than MSBuild does:\n\n{}",
         tally.wrong.len(),
         tally.cases,
         shown.join("\n\n")
@@ -435,8 +487,8 @@ fn assert_read_as_msbuild_reads(tally: &Tally) {
 
 fn sweep(rng: &mut SplitMix64, cases: usize) -> Tally {
     let census = coverage::open(
-        "crates/msbuild/tests/inline_task_body_diff.rs",
-        "inline_task_bodies",
+        "crates/msbuild/tests/element_contents_diff.rs",
+        "element_contents",
         EXCLUDED,
     );
     let texts = name::as_text("Stem", "");
@@ -446,26 +498,29 @@ fn sweep(rng: &mut SplitMix64, cases: usize) -> Tally {
     let path = dir.join("Demo.proj");
     let mut tally = Tally::default();
     while tally.cases < cases {
-        let (source, case) = generate(rng, &texts);
-        let outcome = grade(&mut oracle, &source, &path, &mut tally);
+        let (source, site, case) = generate(rng, &texts);
+        let outcome = grade(&mut oracle, &source, site, &path, &mut tally);
         census.reached(&case.hostile, outcome);
     }
     census.finish(
         "BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-msbuild --test \
-         inline_task_body_diff sweep_fixed_seed",
+         element_contents_diff sweep_fixed_seed",
     );
     tally
 }
 
-/// The generated bodies at a fixed seed. The floors say the sweep reaches
-/// what it is for: bodies the walk reads, serialized from elements, with a
-/// namespace written back.
+/// The generated contents at a fixed seed. The floors say the sweep reaches
+/// what it is for: contents the walk reads, serialized from elements at
+/// every site, with a namespace written back.
 #[test]
 fn sweep_fixed_seed() {
     let mut rng = SplitMix64(0x1009_b0d1);
     let tally = sweep(&mut rng, 2_000);
+    for (site, committed) in SITES.iter().zip(tally.committed_with_elements_by_site) {
+        assert!(committed >= tally.cases / 50, "{site:?}: {tally:?}");
+    }
     assert_read_as_msbuild_reads(&tally);
-    eprintln!("inline task body sweep: {tally:?}");
+    eprintln!("element contents sweep: {tally:?}");
     assert!(tally.committed >= tally.cases / 4, "{tally:?}");
     assert!(
         tally.committed_with_elements >= tally.cases / 10,
@@ -482,11 +537,11 @@ fn sweep_fixed_seed() {
 #[test]
 #[ignore]
 fn sweep_soak() {
-    let (seed, cases) = soak_parameters("inline task body", 10_000);
+    let (seed, cases) = soak_parameters("element contents", 10_000);
     let mut rng = SplitMix64(seed);
     let tally = sweep(&mut rng, cases);
     assert_read_as_msbuild_reads(&tally);
-    eprintln!("inline task body soak: {tally:?}");
+    eprintln!("element contents soak: {tally:?}");
 }
 
 /// Each corner's project: the attributes of its `<Project>`, and its body.
@@ -546,14 +601,14 @@ fn corner_bodies_are_read_as_msbuild_reads_them() {
     for (project, body) in corners {
         let source = corner_source(project, body);
         let theirs = oracle
-            .task_bodies(&source, &path)
+            .element_contents(&source, &path)
             .unwrap_or_else(|| panic!("MSBuild refuses {source}"));
-        let ours = borzoi_msbuild::test_support::inline_task_body(&source);
+        let ours = borzoi_msbuild::test_support::element_contents(&source);
         assert!(
             ours.is_some(),
             "the walk declines {source}; MSBuild reads {theirs:?}"
         );
-        assert_eq!(ours, theirs[0], "{source}");
+        assert_eq!(ours.as_ref(), theirs.first(), "{source}");
     }
 }
 
@@ -583,10 +638,10 @@ fn bodies_once_misread_are_read_as_msbuild_reads_them_or_declined() {
     for (project, body) in corners {
         let source = corner_source(project, body);
         let theirs = oracle
-            .task_bodies(&source, &path)
+            .element_contents(&source, &path)
             .unwrap_or_else(|| panic!("MSBuild refuses {source}"));
-        if let Some(ours) = borzoi_msbuild::test_support::inline_task_body(&source) {
-            assert_eq!(Some(ours), theirs[0], "{source}");
+        if let Some(ours) = borzoi_msbuild::test_support::element_contents(&source) {
+            assert_eq!(Some(&ours), theirs.first(), "{source}");
         }
     }
 }
