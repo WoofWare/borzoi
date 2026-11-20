@@ -138,11 +138,19 @@ use it rather than re-deriving an fsc input from evaluated values, since
 every hand re-derivation leaked. Its first consumer is
 `borzoi_msbuild::fsc::compiled_assembly_name`, the name of the assembly a
 project compiles to. It commits only over a positive domain: every property,
-item type, item metadata name, global and environment variable set from
-outside the .NET install is on one of its lists, and each allowed property's
-value matches its grammar; documents outside the install are literal and
-unconditional (#993, #1060). Widen the domain by adding a name to a list,
-never by subtracting a route. `fsproj_assembly_name_perturbation_diff`
+item type, item metadata name and global set from outside the .NET install
+is on one of its lists, and each allowed property's value matches its
+grammar; documents outside the install are literal and unconditional (#993,
+#1060). Widen the domain by adding a name to a list, never by subtracting a
+route. Environment variables are the exception, by a stated assumption (the
+build's environment is the evaluation's): a variable declines when an SDK
+file reads a property of its name or the build's tools read it, both listed
+per verified SDK in `src/fsc_environment_reads.txt` (scanned from the SDK's
+documents and binaries by `tests/fsc_environment_reads.rs`, which fails until
+an SDK bump is rescanned, the binaries through the condition oracle's
+`envReads` op), unless it is the toolchain's own, an allowed property or
+graded inert; any other is inert by construction, which the grader checks by
+setting names off both lists and requiring fsc's arguments unchanged. `fsproj_assembly_name_perturbation_diff`
 grades every listed name: it sets each one, everywhere it can be set, to
 line-break and option-shaped values, and holds each commit to fsc's `-o:`
 (its ignored `deep_every_perturbation` covers every case, and with

@@ -32,10 +32,10 @@ use std::path::{Path, PathBuf};
 
 use borzoi_msbuild::AutoResponseFile;
 use borzoi_msbuild::fsc::{
-    ALLOWED_ENVIRONMENT, ALLOWED_ITEM_TYPES, ALLOWED_METADATA, ALLOWED_PROPERTIES,
-    BUILD_TIME_SITES, CompiledAssemblyName, Gate, RESTORE_ITEM_TYPES, RESTORE_METADATA,
-    RESTORE_PROPERTIES, RESTORE_PROPERTY_PREFIX, resolved_sdk_version, restore_props,
-    toolchain_variable, verified_manifests, verified_sdks,
+    ALLOWED_ITEM_TYPES, ALLOWED_METADATA, ALLOWED_PROPERTIES, BUILD_TIME_SITES,
+    CompiledAssemblyName, Gate, NameDecline, RESTORE_ITEM_TYPES, RESTORE_METADATA,
+    RESTORE_PROPERTIES, RESTORE_PROPERTY_PREFIX, classify_variable, environment_decline,
+    resolved_sdk_version, restore_props, verified_manifests, verified_sdks,
 };
 use borzoi_msbuild::observed::host_fs::{self, HostPath};
 use borzoi_msbuild::{ParsedProject, PropertyRead};
@@ -196,13 +196,24 @@ fn blocking_facts(
             fact("metadata off the list", name);
         }
     }
-    for name in environment.keys() {
-        if !toolchain_variable(name)
-            && !on_list(ALLOWED_ENVIRONMENT.iter().copied(), name)
-            && !on_list(ALLOWED_PROPERTIES.iter().map(|(n, _)| *n), name)
-        {
-            fact("environment variable off the list", name);
+    // The environment, as the derivation classifies each variable under the
+    // SDK the evaluation resolved.
+    match resolved_sdk_version(parsed) {
+        Some(sdk) => {
+            for name in environment.keys() {
+                match classify_variable(&sdk, name) {
+                    Some(class) if class.admitted() => {}
+                    Some(class) => fact(&format!("environment variable ({class:?})"), name),
+                    None => fact("environment reads not pinned for the SDK", &sdk),
+                }
+            }
+            if let Some(NameDecline::Environment(why)) = environment_decline(&sdk, environment)
+                && why.ends_with("name one property")
+            {
+                fact("environment variables naming one property", &why);
+            }
         }
+        None => fact("environment unclassified: no canonical SDK", ""),
     }
     // A package's own build files: documents outside the install under the
     // restore's package folder.

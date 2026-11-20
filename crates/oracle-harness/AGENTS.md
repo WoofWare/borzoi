@@ -39,7 +39,10 @@ deleted, and the trees the differentials generate hold it by grammar (no
 property function, no build code), which the generators assert. Callers set
 globals and environment variables only through `BuildInputs`, which refuses
 names that choose the toolchain, the compiler, the restore or MSBuild's
-machinery. `borzoi-msbuild`'s `fsc_args_oracle_calibration` holds the
+machinery, except through `unlisted_env`, which a grader of an environment
+rule uses to set names on no list (refusing the machinery's prefixes,
+`MACHINERY`). The build's own environment is closed too:
+`build_environment` carries only `BUILD_ENVIRONMENT_NAMES`. `borzoi-msbuild`'s `fsc_args_oracle_calibration` holds the
 reading to real compiling builds (the arguments `-getItem` reports, and the
 file fsc writes).
 

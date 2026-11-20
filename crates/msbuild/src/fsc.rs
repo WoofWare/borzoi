@@ -24,9 +24,28 @@
 //! names in a real build (`borzoi_oracle_harness::msbuild_oracle::fsc_args`).
 //! A name goes on a list only with that grading.
 //!
-//! The build's own environment ([`toolchain_variable`]) is the toolchain's,
-//! which the grading holds fixed rather than perturbs: a variable there that
-//! chooses another compiler is outside what is graded.
+//! **The environment.** MSBuild reads every environment variable as a
+//! property, and the build's tools read some of them directly, so a variable
+//! reaches fsc by one of two routes: a property some file of the SDK reads,
+//! or a read by the SDK's tasks, MSBuild, NuGet, the CLI, the host or fsc.
+//! Both are listed per verified SDK, statically ([`environment_reads`], from
+//! `src/fsc_environment_reads.txt`, which `tests/fsc_environment_reads.rs`
+//! scans from the SDK and fails on until regenerated). A variable on either
+//! list declines unless it is the toolchain's own ([`TOOLCHAIN_VARIABLES`],
+//! held fixed by the grading), an allowed property (held to its grammar), or
+//! graded inert ([`ALLOWED_ENVIRONMENT`]); every other variable is inert by
+//! construction ([`classify_variable`]). The grader sets names off both lists,
+//! drawn from the hostile alphabets, and requires fsc to be handed exactly
+//! what it is handed without them.
+//!
+//! **Stated assumption: the build's environment is the evaluation's.** The
+//! LSP evaluates under its own environment and cannot see the one a build
+//! runs in. The derivation assumes the build environment adds no variable
+//! named like a property an SDK file reads, nor one the build's tools read,
+//! beyond those the evaluation saw, as the LSP already assumes
+//! `Configuration=Debug` and `Platform=AnyCPU` for the build it stands in
+//! for. Under it, a variable the LSP does not see is a variable the build
+//! does not have, or one inert by construction.
 //!
 //! **The register is keyed by what fsc receives.** Everything fsc is handed
 //! arrives through a parameter of the SDK's `<Fsc>` invocation, a finite set
@@ -46,11 +65,14 @@
 //! | The reference set | every path the caller builds its assembly env from ([`ReferencePaths`]) is absolute, without control characters, not option-shaped |
 //! | Package content files | every build action is on [`ADMITTED_CONTENT_ACTIONS`] ([`ContentFiles`]) |
 //! | Documents | no build code outside the install; no condition outside the install but in NuGet's restore files (#993: the walk cannot tell every value a condition compares, MSBuild respelling a backslash by its working directory); no item wildcard outside the install (a glob's match keeps the glob's spelling, which the walk's path does not); no expansion (`$(`, `@(`, `%(`) outside the install but in NuGet's restore files (MSBuild sets properties the walk takes for unset, `_MSBUILDTLENABLED`); no response file beside MSBuild, beside the project or above it ([`crate::AutoResponseFile::Absent`]); no `NotImported` site's file imported; no workload manifest from outside the install, and none a grading run of the SDK did not load ([`verified_manifests`]: manifests change apart from the SDK); the project's path without control characters |
-//! | The environment | the toolchain's own ([`toolchain_variable`]) held fixed; others on `ALLOWED_ENVIRONMENT` or `ALLOWED_PROPERTIES` |
+//! | The environment | the toolchain's own ([`TOOLCHAIN_VARIABLES`]) held fixed; `ALLOWED_PROPERTIES` held to their grammars; `ALLOWED_ENVIRONMENT` graded inert; NuGet's restore-only names declined; others declined if an SDK file reads a property of the name or the build's tools read the variable ([`environment_reads`]), else inert; no two variables naming one property ([`environment_decline`]) |
 //! | The SDK | fixed per install; only an SDK a whole sweep has graded commits ([`verified_sdks`]) |
 //!
 //! Assumed rather than checked: that the assets file is the restore of the
-//! project's current inputs, as the LSP's assembly env assumes it (#1044).
+//! project's current inputs, as the LSP's assembly env assumes it (#1044);
+//! that the build's environment is the evaluation's (above); and that the
+//! runtime the SDK runs on reads the variables the one it was scanned with
+//! reads (its `DOTNET_` and `COMPlus_` knobs are declined by prefix).
 //!
 //! A finding that names an input reaching fsc other than through a registered
 //! parameter and its sites means the coverage test is wrong: fix the test
@@ -330,24 +352,251 @@ pub const ALLOWED_METADATA: &[&str] = &[
     "Visible",
 ];
 
-/// Environment variables beyond the build's own ([`toolchain_variable`]) and
-/// the [`ALLOWED_PROPERTIES`] that may be set and stay in the domain.
+/// Environment variables on [`environment_reads`]' lists that are graded
+/// inert, each by its exact name: `fsproj_assembly_name_perturbation_diff`
+/// sets each to line-break and option-shaped values and holds every commit to
+/// fsc's `-o:`. Most are a shell's own (`_` among them, which a shell sets to
+/// the program it ran); the `DOTNET_` ones are the CLI's switches the
+/// devshell sets, so the grading's own builds run under them.
 pub const ALLOWED_ENVIRONMENT: &[&str] = &[
-    "EDITOR", "LANG", "LC_ALL", "LC_CTYPE", "LOGNAME", "OLDPWD", "PAGER", "PWD", "SHELL", "SHLVL",
-    "TERM", "TZ", "USER",
+    "_",
+    "DOTNET_CLI_TELEMETRY_OPTOUT",
+    "DOTNET_NOLOGO",
+    "DOTNET_NUGET_SIGNATURE_VERIFICATION",
+    "DOTNET_SKIP_FIRST_TIME_EXPERIENCE",
+    "DOTNET_SKIP_WORKLOAD_INTEGRITY_CHECK",
+    "EDITOR",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "LOGNAME",
+    "OLDPWD",
+    "PAGER",
+    "PWD",
+    "SHELL",
+    "SHLVL",
+    "TERM",
+    "TZ",
+    "USER",
 ];
 
-/// Whether `name` is one of the variables the build's own environment holds,
-/// which the grading holds fixed: `PATH`, `HOME`, `TMPDIR`, `RestoreSources`,
-/// the `DOTNET_*` and `NUGET_*` variables, and `MSBuildUserExtensionsPath`,
-/// which MSBuild computes for itself and an evaluation is handed as a
-/// variable (one of that name displaces the computed value).
+/// The variables of the toolchain itself, each by its exact name, which the
+/// grading holds fixed rather than perturbs: what they choose reaches fsc
+/// only through what the derivation reads and checks. `PATH` and
+/// `DOTNET_ROOT` choose the .NET install, whose SDK must be a verified one;
+/// `HOME`, `NUGET_PACKAGES` and `RestoreSources` choose NuGet's settings,
+/// package folder and feeds, whose restore the derivation reads (its
+/// `RestoreSuccess`, its assets file); `TMPDIR` the temporary directory;
+/// `MSBuildUserExtensionsPath` is what MSBuild computes for itself and an
+/// evaluation is handed as a variable (one of that name displaces the
+/// computed value).
+pub const TOOLCHAIN_VARIABLES: &[&str] = &[
+    "DOTNET_ROOT",
+    "HOME",
+    "MSBuildUserExtensionsPath",
+    "NUGET_PACKAGES",
+    "PATH",
+    "RestoreSources",
+    "TMPDIR",
+];
+
+/// Whether `name`, exactly, is one of [`TOOLCHAIN_VARIABLES`]. A variable
+/// differing from one only by case is not: a tool reading `HOME` does not
+/// read `home`, which MSBuild reads as the property `HOME`.
 pub fn toolchain_variable(name: &str) -> bool {
-    matches!(
-        name,
-        "PATH" | "HOME" | "TMPDIR" | "RestoreSources" | "MSBuildUserExtensionsPath"
-    ) || name.starts_with("DOTNET_")
-        || name.starts_with("NUGET_")
+    TOOLCHAIN_VARIABLES.contains(&name)
+}
+
+/// The names an SDK's files and its build's tools may read, as
+/// [`environment_reads`] lists them for one verified SDK, lowercased.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EnvironmentReads {
+    /// The properties some file of the SDK (its version directory and its
+    /// verified workload manifests) reads: every `$(Name)` in an attribute or
+    /// an element's text, and, for a name computed from an item's identity
+    /// (`$(%(PropertyNames.Identity))`), each name that item type's SDK
+    /// declarations give.
+    pub properties: BTreeSet<String>,
+    /// Prefixes of such computed names (`pkg`, from `Pkg$(…)`).
+    pub property_prefixes: BTreeSet<String>,
+    /// The variables the build's tools may read: the strings each managed
+    /// assembly of the SDK and its runtime passes to an environment read, the
+    /// strings shaped like a conventional variable name in each, and those
+    /// of each native binary of the host and the runtime.
+    pub variables: BTreeSet<String>,
+    /// Prefixes of the variables they read by a composed name (`dotnet_`,
+    /// `complus_`, `nugetpackagesourcecredentials_`).
+    pub variable_prefixes: BTreeSet<String>,
+}
+
+/// The [`EnvironmentReads`] of each SDK in `src/fsc_environment_reads.txt`,
+/// by version directory.
+fn all_environment_reads() -> &'static HashMap<String, EnvironmentReads> {
+    static READS: std::sync::OnceLock<HashMap<String, EnvironmentReads>> =
+        std::sync::OnceLock::new();
+    READS.get_or_init(|| parse_environment_reads(include_str!("fsc_environment_reads.txt")))
+}
+
+/// The lists of `src/fsc_environment_reads.txt`, by SDK: sections headed
+/// `[<sdk> <list>]` (`properties`, `property-prefixes`, `variables`,
+/// `variable-prefixes`), one lowercased name a line, `# ` lines comments.
+pub fn parse_environment_reads(text: &str) -> HashMap<String, EnvironmentReads> {
+    let mut all: HashMap<String, EnvironmentReads> = HashMap::new();
+    let mut current: Option<(String, String)> = None;
+    for line in text.lines() {
+        // A name holds no whitespace, so neither a comment (`# …`) nor a
+        // header (`[<sdk> <list>]`) is one.
+        if line.is_empty() || line == "#" || line.starts_with("# ") {
+            continue;
+        }
+        if let Some(header) = line
+            .strip_prefix('[')
+            .and_then(|h| h.strip_suffix(']'))
+            .filter(|h| h.contains(' '))
+        {
+            let (sdk, list) = header
+                .split_once(' ')
+                .unwrap_or_else(|| panic!("fsc_environment_reads.txt: bad header {line:?}"));
+            current = Some((sdk.to_string(), list.to_string()));
+            all.entry(sdk.to_string()).or_default();
+            continue;
+        }
+        let (sdk, list) = current
+            .as_ref()
+            .unwrap_or_else(|| panic!("fsc_environment_reads.txt: {line:?} before a header"));
+        let reads = all.get_mut(sdk).expect("made at its header");
+        let set = match list.as_str() {
+            "properties" => &mut reads.properties,
+            "property-prefixes" => &mut reads.property_prefixes,
+            "variables" => &mut reads.variables,
+            "variable-prefixes" => &mut reads.variable_prefixes,
+            other => panic!("fsc_environment_reads.txt: unknown list {other:?}"),
+        };
+        set.insert(line.to_string());
+    }
+    all
+}
+
+/// What the SDK `sdk`'s files and its build's tools may read
+/// ([`EnvironmentReads`]), or `None` for an SDK whose reads are not pinned.
+pub fn environment_reads(sdk: &str) -> Option<&'static EnvironmentReads> {
+    all_environment_reads().get(sdk)
+}
+
+/// The SDKs whose reads are pinned.
+pub fn environment_read_sdks() -> impl Iterator<Item = &'static str> {
+    all_environment_reads().keys().map(String::as_str)
+}
+
+/// Whether `name` is one a guard of NuGet's restore files reads, where the
+/// derivation exempts them from its condition and expansion rules
+/// (`NUGET_GUARDS` in the crate root): no file of the SDK need read one, so
+/// [`environment_reads`] need not list it, and a variable of the name chooses
+/// which of the restore's groups the build reads. Their own names and
+/// `$(NuGetPackageRoot)` are [`RESTORE_PROPERTIES`], and
+/// `$(MSBuildThisFileDirectory)` is reserved.
+pub fn restore_file_read(name: &str) -> bool {
+    crate::NUGET_GUARDS
+        .iter()
+        .any(|(guard, _, _)| guard.eq_ignore_ascii_case(name))
+}
+
+/// What an environment variable is to the derivation ([`classify_variable`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VariableClass {
+    /// One of [`TOOLCHAIN_VARIABLES`], held fixed.
+    Toolchain,
+    /// One of [`ALLOWED_PROPERTIES`] (in any case), whose value must match
+    /// this grammar.
+    AllowedProperty(Grammar),
+    /// One of [`ALLOWED_ENVIRONMENT`], graded inert.
+    Graded,
+    /// A name only NuGet's restore file may write ([`RESTORE_PROPERTIES`],
+    /// [`RESTORE_PROPERTY_PREFIX`]): declined.
+    RestoreWritten,
+    /// A property some SDK file or a guard of NuGet's restore files
+    /// ([`restore_file_read`]) reads: declined.
+    SdkRead,
+    /// A variable the build's tools read: declined.
+    ToolRead,
+    /// On no list: inert by construction.
+    Inert,
+}
+
+impl VariableClass {
+    /// Whether a variable of this class keeps the evaluation in the domain
+    /// (an allowed property's value aside).
+    pub fn admitted(self) -> bool {
+        !matches!(
+            self,
+            VariableClass::RestoreWritten | VariableClass::SdkRead | VariableClass::ToolRead
+        )
+    }
+}
+
+/// What the variable `name` is to the derivation under the SDK `sdk`, or
+/// `None` when that SDK's reads are not pinned. In order: the toolchain's own
+/// (exact name), an allowed property (any case, as MSBuild reads it), graded
+/// inert (exact name), NuGet's restore-only names, a property an SDK file or
+/// NuGet's restore file reads (any case), a variable the tools read (any
+/// case, by name or by a
+/// prefix), else inert. A tool's read compares without case, as a tool on
+/// Windows reads `Path` as `PATH`.
+pub fn classify_variable(sdk: &str, name: &str) -> Option<VariableClass> {
+    let reads = environment_reads(sdk)?;
+    let lower = name.to_ascii_lowercase();
+    let prefixed = |prefixes: &BTreeSet<String>| prefixes.iter().any(|p| lower.starts_with(p));
+    Some(if toolchain_variable(name) {
+        VariableClass::Toolchain
+    } else if let Some(grammar) = allowed_property(name) {
+        VariableClass::AllowedProperty(grammar)
+    } else if ALLOWED_ENVIRONMENT.contains(&name) {
+        VariableClass::Graded
+    } else if restore_property(name).is_some() {
+        VariableClass::RestoreWritten
+    } else if reads.properties.contains(&lower)
+        || prefixed(&reads.property_prefixes)
+        || restore_file_read(name)
+    {
+        VariableClass::SdkRead
+    } else if reads.variables.contains(&lower) || prefixed(&reads.variable_prefixes) {
+        VariableClass::ToolRead
+    } else {
+        VariableClass::Inert
+    })
+}
+
+/// Why the environment `environment` takes an evaluation under the SDK
+/// `sdk` out of the domain, or `None` when it does not (an allowed
+/// property's value aside, which the derivation checks with the rest): a
+/// variable [`classify_variable`] declines, two variables whose names differ
+/// only by case where either is not inert (MSBuild takes one of them as the
+/// property, by an order the walk does not reproduce), or no pinned reads for
+/// the SDK.
+pub fn environment_decline(
+    sdk: &str,
+    environment: &HashMap<String, String>,
+) -> Option<NameDecline> {
+    let mut names: Vec<&String> = environment.keys().collect();
+    names.sort();
+    let mut by_property: HashMap<String, &String> = HashMap::new();
+    for name in names {
+        let Some(class) = classify_variable(sdk, name) else {
+            return Some(NameDecline::UnscannedSdk(sdk.to_string()));
+        };
+        if !class.admitted() {
+            return Some(NameDecline::Environment(format!("{name} ({class:?})")));
+        }
+        if let Some(other) = by_property.insert(name.to_ascii_lowercase(), name)
+            && (class != VariableClass::Inert
+                || classify_variable(sdk, other) != Some(VariableClass::Inert))
+        {
+            return Some(NameDecline::Environment(format!(
+                "{other} and {name} name one property"
+            )));
+        }
+    }
+    None
 }
 
 /// The name of the assembly a project compiles to, as FCS names it.
@@ -409,8 +658,12 @@ pub enum NameDecline {
     /// Item metadata not on [`ALLOWED_METADATA`] is set outside the .NET
     /// install.
     Metadata(String),
-    /// An environment variable on no list is set.
+    /// An environment variable is set that [`classify_variable`] declines,
+    /// or two whose names differ only by case: which.
     Environment(String),
+    /// The SDK's environment reads are not pinned ([`environment_reads`]):
+    /// its version directory.
+    UnscannedSdk(String),
     /// An allowed property held a value outside its grammar, or one the walk
     /// is not certain of, at some point of the evaluation (its final value,
     /// any write a document outside the install made, its global or its
@@ -1780,7 +2033,7 @@ pub(crate) fn compiled_assembly_name_graded(
     {
         return CompiledAssemblyName::Unknown(NameDecline::WorkloadManifest(manifest.clone()));
     }
-    match decide(project_path, parsed, inputs) {
+    match decide(&version, project_path, parsed, inputs) {
         Ok(name) => CompiledAssemblyName::Known(name),
         Err(decline) => CompiledAssemblyName::Unknown(decline),
     }
@@ -1844,6 +2097,7 @@ fn on_list(list: &[&str], name: &str) -> bool {
 }
 
 fn decide(
+    sdk: &str,
     project_path: &Path,
     parsed: &ParsedProject,
     inputs: &NameInputs<'_>,
@@ -1963,12 +2217,8 @@ fn decide(
     }) {
         return Err(NameDecline::Metadata(name.clone()));
     }
-    if let Some(name) = environment.keys().find(|name| {
-        !toolchain_variable(name)
-            && !on_list(ALLOWED_ENVIRONMENT, name)
-            && allowed_property(name).is_none()
-    }) {
-        return Err(NameDecline::Environment(name.clone()));
+    if let Some(decline) = environment_decline(sdk, environment) {
+        return Err(decline);
     }
 
     // Every value an allowed property held is in its grammar: its final value,
@@ -2111,6 +2361,7 @@ fn sources_read_as_files(project_path: &Path, parsed: &ParsedProject) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{DefaultItemFiles, Grammar, default_item_files, may_read_as_option};
+
     use crate::observed::Observer;
     use std::fs::{create_dir_all, write};
     use std::path::Path;

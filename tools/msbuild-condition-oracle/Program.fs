@@ -164,6 +164,14 @@
 ///     run code the JIT has not yet optimised. A caller wanting MSBuild's
 ///     steady state waits on this between batches.
 ///
+///   {"op":"envReads","files":[path, ..]}
+///     -> {"assemblies":[{"file":s,"names":[..],"prefixes":[..],"upper":[..],
+///                        "envCalls":n,"unresolved":n}, ..]}
+///     Not a differential: the environment variables each managed assembly
+///     among `files` may read, from its IL (`respondEnvReads`), for
+///     `borzoi-msbuild`'s `fsc_environment_reads` to pin. A file that is not
+///     a managed assembly is left out.
+///
 /// Not an op: `FscArgsLogger`, which `borzoi-oracle-harness`'s `fsc_args`
 /// driver loads into a real `dotnet msbuild -restore -t:Build` to record what
 /// each `Fsc` invocation hands fsc.
@@ -1682,6 +1690,268 @@ let private respondBench (root: JsonElement) : string =
             bench (root.GetProperty("project").GetString()) globals mode (root.GetProperty("reps").GetInt32()) scratch
         )
 
+/// The size of each IL opcode's operand, by its value (`OpCode.Value`), from
+/// the runtime's own `OpCodes` table; a `switch`'s is its count's 4 bytes,
+/// and its targets follow.
+let private operandSizes: Collections.Generic.Dictionary<int16, int> =
+    let sizes = Collections.Generic.Dictionary<int16, int>()
+
+    for field in typeof<Reflection.Emit.OpCodes>.GetFields(Reflection.BindingFlags.Public ||| Reflection.BindingFlags.Static) do
+        match field.GetValue null with
+        | :? Reflection.Emit.OpCode as op ->
+            let size =
+                match op.OperandType with
+                | Reflection.Emit.OperandType.InlineNone -> 0
+                | Reflection.Emit.OperandType.ShortInlineBrTarget
+                | Reflection.Emit.OperandType.ShortInlineI
+                | Reflection.Emit.OperandType.ShortInlineVar -> 1
+                | Reflection.Emit.OperandType.InlineVar -> 2
+                | Reflection.Emit.OperandType.InlineI8
+                | Reflection.Emit.OperandType.InlineR -> 8
+                | _ -> 4
+
+            sizes[op.Value] <- size
+        | _ -> ()
+
+    sizes
+
+/// One decoded IL instruction: its opcode value, and its 4-byte operand (a
+/// token, for the ones read here), else 0.
+[<Struct>]
+type private Instruction = { Op: int16; Token: int }
+
+/// The instructions of a method body, in order.
+let private decode (il: byte[]) : Instruction list =
+    let mutable i = 0
+    let out = Collections.Generic.List<Instruction>()
+
+    while i < il.Length do
+        let op =
+            if il[i] = 0xFEuy && i + 1 < il.Length then
+                let v = int16 ((0xFE <<< 8) ||| int il[i + 1])
+                i <- i + 2
+                v
+            else
+                let v = int16 il[i]
+                i <- i + 1
+                v
+
+        let size =
+            match operandSizes.TryGetValue op with
+            | true, size -> size
+            | _ -> failwith $"unknown IL opcode %x{op}"
+
+        let token =
+            if size = 4 && i + 4 <= il.Length then
+                BitConverter.ToInt32(il, i)
+            else
+                0
+
+        // `switch`: a count, then that many 4-byte targets.
+        let size = if op = 0x45s then 4 + 4 * token else size
+        i <- i + size
+        out.Add { Op = op; Token = token }
+
+    List.ofSeq out
+
+/// The environment variables the managed assembly at `path` may read, from
+/// its IL. A read is a call to a method whose name holds
+/// `EnvironmentVariable` (`Environment.GetEnvironmentVariable`, NuGet's and
+/// the CLI's readers alike), or to a method of the assembly that passes one of
+/// its own arguments to such a call (a helper, followed to a fixed point). The
+/// names are the strings loaded in the eight instructions before the call:
+/// each `ldstr`, and each `ldsfld` of a static field some method assigns a
+/// literal (`ldstr`; `stsfld`). With a `Concat` or `Format` among those
+/// instructions, each string is a prefix too. A read with no string, no
+/// argument and no field among them is unresolved: every string of its method
+/// counts, and it is counted. `upper` is every user string shaped like a
+/// conventional variable name (ASCII capitals, digits and `_`, two or more,
+/// one a letter), whatever reads it. `None` for a file that is not a managed
+/// assembly.
+let private envReadsOf (path: string) =
+    use stream = File.OpenRead path
+    use pe = new Reflection.PortableExecutable.PEReader(stream)
+
+    if not pe.HasMetadata then
+        None
+    else
+        let md = Reflection.Metadata.PEReaderExtensions.GetMetadataReader(pe)
+
+        let userStrings =
+            let out = Collections.Generic.List<string>()
+            let size = Reflection.Metadata.Ecma335.MetadataReaderExtensions.GetHeapSize(md, Reflection.Metadata.Ecma335.HeapIndex.UserString)
+            let mutable handle = Reflection.Metadata.Ecma335.MetadataTokens.UserStringHandle 1
+
+            while not handle.IsNil
+                  && Reflection.Metadata.Ecma335.MetadataTokens.GetHeapOffset(handle) < size do
+                out.Add(md.GetUserString handle)
+                handle <- Reflection.Metadata.Ecma335.MetadataReaderExtensions.GetNextHandle(md, handle)
+
+            out
+
+        let userString (token: int) =
+            try
+                md.GetUserString(Reflection.Metadata.Ecma335.MetadataTokens.UserStringHandle(token &&& 0xFFFFFF))
+            with _ ->
+                null
+
+        let rec methodName (token: int) : string * int option =
+            try
+                let handle = Reflection.Metadata.Ecma335.MetadataTokens.EntityHandle token
+
+                match handle.Kind with
+                | Reflection.Metadata.HandleKind.MethodDefinition ->
+                    let h = Reflection.Metadata.MethodDefinitionHandle.op_Explicit handle
+                    md.GetString (md.GetMethodDefinition h).Name, Some token
+                | Reflection.Metadata.HandleKind.MemberReference ->
+                    let h = Reflection.Metadata.MemberReferenceHandle.op_Explicit handle
+                    md.GetString (md.GetMemberReference h).Name, None
+                | Reflection.Metadata.HandleKind.MethodSpecification ->
+                    let h = Reflection.Metadata.MethodSpecificationHandle.op_Explicit handle
+                    methodName (Reflection.Metadata.Ecma335.MetadataTokens.GetToken((md.GetMethodSpecification h).Method))
+                | _ -> "", None
+            with _ ->
+                "", None
+
+        let bodies =
+            [ for typeHandle in md.TypeDefinitions do
+                  for methodHandle in (md.GetTypeDefinition typeHandle).GetMethods() do
+                      let rva = (md.GetMethodDefinition methodHandle).RelativeVirtualAddress
+
+                      if rva <> 0 then
+                          let il = (Reflection.Metadata.PEReaderExtensions.GetMethodBody(pe, rva)).GetILBytes()
+                          let entity: Reflection.Metadata.EntityHandle = Reflection.Metadata.MethodDefinitionHandle.op_Implicit methodHandle
+                          Reflection.Metadata.Ecma335.MetadataTokens.GetToken(entity), decode il ]
+
+        let isCall (op: int16) = op = 0x28s || op = 0x6Fs || op = 0x73s
+        let isLdarg (op: int16) = (op >= 0x02s && op <= 0x05s) || op = 0x0Es || op = 0xFE09s
+
+        // `ldstr`; `stsfld`: a static field holding a literal.
+        let fieldStrings = Collections.Generic.Dictionary<int, Collections.Generic.HashSet<string>>()
+
+        for _, body in bodies do
+            body
+            |> List.pairwise
+            |> List.iter (fun (a, b) ->
+                if a.Op = 0x72s && b.Op = 0x80s then
+                    match userString a.Token with
+                    | null -> ()
+                    | s ->
+                        if not (fieldStrings.ContainsKey b.Token) then
+                            fieldStrings[b.Token] <- Collections.Generic.HashSet<string>()
+
+                        fieldStrings[b.Token].Add s |> ignore)
+
+        // A string a composed name may start with: an identifier ending in
+        // `_`, or one of four or more capitals (`MSBUILD`, `PATH`).
+        let prefixShaped (s: string) =
+            s.Length >= 2
+            && s |> Seq.forall (fun c -> Char.IsAsciiLetterOrDigit c || c = '_')
+            && (s.EndsWith '_' || (s.Length >= 4 && s |> Seq.forall (fun c -> Char.IsAsciiLetterUpper c || Char.IsAsciiDigit c || c = '_')))
+
+        let readers = Collections.Generic.HashSet<int>()
+        let names = Collections.Generic.HashSet<string>()
+        let prefixes = Collections.Generic.HashSet<string>()
+        let mutable envCalls = 0
+        let mutable unresolved = 0
+        let mutable changed = true
+
+        while changed do
+            changed <- false
+            envCalls <- 0
+            unresolved <- 0
+
+            for methodToken, body in bodies do
+                let body = Array.ofList body
+
+                for i in 0 .. body.Length - 1 do
+                    let ins = body[i]
+
+                    if isCall ins.Op then
+                        let name, def = methodName ins.Token
+
+                        let reads =
+                            name.Contains "EnvironmentVariable"
+                            || (def |> Option.exists readers.Contains)
+
+                        if reads then
+                            envCalls <- envCalls + 1
+                            let window = body[max 0 (i - 8) .. i - 1]
+
+                            let strings =
+                                window
+                                |> Array.collect (fun w ->
+                                    match w.Op with
+                                    | 0x72s ->
+                                        match userString w.Token with
+                                        | null -> [||]
+                                        | s -> [| s |]
+                                    | 0x7Es ->
+                                        match fieldStrings.TryGetValue w.Token with
+                                        | true, set -> Array.ofSeq set
+                                        | _ -> [||]
+                                    | _ -> [||])
+
+                            let composed =
+                                window
+                                |> Array.exists (fun w ->
+                                    isCall w.Op
+                                    && (let n, _ = methodName w.Token in n = "Concat" || n = "Format"))
+
+                            names.UnionWith strings
+
+                            if composed then
+                                prefixes.UnionWith(strings |> Array.filter prefixShaped)
+
+                            if window |> Array.exists (fun w -> isLdarg w.Op) then
+                                if readers.Add methodToken then
+                                    changed <- true
+                            elif strings.Length = 0 then
+                                unresolved <- unresolved + 1
+
+                                body
+                                |> Array.iter (fun w ->
+                                    if w.Op = 0x72s then
+                                        match userString w.Token with
+                                        | null -> ()
+                                        | s -> names.Add s |> ignore)
+
+        let conventional (s: string) =
+            s.Length >= 2
+            && s |> Seq.forall (fun c -> (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c = '_')
+            && s |> Seq.exists (fun c -> c >= 'A' && c <= 'Z')
+
+        Some
+            {| file = path
+               names =
+                names
+                |> Seq.filter (fun s ->
+                    s.Length > 0
+                    && s.Length <= 128
+                    && not (s |> Seq.exists (fun c -> Char.IsWhiteSpace c || Char.IsControl c || c = '=')))
+                |> Seq.sort
+                |> Array.ofSeq
+               prefixes = prefixes |> Seq.sort |> Array.ofSeq
+               upper = userStrings |> Seq.filter conventional |> Seq.distinct |> Seq.sort |> Array.ofSeq
+               envCalls = envCalls
+               unresolved = unresolved |}
+
+let private respondEnvReads (root: JsonElement) : string =
+    let files =
+        root.GetProperty("files").EnumerateArray()
+        |> Seq.map (fun f -> f.GetString())
+        |> Array.ofSeq
+
+    let assemblies =
+        files
+        |> Array.choose (fun file ->
+            try
+                envReadsOf file
+            with :? BadImageFormatException ->
+                None)
+
+    JsonSerializer.Serialize {| assemblies = assemblies |}
+
 /// Register the MSBuild the oracle runs. With no arguments, the SDK `dotnet`
 /// resolves from the working directory (`RegisterDefaults`). With
 /// `--msbuild-sdk <dir>`, the SDK installed at `<dir>` (`<root>/sdk/<version>`),
@@ -1758,6 +2028,7 @@ let main argv =
                     | "runTargets" -> respondRunTargets root
                     | "globalName" -> respondGlobalName root
                     | "reservedNames" -> respondReservedNames ()
+                    | "envReads" -> respondEnvReads root
                     | "bench" -> respondBench root
                     | "idle" -> respondIdle root
                     | other -> JsonSerializer.Serialize {| error = $"unknown op: %s{other}" |}

@@ -693,6 +693,17 @@ impl Oracle {
         )
     }
 
+    /// What each managed assembly among `files` may read from the
+    /// environment (the `envReads` op): one object per assembly, a file that
+    /// is not one left out.
+    pub fn env_reads(&mut self, files: &[PathBuf]) -> Vec<serde_json::Value> {
+        let resp = self.request(&serde_json::json!({ "op": "envReads", "files": files }));
+        resp["assemblies"]
+            .as_array()
+            .expect("envReads carries its assemblies")
+            .clone()
+    }
+
     /// The names the oracle's MSBuild reserves (the `reservedNames` op), as
     /// MSBuild spells them, after checking that the op's three readings of
     /// `ReservedPropertyNames` agree with one another.

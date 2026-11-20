@@ -32,17 +32,19 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use borzoi_msbuild::fsc::{
     ALLOWED_ENVIRONMENT, ALLOWED_ITEM_TYPES, ALLOWED_METADATA, ALLOWED_PROPERTIES,
-    CompiledAssemblyName, FSC_OPTIONS, Grammar, NameDecline, RESTORE_ITEM_TYPES, RESTORE_METADATA,
-    RESTORE_PROPERTIES, RESTORE_PROPERTY_PREFIX, resolved_sdk_version, verified_manifests,
-    verified_sdks,
+    CompiledAssemblyName, FSC_OPTIONS, FSC_PARAMETERS, Feed, Grammar, NameDecline,
+    RESTORE_ITEM_TYPES, RESTORE_METADATA, RESTORE_PROPERTIES, RESTORE_PROPERTY_PREFIX,
+    VariableClass, classify_variable, environment_reads, resolved_sdk_version, toolchain_variable,
+    verified_manifests, verified_sdks,
 };
 use borzoi_msbuild::observed::host_fs;
 use borzoi_oracle_harness::BoundedCommand;
 use borzoi_oracle_harness::hostile::value::{self, Write};
 use borzoi_oracle_harness::hostile::{Dimension, coverage};
+use borzoi_oracle_harness::hostile::{env as hostile_env, name as hostile_name};
 use borzoi_oracle_harness::msbuild_oracle::{
-    BuildInputs, FscArgsDecline, FscArgsRequest, INPUT_NAMES, InputError, build_environment,
-    fsc_args,
+    BUILD_ENVIRONMENT_NAMES, BuildInputs, FscArgsDecline, FscArgsRequest, INPUT_NAMES, InputError,
+    build_environment, fsc_args,
 };
 use common::SplitMix64;
 use common::assembly_name::{self, Sdks};
@@ -164,6 +166,14 @@ enum Place {
     /// Item metadata on a `None` item that NuGet's restore file is made to
     /// declare after the restore.
     RestoreMetadata,
+    /// The environment variables [`Case::variables`], each set as the build's
+    /// (through [`BuildInputs::env`] for a name on the oracle's list, else
+    /// [`BuildInputs::unlisted_env`]) and handed to the evaluation. One the
+    /// oracle refuses, or a second spelling of a name already set, is handed
+    /// to the evaluation alone ([`split_variables`]), and a commit under it
+    /// is a failure unless it is the toolchain's, which the grading holds
+    /// fixed.
+    Variables,
 }
 
 /// The directory, ignored by git, holding [`Place::UntrackedCompile`]'s file.
@@ -200,12 +210,204 @@ struct Case {
     must_commit: Option<String>,
     /// The derivation must decline, whatever the build does.
     must_decline: bool,
+    /// For [`Place::Variables`], the variables, by name and value.
+    variables: Vec<(String, String)>,
+    /// The variables are on no list, so inert by construction: fsc must be
+    /// handed exactly what the plain project's build hands it.
+    inert: bool,
+    /// Graded in every run, not only when the sample draws it.
+    always: bool,
+}
+
+impl Default for Case {
+    fn default() -> Case {
+        Case {
+            place: Place::Body,
+            name: "",
+            value: String::new(),
+            reset: "",
+            must_commit: None,
+            must_decline: false,
+            variables: Vec::new(),
+            inert: false,
+            always: false,
+        }
+    }
 }
 
 impl Case {
     fn label(&self) -> String {
+        if self.place == Place::Variables {
+            return format!("{:?} {:?}", self.place, self.variables);
+        }
         format!("{:?} {} = {:?}", self.place, self.name, self.value)
     }
+
+    /// A [`Place::Variables`] case setting `variables`.
+    fn variables(variables: &[(&str, &str)]) -> Case {
+        Case {
+            place: Place::Variables,
+            name: "environment",
+            variables: variables
+                .iter()
+                .map(|(n, v)| (n.to_string(), v.to_string()))
+                .collect(),
+            ..Case::default()
+        }
+    }
+}
+
+/// The value the environment cases set a variable to, for the `i`th case:
+/// [`VALUES`] by turns.
+fn env_value(i: usize) -> &'static str {
+    VALUES[i % VALUES.len()]
+}
+
+/// The SDKs whose environment reads the cases draw listed names from.
+fn graded_reads() -> Vec<&'static borzoi_msbuild::fsc::EnvironmentReads> {
+    verified_sdks().filter_map(environment_reads).collect()
+}
+
+/// How a variable named `name` classifies under every verified SDK: one
+/// class when they agree, else `None`.
+fn class_of(name: &str) -> Option<VariableClass> {
+    let classes: BTreeSet<String> = verified_sdks()
+        .filter_map(|sdk| classify_variable(sdk, name))
+        .map(|c| format!("{c:?}"))
+        .collect();
+    (classes.len() == 1).then(|| {
+        classify_variable(verified_sdks().next().expect("a verified SDK"), name)
+            .expect("classified")
+    })
+}
+
+/// `count` of `names`, spread evenly over them.
+fn spread<'a>(names: impl IntoIterator<Item = &'a String>, count: usize) -> Vec<String> {
+    let names: Vec<&String> = names.into_iter().collect();
+    if names.is_empty() {
+        return Vec::new();
+    }
+    let step = (names.len() / count.max(1)).max(1);
+    names
+        .into_iter()
+        .step_by(step)
+        .take(count)
+        .cloned()
+        .collect()
+}
+
+/// A random name for a variable, an ASCII letter or `_` then letters, digits
+/// and `_`, which [`classify_variable`] finds on no list.
+fn random_inert_name(rng: &mut SplitMix64) -> String {
+    const FIRST: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_";
+    const REST: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_";
+    loop {
+        let len = 1 + rng.below(16);
+        let mut name = String::new();
+        name.push(FIRST[rng.below(FIRST.len())] as char);
+        for _ in 1..len {
+            name.push(REST[rng.below(REST.len())] as char);
+        }
+        if class_of(&name) == Some(VariableClass::Inert) {
+            return name;
+        }
+    }
+}
+
+/// The environment's cases:
+///
+/// - every property an `Fsc` parameter is fed from that is not an allowed
+///   one, set as a variable to a line break and an output switch: the SDK's
+///   files read each, so the derivation must decline it or the build agree
+///   (graded in every run, and chosen from the register alone, not by the
+///   derivation's lists: an SDK-read list missing one commits a name fsc
+///   does not compile to);
+/// - `listed` names of each list, spread over it, by turns at each value;
+/// - `inert` names on no list, random, each must commit and leave fsc's
+///   arguments as they were.
+fn environment_cases(listed: usize, inert: usize) -> Vec<Case> {
+    let mut cases = Vec::new();
+    let fed: BTreeSet<&str> = FSC_PARAMETERS
+        .iter()
+        .filter_map(|p| match p.feed {
+            Feed::Properties(names) => Some(names.iter().copied()),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    for name in fed {
+        if !ALLOWED_PROPERTIES
+            .iter()
+            .any(|(allowed, _)| allowed.eq_ignore_ascii_case(name))
+        {
+            cases.push(Case {
+                always: true,
+                ..Case::variables(&[(name, "x\n--out:obj/Evil.dll")])
+            });
+        }
+    }
+    let reads = graded_reads();
+    let properties: BTreeSet<&String> = reads.iter().flat_map(|r| &r.properties).collect();
+    let variables: BTreeSet<&String> = reads.iter().flat_map(|r| &r.variables).collect();
+    for (i, name) in spread(properties, listed)
+        .into_iter()
+        .chain(spread(variables, listed))
+        .enumerate()
+    {
+        cases.push(Case::variables(&[(
+            &name.to_ascii_uppercase(),
+            env_value(i),
+        )]));
+    }
+    let mut rng = SplitMix64(0x1064_e7a1);
+    for i in 0..inert {
+        let name = random_inert_name(&mut rng);
+        cases.push(Case {
+            must_commit: Some("Demo".into()),
+            inert: true,
+            ..Case::variables(&[(&name, env_value(i))])
+        });
+    }
+    cases
+}
+
+/// One case per entry of the hostile environment alphabet (`hostile::env`),
+/// its variables set together, and one per entry of the hostile file-name
+/// alphabet (`hostile::name`) rendered as a variable's name: those
+/// [`classify_variable`] finds on no list must commit and leave fsc's
+/// arguments as they were. Each with the dimension it stands for. A name the
+/// environment cannot carry (empty, or holding `=` or NUL) or that is not
+/// UTF-8 has no case.
+fn hostile_environment_cases() -> Vec<(Case, Dimension)> {
+    let mut out = Vec::new();
+    for entry in hostile_env::alphabet().entries() {
+        let mut case = Case::variables(entry.value);
+        let inert = entry
+            .value
+            .iter()
+            .all(|(name, _)| class_of(name) == Some(VariableClass::Inert));
+        if inert {
+            case.must_commit = Some("Demo".into());
+            case.inert = true;
+        }
+        out.push((case, entry.dimension));
+    }
+    for (i, entry) in hostile_name::alphabet().entries().iter().enumerate() {
+        let rendered = entry.value.render("BorzoiVar", "");
+        let Some(name) = rendered.to_str() else {
+            continue;
+        };
+        if name.is_empty() || name.contains(['=', '\0']) {
+            continue;
+        }
+        let mut case = Case::variables(&[(name, env_value(i))]);
+        if class_of(name) == Some(VariableClass::Inert) {
+            case.must_commit = Some("Demo".into());
+            case.inert = true;
+        }
+        out.push((case, entry.dimension));
+    }
+    out
 }
 
 /// Every case, the must-commit points first.
@@ -217,6 +419,7 @@ fn cases() -> Vec<Case> {
         reset: "",
         must_commit: Some("Demo".into()),
         must_decline: false,
+        ..Case::default()
     }];
     for (name, grammar) in ALLOWED_PROPERTIES {
         let plain = plain_value(name, *grammar);
@@ -232,6 +435,7 @@ fn cases() -> Vec<Case> {
             reset: "",
             must_commit: Some(expect.into()),
             must_decline: false,
+            ..Case::default()
         });
     }
     // Every option `OtherFlags` admits, in each form: fsc must compile with it.
@@ -244,6 +448,7 @@ fn cases() -> Vec<Case> {
                 reset: "",
                 must_commit: Some("Demo".into()),
                 must_decline: false,
+                ..Case::default()
             });
         }
     }
@@ -256,6 +461,7 @@ fn cases() -> Vec<Case> {
         reset: "",
         must_commit: None,
         must_decline: true,
+        ..Case::default()
     });
     // An item type on no list, defined rather than declared: `Output` in an
     // item definition group is an item type, not a task output.
@@ -266,6 +472,7 @@ fn cases() -> Vec<Case> {
         reset: "",
         must_commit: None,
         must_decline: true,
+        ..Case::default()
     });
     // A write or an item under a condition the walk may decide apart from
     // MSBuild must decline, whatever it writes (#993).
@@ -277,6 +484,7 @@ fn cases() -> Vec<Case> {
             reset: "",
             must_commit: None,
             must_decline: true,
+            ..Case::default()
         });
     }
     for value in VALUES {
@@ -287,6 +495,7 @@ fn cases() -> Vec<Case> {
             reset: "",
             must_commit: None,
             must_decline: true,
+            ..Case::default()
         });
     }
     let mut rest = Vec::new();
@@ -309,6 +518,7 @@ fn cases() -> Vec<Case> {
                     reset: "",
                     must_commit: None,
                     must_decline: false,
+                    ..Case::default()
                 });
             }
         }
@@ -329,20 +539,9 @@ fn cases() -> Vec<Case> {
                     reset: "",
                     must_commit: None,
                     must_decline: true,
+                    ..Case::default()
                 });
             }
-        }
-    }
-    for name in ALLOWED_ENVIRONMENT {
-        for value in VALUES {
-            rest.push(Case {
-                place: Place::Environment,
-                name,
-                value: (*value).into(),
-                reset: "",
-                must_commit: None,
-                must_decline: false,
-            });
         }
     }
     // The item types and metadata NuGet's restore writes are admitted, like
@@ -365,6 +564,7 @@ fn cases() -> Vec<Case> {
                     reset: "",
                     must_commit: None,
                     must_decline,
+                    ..Case::default()
                 });
             }
         }
@@ -380,6 +580,7 @@ fn cases() -> Vec<Case> {
                     reset: "",
                     must_commit: None,
                     must_decline: false,
+                    ..Case::default()
                 });
             }
         }
@@ -394,6 +595,7 @@ fn cases() -> Vec<Case> {
             reset: "",
             must_commit: None,
             must_decline: true,
+            ..Case::default()
         });
     }
     // The restore-only metadata in its other forms.
@@ -406,6 +608,7 @@ fn cases() -> Vec<Case> {
                 reset: "",
                 must_commit: None,
                 must_decline: true,
+                ..Case::default()
             });
         }
     }
@@ -422,6 +625,7 @@ fn cases() -> Vec<Case> {
                 reset: "",
                 must_commit: None,
                 must_decline: false,
+                ..Case::default()
             });
         }
     }
@@ -438,6 +642,7 @@ fn cases() -> Vec<Case> {
                     reset: "",
                     must_commit: None,
                     must_decline: false,
+                    ..Case::default()
                 });
             }
         }
@@ -452,6 +657,7 @@ fn cases() -> Vec<Case> {
                     reset: "",
                     must_commit: None,
                     must_decline: false,
+                    ..Case::default()
                 });
             }
         }
@@ -462,6 +668,7 @@ fn cases() -> Vec<Case> {
             reset: "",
             must_commit: Some("Friend".into()),
             must_decline: false,
+            ..Case::default()
         });
         cases.push(Case {
             place,
@@ -470,6 +677,7 @@ fn cases() -> Vec<Case> {
             reset: "",
             must_commit: None,
             must_decline: true,
+            ..Case::default()
         });
     }
     // A Compile file git does not track, which reaches fsc twice: as a source
@@ -482,6 +690,7 @@ fn cases() -> Vec<Case> {
             reset: "",
             must_commit: (*value == "Evil").then(|| "Demo".to_string()),
             must_decline: false,
+            ..Case::default()
         });
     }
     // A package content file under each build action: those reaching fsc must
@@ -496,6 +705,7 @@ fn cases() -> Vec<Case> {
             reset: "",
             must_commit: admitted.then(|| "Demo".to_string()),
             must_decline: !admitted,
+            ..Case::default()
         });
     }
     // A reference path fsc is handed, from a package's compile asset.
@@ -507,6 +717,7 @@ fn cases() -> Vec<Case> {
             reset: "",
             must_commit: None,
             must_decline: false,
+            ..Case::default()
         });
     }
     // A file name the default `EmbeddedResource` glob reaches.
@@ -518,6 +729,7 @@ fn cases() -> Vec<Case> {
             reset: "",
             must_commit: None,
             must_decline: false,
+            ..Case::default()
         });
     }
     // A value the SDK may copy before a later write puts the plain one back.
@@ -535,10 +747,28 @@ fn cases() -> Vec<Case> {
                     reset: plain_value(name, *grammar),
                     must_commit: None,
                     must_decline: false,
+                    ..Case::default()
                 });
             }
         }
     }
+    // The environment: graded-inert names at every value, listed names, and
+    // names on no list.
+    for name in ALLOWED_ENVIRONMENT {
+        for value in VALUES {
+            rest.push(Case::variables(&[(name, value)]));
+        }
+    }
+    cases.extend(
+        environment_cases(12, 6)
+            .into_iter()
+            .filter(|c| c.always || c.must_commit.is_some()),
+    );
+    rest.extend(
+        environment_cases(12, 6)
+            .into_iter()
+            .filter(|c| !(c.always || c.must_commit.is_some())),
+    );
     cases.extend(rest);
     cases
 }
@@ -784,6 +1014,7 @@ fn lay_out(case: &Case, dir: &Path) -> Option<(std::path::PathBuf, BuildInputs)>
                 .join(separator);
             body = format!("<{0}>{split}</{0}>", case.name);
         }
+        Place::Variables => inputs = split_variables(case)?.0,
         // Written after the restore ([`after_restore`]).
         Place::RestoreProps | Place::RestoreItem => {}
         Place::RestoreMetadata => std::fs::write(dir.join("readme.txt"), "").unwrap(),
@@ -981,13 +1212,53 @@ fn restore(project: &Path, inputs: &BuildInputs) {
         .unwrap_or_else(|e| panic!("restoring {}: {e}", project.display()));
 }
 
-/// Our verdict on the project at `project`, built under `inputs`.
-fn ours(project: &Path, inputs: &BuildInputs) -> CompiledAssemblyName {
-    ours_under(project, inputs, &common::dotnet_root_from_env())
+/// The variables of `case` the oracle refuses to set, which the evaluation
+/// alone is handed.
+fn unsettable(case: &Case) -> Vec<(String, String)> {
+    split_variables(case)
+        .map(|(_, rest)| rest)
+        .unwrap_or_default()
+}
+
+/// `case`'s variables, in order, as the build's inputs where the oracle sets
+/// them (through [`BuildInputs::env`] for a name on its list, else
+/// [`BuildInputs::unlisted_env`]), and the rest: those it refuses, and a
+/// second spelling of a name already set (which a build's environment holds,
+/// and the oracle does not take twice). `None` when a value cannot be
+/// carried.
+fn split_variables(case: &Case) -> Option<(BuildInputs, Vec<(String, String)>)> {
+    let mut inputs = BuildInputs::new();
+    let mut rest = Vec::new();
+    for (name, value) in &case.variables {
+        let set = match inputs.clone().env(name, value) {
+            Err(InputError::NotAnInput(_)) => inputs.clone().unlisted_env(name, value),
+            other => other,
+        };
+        match set {
+            Ok(next) => inputs = next,
+            Err(InputError::Refused(_) | InputError::Repeated(_)) => {
+                rest.push((name.clone(), value.clone()));
+            }
+            Err(InputError::Unpassable { .. }) => return None,
+            Err(e) => panic!("{}: {e:?}", case.label()),
+        }
+    }
+    Some((inputs, rest))
+}
+
+/// Our verdict on the project at `project`, built under `inputs`, its
+/// evaluation also handed `extra`.
+fn ours(project: &Path, inputs: &BuildInputs, extra: &[(String, String)]) -> CompiledAssemblyName {
+    ours_under(project, inputs, extra, &common::dotnet_root_from_env())
 }
 
 /// [`ours`], resolving SDKs from the .NET install at `dotnet_root`.
-fn ours_under(project: &Path, inputs: &BuildInputs, dotnet_root: &Path) -> CompiledAssemblyName {
+fn ours_under(
+    project: &Path,
+    inputs: &BuildInputs,
+    extra: &[(String, String)],
+    dotnet_root: &Path,
+) -> CompiledAssemblyName {
     let globals: HashMap<String, String> = inputs
         .globals()
         .map(|(n, v)| (n.to_string(), v.to_string()))
@@ -1000,6 +1271,7 @@ fn ours_under(project: &Path, inputs: &BuildInputs, dotnet_root: &Path) -> Compi
         common::msbuild_user_extensions_path().to_string(),
     );
     environment.extend(inputs.env_vars());
+    environment.extend(extra.iter().cloned());
     // The SDK the evaluation resolved is the one being graded.
     assembly_name::derive(project, &globals, &environment, dotnet_root, Sdks::Resolved)
 }
@@ -1020,6 +1292,9 @@ enum Outcome {
     Agreed,
     /// We committed, and the oracle could not vouch for a compile.
     Unanswered,
+    /// We committed under a toolchain variable the grading holds fixed, so
+    /// the oracle cannot build under it.
+    HeldFixed,
 }
 
 /// Grade `case`; `Err` with a failure message on a wrong commit or a missed
@@ -1034,7 +1309,8 @@ fn grade(case: &Case) -> Result<Outcome, String> {
     // The derivation reads a restored evaluation, as the build makes one.
     restore(&project, &inputs);
     after_restore(case, &project);
-    let name = match ours(&project, &inputs) {
+    let extra = unsettable(case);
+    let name = match ours(&project, &inputs, &extra) {
         CompiledAssemblyName::Known(name) => name,
         CompiledAssemblyName::Unknown(why) => {
             return match &case.must_commit {
@@ -1062,6 +1338,16 @@ fn grade(case: &Case) -> Result<Outcome, String> {
             case.label(),
             case.must_commit
         ));
+    }
+    if !extra.is_empty() {
+        return if extra.iter().all(|(name, _)| toolchain_variable(name)) {
+            Ok(Outcome::HeldFixed)
+        } else {
+            Err(format!(
+                "{}: committed {name:?} under variables the oracle cannot set: {extra:?}",
+                case.label()
+            ))
+        };
     }
     // `fsc_args`'s domain: a build that does not read the process's command
     // line, which a tree without property functions and build code cannot.
@@ -1133,6 +1419,16 @@ fn grade(case: &Case) -> Result<Outcome, String> {
                     ));
                 }
             }
+            if case.inert {
+                let ours = normalised_arguments(&build, dir);
+                let plain = plain_arguments();
+                if ours != plain {
+                    return Err(format!(
+                        "{}: a variable on no list moved fsc's arguments\nplain:\n{plain}\nwith it:\n{ours}",
+                        case.label()
+                    ));
+                }
+            }
             BUILT_BY
                 .lock()
                 .unwrap()
@@ -1153,6 +1449,41 @@ fn grade(case: &Case) -> Result<Outcome, String> {
             Ok(Outcome::Unanswered)
         }
     }
+}
+
+/// The response files of `build`, joined, the project's directory `dir`
+/// spelt `<dir>`.
+fn normalised_arguments(
+    build: &borzoi_oracle_harness::msbuild_oracle::FscBuild,
+    dir: &Path,
+) -> String {
+    let dir = dir.to_string_lossy();
+    build
+        .invocations
+        .iter()
+        .map(|i| i.response_file.replace(dir.as_ref(), "<dir>"))
+        .collect::<Vec<_>>()
+        .join("\n----\n")
+}
+
+/// [`normalised_arguments`] of the plain project's build, once per run.
+fn plain_arguments() -> String {
+    static PLAIN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    PLAIN
+        .get_or_init(|| {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let dir = host_fs::canonicalize(tmp.path()).unwrap().join("project");
+            std::fs::create_dir(&dir).unwrap();
+            let (project, inputs) = lay_out(&cases()[0], &dir).expect("the plain project lays out");
+            restore(&project, &inputs);
+            let build = fsc_args(&FscArgsRequest {
+                project: &project,
+                inputs: &inputs,
+            })
+            .expect("the plain project's build is answered");
+            normalised_arguments(&build, &dir)
+        })
+        .clone()
 }
 
 /// Grade `cases` on a few threads; the census, and every failure.
@@ -1213,6 +1544,7 @@ fn hostile_value_cases() -> Vec<(Case, Dimension)> {
                 reset,
                 must_commit: None,
                 must_decline: false,
+                ..Case::default()
             };
             (case, entry.dimension)
         })
@@ -1266,6 +1598,63 @@ fn deep_hostile_values() {
         "BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-msbuild \
          --test fsproj_assembly_name_perturbation_diff deep_hostile_values -- --ignored",
     );
+}
+
+/// Every [`hostile_environment_cases`] case graded, recording what became of
+/// each dimension in the census `assembly_name_environment`, beside the
+/// listed names of [`environment_cases`] at a larger sample.
+#[test]
+#[ignore = "every hostile environment and every hostile name as a variable: one build each that commits"]
+fn deep_hostile_environment() {
+    let census = coverage::open(
+        file!(),
+        "assembly_name_environment",
+        &[(
+            Dimension::NonUtf8,
+            "the derivation takes the environment as UTF-8 text, as its caller reads it",
+        )],
+    );
+    let mut failures = Vec::new();
+    for (case, dimension) in hostile_environment_cases() {
+        match grade(&case) {
+            Ok(outcome) => {
+                let outcome = format!("{outcome:?}");
+                census.reached(
+                    &BTreeSet::from([dimension]),
+                    outcome.split('(').next().unwrap_or_default(),
+                );
+            }
+            Err(failure) => failures.push(failure),
+        }
+    }
+    // The harness's own values beside them: the listed names and the random
+    // names on no list.
+    let (outcomes, more) = grade_all(&environment_cases(200, 40));
+    for (_, outcome) in outcomes.keys() {
+        let outcome = format!("{outcome:?}");
+        census.reached(
+            &BTreeSet::new(),
+            outcome.split('(').next().unwrap_or_default(),
+        );
+    }
+    failures.extend(more);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    census.finish(
+        "BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-msbuild \
+         --test fsproj_assembly_name_perturbation_diff deep_hostile_environment -- --ignored",
+    );
+}
+
+/// Every variable the grading's own builds run under is one the derivation
+/// admits, so no case declines for the grading's environment alone.
+#[test]
+fn the_grading_environment_is_admitted() {
+    for name in BUILD_ENVIRONMENT_NAMES {
+        assert!(
+            toolchain_variable(name) || ALLOWED_ENVIRONMENT.contains(name),
+            "the grading's builds run under {name}, which the derivation does not admit"
+        );
+    }
 }
 
 /// `cases`, but for those `BORZOI_FSC_NAME_ONLY` (a name) leaves out.
@@ -1329,7 +1718,7 @@ fn committed_names_survive_perturbation() {
     let mut rng = SplitMix64(seed);
     let (mut chosen, mut rest): (Vec<Case>, Vec<Case>) = all
         .into_iter()
-        .partition(|c| c.must_commit.is_some() || c.must_decline);
+        .partition(|c| c.must_commit.is_some() || c.must_decline || c.always);
     for _ in 0..sample.min(rest.len()) {
         let i = rng.below(rest.len());
         chosen.push(rest.swap_remove(i));
@@ -1408,7 +1797,7 @@ fn a_split_install_s_manifests_are_its_own() {
     let (project, inputs) = lay_out(&cases()[0], &dir).expect("the plain project lays out");
     restore(&project, &inputs);
     assert_eq!(
-        ours_under(&project, &inputs, &split),
+        ours_under(&project, &inputs, &[], &split),
         CompiledAssemblyName::Known("Demo".into())
     );
 }
@@ -1449,7 +1838,7 @@ fn not_imported_files_decline_however_the_install_is_spelled() {
         .unwrap();
         restore(&project, &inputs);
         for root in &roots {
-            let verdict = ours_under(&project, &inputs, root);
+            let verdict = ours_under(&project, &inputs, &[], root);
             let right = match (must, &verdict) {
                 (None, CompiledAssemblyName::Known(name)) => name == "Demo",
                 (Some(prefix), CompiledAssemblyName::Unknown(NameDecline::NotImported(file))) => {

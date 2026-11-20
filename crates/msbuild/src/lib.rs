@@ -1047,6 +1047,19 @@ fn joined_text(node: roxmltree::Node<'_, '_>) -> Option<String> {
     Some(text)
 }
 
+/// The atoms of the conditions on the groups NuGet's restore writes
+/// ([`nuget_shaped`]): `'$(name)' op 'value'`, the value as given, or any
+/// literal where `None`. What an exempt restore file can read beside its own
+/// properties, so the compiled-name derivation declines a variable of each
+/// name ([`fsc::classify_variable`]).
+pub(crate) const NUGET_GUARDS: &[(&str, &str, Option<&str>)] = &[
+    ("ExcludeRestorePackageImports", "!=", Some("true")),
+    ("TargetFramework", "==", Some("")),
+    ("TargetFramework", "==", None),
+    ("Language", "==", None),
+    ("Language", "!=", None),
+];
+
 /// Whether `node`, an element holding a condition or an expansion, is one
 /// of the shapes NuGet's restore writes into `obj/*.nuget.g.props` and
 /// `.targets` (`BuildAssetsUtils`, NuGet.Client):
@@ -1091,11 +1104,13 @@ fn nuget_shaped(node: roxmltree::Node<'_, '_>) -> bool {
             .is_some_and(|value| literal(value) && !value.contains('\''))
     };
     let group_atom = |atom: &str| {
-        atom == "'$(ExcludeRestorePackageImports)' != 'true'"
-            || atom == "'$(TargetFramework)' == ''"
-            || quoted(atom, "'$(TargetFramework)' == '", "'")
-            || quoted(atom, "'$(Language)' == '", "'")
-            || quoted(atom, "'$(Language)' != '", "'")
+        NUGET_GUARDS.iter().any(|(name, op, value)| {
+            let head = format!("'$({name})' {op} '");
+            match value {
+                Some(value) => atom == format!("{head}{value}'"),
+                None => quoted(atom, &head, "'"),
+            }
+        })
     };
     let rooted_literal = |text: &str, root: &str| literal(text.strip_prefix(root).unwrap_or(text));
     // One `Exists` of one quoted literal: a path holding a quote could close
