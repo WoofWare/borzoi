@@ -15,6 +15,7 @@ assembly_auto_open_no_argument	certified: exact []; unknown: unread TypeProvider
 assembly_auto_open_without_target	certified: exact []; unknown: unread TypeProvider(0)
 assembly_auto_open_without_target_in_module	certified: exact []; unknown: unread TypeProvider(0)
 assembly_other_attribute	certified: exact []; unknown: unread TypeProvider(0)
+attribute_made_interface_augmentation	certified: exact, FCS rejects [AugmentationKind]; unknown: covers, FCS rejects surplus(prefix 0, entity 0, lends 1, lender 0, auto-open 0, extension 0) [UncertainAttribute,AugmentationKind] [FCS: FS866]
 attribute_target_assembly_on_type	certified: covers, FCS rejects surplus(prefix 1, entity 1, lends 1, lender 0, auto-open 1, extension 0) [ModuleSuffix]; unknown: unread TypeProvider(0) [FCS: FS841,FS841,FS841]
 attribute_target_module	certified: unread Recovered(0); unknown: unread Recovered(0) [FCS: FS10]
 attribute_target_return_on_constructor_and_slot	certified: exact []; unknown: covers surplus(prefix 0, entity 0, lends 1, lender 0, auto-open 0, extension 4) [UncertainAttribute]
@@ -120,6 +121,7 @@ namespace_global	certified: covers surplus(prefix 1, entity 1, lends 0, lender 0
 namespace_rec	certified: exact []; unknown: exact []
 namespace_shared_across_files	certified: exact []; unknown: exact []
 namespace_two_files	certified: exact []; unknown: exact []
+nullary_active_pattern_let	certified: exact []; unknown: exact [UncertainAttribute]
 rec_module_class_with_constructor	certified: exact []; unknown: exact [UncertainAttribute]
 rec_module_class_with_constructor_and_let	certified: covers, FCS's signature undecodable (#1081) surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 4) []; unknown: covers, FCS's signature undecodable (#1081) surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 4) [UncertainAttribute] [FCS: view-unread Outer/Inner/T. (namespace RecCtorLet)]
 rec_module_class_with_constructor_nested	certified: exact []; unknown: exact [UncertainAttribute]
@@ -130,6 +132,7 @@ self_named_generic_abbreviation	certified: exact, FCS rejects [AbbreviationOrUni
 signature_augmentation	certified: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 1) [SignaturePair]; unknown: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 1) [SignaturePair]
 signature_augmentation_missing_in_implementation	certified: covers, FCS rejects surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 1) [SignaturePair]; unknown: covers, FCS rejects surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 1) [SignaturePair] [FCS: FS193]
 signature_method_unreadable_rename	certified: unread UnreadableCompiledName(0); unknown: unread UnreadableCompiledName(0)
+static_abstract_signature_augmentation	certified: exact, FCS rejects [SignaturePair]; unknown: exact, FCS rejects [SignaturePair] [FCS: FS193]
 tuple_augmentation	certified: covers, FCS rejects surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 10) [RejectedShape]; unknown: covers, FCS rejects surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 10) [RejectedShape] [FCS: FS3350,FS3350]
 type_and_group	certified: exact []; unknown: exact [UncertainAttribute]
 type_generic	certified: exact []; unknown: covers surplus(prefix 0, entity 0, lends 1, lender 0, auto-open 0, extension 0) [UncertainAttribute]

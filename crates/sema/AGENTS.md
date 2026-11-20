@@ -58,7 +58,15 @@ A's references route each written attribute name to (`MarkerRoutes`:
 (`ProviderReferences`, under which any abbreviation to a named type
 declines). Every match over a syntax enum in the walk and its member reader
 names its kinds (`clippy::wildcard_enum_match_arm` is denied there), so a
-construct no arm reads is a compile error, not a silent skip. Every channel it reads is a `Channel` with a `Treatment`, and
+construct no arm reads is a compile error, not a silent skip. The leaves it
+interprets (a type's head, an augmentation's head, an abbreviation's target
+where a provider may be referenced) are certified form by form in
+`LEAF_FORMS`: a form outside the table declines (`OutsideDomain`), and
+`source_existence_domain` grades every row against FCS and holds the walk to
+each row's verdict, so the predicate and the table cannot drift apart. A
+clean producer's resolver fold is held to the walk too: every module and
+placed type `resolve_project_files` exports is one of its entities
+(`test_support::fold_entity_paths`). Every channel it reads is a `Channel` with a `Treatment`, and
 `the_inventory_is_what_the_walk_does` runs a witness of each. The harness
 grades a hand-written grid (`source_existence_grid.rs`), generated projects
 (`source_existence_gen.rs`, `deep_` for more seeds), and the
