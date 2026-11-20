@@ -36,66 +36,54 @@ through `borzoi_sema::FcsRange::fcs_range`, and `clippy.toml` bans
 glued `(*)`, which the tree spells as `(`, `*`, `)` (what every frozen
 facade's name accessors return) and FCS names over all three characters
 (`borzoi_cst::syntax::fcs_ident_range`).
-A referenced F# project's existence surface is read from its source by
-`source_existence` (Stage 1a of the source-references plan), for the
-**existence consumers only**: the rows the `assembly_env::existence` set
-reads (canonical entity paths, namespace/abbreviation/other, `[<AutoOpen>]`,
-`[<Extension>]` on abbreviations, extension names and staticness, assembly
-auto-open paths), or `Unread` with the reason. Every question that set
-answers is monotone, so the claim is containment: the set built from our
-rows holds every fact of the set built from FCS's CCU for A, which
-`tests/all/source_existence_diff.rs` checks on the set's own facts
-(`test_support::existence_facts`), pinning ours' surplus per kind and
-failing a surplus abbreviation lender no `Approximation` accounts for at
-its own path (`SourceSurface::lender_sources`; one makes every name a
-possible extension). Fields no existence question reads
-(accessibility, kinds beyond abbreviation, the inferred `[<Extension>]`)
-are constants: **a stage that reads more of a source producer derives and
-grades those itself.** Its input enumerates what only the caller knows (an
-unreadable Compile item, a refused fold, an unserved producer TFM) and what
-A's references route each written attribute name to (`MarkerRoutes`:
-`Unknown`, or a `Certified` map in which an omitted name reads as
-`Unknown`), and whether one of them may be a type provider
-(`ProviderReferences`, under which any abbreviation to a named type
-declines). Every match over a syntax enum in the walk and its member reader
-names its kinds (`clippy::wildcard_enum_match_arm` is denied there), so a
-construct no arm reads is a compile error, not a silent skip. The leaves it
-interprets (a type's head, an augmentation's head, an abbreviation's target
-where a provider may be referenced, an `[<Extension>]` binding's pattern)
-are certified form by form in
-`LEAF_FORMS`: a form outside the table declines (`OutsideDomain`), and
-`source_existence_domain` grades every row against FCS and holds the walk to
-each row's verdict, so the predicate and the table cannot drift apart. A
-clean producer's resolver fold is held to the walk too: every module and
-placed type `resolve_project_files` exports is one of its entities
-(`test_support::fold_entity_paths`). Every channel it reads is a `Channel` with a `Treatment`, and
-`the_inventory_is_what_the_walk_does` runs a witness of each. Every
-binding-head construct the walk reads through is a `HeadForm` whose
-`LEAF_FORMS` row decides it (`binding_head_forms_are_table_rows` holds the
-two together), so a construct with no Read row declines. Every spelling the
-walk derives rather than reads (compiled names, accessor and arity forms,
-mangled names) is listed, with the FCS formula it covers, in the module doc's
-"Spellings the walk derives": for each, the walk emits every spelling the
-formula could produce rather than model the one it does. Every byte a row
-copies is charged before it is made (`MAX_ROW_BYTES`), and
-`source_existence_budget` walks producers whose long names multiply under a
-memory limit, in a child process. The only
-positions the walk reads are the lines a marked class `let`'s head spans
-(`head_lines`): FCS mangles a taken name by its binder's line, and the walk
-emits every line of the head rather than model which token FCS takes the
-range from. `source_existence_layout` holds that to FCS with a line break
-before every token and a comment line before every line of each grid cell
-that reads a position, and the generator mixes the same layout trivia into
-random cases. The harness
-grades a hand-written grid (`source_existence_grid.rs`), generated projects
-(`source_existence_gen.rs`, `deep_` for more seeds), and the
-attribute-placement grid (`source_existence_placement.rs`: every
+A referenced F# project read from its source feeds the existence set in two
+halves (Stage 1a of the source-references plan). **The entity half** is
+`source_existence`: the rows open certification reads (canonical entity
+paths, namespace/abbreviation/other, `[<AutoOpen>]`, assembly auto-open
+paths), or `Unread` with the reason. Every such question is monotone, so the
+claim is containment on those facts, which `tests/all/source_existence_diff.rs`
+grades on the set's own facts (`test_support::existence_facts`), pinning
+ours' surplus. **The extension half** is the reference's `ExtensionNames`
+(`ResolvedProject::extension_names`), the gate's currency for the project's
+own files: FCS binds an extension by its logical name, so no compiled
+spelling, class `let` or module `let` is read, and the claim is the gate
+grids' certain-implies-exact with the reference as a `ReferencedProject`
+placement (`infer_extension_scope_grid`, `infer_assembly_extension_grid`,
+through `common::ext_scope::check_referenced` and FCS's graph oracle).
+`a_referenced_project_binds_extensions_by_logical_name_only` pins the
+calls that license that: a backticked compiled spelling, an `[<Extension>]`
+module `let` and an `[<Extension>]` class `let` bind nothing of the
+reference. `AssemblyEnv::add_source_existence` takes both halves; an unread
+entity half makes the set unknowable whatever the names say. Fields no
+entity question reads (accessibility, kinds beyond abbreviation, the
+`[<Extension>]` flag) are constants: **a stage that reads more of a source
+producer derives and grades those itself.** The walk's input enumerates
+what only the caller knows (an unreadable Compile item, a refused fold, an
+unserved producer TFM), what A's references route each written attribute
+name to (`MarkerRoutes`, certified by the full name a written name resolves
+to, in any assembly), and whether one may be a type provider
+(`ProviderReferences`). Each node the walk reads is a `Leaf` classified into
+a closed `Form` whose verdict decides it, and each classifier accounts for
+every child of its node, so a child no classifier names declines
+(`Unreadable`); `source_existence_domain` grades every `Form::ALL` witness
+against FCS, the raw-kind scans (`RAW_SCANS`) have a grid cell each, and
+`source_existence_accessors` pins, under `accessor-trace`, every accessor of
+a node type the walk reads that it never calls, with its reason. Every
+match over a syntax enum in the walk names its kinds
+(`clippy::wildcard_enum_match_arm` is denied there). The walk bounds its
+input before it walks (`MAX_NAME_BYTES`, `MAX_DEPTH`, `MAX_DECLARATIONS`),
+so the rows' memory is bounded by the input with no metering;
+`source_existence_budget` runs the bound's corner through `ExistenceSet`
+construction under a memory limit. A clean producer's resolver fold is held
+to the walk (`test_support::fold_entity_paths`), and every channel it reads
+is a `Channel` with a `Treatment`, witnessed by
+`the_inventory_is_what_the_walk_does`. The harness grades a hand-written
+grid, generated projects and the attribute-placement grid (every
 attribute-bearing node of the grammar, held to `syntax/union.rs` by
-`every_attribute_bearing_node_has_a_template`, under every marker, at every
-target in its `deep_` twin), reading FCS's signature through `fcs-dump`'s
-`referenced` op and `unpickle_signature`, each verdict pinned; the corpus
-twin is `borzoi-corpus-diff`'s `source_existence_corpus`. The member reader
-it shares with `resolve/extension_names.rs` is `member_shape`.
+`every_attribute_bearing_node_has_a_template`), reading FCS's signature
+through `fcs-dump`'s `referenced` op and `unpickle_signature`, each verdict
+pinned; `source_existence_census` measures, FCS-free, what the walk declines
+over the pinned corpus.
 Inferred types are not bounded by the tree (each line of `let gK x =
 g(K-1) (g(K-1) x)` doubles one), so every walk of the unification table
 counts against a type budget (`MAX_TYPE_NODES`, `MAX_TYPE_DEPTH`), and a

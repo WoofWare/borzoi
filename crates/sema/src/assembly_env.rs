@@ -5395,12 +5395,12 @@ impl AssemblyEnv {
     }
 
     /// Add a project reference read from its source: its entity half
-    /// (`existence`, which [`crate::source_existence`] read; an unread one
+    /// (`existence`, which [`crate::source_existence()`] read; an unread one
     /// makes the existence set unknowable, whatever `names` say) joins the
     /// existence set with its assembly-level auto-opens, and its
     /// extension-member names (the referenced project's
     /// [`ResolvedProject::extension_names`](crate::ResolvedProject::extension_names))
-    /// join the gate's ([`ExtensionView::referenced_extension_names`]).
+    /// join the gate's, which reads them as the project's own files' names.
     pub fn add_source_existence(
         &mut self,
         existence: &crate::SourceExistence,

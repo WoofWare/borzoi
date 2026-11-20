@@ -336,6 +336,7 @@ crates/sema/tests/all/resolve_self_qualifier_gen_diff.rs	pending	3
 crates/sema/tests/all/resolve_straddle_gen_diff.rs	pending	3
 crates/sema/tests/all/resolve_target_fold.rs	pending	3
 crates/sema/tests/all/silent_region_sweep.rs	pending	3
+crates/sema/tests/all/source_existence_accessors.rs	not-applicable	the walk traced over the grid's, the generator's, the witnesses' and the placement grid's producers, its unread accessors pinned; the hostile source states reach the same walk through source_existence_gen's census
 crates/sema/tests/all/source_existence_budget.rs	not-applicable	the corner of the walk's input bound, walked and built into the existence set under a memory limit; the hostile source states reach the same walk through source_existence_gen's census
 crates/sema/tests/all/source_existence_census.rs	not-applicable	the pinned corpus walked file by file, an FCS-free measurement of what the walk declines; the hostile source states reach the same walk through source_existence_gen's census
 crates/sema/tests/all/source_existence_domain.rs	not-applicable	the certified leaf forms of source_existence, one producer per LEAF_FORMS row; the hostile source states reach the same walk through source_existence_gen's census

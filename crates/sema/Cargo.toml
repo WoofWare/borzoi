@@ -46,6 +46,9 @@ test-support = []
 surface-reference = []
 
 [dev-dependencies]
+# `accessor-trace`, so `source_existence_accessors` can record the typed
+# accessors the walk calls.
+borzoi-cst = { workspace = true, features = ["unstable-union", "accessor-trace"] }
 borzoi-oracle-harness.workspace = true
 # The metric-path walk the stats dashboard plots by, so a generator's
 # pinned metric namespace is read exactly as it is published.

@@ -436,7 +436,7 @@ fn cell(template: &Template, attribute: (&str, &str), target: &str) -> Cell {
     cell
 }
 
-fn grid(targets: &[&str]) -> Vec<Cell> {
+pub fn grid(targets: &[&str]) -> Vec<Cell> {
     let templates = templates();
     templates
         .iter()

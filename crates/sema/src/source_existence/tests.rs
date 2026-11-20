@@ -717,4 +717,13 @@ fn an_unconsumed_child_declines_with_its_leaf() {
         ),
         "{r:?}"
     );
+    // A token the header's classifier does not name: a top-level `let … in`.
+    let r = read(&[("Lib.fs", "module M\nlet f x = x in\nf 1 |> ignore\n")]);
+    assert!(
+        matches!(
+            r,
+            SourceExistence::Unread(ExistenceUnread::Unreadable(0, Leaf::FileHeader))
+        ),
+        "{r:?}"
+    );
 }

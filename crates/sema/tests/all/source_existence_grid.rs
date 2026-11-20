@@ -600,8 +600,8 @@ pub fn cells() -> Vec<Cell> {
             "lender_under_suffixed_module",
             "namespace SuffixLender\nmodule FooModule =\n    [<AutoOpen>]\n    type Alias = int\n",
         ),
-        // Codex round 5's shapes (the leaves certified in `LEAF_FORMS` are
-        // graded in `source_existence_domain`).
+        // Extension-bearing shapes: their entity facts are graded here, their
+        // extensions by the gate grids' referenced-project placements.
         one(
             "nullary_active_pattern_let",
             "module NullaryAp\n[<System.Runtime.CompilerServices.Extension>]\nlet (|Zero|_|) = function 0 -> Some () | _ -> None\n",

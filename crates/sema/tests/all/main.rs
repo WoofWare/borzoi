@@ -156,6 +156,7 @@ mod resolve_types;
 mod resolve_union_cases;
 mod sig_namespace_fold_diff;
 mod silent_region_sweep;
+mod source_existence_accessors;
 mod source_existence_budget;
 mod source_existence_census;
 mod source_existence_diff;

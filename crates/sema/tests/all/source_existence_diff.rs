@@ -591,6 +591,16 @@ fn project_files(cell: &Cell) -> Vec<ProjectFile> {
 
 /// Our reading of `cell` under `routes`, or certified by spelling.
 pub fn ours(cell: &Cell, routes: Option<&MarkerRoutes>) -> (SourceExistence, MarkerRoutes) {
+    ours_with(cell, routes, |walk| walk())
+}
+
+/// [`ours`], with the walk itself (and nothing that prepares its input)
+/// run inside `around`: what a test that observes the walk alone wraps.
+pub fn ours_with(
+    cell: &Cell,
+    routes: Option<&MarkerRoutes>,
+    around: impl FnOnce(&mut dyn FnMut() -> SourceExistence) -> SourceExistence,
+) -> (SourceExistence, MarkerRoutes) {
     let project = project_files(cell);
     let refs: Vec<&ProjectFile> = project.iter().collect();
     let routes = match routes {
@@ -598,25 +608,26 @@ pub fn ours(cell: &Cell, routes: Option<&MarkerRoutes>) -> (SourceExistence, Mar
         None => certificate(cell, &refs),
     };
     let items: Vec<CompileItem<'_>> = project.iter().map(CompileItem::Parsed).collect();
-    (
+    // A reference that may be a type provider is one whose source names the
+    // attribute that makes it one.
+    let providers = if cell.providers_possible
+        || cell.refs.iter().any(|r| {
+            r.files
+                .iter()
+                .any(|(_, t)| t.contains("TypeProviderAssembly"))
+        }) {
+        ProviderReferences::Possible
+    } else {
+        ProviderReferences::None
+    };
+    let read = around(&mut || {
         source_existence(Producer::Evaluated {
             items: &items,
             routes: &routes,
-            // A reference that may be a type provider is one whose source
-            // names the attribute that makes it one.
-            providers: if cell.providers_possible
-                || cell.refs.iter().any(|r| {
-                    r.files
-                        .iter()
-                        .any(|(_, t)| t.contains("TypeProviderAssembly"))
-                }) {
-                ProviderReferences::Possible
-            } else {
-                ProviderReferences::None
-            },
-        }),
-        routes,
-    )
+            providers,
+        })
+    });
+    (read, routes)
 }
 
 fn certificate(cell: &Cell, files: &[&ProjectFile]) -> MarkerRoutes {
