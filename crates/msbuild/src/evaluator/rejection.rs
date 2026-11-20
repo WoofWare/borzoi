@@ -588,12 +588,13 @@ pub(super) fn throws_in(issues: &[properties::Issue]) -> Vec<Thrown> {
 /// whether MSBuild evaluates the text for certain. MSBuild expands the whole
 /// text, and a throw anywhere in it rejects the project, so what an
 /// expression before a throwing one does is moot: it is certain where it is
-/// reached for certain and every name one of them read before it threw is
-/// certain ([`directory_build::is_certain`]).
+/// reached for certain and one expression throws in every world of MSBuild's
+/// startup directory, each world's throw (its own entry) on names the walk
+/// is certain of ([`directory_build::is_certain`]).
 ///
-/// Short of that it is Possible, where every name one of them read holds a
+/// Short of that it is Possible, where every name one entry read holds a
 /// value MSBuild may hold ([`holds_a_value_msbuild_may`]), or where one
-/// throws whatever its expressions on the names that do not return
+/// throws, in some world, whatever its expressions on the names that do not return
 /// ([`condition::expression_throws_whatever_they_return`]). Any other throw on
 /// such a name is no site: the value held is none MSBuild need hold, and
 /// whether the function throws on MSBuild's own value is the judgement over
@@ -606,24 +607,33 @@ pub(super) fn judge_throwing_expression(
     span: Range<usize>,
 ) {
     let unheld = |name: &str| !holds_a_value_msbuild_may(state, name);
-    let (held, on_unheld): (Vec<Thrown>, Vec<Thrown>) = thrown
-        .into_iter()
-        .partition(|thrown| !thrown.reads.iter().any(|name| unheld(name)));
-    let certain = held
+    // Each world's throw is its own entry: an expression throws for certain
+    // only where it throws in every world, each on names the walk is certain
+    // of.
+    let certain = thrown
         .iter()
-        .find(|thrown| {
-            thrown.everywhere
-                && thrown
-                    .reads
-                    .iter()
-                    .all(|name| directory_build::is_certain(state, name))
+        .find(|candidate| {
+            thrown
+                .iter()
+                .filter(|other| other.expression == candidate.expression)
+                .all(|entry| {
+                    entry.everywhere
+                        && entry
+                            .reads
+                            .iter()
+                            .all(|name| directory_build::is_certain(state, name))
+                })
         })
         .filter(|_| reached)
         .cloned();
+    let (held, on_unheld): (Vec<Thrown>, Vec<Thrown>) = thrown
+        .into_iter()
+        .partition(|thrown| !thrown.reads.iter().any(|name| unheld(name)));
     // One that read a name the walk holds none of throws whatever that
     // name's expressions return, perhaps: on each value tried, it throws on
     // the rest.
     let observer = state.follow_imports.then_some(state.observer);
+    let start = state.start();
     let possible = || {
         held.first().cloned().or_else(|| {
             on_unheld.into_iter().find(|thrown| {
@@ -631,6 +641,7 @@ pub(super) fn judge_throwing_expression(
                     &thrown.expression,
                     &state.lookup,
                     observer,
+                    start,
                     &unheld,
                 )
             })
@@ -659,7 +670,48 @@ fn judge_unwalked_text(state: &mut State<'_>, text: &str, reached: bool, span: R
     if !expressions.is_empty() {
         judge_throwing_expression(state, expressions, reached, span.clone());
     }
-    judge_text_after_startup_decline(state, text, span);
+    judge_text_after_startup_decline_and_unheld(state, text, span);
+}
+
+/// Judge `text`, at `span`, for the throws the walk cannot judge on the
+/// values it holds, where MSBuild's startup directory may decide them
+/// ([`judge_text_after_startup_decline`],
+/// [`judge_unheld_text_beside_startup`]).
+pub(super) fn judge_text_after_startup_decline_and_unheld(
+    state: &mut State<'_>,
+    text: &str,
+    span: Range<usize>,
+) {
+    judge_text_after_startup_decline(state, text, span.clone());
+    judge_unheld_text_beside_startup(state, text, span);
+}
+
+/// `text` has an expression beyond a plain reference (a method, an indexer)
+/// that reads a name the walk holds no value of, which may throw on
+/// MSBuild's value of it: no site of its own (#1009's second stage). Where
+/// the text also turns on where MSBuild starts
+/// ([`properties::expansion_turns_on_startup_directory`]), the walk may have
+/// followed a world other than one MSBuild throws in, so it is a Possible
+/// site.
+fn judge_unheld_text_beside_startup(state: &mut State<'_>, text: &str, span: Range<usize>) {
+    if condition::plain_references_only(text)
+        || !properties::property_references(text)
+            .any(|name| !holds_a_value_msbuild_may(state, name))
+        || !properties::expansion_turns_on_startup_directory(
+            text,
+            &state.lookup,
+            state.follow_imports.then_some(state.observer),
+        )
+    {
+        return;
+    }
+    state.note_rejection(
+        RejectionCertainty::Possible,
+        RejectionCause::ThrowingExpression {
+            expression: text.to_owned(),
+        },
+        span,
+    );
 }
 
 /// After the walk declined a property write for MSBuild's startup directory
@@ -1534,7 +1586,7 @@ fn judge_metadata_text(state: &mut State<'_>, text: &str, reached: bool, span: R
     if !expressions.is_empty() {
         judge_throwing_expression(state, expressions, reached, span.clone());
     }
-    judge_text_after_startup_decline(state, text, span);
+    judge_text_after_startup_decline_and_unheld(state, text, span);
 }
 
 /// Judge the `<ItemGroup>` at `node`, which MSBuild reaches as `reached` says.

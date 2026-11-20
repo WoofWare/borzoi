@@ -264,9 +264,28 @@ impl Site {
     ];
 }
 
+/// Relative paths spliced before an indexer so that the computation asks
+/// about more of the startup directory than the walk enumerates
+/// (`properties::worlds::MAX_SEGMENTS`, six, plus one).
+const UNENUMERATED_SPLICES: usize = 7;
+
 /// The last write of a rejection-shaped point: unconditional, so the walk
 /// publishes it exactly where it claims MSBuild accepts the project.
 const AFTER: &str = "  </PropertyGroup>\n  <PropertyGroup>\n    <After>ok</After>\n";
+
+/// A generated value for `site`: for an indexer, half the time a relative
+/// segment joined to a part by a `\`, whose respelling moves the value's
+/// fields; otherwise [`gen_value`]'s.
+fn gen_site_value(rng: &mut SplitMix64, root: &str, site: Site) -> String {
+    if site == Site::Index && rng.below(2) == 0 {
+        let segment = *rng.pick(&["seg", "obj"]);
+        let separator = *rng.pick(&["\\", "%5c"]);
+        let part = *rng.pick(&["a", "seg", "..", "b c"]);
+        format!("{segment}{separator}{part}")
+    } else {
+        gen_value(rng, root)
+    }
+}
 
 /// One generated value: a first segment, then parts joined by separators.
 fn gen_value(rng: &mut SplitMix64, root: &str) -> String {
@@ -359,11 +378,17 @@ fn gen_point(
 ) -> Point {
     let (value, reference) = match source {
         Source::Literal => {
-            let value = gen_value(rng, world.root_text());
+            let value = gen_site_value(rng, world.root_text(), site);
             (value.clone(), value)
         }
-        Source::Written | Source::Global => (gen_value(rng, world.root_text()), "$(V)".to_owned()),
-        Source::Copied => (gen_value(rng, world.root_text()), "$(W)".to_owned()),
+        Source::Written | Source::Global => (
+            gen_site_value(rng, world.root_text(), site),
+            "$(V)".to_owned(),
+        ),
+        Source::Copied => (
+            gen_site_value(rng, world.root_text(), site),
+            "$(W)".to_owned(),
+        ),
         Source::Environment => {
             let (name, value) = rng.pick(&world.environment);
             (value.clone(), format!("$({name})"))
@@ -373,7 +398,13 @@ fn gen_point(
             "$(MSBuildUserExtensionsPath)".to_owned(),
         ),
     };
-    let template = *rng.pick(TEMPLATES);
+    // An indexer reads past the end in one world most often under a whole
+    // value whose pass respells a kept `\` (`./{v}//q`).
+    let template = if site == Site::Index && rng.below(2) == 0 {
+        "./{v}//q"
+    } else {
+        *rng.pick(TEMPLATES)
+    };
     let expansion = template.replace("{v}", &reference);
     let mut writes = String::new();
     let mut items = String::new();
@@ -416,8 +447,37 @@ fn gen_point(
         }
         Site::Index => {
             writes.push_str(&format!("    <X>{}</X>\n", xml_body(&expansion)));
-            let index = rng.below(6);
-            writes.push_str(&format!("    <F>$(X.Split('/')[{index}])</F>\n"));
+            // Half the time, at the edge of the value's fields as written: the
+            // world that keeps every `\` has that many, and one that respells
+            // a `\` has more, so the indexer is past the end in some worlds.
+            let index = if rng.below(2) == 0 {
+                rng.below(6)
+            } else {
+                let fields = template.replace("{v}", &value).split('/').count();
+                fields - 1 + rng.below(3)
+            };
+            // Beside a name the walk holds no value of (`U`, through a
+            // function it does not model), read after the indexer, before
+            // it, or beside more relative paths than the walk enumerates:
+            // MSBuild may throw at the indexer in one world without reading
+            // `U`, which the walk must not let `U` hide.
+            let body = match rng.below(4) {
+                0 => format!("$(X.Split('/')[{index}])"),
+                unheld => {
+                    writes.push_str("    <U>$([System.IO.Path]::GetFileName('x'))</U>\n");
+                    match unheld {
+                        1 => format!("$(X.Split('/')[{index}].Split('z$(U)')[1])"),
+                        2 => format!("$(X.TrimStart('z$(U)').Split('/')[{index}])"),
+                        _ => {
+                            let splices: String = (0..UNENUMERATED_SPLICES)
+                                .map(|i| format!("s{i}\\x$(Empty)"))
+                                .collect();
+                            format!("{splices}$(U.Substring(5))$(X.Split('/')[{index}])")
+                        }
+                    }
+                }
+            };
+            writes.push_str(&format!("    <F>{}</F>\n", xml_body(&body)));
             writes.push_str(AFTER);
             Read::Property("After")
         }
@@ -1036,7 +1096,8 @@ const FIXED_CASES: usize = 900;
 /// The text of a generated point, or of a claim on it, with the fixture's
 /// root spelt `{ROOT}`, its parent (a directory unique to the run) `{TMP}`,
 /// and the host's `MSBuildUserExtensionsPath` `{UEXT}`, so that it names the
-/// same document on any host and in any checkout.
+/// same document on any host and in any checkout. A document spells each in
+/// XML (`xml_attribute`), which is replaced first.
 fn placeholder(text: &str, root: &str) -> String {
     static UEXT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     let uext = UEXT.get_or_init(|| {
@@ -1050,12 +1111,19 @@ fn placeholder(text: &str, root: &str) -> String {
         .parent()
         .and_then(std::path::Path::to_str)
         .unwrap_or(root);
-    let text = text.replace(root, "{ROOT}").replace(parent, "{TMP}");
-    if uext.is_empty() {
-        text
-    } else {
-        text.replace(uext.as_str(), "{UEXT}")
+    let mut text = text.to_owned();
+    for (path, token) in [
+        (root, "{ROOT}"),
+        (parent, "{TMP}"),
+        (uext.as_str(), "{UEXT}"),
+    ] {
+        if !path.is_empty() {
+            text = text
+                .replace(&xml_attribute(path), token)
+                .replace(path, token);
+        }
     }
+    text
 }
 
 /// `answer` with each value [`placeholder`]ed, as the baseline records its
@@ -1265,9 +1333,9 @@ fn fixed_seed_sweep_regresses_nothing_main_answers() {
     );
     assert!(
         regressed.is_empty(),
-        "{} claims wrong where main's walk was right or declined; the first:\n{}",
+        "{} claims wrong where main's walk was right or declined:\n{}",
         regressed.len(),
-        regressed[0]
+        regressed.join("\n")
     );
     let manifest = Manifest::from_keyed(pins).expect("well-formed entries");
     manifest::check(

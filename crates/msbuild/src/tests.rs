@@ -12422,6 +12422,76 @@ fn an_agreed_empty_framework_list_is_decided() {
     assert!(!crate::target_frameworks_undecided(&p));
 }
 
+/// A throw in one world rests on that world's reads: without `seg/`,
+/// `[4]` is past the end before `U` is read, and MSBuild rejects; with it,
+/// `U` (a function the walk does not model) is read and MSBuild accepts.
+#[test]
+#[cfg(not(windows))]
+fn a_throw_before_an_unheld_read_in_one_world_may_reject() {
+    let p = parse(
+        r#"<Project><PropertyGroup>
+    <S>seg\a</S>
+    <Q>./$(S)//x</Q>
+    <U>$([System.IO.Path]::GetFileName('x'))</U>
+    <F>$(Q.Split('/')[4].Split('z$(U)')[1])</F>
+  </PropertyGroup>
+  <PropertyGroup><After>ok</After></PropertyGroup></Project>"#,
+    );
+    assert!(
+        p.rejection.is_some(),
+        "{:?} {:#?}",
+        p.property("After"),
+        p.diagnostics
+    );
+}
+
+/// An expression that throws whatever an unheld name returns in one world
+/// may reject: without `seg/`, no trim gives `Q` a fifth field.
+#[test]
+#[cfg(not(windows))]
+fn a_throw_whatever_unheld_returns_in_one_world_may_reject() {
+    let p = parse(
+        r#"<Project><PropertyGroup>
+    <S>seg\a</S>
+    <Q>./$(S)//x</Q>
+    <U>$([System.IO.Path]::GetFileName('x'))</U>
+    <F>$(Q.TrimStart('z$(U)').Split('/')[4])</F>
+  </PropertyGroup>
+  <PropertyGroup><After>ok</After></PropertyGroup></Project>"#,
+    );
+    assert!(
+        p.rejection.is_some(),
+        "{:?} {:#?}",
+        p.property("After"),
+        p.diagnostics
+    );
+}
+
+/// Past the segment cap, a sampled throw on an unheld name does not stand
+/// for the worlds left unenumerated: the indexer may throw in one of them.
+#[test]
+#[cfg(not(windows))]
+fn a_capped_body_with_a_discarded_throw_may_reject() {
+    let splices: String = (0..crate::properties::worlds::MAX_SEGMENTS + 1)
+        .map(|i| format!("s{i}\\x$(Empty)"))
+        .collect();
+    let p = parse(&format!(
+        r#"<Project><PropertyGroup>
+    <S>seg\a</S>
+    <Q>./$(S)//x</Q>
+    <U>$([System.IO.Path]::GetFileName('x'))</U>
+    <F>{splices}$(U[0])$(Q.Split('/')[3][0])</F>
+  </PropertyGroup>
+  <PropertyGroup><After>ok</After></PropertyGroup></Project>"#
+    ));
+    assert!(
+        p.rejection.is_some(),
+        "{:?} {:#?}",
+        p.property("After"),
+        p.diagnostics
+    );
+}
+
 /// `Q` is `./seg/a//` where `seg` is a directory under MSBuild's startup
 /// directory, and `./seg/a/` elsewhere: the whole value's pass respells it
 /// only where `S`'s `\` survived. Each reader below that would act on one of

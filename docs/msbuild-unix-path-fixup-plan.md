@@ -191,8 +191,12 @@ again), so a value whose worlds agree is *committed determinate*, not degraded.
   measured. The same through any other undecided gate waits on #1009's
   second stage. A property function that throws in some worlds only, or in
   a computation past the segment cap, is a possible rejection, never a
-  certain one: a throw records whether it happens in every world
-  (`Issue::Throws`'s `everywhere`). An `Exists` guard over an import's list asks about each
+  certain one: each world's throw is its own entry, with that world's
+  reads and whether every world throws (`Issue::Throws`'s `everywhere`),
+  and the rejection judgement weighs them apart. A text with an expression
+  beyond plain references that reads a name the walk holds no value of is
+  a possible rejection where the text itself turns on the startup
+  directory: the walk may have followed a world MSBuild does not throw in. An `Exists` guard over an import's list asks about each
   entry, as MSBuild's does. An import
   whose path the walk cannot compute is a possible rejection even under an
   `Exists` of that path: `Exists` is true of a directory and of a spelling the

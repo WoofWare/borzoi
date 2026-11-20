@@ -75,7 +75,8 @@ pub enum Issue {
         reads: Vec<String>,
         /// Whether it throws in every world of MSBuild's startup directory
         /// the expansion ran in (`properties::worlds`): where it does not, MSBuild may
-        /// start where it does not throw here.
+        /// start where it does not throw here. Each world's throw is its own
+        /// entry, with that world's `reads`.
         everywhere: bool,
     },
     /// `$(...)` MSBuild evaluates without throwing, to a boolean we do not
@@ -720,6 +721,23 @@ pub(crate) fn substitute_worlds(
     expand_in_every_world(input, props, observer, start, Probes::Evaluation)
 }
 
+/// Whether expanding `input` turns on where MSBuild starts: its value, or
+/// what it refuses or throws on, differs between the worlds of its startup
+/// directory, or it asks about more of the directory than the walk
+/// enumerates. Asked of every startup directory, whatever start the walk was
+/// given.
+pub(crate) fn expansion_turns_on_startup_directory(
+    input: &str,
+    props: &PropertyMap,
+    observer: Option<&Observer>,
+) -> bool {
+    let expanded = worlds::in_every_world(Start::Unknown, |world| {
+        let (value, issues) = substitute_in_world(input, props, observer, world);
+        (value.value, issues)
+    });
+    !matches!(expanded, Ok(Worlds::Same(_)))
+}
+
 /// [`substitute_worlds`], answering only a value that is the same under every
 /// startup directory. One that is not is an
 /// [`Issue::PathAdjustmentUndecided`], and the value returned is the one where
@@ -813,45 +831,36 @@ fn expand_in_every_world(
         Ok(Worlds::Same((value, issues))) => (Worlds::Same(value), issues),
         Ok(results) => {
             let worlds = results.values();
-            // For each expression some world throws on: how many worlds
-            // throw on it, and what any of them read before it threw (in
-            // order of first reading).
-            let mut thrown: HashMap<&str, (usize, Vec<String>, HashSet<&str>)> = HashMap::new();
+            // How many worlds throw on each expression. Each world's throw
+            // stays its own entry, resting on what that world read before it
+            // threw: the rejection judgement weighs the worlds apart
+            // (`rejection::judge_throwing_expression`).
+            let mut throwing: HashMap<&str, usize> = HashMap::new();
             for (_, world_issues) in &worlds {
                 let mut counted: HashSet<&str> = HashSet::new();
                 for issue in world_issues {
-                    if let Issue::Throws {
-                        expression, reads, ..
-                    } = issue
+                    if let Issue::Throws { expression, .. } = issue
+                        && counted.insert(expression.as_str())
                     {
-                        let entry = thrown.entry(expression.as_str()).or_default();
-                        if counted.insert(expression.as_str()) {
-                            entry.0 += 1;
-                        }
-                        for name in reads {
-                            if entry.2.insert(name.as_str()) {
-                                entry.1.push(name.clone());
-                            }
-                        }
+                        *throwing.entry(expression.as_str()).or_default() += 1;
                     }
                 }
             }
             // The first world's issues as they came, then any other world's
             // it lacks. A throw some world does not make is one MSBuild may
-            // not make, and one rests on what any world read before it threw.
+            // not make.
             let mut issues: Vec<Issue> = Vec::new();
             let mut seen: HashSet<Issue> = HashSet::new();
             for (_, world_issues) in &worlds {
                 for issue in world_issues {
                     let issue = match issue {
-                        Issue::Throws { expression, .. } => {
-                            let (throwing, reads, _) = &thrown[expression.as_str()];
-                            Issue::Throws {
-                                expression: expression.clone(),
-                                reads: reads.clone(),
-                                everywhere: *throwing == worlds.len(),
-                            }
-                        }
+                        Issue::Throws {
+                            expression, reads, ..
+                        } => Issue::Throws {
+                            expression: expression.clone(),
+                            reads: reads.clone(),
+                            everywhere: throwing[expression.as_str()] == worlds.len(),
+                        },
                         other => other.clone(),
                     };
                     if seen.insert(issue.clone()) {
@@ -886,11 +895,9 @@ fn expand_in_every_world(
                     *everywhere = false;
                 }
             }
-            if !crate::condition::plain_references_only(input)
-                && !issues
-                    .iter()
-                    .any(|issue| matches!(issue, Issue::Throws { .. }))
-            {
+            // A throw sampled in this world says nothing of theirs, so the
+            // marker stands whatever this world threw on.
+            if !crate::condition::plain_references_only(input) {
                 issues.push(Issue::Throws {
                     expression: input.to_owned(),
                     reads: Vec::new(),

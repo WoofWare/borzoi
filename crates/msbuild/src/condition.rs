@@ -1101,30 +1101,33 @@ fn strike(text: &str, spans: &[Range<usize>], value: &str) -> String {
 /// throws on the values `props` holds, whatever the expressions in it that
 /// read a name `unheld` names return: with each of them in turn returning each
 /// value of [`RETURNED`], it still throws, on what it read of the other names
-/// (`VersionLessThan($(A), $(X))` with `A` holding `true`, whatever `X` is).
-/// The text's counterpart of [`throws_whatever_they_return`].
+/// (`VersionLessThan($(A), $(X))` with `A` holding `true`, whatever `X` is),
+/// in some world of MSBuild's startup directory `start` allows: MSBuild may
+/// start there. The text's counterpart of [`throws_whatever_they_return`].
 pub(crate) fn expression_throws_whatever_they_return(
     expression: &str,
     props: &PropertyMap,
     observer: Option<&Observer>,
+    start: Start<'_>,
     unheld: &dyn Fn(&str) -> bool,
 ) -> bool {
     let inner = uncertain_spans(expression, unheld);
     if inner.is_empty() {
         return false;
     }
-    // It throws whatever they return only where it throws in every world of
-    // MSBuild's startup directory.
-    RETURNED.iter().all(|value| {
-        let struck = strike(expression, &inner, value);
-        let thrown = worlds::in_every_world(Start::Unknown, |world| {
+    let throws_whatever = worlds::in_every_world(start, |world| {
+        RETURNED.iter().all(|value| {
+            let struck = strike(expression, &inner, value);
             let (_, issues) = substitute_in_world(&struck, props, observer, world);
             issues.iter().any(|issue| {
                 matches!(issue, Issue::Throws { reads, .. } if !reads.iter().any(|name| unheld(name)))
             })
-        });
-        matches!(thrown, Ok(Worlds::Same(true)))
-    })
+        })
+    });
+    match throws_whatever {
+        Ok(worlds) => worlds.values().into_iter().any(|throws| *throws),
+        Err(worlds::TooManySegments) => false,
+    }
 }
 
 /// Whether MSBuild throws evaluating the leaf `expr`, or may, whatever the

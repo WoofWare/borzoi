@@ -142,7 +142,11 @@ fn record_baseline() {
                 other => panic!("{key}: unknown meta line {other:?}"),
             }
         }
-        let xml = unplace(&text);
+        // A document spells the fixture's paths in XML.
+        let xml = text
+            .replace("{ROOT}", &xml_attribute(&root_text))
+            .replace("{TMP}", &xml_attribute(&parent_text))
+            .replace("{UEXT}", &xml_attribute(&uext));
         let extra: HashMap<String, String> = globals.into_iter().collect();
         let project_path = root.join(&project).join("Demo.fsproj");
         let file = borzoi_msbuild::ProjectFile::buffer(&project_path, &xml)
@@ -236,6 +240,13 @@ fn encode_claim(claim: &Option<Vec<String>>) -> String {
             out
         }
     }
+}
+
+/// XML text for an attribute value, as the sweep writes one.
+fn xml_attribute(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('"', "&quot;")
 }
 
 /// The inverse of Rust's `escape_default` over the escapes it writes.

@@ -5111,7 +5111,7 @@ fn walk_property_child_inner(
         let expressions = expansion.throws.clone();
         rejection::judge_throwing_expression(state, expressions, reached, node.range());
     }
-    rejection::judge_text_after_startup_decline(state, &raw, node.range());
+    rejection::judge_text_after_startup_decline_and_unheld(state, &raw, node.range());
     // A value refused because it asks past the segment cap is one the walk
     // declines for the startup directory.
     if state.diagnostics[diagnostics_before_value..]
