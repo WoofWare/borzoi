@@ -38,7 +38,7 @@ use std::sync::OnceLock;
 use borzoi_oracle_harness::msbuild_oracle;
 use borzoi_oracle_harness::{BatchChild, BoundedCommand, default_timeout};
 
-use borzoi_msbuild::test_support::{Outcome, PropertyMap, evaluate, substitute};
+use borzoi_msbuild::test_support::{Issue, Outcome, PropertyMap, evaluate, substitute};
 use borzoi_msbuild::{GlobResolver, ParseError, ParsedProject, SdkResolver};
 
 thread_local! {
@@ -601,6 +601,29 @@ impl Oracle {
     /// project. This is what lets a generative sweep diff a `<PackageReference>`
     /// `Include`+`Update` collapse — identity matching and per-key metadata
     /// merge — against the real evaluator, resident.
+    /// The text MSBuild reads of each property, metadatum (an element's) and
+    /// inline task body in `xml`, unexpanded, in document order (the
+    /// `elementContents` op): `None` where MSBuild refuses to load the
+    /// document.
+    pub fn element_contents(&mut self, xml: &str, path: &Path) -> Option<Vec<String>> {
+        let resp = self.request(&serde_json::json!({
+            "op": "elementContents",
+            "xml": xml,
+            "path": path.to_string_lossy().into_owned(),
+        }));
+        if resp["ok"].as_bool() != Some(true) {
+            return None;
+        }
+        Some(
+            resp["contents"]
+                .as_array()
+                .expect("contents is an array")
+                .iter()
+                .map(|text| text.as_str().expect("each content is a string").to_owned())
+                .collect(),
+        )
+    }
+
     pub fn items_meta(
         &mut self,
         xml: &str,
@@ -975,6 +998,9 @@ pub fn check_certain_implies_exact(
 pub enum ExpandVerdict {
     Exact,
     Partial,
+    /// We classify an expression in it as one MSBuild throws on
+    /// (`Issue::Throws`), and MSBuild errors expanding it.
+    Throws,
 }
 
 /// The expansion differential contract, asserted for one `(value, props)` case:
@@ -1017,6 +1043,29 @@ pub fn check_expand_certain_implies_exact(
         map.insert(k.clone(), v.clone());
     }
     let (ours, issues) = substitute(value, &map);
+    // A throw we claim is a claim: the walk withdraws the whole project on
+    // it, so MSBuild must error expanding the value. On the names it read
+    // from `props`: one MSBuild defines itself (`MSBuildVersion`) it holds,
+    // where `props` leaves it undefined, as the walk holds no value of one it
+    // does not seed.
+    let on_props = |reads: &[String]| {
+        reads.iter().all(|read| {
+            props
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case(read))
+        })
+    };
+    if issues
+        .iter()
+        .any(|issue| matches!(issue, Issue::Throws { reads, .. } if on_props(reads)))
+    {
+        assert!(
+            oracle.expand(&format!("|{value}|"), props).is_none(),
+            "expand certain-implies-exact violated: we classify {value:?} with props \
+             {props:?} as one MSBuild throws on ({issues:?}), and MSBuild expands it"
+        );
+        return ExpandVerdict::Throws;
+    }
     if !issues.is_empty() {
         return ExpandVerdict::Partial;
     }
@@ -1552,18 +1601,27 @@ pub fn gen_expand_value(rng: &mut SplitMix64) -> String {
 /// The same generator turns those `Partial`s `Exact` once Stage 3's dispatch
 /// lands, still under certain-implies-exact.
 pub fn gen_grammar_value(rng: &mut SplitMix64) -> String {
-    format!("$({})", gen_grammar_inner(rng, 2))
+    format!("$({})", gen_grammar_inner(rng, 2, false))
 }
 
-fn gen_grammar_inner(rng: &mut SplitMix64, depth: u32) -> String {
-    let mut s = gen_grammar_root(rng, depth);
+/// [`gen_grammar_value`] with every argument spelling MSBuild reads drawn
+/// too (an unquoted word, `null`, unquoted text around an expansion, a tab,
+/// the markers a property body reads as text) and the statics those
+/// spellings matter to. A separate stream, so the sweeps that draw
+/// [`gen_grammar_value`] keep theirs.
+pub fn gen_grammar_value_spelled(rng: &mut SplitMix64) -> String {
+    format!("$({})", gen_grammar_inner(rng, 2, true))
+}
+
+fn gen_grammar_inner(rng: &mut SplitMix64, depth: u32, spelled: bool) -> String {
+    let mut s = gen_grammar_root(rng, depth, spelled);
     for _ in 0..rng.below(3) {
-        s.push_str(&gen_grammar_link(rng, depth));
+        s.push_str(&gen_grammar_link(rng, depth, spelled));
     }
     s
 }
 
-fn gen_grammar_root(rng: &mut SplitMix64, depth: u32) -> String {
+fn gen_grammar_root(rng: &mut SplitMix64, depth: u32, spelled: bool) -> String {
     // Property receiver (defined-or-undefined), or a static call.
     if rng.below(3) == 0 {
         return (*rng.pick(CONTROLLED_PROPERTY_NAMES)).to_string();
@@ -1585,17 +1643,28 @@ fn gen_grammar_root(rng: &mut SplitMix64, depth: u32) -> String {
         "IsPathRooted",
         "AreFeaturesEnabled",
         "NormalizePath",
+        "NormalizeDirectory",
         "Nope",
     ];
+    const SPELLED_STATICS: &[&str] = &[
+        "VersionLessThan",
+        "VersionEquals",
+        "IsNullOrEmpty",
+        "IsNullOrWhiteSpace",
+    ];
+    let ty = *rng.pick(TYPES);
+    let member = if spelled && rng.below(3) == 0 {
+        *rng.pick(SPELLED_STATICS)
+    } else {
+        *rng.pick(STATICS)
+    };
     format!(
-        "[{}]::{}({})",
-        rng.pick(TYPES),
-        rng.pick(STATICS),
-        gen_grammar_args(rng, depth)
+        "[{ty}]::{member}({})",
+        gen_grammar_args(rng, depth, spelled)
     )
 }
 
-fn gen_grammar_link(rng: &mut SplitMix64, depth: u32) -> String {
+fn gen_grammar_link(rng: &mut SplitMix64, depth: u32, spelled: bool) -> String {
     const PARENLESS: &[&str] = &["Major", "Minor", "Build", "Length", "Bogus"];
     const METHODS: &[&str] = &[
         "Contains",
@@ -1609,11 +1678,15 @@ fn gen_grammar_link(rng: &mut SplitMix64, depth: u32) -> String {
     match rng.below(5) {
         0 => format!("[{}]", rng.below(4)),
         1 => format!(".{}", rng.pick(PARENLESS)),
-        _ => format!(".{}({})", rng.pick(METHODS), gen_grammar_args(rng, depth)),
+        _ => format!(
+            ".{}({})",
+            rng.pick(METHODS),
+            gen_grammar_args(rng, depth, spelled)
+        ),
     }
 }
 
-fn gen_grammar_args(rng: &mut SplitMix64, depth: u32) -> String {
+fn gen_grammar_args(rng: &mut SplitMix64, depth: u32, spelled: bool) -> String {
     if depth == 0 {
         return String::new();
     }
@@ -1624,15 +1697,33 @@ fn gen_grammar_args(rng: &mut SplitMix64, depth: u32) -> String {
         return " ".to_string();
     }
     (0..rng.below(3))
-        .map(|_| gen_grammar_arg(rng, depth - 1))
+        .map(|_| gen_grammar_arg(rng, depth - 1, spelled))
         .collect::<Vec<_>>()
         .join(",")
 }
 
-fn gen_grammar_arg(rng: &mut SplitMix64, depth: u32) -> String {
-    match rng.below(5) {
+fn gen_grammar_arg(rng: &mut SplitMix64, depth: u32, spelled: bool) -> String {
+    match rng.below(if spelled { 7 } else { 5 }) {
         0 => rng.below(10).to_string(),
-        1 => format!("$({})", gen_grammar_inner(rng, depth)),
+        1 => format!("$({})", gen_grammar_inner(rng, depth, spelled)),
+        // The argument spellings MSBuild reads other than as a quoted literal:
+        // an unquoted word (`TrimStart(vV)`), `null` in any case (no string at
+        // all), unquoted text around an expansion (`$(V).0`), a tab, a
+        // version.
+        5 => match rng.below(6) {
+            0 => format!("$({}).0", rng.pick(CONTROLLED_PROPERTY_NAMES)),
+            1 => format!("$({})", rng.pick(CONTROLLED_PROPERTY_NAMES)),
+            _ => rng
+                .pick(&["vV", "null", "NULL", "1.0", "\t", "ab"])
+                .to_string(),
+        },
+        // A quoted literal holding the markers a property body reads as text
+        // (`%(M)`, `@(J)`: no metadata or item list there) and a tab.
+        6 => {
+            let delim = *rng.pick(&['\'', '`', '"']);
+            let body = rng.pick(&["%(M)", "@(J)", "a\tb", "%(M)$(B)"]);
+            format!("{delim}{body}{delim}")
+        }
         // Quoted literal, whose body may itself be a nested `$(…)` carrying its
         // own quotes (`'$(X.Split('-')[0])'`) — the scanner's hard case. All
         // three MSBuild delimiters are generated; a literal that happens to
@@ -1690,7 +1781,7 @@ fn gen_grammar_arg_literal(rng: &mut SplitMix64, depth: u32) -> String {
         "999.999",
     ];
     if depth > 0 && rng.below(2) == 0 {
-        format!("$({})", gen_grammar_inner(rng, depth))
+        format!("$({})", gen_grammar_inner(rng, depth, false))
     } else {
         (*rng.pick(LITS)).to_string()
     }

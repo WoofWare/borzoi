@@ -296,6 +296,10 @@ pub enum RejectionCause {
     /// holds: a `Remove` with `MatchOnMetadata` that names more than item
     /// types. `item` is the item's type.
     IllegalItemOperation { item: String },
+    /// A property expression MSBuild evaluates and throws on (MSB4184): an
+    /// indexer out of range, a malformed `[MSBuild]::Version*` operand.
+    /// `expression` is the `$(…)` text.
+    ThrowingExpression { expression: String },
 }
 
 /// A construct MSBuild's loader (`ProjectParser`) refuses when it loads a

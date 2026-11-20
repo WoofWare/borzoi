@@ -388,7 +388,7 @@ fn the_unseeded_reserved_names_are_worth_four_expressions_and_thirty_conditions(
     // diverge, one of the two harnesses has drifted and neither can be trusted.
     assert_eq!(
         (expr_base, cond_base),
-        (66, 139),
+        (68, 140),
         "the base commit counts must equal the census's own — same seeds, same \
          extraction"
     );
@@ -397,10 +397,14 @@ fn the_unseeded_reserved_names_are_worth_four_expressions_and_thirty_conditions(
 /// `(census seeds, + what we already seed, + what seeding work would add)`.
 /// The **third minus the second** is the value of the work; the second minus
 /// the first is an artefact of the census not seeding reserved names at all.
-/// Measured 2026-10-25, pinned SDK 10.0.401.
-const EXPRESSION_STEPS: (usize, usize, usize) = (66, 77, 81);
-/// As [`EXPRESSION_STEPS`], for `Condition` attributes.
-const CONDITION_STEPS: (usize, usize, usize) = (139, 155, 185);
+/// Measured 2026-11-20, pinned SDK 10.0.401: up from (66, 77, 81) on
+/// 2026-10-25, the evaluator reducing more of the SDK's call expressions
+/// (#1009: `NormalizeDirectory`, version arguments spliced from text). The
+/// value of the work, the third minus the second, is unchanged.
+const EXPRESSION_STEPS: (usize, usize, usize) = (68, 80, 84);
+/// As [`EXPRESSION_STEPS`], for `Condition` attributes: up from
+/// (139, 155, 185) on 2026-10-25, by one at each step.
+const CONDITION_STEPS: (usize, usize, usize) = (140, 156, 186);
 /// Declined call expressions that read at least one reserved name — the most
 /// seeding could ever reach, whatever values it chose. Sound, unlike a measured
 /// delta, which is only ever a floor.

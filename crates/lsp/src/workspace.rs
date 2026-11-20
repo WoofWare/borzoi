@@ -5777,7 +5777,7 @@ mod tests {
         write_file(
             &b,
             r#"<Project>
-              <Import Project="tfm.props" Condition="$([System.String]::IsNullOrWhiteSpace(''))" />
+              <Import Project="tfm.props" Condition="'É' == 'é'" />
             </Project>"#,
         );
         write_file(
@@ -6399,7 +6399,7 @@ mod tests {
               </PropertyGroup>
               <ItemGroup>
                 <ProjectReference Include="../B/B.fsproj">
-                  <ReferenceOutputAssembly Condition="$(ToolLock.FooBar('x'))">false</ReferenceOutputAssembly>
+                  <ReferenceOutputAssembly Condition="'$(ToolLock)É' == 'abcé'">false</ReferenceOutputAssembly>
                 </ProjectReference>
               </ItemGroup>
             </Project>"#,
@@ -6429,7 +6429,7 @@ mod tests {
               </PropertyGroup>
               <ItemGroup>
                 <ProjectReference Include="../B/B.fsproj">
-                  <ExcludeAssets Condition="$(ToolLock.FooBar('x'))">compile</ExcludeAssets>
+                  <ExcludeAssets Condition="'$(ToolLock)É' == 'abcé'">compile</ExcludeAssets>
                 </ProjectReference>
               </ItemGroup>
             </Project>"#,
@@ -6456,7 +6456,7 @@ mod tests {
               </PropertyGroup>
               <ItemGroup>
                 <ProjectReference Include="../C/C.fsproj">
-                  <ExcludeAssets Condition="$(ToolLock.FooBar('x'))">compile</ExcludeAssets>
+                  <ExcludeAssets Condition="'$(ToolLock)É' == 'abcé'">compile</ExcludeAssets>
                 </ProjectReference>
               </ItemGroup>
             </Project>"#,

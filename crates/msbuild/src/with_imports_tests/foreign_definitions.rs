@@ -88,7 +88,7 @@ fn every_definition_outside_the_sdk_is_recorded_whatever_its_condition() {
         tmp.path(),
         "Demo.fsproj",
         r#"<Project Sdk="MySdk">
-  <PropertyGroup Condition="'$([System.Guid]::NewGuid())' == ''"><Skipped>1</Skipped></PropertyGroup>
+  <PropertyGroup Condition="'É' == 'Ê'"><Skipped>1</Skipped></PropertyGroup>
   <PropertyGroup Condition="'false' == 'true'"><Decided>1</Decided></PropertyGroup>
   <Choose>
     <When Condition="'$(Undecided)' == 'y'"><PropertyGroup><InChoose>1</InChoose></PropertyGroup></When>
@@ -148,7 +148,7 @@ fn content_behind_an_undecidable_import_is_hidden() {
         tmp.path(),
         "Demo.fsproj",
         r#"<Project Sdk="MySdk">
-  <Import Project="other.props" Condition="'$([System.Guid]::NewGuid())' == ''" />
+  <Import Project="other.props" Condition="'É' == 'Ê'" />
 </Project>"#,
     );
     let result = parse_file_with_sdk_env(&project_path, resolver, HashMap::new(), HashMap::new());

@@ -39,7 +39,11 @@ use crate::observed::Observer;
 
 #[cfg(feature = "test-support")]
 pub use expr::MAX_EXPRESSION_NESTING;
-pub(crate) use expr::{is_referenceable_name, property_references};
+#[cfg(not(feature = "test-support"))]
+pub(crate) use expr::MAX_EXPRESSION_NESTING;
+pub(crate) use expr::{
+    expression_texts, expressions_reading_metadata, is_referenceable_name, property_references,
+};
 
 const MAX_TARGET_FRAMEWORK_VERSION_PARTS: usize = 4;
 
@@ -55,6 +59,26 @@ pub enum Issue {
     /// example `$([System.IO.Path]::Combine(...))`. Left literal in the
     /// output.
     Unsupported { expression: String },
+    /// `$(...)` MSBuild throws evaluating (MSB4184), on exactly the values the
+    /// substitution read (`expr::Failure::Throws`). Left literal in the output,
+    /// as an unsupported one is. MSBuild rejects the project wherever it
+    /// evaluates the text.
+    Throws {
+        expression: String,
+        /// The names the evaluation looked up before it threw, in order:
+        /// what the throw rests on. A later step of the expression, which
+        /// MSBuild never reaches (`$(P.Split(';')[9].Contains('$(X)'))`
+        /// throws at `[9]`, whatever `X` holds), is not among them.
+        reads: Vec<String>,
+    },
+    /// `$(...)` MSBuild evaluates without throwing, to a boolean we do not
+    /// compute (`expr::Failure::ReturnsBoolean`). Left literal in the output,
+    /// as an unsupported one is.
+    ReturnsBoolean { expression: String },
+    /// `$(...)` MSBuild evaluates without throwing, to a value we do not
+    /// compute (`expr::Failure::ReturnsValue`). Left literal in the output,
+    /// as an unsupported one is.
+    ReturnsValue { expression: String },
     /// MSBuild's Unix path adjustment of `value` (escaped text: one piece of
     /// the expansion, or the whole of it) turns on something the evaluation
     /// does not know: a directory relative to MSBuild's working directory, or
@@ -406,6 +430,8 @@ impl PropertyMap {
 pub(crate) struct Reads<'m> {
     map: &'m PropertyMap,
     joined: std::cell::RefCell<Trust>,
+    /// Every name looked up, bound or not, in order.
+    names: std::cell::RefCell<Vec<String>>,
 }
 
 impl<'m> Reads<'m> {
@@ -413,7 +439,18 @@ impl<'m> Reads<'m> {
         Reads {
             map,
             joined: std::cell::RefCell::new(Trust::CERTAIN),
+            names: std::cell::RefCell::new(Vec::new()),
         }
+    }
+
+    /// How many lookups have been made: a mark for [`Self::names_since`].
+    fn lookups(&self) -> usize {
+        self.names.borrow().len()
+    }
+
+    /// The names looked up since `mark` ([`Self::lookups`]), in order.
+    fn names_since(&self, mark: usize) -> Vec<String> {
+        self.names.borrow()[mark..].to_vec()
     }
 
     /// The stored value of `key`, joining its entry's trust into the
@@ -424,6 +461,7 @@ impl<'m> Reads<'m> {
 
     /// [`Self::get`], with how the value was stored.
     fn get_with_origin(&self, key: &str) -> Option<(&'m Escaped, Origin)> {
+        self.names.borrow_mut().push(key.to_owned());
         let entry = self.map.inner.get(&key.to_ascii_lowercase())?;
         self.joined.borrow_mut().join_in(&entry.trust);
         Some((entry.value.as_ref()?, entry.origin))
@@ -859,24 +897,36 @@ fn substitute_impl(
             Some(close) => {
                 let inner = &after[..close];
                 rest = &after[close + 1..];
-                if let Some(evaluated) = expr::evaluate(inner, props, fs_observer) {
-                    issues.extend(evaluated.issues);
-                    // The evaluator hands back an `Escaped`: a function result
-                    // is escaped (so its `%` cannot compose an escape with what
-                    // follows), while a string indexer's `Char` went in raw —
-                    // MSBuild's own hole, modelled in `expr::evaluate`.
-                    // A result holding a live backslash has declined (see
-                    // `expr::has_unix_backslash`), so its origin is moot.
-                    out.push(&evaluated.value, Origin::Expansion, &mut issues);
-                } else {
-                    issues.push(Issue::Unsupported {
-                        expression: format!("$({inner})"),
-                    });
-                    out.push(
-                        &Escaped::from_xml(format!("$({inner})")),
-                        Origin::Expansion,
-                        &mut issues,
-                    );
+                let mark = props.lookups();
+                match expr::evaluate(inner, props, fs_observer) {
+                    Ok(evaluated) => {
+                        issues.extend(evaluated.issues);
+                        // The evaluator hands back an `Escaped`: a function
+                        // result is escaped (so its `%` cannot compose an
+                        // escape with what follows), while a string indexer's
+                        // `Char` went in raw — MSBuild's own hole, modelled in
+                        // `expr::evaluate`. A result holding a live backslash
+                        // has declined (see `expr::has_unix_backslash`), so its
+                        // origin is moot.
+                        out.push(&evaluated.value, Origin::Expansion, &mut issues);
+                    }
+                    Err(failure) => {
+                        let expression = format!("$({inner})");
+                        issues.push(match failure {
+                            expr::Failure::Unsupported => Issue::Unsupported { expression },
+                            expr::Failure::Throws => Issue::Throws {
+                                expression,
+                                reads: props.names_since(mark),
+                            },
+                            expr::Failure::ReturnsBoolean => Issue::ReturnsBoolean { expression },
+                            expr::Failure::ReturnsValue => Issue::ReturnsValue { expression },
+                        });
+                        out.push(
+                            &Escaped::from_xml(format!("$({inner})")),
+                            Origin::Expansion,
+                            &mut issues,
+                        );
+                    }
                 }
             }
             None => {
@@ -1129,6 +1179,21 @@ fn get_path_of_file_above(observer: &Observer, file: &str, start: &str) -> Optio
 /// working directory) or names a Windows drive on a unix host.
 fn normalize_path(parts: &[String]) -> Option<String> {
     let combined = combine_path(parts)?;
+    // A backslash is a name character to `Path.GetFullPath` on Unix, which
+    // resolves `.` and `..` and collapses separators with `a\b` still one
+    // component, and only then turns it into a separator (`a%5cb/..` is
+    // nothing, not `a`). Reading it as a separator first agrees only where
+    // nothing is resolved or collapsed.
+    if !cfg!(windows) && parts.iter().any(|part| part.contains('\\')) {
+        let body = combined.trim_start_matches('/');
+        let segments: Vec<&str> = body.split('/').collect();
+        let last = segments.len().saturating_sub(1);
+        if segments.iter().enumerate().any(|(at, segment)| {
+            matches!(*segment, "." | "..") || (segment.is_empty() && at != last)
+        }) {
+            return None;
+        }
+    }
     if !is_rooted(&combined) {
         return None;
     }
@@ -1342,6 +1407,17 @@ fn infer_target_framework_version(tfm: &str, min_parts: usize) -> Option<String>
 /// [`parse_msbuild_version`].
 pub(crate) fn compare_msbuild_versions(lhs: &str, rhs: &str) -> Result<std::cmp::Ordering, ()> {
     Ok(parse_msbuild_version(lhs)?.cmp(&parse_msbuild_version(rhs)?))
+}
+
+/// Whether [`compare_msbuild_versions`] failing on `lhs` and `rhs` means
+/// MSBuild throws on them (MSB4184). So for printable ASCII alone:
+/// [`parse_msbuild_version`] trims Rust's whitespace, which outside ASCII is
+/// not .NET's, and .NET's parse reads a trailing NUL as no part of the
+/// version (`VersionGreaterThan('1.2.3%00', '1.0')` is true; probed,
+/// msbuild-condition-oracle, SDK 10.0.401), where we refuse it.
+pub(crate) fn msbuild_version_failure_throws(lhs: &str, rhs: &str) -> bool {
+    let printable = |s: &str| s.bytes().all(|b| b.is_ascii() && !b.is_ascii_control());
+    printable(lhs) && printable(rhs)
 }
 
 /// Parse a version operand as the `[MSBuild]::Version*` intrinsics do

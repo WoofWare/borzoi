@@ -47,6 +47,72 @@ fn illegal_corners() -> Vec<Case> {
         // it, so a syntax error rejects it whatever the values, and behind a
         // deciding `And`/`Or` operand too.
         ("tr ue", props(&[]), Verdict::Illegal),
+        // An item list its properties' values form is expanded by this
+        // evaluation, as by the item pass (to nothing here: false), which we do
+        // not model; the property pass reads it as text
+        // (`an_item_list_formed_in_a_property_condition_is_text`).
+        (
+            "'$(A)$(B)' != ''",
+            props(&[("A", "@"), ("B", "(I)")]),
+            Verdict::Unsupported,
+        ),
+        // A typed result spliced among text in a version argument renders as
+        // text; one alone is no string.
+        (
+            "$([MSBuild]::VersionGreaterThan($(P.Length).0, 0))",
+            props(&[("P", "1")]),
+            Verdict::True,
+        ),
+        (
+            "$([MSBuild]::VersionGreaterThan('$(P.Length).0', 0))",
+            props(&[("P", "1")]),
+            Verdict::True,
+        ),
+        (
+            "$([MSBuild]::VersionGreaterThan('$(P[0]).0', 0))",
+            props(&[("P", "1")]),
+            Verdict::True,
+        ),
+        (
+            "$([MSBuild]::VersionGreaterThan($(P.Length), 0))",
+            props(&[("P", "1")]),
+            Verdict::Unsupported,
+        ),
+        // Equality asks each side whether it is empty first, expanding only
+        // a side that is one reference whole: where one is empty, this
+        // evaluation (a build's, an item's condition) does not expand the
+        // other, so its throw is not reached. Design-time evaluation of a
+        // property's condition expands it all the same, for its table of
+        // conditioned properties, and throws; `evaluator/rejection.rs` judges
+        // by the site (`an_empty_side_does_not_spare_the_other_from_design_
+        // time_expansion`).
+        ("'a$(P[9])' == ''", props(&[("P", "abc")]), Verdict::False),
+        ("'' != 'a$(P[9])'", props(&[("P", "abc")]), Verdict::True),
+        (
+            "'$(P[9])x' == '$(E)'",
+            props(&[("P", "abc")]),
+            Verdict::False,
+        ),
+        ("'%41$(P[9])' == ''", props(&[("P", "abc")]), Verdict::False),
+        ("' $(P[9])' == ''", props(&[("P", "abc")]), Verdict::False),
+        // A side whose emptiness is unknown may be empty, and then the other
+        // is not expanded.
+        (
+            "'$(E.Trim())' == 'a$(P[9])'",
+            props(&[("P", "abc")]),
+            Verdict::Unsupported,
+        ),
+        (
+            "'$(A)$(P[9])' == ''",
+            props(&[("P", "abc"), ("A", "x")]),
+            Verdict::Illegal,
+        ),
+        ("'$(P[9])' == ''", props(&[("P", "abc")]), Verdict::Illegal),
+        (
+            "'a$(P[9])' == 'x'",
+            props(&[("P", "abc")]),
+            Verdict::Illegal,
+        ),
         ("$(A) == ", props(&[("A", "a")]), Verdict::Illegal),
         ("(true", props(&[]), Verdict::Illegal),
         ("true)", props(&[]), Verdict::Illegal),
@@ -140,6 +206,46 @@ fn illegal_corners() -> Vec<Case> {
             props(&[]),
             Verdict::False,
         ),
+        // A version function given no version (MSB4184), and a property
+        // function out of range, on the evaluated path only (#1009).
+        (
+            "$([MSBuild]::VersionGreaterThan('abc', '1.0'))",
+            props(&[]),
+            Verdict::Illegal,
+        ),
+        (
+            "$([MSBuild]::VersionLessThan('$(V)', '1.0'))",
+            props(&[("V", "1.2.3.4.5")]),
+            Verdict::Illegal,
+        ),
+        (
+            "false and $([MSBuild]::VersionGreaterThan('abc', '1.0'))",
+            props(&[]),
+            Verdict::False,
+        ),
+        // .NET reads a trailing NUL as no part of the version: no claim.
+        (
+            "$([MSBuild]::VersionGreaterThan('1.2.3%00', '1.0'))",
+            props(&[]),
+            Verdict::Unsupported,
+        ),
+        (
+            "'$(P.Split(`;`)[3])' == ''",
+            props(&[("P", "a;b")]),
+            Verdict::Illegal,
+        ),
+        ("'$(P[5])' == ''", props(&[("P", "abc")]), Verdict::Illegal),
+        (
+            "'a' == 'b' and '$(P[5])' == ''",
+            props(&[("P", "abc")]),
+            Verdict::False,
+        ),
+        (
+            "'$([MSBuild]::VersionLessThan(\"x\", \"18.9\"))' == ''",
+            props(&[]),
+            Verdict::Illegal,
+        ),
+        ("'$(P[2])' == 'c'", props(&[("P", "abc")]), Verdict::True),
     ]
 }
 
@@ -1047,6 +1153,817 @@ fn where_msbuild_evaluates_a_condition() {
         assert_eq!(rejects(&mut oracle, &xml, &globals), rejected, "{xml}");
     }
 }
+
+/// The host's runtime properties, which real projects compare
+/// (`'$([System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture)'
+/// == 'Ppc64le'` in dotnet/fsharp's `Directory.Build.props`): MSBuild
+/// evaluates each to a value the walk does not compute and never throws on
+/// it, in any case of the type's and the member's names; a step after one may
+/// throw, and the same name called as a method does. Each held to
+/// design-time evaluation, certain-implies-exact, and the walk withdraws
+/// nothing where MSBuild throws on none.
+#[test]
+fn host_properties_are_values_msbuild_does_not_throw_on() {
+    const T: &str = "System.Runtime.InteropServices.RuntimeInformation";
+    let mut rows: Vec<(String, RowVerdict)> = Vec::new();
+    for member in [
+        "ProcessArchitecture",
+        "OSArchitecture",
+        "OSDescription",
+        "FrameworkDescription",
+        "RuntimeIdentifier",
+        "processarchitecture",
+    ] {
+        for ty in [T.to_owned(), T.to_ascii_lowercase()] {
+            let call = format!("$([{ty}]::{member})");
+            rows.push((
+                format!(
+                    "<PropertyGroup><R Condition=\"'{call}' == 'Ppc64le'\">x</R><V>{call}</V></PropertyGroup>"
+                ),
+                RowVerdict::Commits,
+            ));
+        }
+    }
+    rows.push((
+        format!(
+            "<ItemGroup><I Include=\"x\" Condition=\"'$([{T}]::OSArchitecture)' != ''\" /></ItemGroup>"
+        ),
+        RowVerdict::Commits,
+    ));
+    // A bare `null` is a null argument, which a path function throws on; a
+    // quoted one names a directory. (The arguments are quoted with backticks:
+    // a `'` would end the condition's own quoted operand.)
+    rows.push((
+        "<PropertyGroup><R Condition=\"'$([MSBuild]::NormalizeDirectory(`/tmp`, null))' == ''\">x</R></PropertyGroup>"
+            .to_owned(),
+        RowVerdict::Rejects,
+    ));
+    rows.push((
+        "<PropertyGroup><R Condition=\"'$([MSBuild]::NormalizeDirectory(`/tmp`, `null`))' == '/tmp/null/'\">x</R></PropertyGroup>"
+            .to_owned(),
+        RowVerdict::Commits,
+    ));
+    // The SDK's comparison of the publish directory, normalised, with its
+    // project directory, in each shape it meets: MSBuild throws only on a
+    // NUL its arguments decode to.
+    for (publish_dir, verdict) in [
+        ("bin/publish/", RowVerdict::Commits),
+        ("bin\\x\\", RowVerdict::Commits),
+        ("", RowVerdict::Commits),
+        ("a%00b", RowVerdict::Rejects),
+    ] {
+        rows.push((
+            format!(
+                "<PropertyGroup><PublishDir>{publish_dir}</PublishDir></PropertyGroup>\
+                 <PropertyGroup Condition=\"'$(PublishDir)' != '' And '$([MSBuild]::NormalizeDirectory($(MSBuildProjectDirectory), $(PublishDir)))' != '$([MSBuild]::NormalizeDirectory($(MSBuildProjectDirectory)))'\"><X>1</X></PropertyGroup>"
+            ),
+            verdict,
+        ));
+    }
+    // A step after the value may throw on it, and a call is no property: in
+    // a condition, where the walk judges what it does not model as a possible
+    // throw (a walked body's is #1094).
+    rows.push((
+        format!(
+            "<PropertyGroup><R Condition=\"'$([{T}]::OSDescription.Substring(9999))' == ''\">x</R></PropertyGroup>"
+        ),
+        RowVerdict::Rejects,
+    ));
+    rows.push((
+        format!(
+            "<PropertyGroup><R Condition=\"'$([{T}]::ProcessArchitecture())' == ''\">x</R></PropertyGroup>"
+        ),
+        RowVerdict::Rejects,
+    ));
+    grade_rows_against_design_time(rows);
+}
+
+/// What a row of [`grade_rows_against_design_time`] pins.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum RowVerdict {
+    /// MSBuild rejects the project, and the walk claims it may.
+    Rejects,
+    /// MSBuild evaluates it, and the walk claims no rejection and commits a
+    /// value written after the row.
+    Commits,
+    /// MSBuild evaluates it, and the walk, not reading the row as MSBuild
+    /// does, claims it may reject: a decline, which makes no claim, pinned so
+    /// that its closing shows.
+    Withdraws,
+}
+
+/// Each row (a project's content, and what MSBuild and the walk make of it,
+/// pinned) held to design-time evaluation, and the walk to it,
+/// certain-implies-exact ([`RowVerdict`]).
+fn grade_rows_against_design_time(rows: Vec<(String, RowVerdict)>) {
+    let mut oracle = Oracle::spawn();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let dir = borzoi_msbuild::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    let project_path = dir.join("Demo.fsproj");
+    for (row, verdict) in rows {
+        let rejects = verdict == RowVerdict::Rejects;
+        // A row that opens the project itself, for its attributes.
+        let open = if row.starts_with("<Project") {
+            ""
+        } else {
+            "<Project>"
+        };
+        let xml = format!(
+            "{open}{}<PropertyGroup><After>ok</After></PropertyGroup></Project>",
+            row.replace('\'', "&apos;")
+        );
+        std::fs::write(&project_path, &xml).unwrap();
+        let msbuild_rejects = oracle
+            .project_design_time(&xml, &["After".to_string()], Some(&project_path), &[])
+            .is_none();
+        assert_eq!(msbuild_rejects, rejects, "MSBuild's verdict moved: {xml}");
+        let parsed = common::parse_fsproj_with_imports(
+            &borzoi_msbuild::ProjectFile::buffer(&project_path, &xml)
+                .expect("a project path spelt as its full path"),
+            &std::collections::HashMap::new(),
+            &common::oracle_environment(),
+            None,
+            None,
+        )
+        .expect("well-formed");
+        match verdict {
+            RowVerdict::Rejects => assert!(
+                parsed.rejection.is_some(),
+                "MSBuild rejects, and the walk claims nothing: {xml}"
+            ),
+            RowVerdict::Commits => {
+                assert_eq!(
+                    parsed.rejection, None,
+                    "MSBuild evaluates, and the walk withdrew: {xml}"
+                );
+                assert_eq!(parsed.property("After").value(), Some("ok"), "{xml}");
+            }
+            RowVerdict::Withdraws => assert_eq!(
+                parsed.rejection.as_ref().map(|r| r.certainty),
+                Some(borzoi_msbuild::RejectionCertainty::Possible),
+                "MSBuild evaluates, and the walk's decline moved: {xml}"
+            ),
+        }
+    }
+}
+
+/// An equality one side's emptiness decides, where that side's value is not
+/// certain: MSBuild may expand the other side, and throw on it. `U` is
+/// written under a gate the walk cannot decide (`'É' == 'é'`, true to
+/// MSBuild), so MSBuild compares `changed` and expands `a$(P[9])`. The same
+/// with the other side in range evaluates.
+#[test]
+fn an_uncertain_emptiness_reaches_the_other_side() {
+    let row = |index: usize| {
+        format!(
+            "<PropertyGroup><P>x</P></PropertyGroup>\
+             <PropertyGroup Condition=\"'É' == 'é'\"><U>changed</U></PropertyGroup>\
+             <ItemGroup><I Include=\"y\" Condition=\"'$(U)' == 'a$(P[{index}])'\" /></ItemGroup>"
+        )
+    };
+    grade_rows_against_design_time(vec![
+        (row(9), RowVerdict::Rejects),
+        (row(0), RowVerdict::Commits),
+    ]);
+}
+
+/// Texts MSBuild reads from markup the walk does not read exactly, each
+/// pinned against design-time evaluation and held to it, certain-implies-
+/// exact: an attribute's metadata holding XML, an inner text whose markup
+/// and the whitespace nodes MSBuild drops part an expression, and a body
+/// the walk declines whose own tag holds an expression MSBuild does not read
+/// as its text.
+#[test]
+fn unread_texts_are_judged_as_msbuild_reads_them() {
+    let rows = vec![
+        (
+            "<PropertyGroup><P>x</P></PropertyGroup>\
+             <ItemGroup><I Include=\"x\" M=\"&lt;b&gt;$(P[9])&lt;/b&gt;\" /></ItemGroup>"
+                .to_owned(),
+            RowVerdict::Rejects,
+        ),
+        (
+            "<PropertyGroup><P>x</P></PropertyGroup>\
+             <ItemGroup><I Include=\"x\" M=\"&lt;b&gt;$(P[0])&lt;/b&gt;\" /></ItemGroup>"
+                .to_owned(),
+            RowVerdict::Withdraws,
+        ),
+        (
+            "<PropertyGroup><P>abc</P>\
+             <R><![CDATA[$]]><a xml:space=\"default\"> </a>(P[9])</R></PropertyGroup>"
+                .to_owned(),
+            RowVerdict::Rejects,
+        ),
+        (
+            "<PropertyGroup><P>x</P>\
+             <R Condition=\"'$(P)' == 'x'\"><a xmlns=\"urn:test\"/></R></PropertyGroup>"
+                .to_owned(),
+            RowVerdict::Commits,
+        ),
+        // A `>` inside an attribute's quotes ends no tag: here the inner
+        // text is `$(P[9])`, the whitespace node dropped.
+        (
+            "<PropertyGroup><P>abc</P>\
+             <R><![CDATA[$]]><a v=\">\" xml:space=\"default\"/>(P[9])</R></PropertyGroup>"
+                .to_owned(),
+            RowVerdict::Rejects,
+        ),
+        // Nor before an `xml:space` scope, under which MSBuild keeps the
+        // space, so that `$ (…)` calls nothing.
+        (
+            "<Project InitialTargets=\"a>b\" xml:space=\"preserve\"><PropertyGroup>\
+             <R><![CDATA[$]]><a> </a>([MSBuild]::VersionEquals('bad','1'))</R></PropertyGroup>"
+                .to_owned(),
+            RowVerdict::Withdraws,
+        ),
+    ];
+    grade_rows_against_design_time(rows);
+}
+
+/// Each construct whose condition MSBuild evaluates, under two probes that
+/// tell its expansion options apart, pinned against design-time evaluation
+/// and the walk's rejection judgement held to it, certain-implies-exact:
+///
+/// - `'' == 'a$(P[9])'` throws only where design-time evaluation records the
+///   conditioned properties, which expands both sides of an equality even
+///   where the empty one decides it: the property pass's conditions, and no
+///   item definition's;
+/// - `'$(A)$(B)' != ''`, `A` and `B` forming `@(J->Nope())` over an item type
+///   with items, throws only where the condition expands an item list its
+///   properties form: an item's, an item group's and its metadata's, a
+///   `<UsingTask>`'s, and no item definition's (probed,
+///   `msbuild-condition-oracle`, SDK 10.0.401).
+#[test]
+fn condition_sites_expand_as_msbuild_does() {
+    const COLLECTS: &str = "'' == 'a$(P[9])'";
+    const FORMS_ITEMS: &str = "'$(A)$(B)' != ''";
+    // Each site, and whether MSBuild rejects under each probe: collecting,
+    // forming items.
+    let sites: &[(&str, bool, bool)] = &[
+        (
+            "<PropertyGroup Condition=\"{c}\"><R>x</R></PropertyGroup>",
+            true,
+            false,
+        ),
+        (
+            "<PropertyGroup><R Condition=\"{c}\">x</R></PropertyGroup>",
+            true,
+            false,
+        ),
+        (
+            "<Choose><When Condition=\"{c}\"><PropertyGroup><R>x</R></PropertyGroup></When></Choose>",
+            true,
+            false,
+        ),
+        (
+            "<ItemGroup Condition=\"{c}\"><I Include=\"x\" /></ItemGroup>",
+            false,
+            true,
+        ),
+        (
+            "<ItemGroup><I Include=\"x\" Condition=\"{c}\" /></ItemGroup>",
+            false,
+            true,
+        ),
+        (
+            "<ItemGroup><I Include=\"x\"><M Condition=\"{c}\">m</M></I></ItemGroup>",
+            false,
+            true,
+        ),
+        (
+            "<ItemDefinitionGroup Condition=\"{c}\"><I><M>m</M></I></ItemDefinitionGroup>",
+            false,
+            false,
+        ),
+        (
+            "<ItemDefinitionGroup><I Condition=\"{c}\"><M>m</M></I></ItemDefinitionGroup>",
+            false,
+            false,
+        ),
+        (
+            "<ItemDefinitionGroup><I><M Condition=\"{c}\">m</M></I></ItemDefinitionGroup>",
+            false,
+            false,
+        ),
+        (
+            "<UsingTask TaskName=\"X\" AssemblyFile=\"y.dll\" Condition=\"{c}\" />",
+            false,
+            true,
+        ),
+        ("<ImportGroup Condition=\"{c}\" />", true, false),
+    ];
+    let mut oracle = Oracle::spawn();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let dir = borzoi_msbuild::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    let project_path = dir.join("Demo.fsproj");
+    for (site, collects, forms_items) in sites {
+        for (probe, expected) in [(COLLECTS, *collects), (FORMS_ITEMS, *forms_items)] {
+            let xml = format!(
+                "<Project><PropertyGroup><P>x</P><A>@</A><B>(J->Nope())</B></PropertyGroup><ItemGroup><J Include=\"j\" /></ItemGroup>{}\
+                 <PropertyGroup><After>ok</After></PropertyGroup></Project>",
+                site.replace("{c}", &probe.replace('\'', "&apos;"))
+            );
+            std::fs::write(&project_path, &xml).unwrap();
+            let msbuild_rejects = oracle
+                .project_design_time(&xml, &["After".to_string()], Some(&project_path), &[])
+                .is_none();
+            assert_eq!(msbuild_rejects, expected, "MSBuild's verdict moved: {xml}");
+            let parsed = common::parse_fsproj_with_imports(
+                &borzoi_msbuild::ProjectFile::buffer(&project_path, &xml)
+                    .expect("a project path spelt as its full path"),
+                &std::collections::HashMap::new(),
+                &common::oracle_environment(),
+                None,
+                None,
+            )
+            .expect("well-formed");
+            let certainty = parsed.rejection.as_ref().map(|r| r.certainty);
+            if msbuild_rejects {
+                assert!(
+                    certainty.is_some(),
+                    "MSBuild rejects, and the walk claims nothing: {xml}"
+                );
+            } else {
+                assert_ne!(
+                    certainty,
+                    Some(borzoi_msbuild::RejectionCertainty::Certain),
+                    "MSBuild evaluates, and the walk claims it rejects: {xml}"
+                );
+                assert_eq!(
+                    parsed.property("After").value(),
+                    Some("ok"),
+                    "MSBuild evaluates, and the walk withdrew: {xml}\n{:#?}",
+                    parsed.rejection
+                );
+            }
+        }
+    }
+}
+
+/// Where MSBuild expands a text holding a property function it throws on
+/// (`$(P.Split(';')[3])` with `P` holding `a;b`: MSB4184), each row pinned
+/// against both evaluations (#1009). A property's body is expanded only under
+/// true gates, in a build and design-time evaluation alike. In design-time
+/// evaluation, an item's `Include`, `Exclude`, `Remove` and metadata (child or
+/// attribute) are expanded whatever its group's or its own condition holds,
+/// and a build expands none of them under a false gate; a metadatum under a
+/// false condition of its own, and an `Update` that applies to nothing, are
+/// expanded by neither. A `<UsingTask>`'s attributes are all expanded, and an
+/// item definition's metadata under true gates. `evaluator/rejection.rs`
+/// judges these texts by design-time evaluation's facts, as it does
+/// conditions.
+#[test]
+fn where_msbuild_evaluates_a_text() {
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Rejects {
+        Neither,
+        Both,
+        DesignTimeOnly,
+    }
+    let mut oracle = Oracle::spawn();
+    const T: &str = "$(P.Split(';')[3])";
+    for (body, rejected) in [
+        ("<PropertyGroup><R>{t}</R></PropertyGroup>", Rejects::Both),
+        (
+            "<PropertyGroup><R Condition=\"false\">{t}</R></PropertyGroup>",
+            Rejects::Neither,
+        ),
+        (
+            "<PropertyGroup Condition=\"false\"><R>{t}</R></PropertyGroup>",
+            Rejects::Neither,
+        ),
+        (
+            "<Target Name=\"T\"><PropertyGroup><R>{t}</R></PropertyGroup></Target>",
+            Rejects::Neither,
+        ),
+        (
+            "<ItemGroup><I Include=\"{t}\" /></ItemGroup>",
+            Rejects::Both,
+        ),
+        (
+            "<ItemGroup><I Include=\"{t}\" Condition=\"false\" /></ItemGroup>",
+            Rejects::DesignTimeOnly,
+        ),
+        (
+            "<ItemGroup Condition=\"false\"><I Include=\"{t}\" /></ItemGroup>",
+            Rejects::DesignTimeOnly,
+        ),
+        (
+            "<ItemGroup><I Include=\"x\" Exclude=\"{t}\" /></ItemGroup>",
+            Rejects::Both,
+        ),
+        (
+            "<ItemGroup><I Include=\"x\" Condition=\"false\" Exclude=\"{t}\" /></ItemGroup>",
+            Rejects::DesignTimeOnly,
+        ),
+        (
+            "<ItemGroup Condition=\"false\"><I Include=\"x\" Exclude=\"{t}\" /></ItemGroup>",
+            Rejects::DesignTimeOnly,
+        ),
+        (
+            "<ItemGroup><I Include=\"x\"><M>{t}</M></I></ItemGroup>",
+            Rejects::Both,
+        ),
+        (
+            "<ItemGroup><I Include=\"x\" Condition=\"false\"><M>{t}</M></I></ItemGroup>",
+            Rejects::DesignTimeOnly,
+        ),
+        (
+            "<ItemGroup Condition=\"false\"><I Include=\"x\"><M>{t}</M></I></ItemGroup>",
+            Rejects::DesignTimeOnly,
+        ),
+        (
+            "<ItemGroup><I Include=\"x\"><M Condition=\"false\">{t}</M></I></ItemGroup>",
+            Rejects::Neither,
+        ),
+        (
+            "<ItemGroup><I Include=\"$(Missing)\"><M>{t}</M></I></ItemGroup>",
+            Rejects::Both,
+        ),
+        (
+            "<ItemGroup><I Include=\"x\" M=\"{t}\" /></ItemGroup>",
+            Rejects::Both,
+        ),
+        (
+            "<ItemGroup><I Include=\"x\" Condition=\"false\" M=\"{t}\" /></ItemGroup>",
+            Rejects::DesignTimeOnly,
+        ),
+        (
+            "<ItemGroup><I Include=\"x\" /><I Update=\"x\" M=\"{t}\" /></ItemGroup>",
+            Rejects::Both,
+        ),
+        (
+            "<ItemGroup><I Update=\"nothere\" M=\"{t}\" /></ItemGroup>",
+            Rejects::Neither,
+        ),
+        ("<ItemGroup><I Remove=\"{t}\" /></ItemGroup>", Rejects::Both),
+        (
+            "<ItemGroup><I Include=\"x\" /><I Remove=\"{t}\" Condition=\"false\" /></ItemGroup>",
+            Rejects::DesignTimeOnly,
+        ),
+        (
+            "<ItemDefinitionGroup><I><M>{t}</M></I></ItemDefinitionGroup>",
+            Rejects::Both,
+        ),
+        (
+            "<ItemDefinitionGroup><I M=\"{t}\" /></ItemDefinitionGroup>",
+            Rejects::Both,
+        ),
+        (
+            "<ItemDefinitionGroup Condition=\"false\"><I><M>{t}</M></I></ItemDefinitionGroup>",
+            Rejects::Neither,
+        ),
+        (
+            "<ItemDefinitionGroup><I><M Condition=\"false\">{t}</M></I></ItemDefinitionGroup>",
+            Rejects::Neither,
+        ),
+        (
+            "<UsingTask TaskName=\"{t}\" AssemblyFile=\"y.dll\" />",
+            Rejects::Both,
+        ),
+        (
+            "<UsingTask TaskName=\"X\" AssemblyFile=\"{t}\" />",
+            Rejects::Both,
+        ),
+        (
+            "<UsingTask TaskName=\"X\" AssemblyName=\"{t}\" />",
+            Rejects::Both,
+        ),
+        (
+            "<UsingTask TaskName=\"X\" AssemblyFile=\"y.dll\" TaskFactory=\"{t}\" />",
+            Rejects::Both,
+        ),
+        (
+            "<UsingTask TaskName=\"X\" AssemblyFile=\"y.dll\" Runtime=\"{t}\" />",
+            Rejects::Both,
+        ),
+        (
+            "<UsingTask TaskName=\"X\" AssemblyFile=\"y.dll\" Architecture=\"{t}\" />",
+            Rejects::Both,
+        ),
+        (
+            "<UsingTask TaskName=\"X\" AssemblyFile=\"y.dll\" Condition=\"false\" Runtime=\"{t}\" />",
+            Rejects::Neither,
+        ),
+    ] {
+        let xml = format!(
+            "<Project><PropertyGroup><P>a;b</P></PropertyGroup>{}</Project>",
+            body.replace("{t}", T)
+        );
+        let both = oracle.project_both(&xml, &["P".to_string()], None, &[]);
+        let got = match (both.design_time.is_none(), both.build.is_none()) {
+            (false, _) => Rejects::Neither,
+            (true, true) => Rejects::Both,
+            (true, false) => Rejects::DesignTimeOnly,
+        };
+        assert_eq!(got, rejected, "{xml}");
+    }
+}
+
+/// Every reserved attribute and a metadatum, on every item operation, holding
+/// a property function MSBuild throws on: whether design-time evaluation
+/// expands it is MSBuild's to say, and the walk's rejection judgement
+/// (`evaluator/rejection.rs`) is held to it, certain-implies-exact. MSBuild
+/// builds an `Include` (with its `Exclude` and metadata), else a `Remove`
+/// (with its `MatchOnMetadata`), else an `Update` (with its metadata), each
+/// expanding only its own attributes; the `MatchOnMetadata` options are
+/// parsed as written. An attribute an item takes nowhere is the loader's.
+#[test]
+fn item_attributes_are_judged_by_their_operation() {
+    const T: &str = "$(P.Split(';')[3])";
+    const OPERATIONS: &[&str] = &[
+        "Include=\"x\"",
+        "Remove=\"@(J)\"",
+        "Remove=\"@(J)\" MatchOnMetadata=\"M\"",
+        "Update=\"x\"",
+    ];
+    const ATTRIBUTES: &[&str] = &[
+        "Include",
+        "Exclude",
+        "Remove",
+        "Update",
+        "MatchOnMetadata",
+        "MatchOnMetadataOptions",
+        "Label",
+        "KeepMetadata",
+        "RemoveMetadata",
+        "KeepDuplicates",
+        "M",
+    ];
+    let mut oracle = Oracle::spawn();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let dir = borzoi_msbuild::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    let project_path = dir.join("Demo.fsproj");
+    let (mut rejects, mut evaluates) = (0, 0);
+    for operation in OPERATIONS {
+        for attribute in ATTRIBUTES {
+            if operation.contains(&format!("{attribute}=")) {
+                continue;
+            }
+            let xml = format!(
+                "<Project><PropertyGroup><P>a;b</P></PropertyGroup><ItemGroup><J Include=\"x\" \
+                 /><I Include=\"x\" /><I {operation} {attribute}=\"{T}\" /></ItemGroup>\
+                 <PropertyGroup><After>ok</After></PropertyGroup></Project>"
+            );
+            std::fs::write(&project_path, &xml).unwrap();
+            let parsed = common::parse_fsproj_with_imports(
+                &borzoi_msbuild::ProjectFile::buffer(&project_path, &xml)
+                    .expect("a project path spelt as its full path"),
+                &std::collections::HashMap::new(),
+                &common::oracle_environment(),
+                None,
+                None,
+            )
+            .expect("well-formed");
+            let msbuild_rejects = oracle
+                .project_design_time(&xml, &["After".to_string()], Some(&project_path), &[])
+                .is_none();
+            let certainty = parsed.rejection.as_ref().map(|r| r.certainty);
+            if msbuild_rejects {
+                rejects += 1;
+                assert!(
+                    certainty.is_some(),
+                    "MSBuild rejects, and the walk claims nothing: {xml}"
+                );
+            } else {
+                evaluates += 1;
+                assert_ne!(
+                    certainty,
+                    Some(borzoi_msbuild::RejectionCertainty::Certain),
+                    "MSBuild evaluates, and the walk claims it rejects: {xml}"
+                );
+                assert_eq!(
+                    parsed.property("After").value(),
+                    Some("ok"),
+                    "MSBuild evaluates, and the walk withdrew: {xml}\n{:#?}",
+                    parsed.rejection
+                );
+            }
+        }
+    }
+    assert!(rejects >= 10 && evaluates >= 10, "{rejects} {evaluates}");
+}
+
+/// What MSBuild expands of a `<UsingTask>` as it registers the task, each
+/// text holding a property function it throws on, and the walk's rejection
+/// judgement held to it, certain-implies-exact: every attribute it takes,
+/// an inline task's parameters and body, the body's `Evaluate` in each
+/// spelling, and the body's comments, CDATA and elements.
+#[test]
+fn using_task_texts_are_judged_where_msbuild_expands_them() {
+    const T: &str = "$(P[9])";
+    const BASE: &str = "TaskName=\"X\" AssemblyFile=\"y.dll\"";
+    const INLINE: &str = "TaskName=\"X\" TaskFactory=\"RoslynCodeTaskFactory\" \
+                          AssemblyFile=\"$(MSBuildToolsPath)\\Microsoft.Build.Tasks.Core.dll\"";
+    let mut rows: Vec<String> = Vec::new();
+    rows.push(format!(
+        "<UsingTask TaskName=\"{T}\" AssemblyFile=\"y.dll\" />"
+    ));
+    rows.push(format!("<UsingTask TaskName=\"X\" AssemblyFile=\"{T}\" />"));
+    rows.push(format!("<UsingTask TaskName=\"X\" AssemblyName=\"{T}\" />"));
+    for attribute in [
+        "TaskFactory",
+        "Architecture",
+        "Runtime",
+        "RequiredPlatform",
+        "RequiredRuntime",
+        "Override",
+        "Label",
+    ] {
+        rows.push(format!("<UsingTask {BASE} {attribute}=\"{T}\" />"));
+    }
+    for evaluate in [
+        None,
+        Some("false"),
+        Some("FALSE"),
+        Some(" false "),
+        Some("$(Fa)"),
+        Some("true"),
+        Some("off"),
+        Some("$(Missing)"),
+        Some(T),
+    ] {
+        let attribute = evaluate.map_or(String::new(), |e| format!(" Evaluate=\"{e}\""));
+        rows.push(format!(
+            "<UsingTask {INLINE}><Task{attribute}>{T}</Task></UsingTask>"
+        ));
+        // An `Evaluate` other than `true` or `false` MSBuild refuses as it
+        // registers the task whatever the body holds, a rule of its own the
+        // walk does not model (#1099): only with a body that throws anyway.
+        if !matches!(evaluate, Some("off" | "$(Missing)")) {
+            rows.push(format!(
+                "<UsingTask {INLINE}><Task{attribute}>x</Task></UsingTask>"
+            ));
+        }
+    }
+    for parameter in ["ParameterType", "Required", "Output"] {
+        rows.push(format!(
+            "<UsingTask {INLINE}><ParameterGroup><A {parameter}=\"{T}\" /></ParameterGroup><Task>x</Task></UsingTask>"
+        ));
+        rows.push(format!(
+            "<UsingTask {INLINE} Condition=\"false\"><ParameterGroup><A {parameter}=\"{T}\" /></ParameterGroup><Task>x</Task></UsingTask>"
+        ));
+    }
+    rows.push(format!(
+        "<UsingTask {INLINE}><ParameterGroup><A ParameterType=\"System.String\" Required=\"true\" Output=\"false\" /></ParameterGroup><Task>x</Task></UsingTask>"
+    ));
+    rows.push(format!(
+        "<UsingTask {INLINE} Condition=\"false\"><Task>{T}</Task></UsingTask>"
+    ));
+    rows.push(format!(
+        "<UsingTask {INLINE}><Task><!-- {T} --></Task></UsingTask>"
+    ));
+    rows.push(format!(
+        "<UsingTask {INLINE}><Task><![CDATA[{T}]]></Task></UsingTask>"
+    ));
+    rows.push(format!(
+        "<UsingTask {INLINE}><Task><Code Type=\"{T}\">x</Code></Task></UsingTask>"
+    ));
+    rows.push(format!(
+        "<UsingTask {INLINE}><Task><Code>{T}</Code></Task></UsingTask>"
+    ));
+    // A body holding an element MSBuild expands as serialized XML: an entity
+    // kept escaped, a comment included.
+    rows.push(format!(
+        "<UsingTask {INLINE}><Task><Code>$(P.Split('&amp;')[1])</Code></Task></UsingTask>"
+    ));
+    rows.push(format!(
+        "<UsingTask {INLINE}><Task><Code>x</Code><!-- {T} --></Task></UsingTask>"
+    ));
+    // Serializing spells a quote in text as itself: split on `;` alone,
+    // `quiet` has no second element.
+    rows.push(format!(
+        "<UsingTask {INLINE}><Task><Code>$(Q.Split(&quot;;&quot;)[1])</Code></Task></UsingTask>"
+    ));
+    // Serializing spells a `>` in text as `&gt;`: `x>y` split on its
+    // characters has no second element.
+    rows.push(format!(
+        "<UsingTask {INLINE}><Task><Code>$(G.Split('>')[1])</Code></Task></UsingTask>"
+    ));
+    // An expression spelt with a reference, in an element and alone.
+    rows.push(format!(
+        "<UsingTask {INLINE}><Task><Code>&#36;(P[9])</Code></Task></UsingTask>"
+    ));
+    // A text body read as its text and sections joined; a processing
+    // instruction read as serialized XML.
+    rows.push(format!(
+        "<UsingTask {INLINE}><Task><![CDATA[$]]>(P[9])</Task></UsingTask>"
+    ));
+    rows.push(format!(
+        "<UsingTask {INLINE}><Task><?note {T}?></Task></UsingTask>"
+    ));
+    // Text before a CDATA section makes the body inner XML, where `$` and
+    // `(` are apart.
+    rows.push(format!(
+        "<UsingTask {INLINE}><Task>$<![CDATA[(P[9])]]></Task></UsingTask>"
+    ));
+    // An expression spelt with a reference in an attribute of the body.
+    rows.push(format!(
+        "<UsingTask {INLINE}><Task><Code Type=\"&#36;(P[9])\" /></Task></UsingTask>"
+    ));
+    // A body leading with a CDATA section is its inner text, an element's
+    // included.
+    rows.push(format!(
+        "<UsingTask {INLINE}><Task><![CDATA[$]]><Code>(P[9])</Code></Task></UsingTask>"
+    ));
+    // Serializing spells an empty element `<a />`.
+    rows.push(format!(
+        "<UsingTask {INLINE}><Task><Code>$([MSBuild]::EnsureTrailingSlash('<a/>')[5])</Code></Task></UsingTask>"
+    ));
+    // A plain reference in an attribute of the body.
+    rows.push(format!(
+        "<UsingTask {INLINE}><Task><Reference Include=\"$(Q)\" /><Code>x</Code></Task></UsingTask>"
+    ));
+    // A CDATA section in an element of the body is kept as one: C#'s `$"…"`
+    // is no expression.
+    rows.push(format!(
+        "<UsingTask {INLINE}><Task><Code><![CDATA[Log.LogMessage($\"Built {{name}}\");]]></Code></Task></UsingTask>"
+    ));
+    // A body's inner text drops a whitespace node between its sections.
+    rows.push(format!(
+        "<UsingTask {INLINE}><Task><![CDATA[$([MSBuild]::VersionEquals('1]]><Code> </Code><![CDATA[.2','1.2'))]]></Task></UsingTask>"
+    ));
+    // The whitespace node dropped from that inner text is no separator:
+    // `a b` split on `;` alone has no second element.
+    rows.push(format!(
+        "<UsingTask {INLINE}><Task><![CDATA[$(S.Split(']]><Code> </Code><![CDATA[;')[1])]]></Task></UsingTask>"
+    ));
+    // An expression in a CDATA section of an element of the body.
+    rows.push(format!(
+        "<UsingTask {INLINE}><Task><Code><![CDATA[{T}]]></Code></Task></UsingTask>"
+    ));
+    // A namespace declaration serializing writes back.
+    rows.push(format!(
+        "<UsingTask {INLINE}><Task><Code xmlns:u=\"urn:{T}\" /></Task></UsingTask>"
+    ));
+    // The flag compared as expanded, escapes and all.
+    rows.push(format!(
+        "<UsingTask {INLINE}><Task Evaluate=\"%66alse\">{T}</Task></UsingTask>"
+    ));
+    // The flag parsed as `Boolean.TryParse` parses it, padded with
+    // whitespace (Unicode's included) or with a NUL, which `$(Nul[0])`
+    // supplies as itself.
+    for evaluate in [
+        "false$(Nul[0])",
+        "$(Nul[0])false",
+        "true$(Nul[0])",
+        "&#xA0;false",
+        "&#x2003;false&#x85;",
+        "&#x200B;false",
+    ] {
+        rows.push(format!(
+            "<UsingTask {INLINE}><Task Evaluate=\"{evaluate}\">{T}</Task></UsingTask>"
+        ));
+    }
+    let mut oracle = Oracle::spawn();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let dir = borzoi_msbuild::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    let project_path = dir.join("Demo.fsproj");
+    let (mut rejects, mut evaluates) = (0, 0);
+    for row in rows {
+        let xml = format!(
+            "<Project><PropertyGroup><P>abc</P><Q>quiet</Q><G>x&gt;y</G><S>a b</S><Fa>false</Fa><Nul>%00</Nul></PropertyGroup>{}\
+             <PropertyGroup><After>ok</After></PropertyGroup></Project>",
+            row.replace('\'', "&apos;")
+        );
+        std::fs::write(&project_path, &xml).unwrap();
+        let parsed = common::parse_fsproj_with_imports(
+            &borzoi_msbuild::ProjectFile::buffer(&project_path, &xml)
+                .expect("a project path spelt as its full path"),
+            &std::collections::HashMap::new(),
+            &common::oracle_environment(),
+            None,
+            None,
+        )
+        .expect("well-formed");
+        let msbuild_rejects = oracle
+            .project_design_time(&xml, &["After".to_string()], Some(&project_path), &[])
+            .is_none();
+        let certainty = parsed.rejection.as_ref().map(|r| r.certainty);
+        if msbuild_rejects {
+            rejects += 1;
+            assert!(
+                certainty.is_some(),
+                "MSBuild rejects, and the walk claims nothing: {xml}"
+            );
+        } else {
+            evaluates += 1;
+            assert_ne!(
+                certainty,
+                Some(borzoi_msbuild::RejectionCertainty::Certain),
+                "MSBuild evaluates, and the walk claims it rejects: {xml}"
+            );
+            assert_eq!(
+                parsed.property("After").value(),
+                Some("ok"),
+                "MSBuild evaluates, and the walk withdrew: {xml}\n{:#?}",
+                parsed.rejection
+            );
+        }
+    }
+    assert!(rejects >= 10 && evaluates >= 10, "{rejects} {evaluates}");
+}
+
 /// Fresh-seed twin of [`whitespace_variant_sweep_fixed_seed`].
 #[test]
 #[ignore = "fresh-seed soak; run it when touching condition.rs"]

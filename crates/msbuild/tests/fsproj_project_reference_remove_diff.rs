@@ -119,8 +119,8 @@ const GATES: &[&str] = &[
     " Condition=\"'$(Unpinned)' == ''\"",
 ];
 
-const UNSUPPORTED_FALSE: &str = " Condition=\"'$([System.Guid]::NewGuid())' == ''\"";
-const UNSUPPORTED_TRUE: &str = " Condition=\"'$([System.Guid]::NewGuid())' != ''\"";
+const UNSUPPORTED_FALSE: &str = " Condition=\"'É' == 'Ê'\"";
+const UNSUPPORTED_TRUE: &str = " Condition=\"'É' == 'é'\"";
 
 /// The gates every evaluation decides exactly.
 const EXACT_GATES: &[&str] = &[
@@ -387,7 +387,7 @@ fn project_xml(blocks: &[Block]) -> String {
     let mut s = String::from("<Project>\n  <PropertyGroup>\n");
     s.push_str("    <MissingRef>../M/M.fsproj</MissingRef>\n");
     s.push_str("    <RemoveSpec>@(H1)</RemoveSpec>\n");
-    s.push_str("    <Unpinned Condition=\"'$([System.Guid]::NewGuid())' == ''\">set</Unpinned>\n");
+    s.push_str("    <Unpinned Condition=\"'É' == 'Ê'\">set</Unpinned>\n");
     s.push_str("  </PropertyGroup>\n");
     for block in blocks {
         block.xml(&mut s);

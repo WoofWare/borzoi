@@ -48,7 +48,7 @@ fn parse_project(
 
 /// A gate MSBuild takes and the walk cannot decide: it computes no property
 /// function.
-const UNDECIDED: &str = "$([System.String]::IsNullOrWhiteSpace(''))";
+const UNDECIDED: &str = "'É' == 'é'";
 
 const BODY_REFERENCE: &str =
     r#"<ItemGroup><ProjectReference Include="../b/b.fsproj" /></ItemGroup>"#;

@@ -149,6 +149,14 @@ pub(super) struct DeferredItemGroup {
     /// Whether MSBuild reaches the group for certain, as the property pass
     /// found it ([`rejection::reach_is_certain`]).
     reach_certain: bool,
+    /// A group the walk does not take (in a `<Choose>` branch it could not
+    /// decide) that MSBuild may: judged in the item pass, against the final
+    /// property table, and not evaluated ([`State::defer_judgement`]).
+    judge_only: bool,
+    /// For a judge-only group, where it stands in the walk it was deferred
+    /// from: the writes there that reach it, whose value the walk does not
+    /// hold.
+    written: Option<super::PathOf>,
 }
 
 impl<'r> State<'r> {
@@ -159,6 +167,32 @@ impl<'r> State<'r> {
     /// must not be resolved against the properties-so-far table the
     /// property pass is still building.
     pub(super) fn defer_item_group(&mut self, node: Node<'_, '_>, kind: DeferredGroupKind) {
+        let reach_certain = rejection::reach_is_certain(self);
+        self.defer_group(node, kind, reach_certain, false);
+    }
+
+    /// Record a group the walk does not take, which MSBuild reaches as
+    /// `reached` says, to be judged in the item pass
+    /// ([`rejection::judge_deferred`]) and not evaluated: MSBuild expands an
+    /// item group's text after every property write, so judging it against
+    /// the table as the property pass holds it now could see a value a later
+    /// write replaces.
+    pub(super) fn defer_judgement(
+        &mut self,
+        node: Node<'_, '_>,
+        kind: DeferredGroupKind,
+        reached: bool,
+    ) {
+        self.defer_group(node, kind, reached, true);
+    }
+
+    fn defer_group(
+        &mut self,
+        node: Node<'_, '_>,
+        kind: DeferredGroupKind,
+        reach_certain: bool,
+        judge_only: bool,
+    ) {
         if self.directory_build.fallback.is_some()
             && node.children().any(|child| {
                 child.is_element()
@@ -200,6 +234,11 @@ impl<'r> State<'r> {
                 DeferredFileKey::Imported(index)
             }
         };
+        let written = if judge_only {
+            self.speculatively_written()
+        } else {
+            None
+        };
         self.deferred_item_groups.push(DeferredItemGroup {
             kind,
             file,
@@ -207,7 +246,9 @@ impl<'r> State<'r> {
             range: node.range(),
             import_site_span: self.import_site_span.clone(),
             in_sdk_subtree: self.in_sdk_subtree,
-            reach_certain: rejection::reach_is_certain(self),
+            reach_certain,
+            judge_only,
+            written,
         });
     }
 }
@@ -229,8 +270,8 @@ pub(super) fn replay_deferred_item_groups(entry_doc: &Document<'_>, state: &mut 
     let using_tasks = groups
         .iter()
         .filter(|group| group.kind == DeferredGroupKind::UsingTask);
-    state.in_item_pass = true;
     for group in definition_groups.chain(item_groups).chain(using_tasks) {
+        state.item_pass = Some(group.kind);
         // Reinstate the positional context the group was recorded under, so
         // diagnostics/origins/SDK tolerance match inline evaluation.
         let saved_span =
@@ -244,7 +285,9 @@ pub(super) fn replay_deferred_item_groups(entry_doc: &Document<'_>, state: &mut 
         // MSBuild evaluates the group's conditions in this pass, against the
         // final property table: judged here, before the group is walked.
         let judge = |node: Node<'_, '_>, dir: &Path, state: &mut State<'_>| {
-            rejection::judge_deferred(node, dir, group.reach_certain, state);
+            state.judge_from_path(group.written.as_ref(), |state| {
+                rejection::judge_deferred(node, dir, group.reach_certain, state);
+            });
         };
         match group.file {
             DeferredFileKey::Entry => {
@@ -253,7 +296,9 @@ pub(super) fn replay_deferred_item_groups(entry_doc: &Document<'_>, state: &mut 
                 let node = resolve_deferred_node(entry_doc, group);
                 let dir = state.entry_project_dir.clone();
                 judge(node, &dir, state);
-                evaluate(node, state);
+                if !group.judge_only {
+                    evaluate(node, state);
+                }
             }
             DeferredFileKey::Imported(index) => {
                 let file = &files[index];
@@ -270,14 +315,16 @@ pub(super) fn replay_deferred_item_groups(entry_doc: &Document<'_>, state: &mut 
                     .map(Path::to_path_buf)
                     .unwrap_or_default();
                 judge(node, &dir, state);
-                evaluate(node, state);
+                if !group.judge_only {
+                    evaluate(node, state);
+                }
                 state.exit_this_file(frame);
             }
         }
         state.import_site_span = saved_span;
         state.in_sdk_subtree = saved_sdk;
     }
-    state.in_item_pass = false;
+    state.item_pass = None;
     // All items captured: collapse Include + Update into the effective set and
     // detect the versionless symptom on it (both need every item present).
     #[cfg(any(test, feature = "test-support"))]
@@ -1695,7 +1742,7 @@ fn read_compile_order_metadata_write(
         span: Range<usize>,
         state: &mut State<'_>,
     ) -> Option<String> {
-        let expansion = state.expand(raw, span.clone());
+        let expansion = expand_metadata(state, raw, span.clone());
         if expansion.had_issue() {
             return None;
         }
@@ -3119,7 +3166,7 @@ fn read_item_metadata(node: Node<'_, '_>, name: &str, state: &mut State<'_>) -> 
         state: &mut State<'_>,
     ) -> MetadataValue {
         state.note_package_uncertain_from_sdk_property_taint(raw);
-        let expansion = state.expand(raw, range.clone());
+        let expansion = expand_metadata(state, raw, range.clone());
         if expansion.had_issue() {
             return MetadataValue::Clear;
         }
@@ -3655,7 +3702,7 @@ pub(super) fn attribute_is_plain(node: Node<'_, '_>, attr: &roxmltree::Attribute
 /// `&lt;![CDATA[a]]&gt;` reads as `a`, ` &lt;!--c--&gt; y` as `"  y"`, and
 /// `x&lt;![CDATA[a]]&gt;` as `x<![CDATA[a]]>`. A value whose parse this crate
 /// does not model ([`crate::document::fragment_content`]) is `None`.
-fn metadata_attribute<'a>(
+pub(super) fn metadata_attribute<'a>(
     node: Node<'a, '_>,
     attr: &roxmltree::Attribute<'a, '_>,
 ) -> Option<std::borrow::Cow<'a, str>> {
@@ -3718,7 +3765,7 @@ fn set_generic_metadata_value(
     let (normalised, exact, rewritable) = if raw.is_empty() {
         (String::new(), String::new(), false)
     } else {
-        let expansion = expand_silent(raw, state);
+        let expansion = expand_metadata_silent(raw, state);
         if expansion.had_issue() {
             forget(metadata, raw);
             return;
@@ -3772,16 +3819,17 @@ fn evaluate_item_condition_silent(node: Node<'_, '_>, state: &State<'_>) -> (Con
     };
     let eval = if state.follow_imports {
         let exists = |path: &str| condition_exists(state.observer, path, &state.entry_project_dir);
-        condition::evaluate_with_exists(
+        condition::evaluate_at(
             cond,
             &state.lookup,
-            condition::Probes {
+            Some(condition::Probes {
                 exists: &exists,
                 observer: state.observer,
-            },
+            }),
+            state.condition_site(),
         )
     } else {
-        condition::evaluate(cond, &state.lookup)
+        condition::evaluate_at(cond, &state.lookup, None, state.condition_site())
     };
     let tainted =
         matches!(
@@ -3816,6 +3864,52 @@ fn evaluate_item_condition_silent_with_sdk_taint(
     (gate, condition_tainted || sdk_tainted)
 }
 
+/// Expand `raw`, the value of an item's metadatum, reporting as
+/// [`State::expand`] does. MSBuild expands a metadatum's own metadata
+/// references first, so a property function reading one is handed the
+/// metadatum's value, not the reference the walk's expansion leaves it
+/// ([`properties::expressions_reading_metadata`]): an unsupported expression.
+/// An operation (`Include`, `Exclude`, `Remove`, `Update`) is no such text:
+/// MSBuild expands its properties first and reads a metadata reference left
+/// in it as written (`Include="$([System.String]::Copy('%(M)'))"` names
+/// `%(M)`; probed, `msbuild-condition-oracle`, SDK 10.0.401), as the walk
+/// does.
+fn expand_metadata(state: &mut State<'_>, raw: &str, span: Range<usize>) -> Expansion {
+    let before = state.diagnostics.len();
+    let mut expansion = state.expand(raw, span.clone());
+    for expression in properties::expressions_reading_metadata(raw) {
+        expansion.had_unsupported = true;
+        // The expansion reports one it did not model already.
+        let reported = state.diagnostics[before..].iter().any(|diagnostic| {
+            matches!(
+                &diagnostic.kind,
+                DiagnosticKind::UnsupportedPropertyExpression { expression: seen }
+                    if seen == expression
+            )
+        });
+        if reported {
+            continue;
+        }
+        state.push(
+            DiagnosticKind::UnsupportedPropertyExpression {
+                expression: expression.to_owned(),
+            },
+            span.clone(),
+        );
+    }
+    expansion
+}
+
+/// [`expand_silent`] of a metadatum's value: a property function reading
+/// item metadata is unsupported, as in [`expand_metadata`].
+fn expand_metadata_silent(raw: &str, state: &State<'_>) -> Expansion {
+    let mut expansion = expand_silent(raw, state);
+    if !properties::expressions_reading_metadata(raw).is_empty() {
+        expansion.had_unsupported = true;
+    }
+    expansion
+}
+
 pub(super) fn expand_silent(raw: &str, state: &State<'_>) -> Expansion {
     let (value, issues) = if state.follow_imports {
         properties::substitute_with_fs(raw, &state.lookup, state.observer)
@@ -3824,6 +3918,7 @@ pub(super) fn expand_silent(raw: &str, state: &State<'_>) -> Expansion {
     };
     let mut had_undefined = false;
     let mut had_unsupported = false;
+    let throws = super::rejection::throws_in(&issues);
     let mut unpinned_root = None;
     for issue in issues {
         match issue {
@@ -3838,7 +3933,11 @@ pub(super) fn expand_silent(raw: &str, state: &State<'_>) -> Expansion {
                     unpinned_root = Some(state.root_for_undefined_read(&name));
                 }
             }
-            Issue::Unsupported { .. } | Issue::PathAdjustmentUndecided { .. } => {
+            Issue::Unsupported { .. }
+            | Issue::ReturnsBoolean { .. }
+            | Issue::ReturnsValue { .. }
+            | Issue::Throws { .. }
+            | Issue::PathAdjustmentUndecided { .. } => {
                 had_unsupported = true;
             }
         }
@@ -3859,6 +3958,7 @@ pub(super) fn expand_silent(raw: &str, state: &State<'_>) -> Expansion {
         had_undefined,
         had_unsupported,
         unpinned_root,
+        throws,
     }
 }
 
@@ -4604,7 +4704,7 @@ fn resolve_string_metadata(
         // A value MSBuild reads as XML is `Unknown`.
         let reading = metadata_attribute(node, &attr);
         let raw = reading.as_deref().unwrap_or(attr.value());
-        let expansion = state.expand(raw, node.range());
+        let expansion = expand_metadata(state, raw, node.range());
         resolved = if reading.is_none()
             || expansion.had_issue()
             || expansion.unpinned_root.is_some()
@@ -4669,7 +4769,7 @@ fn resolve_string_metadata(
             resolved = ItemMetadataValue::Known(None);
             continue;
         }
-        let expansion = state.expand(&raw, child.range());
+        let expansion = expand_metadata(state, &raw, child.range());
         if expansion.had_issue()
             || expansion.unpinned_root.is_some()
             || state.raw_uses_sdk_package_taint(&raw)

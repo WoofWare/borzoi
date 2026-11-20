@@ -2,8 +2,8 @@
 //! see (#1037), held certain-implies-exact to MSBuild.
 //!
 //! Each generated project binds the gate names, then imports `hidden.props`
-//! under a gate the walk cannot decide (`'$(G.ToUpperInvariant())' == 'X'`,
-//! which MSBuild decides on the global `G`): the walk passes it unseen and the
+//! under a gate the walk cannot decide (`'$(G)É' == 'Xé'`, which MSBuild
+//! decides on the global `G`): the walk passes it unseen and the
 //! values it holds go stale. The hidden file rewrites some gate names, and may
 //! take a caller global back from the caller (`TreatAsLocalProperty="G"`) and
 //! rewrite it. After it, each route's output is bound afresh, and then come the
@@ -43,8 +43,11 @@ use borzoi_msbuild::test_support::{PropertyRead, ReadProbe, parse_fsproj_reads};
 use common::{Oracle, SplitMix64, parse_fsproj_with_imports, soak_parameters};
 use tempfile::TempDir;
 
-/// The gate the walk cannot decide, and MSBuild decides on `G`.
-const UNDECIDABLE: &str = "'$(G.ToUpperInvariant())' == 'X'";
+/// The gate the walk cannot decide, and MSBuild decides on `G`, without
+/// throwing: an equality whose case folding is outside ASCII, true where `G`
+/// is `x`. (MSBuild may throw on a function the walk does not model, which
+/// withdraws the whole evaluation.)
+const UNDECIDABLE: &str = "'$(G)É' == 'Xé'";
 const GLOBALS: &[&str] = &["x", "y", "z"];
 /// The names the routes gate on, which the hidden file may rewrite.
 const GATES: &[&str] = &["Gate", "Flag"];

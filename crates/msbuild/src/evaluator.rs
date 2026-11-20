@@ -104,6 +104,8 @@ use item_pass::{
 use property_reads::PropertyRead;
 #[cfg(any(test, feature = "test-support"))]
 use reads::{EvaluationReads, ReadProbe};
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use rejection::element_inner_contents;
 
 /// Maximum recursion depth for `<Import>` following. MSBuild itself
 /// caps at ~100; we pick a number well above any sane real-world
@@ -1296,9 +1298,17 @@ struct State<'r> {
     /// certain values, so that its failure to load is MSBuild's
     /// ([`rejection`]). Set for each explicit import, and `false` for any other.
     taken_import_path_certain: bool,
-    /// Set while the item pass runs: its conditions are judged group by group
-    /// ([`rejection::judge_deferred`]), not where the walk evaluates them.
-    in_item_pass: bool,
+    /// The kind of group the item pass replays, while it runs: its
+    /// conditions are judged group by group ([`rejection::judge_deferred`]),
+    /// not where the walk evaluates them, and each kind's conditions are
+    /// evaluated at its own [`condition::Site`].
+    item_pass: Option<DeferredGroupKind>,
+    /// While the rejection judgement walks content the walk does not take
+    /// ([`rejection::judge_branch`], [`rejection::judge_properties`]), or
+    /// judges an item group from it ([`State::defer_judgement`]): the names
+    /// written on that path before what it judges, whose value there the walk
+    /// does not hold. `None` outside one.
+    speculation: Option<Speculation>,
     /// The root each root-surfacing diagnostic stood for, by its index in
     /// `diagnostics`, captured when it was pushed. A diagnostic carries only a
     /// name, and that name's root may change later in the walk;
@@ -1408,6 +1418,85 @@ struct Expansion {
     /// property that is itself unpinned. Recorded when the value is stored
     /// as a property ([`Trust::unpinned`]).
     unpinned_root: Option<UnpinnedRoot>,
+    /// Every `$(…)` MSBuild throws on, on the values the expansion read
+    /// ([`rejection::throws_in`]); `had_unsupported` is set with any. A
+    /// rejection wherever MSBuild evaluates the text: the caller judges where.
+    throws: Vec<rejection::Thrown>,
+}
+
+/// The rejection judgement's walk of content the walk does not take
+/// ([`State::speculation`]).
+struct Speculation {
+    /// Lower-cased names written on the path, whose value there is unknown.
+    unheld: HashSet<String>,
+    /// The names [`Self::unheld`] gained, in order, so that a branch can undo
+    /// its own on leaving ([`rejection::judge_branch`]).
+    gained: Vec<String>,
+    /// Every write anywhere in the outermost walk, which the item groups
+    /// deferred from it share ([`State::defer_judgement`]): MSBuild evaluates
+    /// an item group after every property write on its path, those after the
+    /// group included.
+    walk_written: std::rc::Rc<std::cell::RefCell<PathWrites>>,
+    /// The `<Choose>` arms the walk is in now, outermost first.
+    arms: Vec<Arm>,
+    /// While an item group deferred from a walk is judged, where it stands
+    /// in that walk: a name written on its path there whose final value is
+    /// not certain is unknown to it ([`State::judge_from_path`]).
+    inherited: Option<PathOf>,
+    /// How many nested walks are open.
+    depth: usize,
+}
+
+/// An arm of a `<Choose>` the judgement walks: the `<Choose>` (its document
+/// and offset) and the `<When>` or `<Otherwise>` (its offset). Two arms of
+/// one `<Choose>` are never both taken.
+type Arm = ((usize, usize), usize);
+
+/// The writes in one walk of content the walk does not take
+/// ([`Speculation::walk_written`]).
+#[derive(Default)]
+struct PathWrites {
+    /// Each name written, lower-cased, and the arms of each of its writes.
+    writes: HashMap<String, Vec<std::rc::Rc<[Arm]>>>,
+    /// The names written whose final value is not certain, computed once, in
+    /// the item pass, when the table is final.
+    settled: Option<std::rc::Rc<HashSet<String>>>,
+}
+
+/// Where an item group deferred from a walk of content the walk does not
+/// take stands in that walk: the walk's writes, and the arms the group is in.
+#[derive(Clone)]
+struct PathOf {
+    writes: std::rc::Rc<std::cell::RefCell<PathWrites>>,
+    arms: std::rc::Rc<[Arm]>,
+}
+
+impl PathOf {
+    /// Whether `name` (lower-cased) is written on the path of the group: in
+    /// no arm another arm of whose `<Choose>` holds the group. Asked of the
+    /// names a judgement reads, so its cost is theirs, not the walk's.
+    fn reaches(&self, name: &str) -> bool {
+        self.writes.borrow().writes.get(name).is_some_and(|writes| {
+            writes.iter().any(|arms| {
+                arms.iter().all(|(choose, arm)| {
+                    self.arms
+                        .iter()
+                        .all(|(other, other_arm)| other != choose || other_arm == arm)
+                })
+            })
+        })
+    }
+
+    /// Whether `name` (lower-cased) reaches the group with a final value that
+    /// is not certain ([`PathWrites::settled`], which must be computed).
+    fn unknown(&self, name: &str) -> bool {
+        self.writes
+            .borrow()
+            .settled
+            .as_ref()
+            .is_some_and(|settled| settled.contains(name))
+            && self.reaches(name)
+    }
 }
 
 impl Expansion {
@@ -1743,7 +1832,8 @@ impl<'r> State<'r> {
             rejection: None,
             reach_doubted: 0,
             taken_import_path_certain: false,
-            in_item_pass: false,
+            item_pass: None,
+            speculation: None,
             diagnostic_roots: HashMap::new(),
         }
     }
@@ -2226,7 +2316,8 @@ impl<'r> State<'r> {
             rejection,
             reach_doubted: _,
             taken_import_path_certain: _,
-            in_item_pass: _,
+            item_pass: _,
+            speculation: _,
             diagnostic_roots: _,
         } = self;
         // Central Package Management opt-in: a versionless
@@ -3241,7 +3332,7 @@ impl<'r> State<'r> {
             _ => None,
         };
         matches!(
-            condition::decide_without(cond, &self.lookup, probes, &unknown),
+            condition::decide_without(cond, &self.lookup, probes, self.condition_site(), &unknown),
             condition::Decision::Decided(_)
         )
     }
@@ -3392,6 +3483,7 @@ impl<'r> State<'r> {
         };
         let mut had_undefined = false;
         let mut had_unsupported = false;
+        let throws = rejection::throws_in(&issues);
         let mut direct_undefined: Vec<String> = Vec::new();
         // The direct reads whose diagnostic doubted on every axis: the self-
         // append's own read did not doubt the define axis, so a root naming
@@ -3414,7 +3506,10 @@ impl<'r> State<'r> {
                     }
                     continue;
                 }
-                Issue::Unsupported { expression } => {
+                Issue::Unsupported { expression }
+                | Issue::ReturnsBoolean { expression }
+                | Issue::ReturnsValue { expression }
+                | Issue::Throws { expression, .. } => {
                     had_unsupported = true;
                     DiagnosticKind::UnsupportedPropertyExpression { expression }
                 }
@@ -3491,6 +3586,7 @@ impl<'r> State<'r> {
             had_undefined,
             had_unsupported,
             unpinned_root,
+            throws,
         }
     }
 
@@ -4474,10 +4570,33 @@ fn walk_property_child_inner(
         state.trust_for_raw(&condition).stale().is_none()
             || directory_build::decided_from_certain_inputs(state, &condition, &entry_dir)
     });
+    // Whether MSBuild evaluates the body exactly when the walk does
+    // ([`rejection`]), asked of the values the gate reads: only for a body
+    // that throws, or one the walk skips.
+    // `None` where the gate reads a value that may decide it otherwise.
+    let own_gate = |state: &State<'_>| match attribute(node, "Condition") {
+        None => Some(true),
+        Some(condition) => {
+            directory_build::decision_from_certain_inputs(state, &condition, &entry_dir)
+        }
+    };
     let diagnostics_before_condition = state.diagnostics.len();
     let gate = evaluate_property_condition(node, state);
     let own_condition_maybe_wrong = state.diagnostics.len() != diagnostics_before_condition
         || matches!(&gate, CondGate::Unsupported);
+    // MSBuild may take a write the walk skips, and evaluate its body: one
+    // whose gate holds whatever the walk could not evaluate in it (`… Or
+    // true`) it takes wherever the walk reaches it.
+    if !matches!(gate, CondGate::Run) {
+        match own_gate(state) {
+            Some(false) => {}
+            Some(true) => {
+                let reached = rejection::reach_is_certain(state);
+                rejection::judge_unwalked_body(node, reached, state);
+            }
+            None => rejection::judge_unwalked_body(node, false, state),
+        }
+    }
     let write_condition_maybe_wrong = inherited_condition_maybe_wrong || own_condition_maybe_wrong;
     let condition_taints_property = inherited_sdk_package_taint
         || condition_uses_sdk_taint
@@ -4555,6 +4674,10 @@ fn walk_property_child_inner(
     // — distinct from "undefined", and used in real projects to clear an
     // inherited value.
     let Some(raw) = collect_element_text(node) else {
+        // MSBuild expands the body as it reads it, its inner XML included,
+        // and may throw on an expression there.
+        let reached = rejection::reach_is_certain(state) && own_gate(state) == Some(true);
+        rejection::judge_unwalked_body(node, reached, state);
         // A body we cannot model (an element or processing instruction). Same
         // treatment as an unevaluable expansion below: drop any prior binding
         // rather than let a stale value stand in for a write whose result we
@@ -4603,6 +4726,11 @@ fn walk_property_child_inner(
     let value_uses_sdk_taint = state.raw_uses_sdk_package_taint(&raw);
     let expansion = state.expand_property_pass_value(&raw, node.range(), &name);
     state.in_define_value = prev_in_value;
+    if !expansion.throws.is_empty() {
+        let reached = rejection::reach_is_certain(state) && own_gate(state) == Some(true);
+        let expressions = expansion.throws.clone();
+        rejection::judge_throwing_expression(state, expressions, reached, node.range());
+    }
     let value_taints_property = condition_taints_property
         || value_uses_sdk_taint
         || (state.in_sdk_subtree && expansion.had_issue());
@@ -4844,16 +4972,17 @@ fn evaluate_condition_with_exemptions(
     };
     let mut eval = if state.follow_imports {
         let exists = |path: &str| condition_exists(state.observer, path, current_file_dir);
-        condition::evaluate_with_exists(
+        condition::evaluate_at(
             cond,
             &state.lookup,
-            condition::Probes {
+            Some(condition::Probes {
                 exists: &exists,
                 observer: state.observer,
-            },
+            }),
+            state.condition_site(),
         )
     } else {
-        condition::evaluate(cond, &state.lookup)
+        condition::evaluate_at(cond, &state.lookup, None, state.condition_site())
     };
     // The undefined names the evaluation visited, before the exemptions below
     // vouch for some of them.
@@ -5005,7 +5134,7 @@ fn evaluate_condition_with_exemptions(
     // project with it. The item pass judges its conditions group by group
     // instead ([`rejection::judge_deferred`]): MSBuild evaluates some the walk
     // does not.
-    if !state.in_item_pass {
+    if state.item_pass.is_none() {
         let reached = rejection::reach_is_certain(state);
         rejection::judge_condition_rejection(
             state,
@@ -5588,16 +5717,17 @@ fn property_child_could_write(child: Node<'_, '_>, state: &State<'_>) -> bool {
     };
     let eval = if state.follow_imports {
         let exists = |path: &str| condition_exists(state.observer, path, &state.entry_project_dir);
-        condition::evaluate_with_exists(
+        condition::evaluate_at(
             cond,
             &state.lookup,
-            condition::Probes {
+            Some(condition::Probes {
                 exists: &exists,
                 observer: state.observer,
-            },
+            }),
+            state.condition_site(),
         )
     } else {
-        condition::evaluate(cond, &state.lookup)
+        condition::evaluate_at(cond, &state.lookup, None, state.condition_site())
     };
     // An undefined read the walk can prove is undefined in the real build too
     // substitutes to exactly "" (C.2b), so a child gated on a provably-false

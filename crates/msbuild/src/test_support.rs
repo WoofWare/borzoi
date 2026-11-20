@@ -18,7 +18,13 @@ pub use crate::condition::{Eval, Judgement, MAX_CONDITION_NESTING, Outcome, Thro
 /// The condition module's `judge` with no file system: what MSBuild makes of
 /// `condition` without the values of the properties `uncertain` names.
 pub fn judge(condition: &str, props: &PropertyMap, uncertain: &dyn Fn(&str) -> bool) -> Judgement {
-    crate::condition::judge(condition, props, None, uncertain)
+    crate::condition::judge(
+        condition,
+        props,
+        None,
+        crate::condition::Site::ItemPass,
+        uncertain,
+    )
 }
 pub use crate::properties::MAX_EXPRESSION_NESTING;
 pub use crate::properties::escaping::{escape, unescape};
@@ -236,4 +242,29 @@ pub fn compiled_assembly_name_grading(
         &|version| version == sdk,
         &|_, _| true,
     )
+}
+
+/// What the walk reads as the text of the first element in `xml` that
+/// MSBuild reads by its contents (a property, an item's or an item
+/// definition's metadatum written as an element, or a `<UsingTask>`'s
+/// `<Task>`), unexpanded, where it reproduces MSBuild's reading
+/// (`Utilities.GetXmlNodeInnerContents`); `None` where it declines, or where
+/// there is none. Held to MSBuild's by `tests/element_contents_diff.rs`.
+pub fn element_contents(xml: &str) -> Option<String> {
+    let document = crate::document::parse(xml).ok()?;
+    let named = |node: &roxmltree::Node<'_, '_>, names: &[&str]| {
+        node.is_element() && names.contains(&node.tag_name().name())
+    };
+    let element = document.root_element().descendants().find(|node| {
+        let Some(parent) = node.parent_element() else {
+            return false;
+        };
+        node.is_element()
+            && (named(&parent, &["PropertyGroup"])
+                || (named(node, &["Task"]) && named(&parent, &["UsingTask"]))
+                || parent
+                    .parent_element()
+                    .is_some_and(|group| named(&group, &["ItemGroup", "ItemDefinitionGroup"])))
+    })?;
+    crate::evaluator::element_inner_contents(element)
 }

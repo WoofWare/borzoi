@@ -212,7 +212,7 @@ fn a_helper_in_an_undecided_choose_branch_cannot_be_read_as_empty() {
     // it may strip a reference we would otherwise keep.
     let (_tmp, _root, parsed) = layout(
         r#"  <Choose>
-    <When Condition="'$([System.Guid]::NewGuid())' == ''">
+    <When Condition="'É' == 'Ê'">
       <ItemGroup>
         <Dropped Include="../A/A.fsproj" />
       </ItemGroup>
@@ -237,7 +237,7 @@ fn an_undecided_choose_holding_other_items_leaves_the_idiom_exact() {
     ] {
         let (_tmp, root, parsed) = layout(&format!(
             r#"  <Choose>
-    <When Condition="'$([System.Guid]::NewGuid())' != ''">
+    <When Condition="'É' == 'é'">
       <ItemGroup>
         {branch}
       </ItemGroup>
@@ -266,7 +266,7 @@ fn a_reference_include_in_an_undecided_choose_makes_a_derived_remove_decline() {
     // and its removal — by path, ignoring case — takes the captured
     // `../A/A.fsproj` with it. The guard is held here on any filesystem.
     let branch = r#"  <Choose>
-    <When Condition="'$([System.Guid]::NewGuid())' != ''">
+    <When Condition="'É' == 'é'">
       <ItemGroup>
         <ProjectReference Include="../a/A.fsproj" />
       </ItemGroup>
@@ -303,7 +303,7 @@ fn an_include_the_walk_may_have_skipped_makes_a_derived_remove_decline() {
     // is untrusted: here it reads false, and the real build may include
     // `../C/C.fsproj`. A missed reference is allowed — but a `Remove` driven by
     // `@(ProjectReference)` then works from an incomplete list.
-    let prelude = r#"  <PropertyGroup Condition="'$([System.Guid]::NewGuid())' != ''">
+    let prelude = r#"  <PropertyGroup Condition="'É' == 'é'">
     <KeepC>true</KeepC>
   </PropertyGroup>"#;
     for hidden in [
@@ -316,7 +316,7 @@ fn an_include_the_walk_may_have_skipped_makes_a_derived_remove_decline() {
     <ProjectReference Include="../C/C.fsproj" />
   </ItemGroup>"#,
         // Group-level gate outside the grammar.
-        r#"<ItemGroup Condition="'$([System.Guid]::NewGuid())' != ''">
+        r#"<ItemGroup Condition="'É' == 'é'">
     <ProjectReference Include="../C/C.fsproj" />
   </ItemGroup>"#,
     ] {

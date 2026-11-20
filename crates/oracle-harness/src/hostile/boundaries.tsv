@@ -180,6 +180,7 @@ crates/msbuild/tests/common/path_spelling.rs	pending	2
 crates/msbuild/tests/condition_diff.rs	pending	2
 crates/msbuild/tests/condition_properties.rs	pending	2
 crates/msbuild/tests/deep_nesting.rs	pending	2
+crates/msbuild/tests/element_contents_diff.rs	draws	element_contents=name+xml
 crates/msbuild/tests/escaping_diff.rs	pending	2
 crates/msbuild/tests/fsc_args_oracle_calibration.rs	not-applicable	hand-picked fixtures, each a build MSBuild and fsc are known to answer: the calibration of fsc_args, not a search
 crates/msbuild/tests/fsc_parameter_register.rs	not-applicable	it reads each verified SDK's own targets and generates no input
@@ -211,6 +212,7 @@ crates/msbuild/tests/path_fixup_expansion_diff.rs	pending	2
 crates/msbuild/tests/path_spelling_generative_diff.rs	pending	2
 crates/msbuild/tests/property_expr_diff.rs	pending	2
 crates/msbuild/tests/property_reference_scan.rs	pending	2
+crates/msbuild/tests/rejection_generative_diff.rs	draws	judge_operands=value;rejection_projects=value
 crates/msbuild/tests/reserved_global_diff.rs	pending	2
 crates/msbuild/tests/sdk_directory_probe_diff.rs	pending	2
 crates/msbuild/tests/sdk_import_project_path_diff.rs	pending	2

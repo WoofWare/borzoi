@@ -266,7 +266,7 @@ fn an_undecided_sdk_import_of_a_user_file_makes_items_uncertain() {
         tmp.path(),
         "MySdk",
         r#"<Project>
-  <Import Project="$(MSBuildProjectDirectory)/child.props" Condition="$([System.String]::IsNullOrWhiteSpace(''))" />
+  <Import Project="$(MSBuildProjectDirectory)/child.props" Condition="'É' == 'é'" />
 </Project>"#,
         "<Project/>",
     );
@@ -305,7 +305,7 @@ fn an_undecided_sdk_import_of_a_user_file_makes_items_uncertain() {
 fn an_undecided_import_of_an_sdk_file_makes_items_uncertain() {
     let result = parse_with_shared_sdk_version_file(
         r#"<Project>
-  <Import Project="$(MSBuildThisFileDirectory)Hidden.props" Condition="$([System.String]::IsNullOrWhiteSpace(''))" />
+  <Import Project="$(MSBuildThisFileDirectory)Hidden.props" Condition="'É' == 'é'" />
 </Project>"#,
         &[(
             "Current/Hidden.props",

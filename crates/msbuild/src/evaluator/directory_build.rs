@@ -507,6 +507,7 @@ fn is_decided_point(
             &condition,
             &state.lookup,
             probes,
+            state.condition_site(),
             &unknown,
             &is_the_exists,
         )
@@ -851,6 +852,7 @@ fn named_file(state: &State<'_>, path_name: &str, dir: &Path) -> Option<PathBuf>
 pub(super) fn is_certain(state: &State<'_>, name: &str) -> bool {
     state.trust_of(name).is_certain()
         && (state.lookup.is_bound(name) || state.undefined_read_is_exact(name))
+        && !state.speculatively_unheld(name)
 }
 
 /// Whether `condition` decides the same way whatever the names the walk is
@@ -874,7 +876,13 @@ pub(super) fn decision_from_certain_inputs(
         observer,
     });
     let unknown = |name: &str| !is_certain(state, name);
-    match condition::decide_without(condition, &state.lookup, probes, &unknown) {
+    match condition::decide_without(
+        condition,
+        &state.lookup,
+        probes,
+        state.condition_site(),
+        &unknown,
+    ) {
         condition::Decision::Decided(value) => Some(value),
         _ => None,
     }

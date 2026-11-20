@@ -96,7 +96,7 @@ const CONDITIONS: [&str; 17] = [
 ];
 /// A condition MSBuild accepts and this evaluator cannot decide, so that
 /// `Gated` is untrusted.
-const UNDECIDABLE: &str = "$([System.String]::IsNullOrWhiteSpace(''))";
+const UNDECIDABLE: &str = "'É' == 'é'";
 
 /// A value: mostly one of the first seven, which the executor runs, and now
 /// and then any, many of which it declines.

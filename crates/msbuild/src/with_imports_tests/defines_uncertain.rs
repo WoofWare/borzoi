@@ -15,7 +15,7 @@ use tempfile::TempDir;
 
 /// A gate MSBuild takes and the walk cannot decide: it computes no property
 /// function.
-const UNDECIDED: &str = "$([System.String]::IsNullOrWhiteSpace(''))";
+const UNDECIDED: &str = "'É' == 'é'";
 
 /// Parse `proj/Demo.fsproj`, whose body is `body`, against the SDK `MySdk`
 /// with the given `Sdk.props` and `Sdk.targets`. `user` are further files,
