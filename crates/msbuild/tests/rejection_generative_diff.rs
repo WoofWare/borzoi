@@ -857,10 +857,21 @@ fn project_sweep(
             !hostile.iter().any(|d| excluded.contains(d)),
             "an excluded dimension is drawn"
         );
-        // A witness is graded by its own expectation, not by the baseline.
+        // A witness is graded by its own expectation, not by the baseline, and
+        // counted in neither the tally nor the census of drawn projects.
         let mut grading = match witness {
             Some(_) => None,
             None => grading.as_deref_mut(),
+        };
+        let mut witness_counts = ProjectCensus::default();
+        let counts: &mut ProjectCensus = match witness {
+            Some(_) => &mut witness_counts,
+            None => &mut tally,
+        };
+        let reach = |hostile: &BTreeSet<Dimension>, outcome: &str| {
+            if witness.is_none() {
+                census.reached(hostile, outcome);
+            }
         };
         // A later write is made of `A` and `B` alone (below), and a value it
         // overwrites reaches only a read of the property pass between the
@@ -945,13 +956,13 @@ fn project_sweep(
                 key
             }
             None => {
-                tally.cases += 1;
-                format!("case-{:04}", tally.cases)
+                counts.cases += 1;
+                format!("case-{:04}", counts.cases)
             }
         };
         match parsed.rejection.as_ref().map(|r| r.certainty) {
-            Some(RejectionCertainty::Certain) => tally.certain += 1,
-            Some(RejectionCertainty::Possible) => tally.possible += 1,
+            Some(RejectionCertainty::Certain) => counts.certain += 1,
+            Some(RejectionCertainty::Possible) => counts.possible += 1,
             None => {}
         }
         let both = oracle.project_both(&xml, &names, Some(&project_path), &[]);
@@ -970,7 +981,7 @@ fn project_sweep(
             }
             wrong
         });
-        tally.baseline_wrong += usize::from(baseline_wrong == Some(true));
+        counts.baseline_wrong += usize::from(baseline_wrong == Some(true));
         let answered_wrongly = |gap: &'static str, grading: Option<&mut Grading>| {
             gap_seen.set(Some(gap));
             if let Some(grading) = grading {
@@ -981,10 +992,10 @@ fn project_sweep(
             }
         };
         let Some(theirs) = both.design_time else {
-            tally.msbuild_rejects += 1;
+            counts.msbuild_rejects += 1;
             if ours.is_empty() {
-                tally.baseline_wrong_now_not += usize::from(baseline_wrong == Some(true));
-                census.reached(&hostile, outcome(true, false));
+                counts.baseline_wrong_now_not += usize::from(baseline_wrong == Some(true));
+                reach(&hostile, outcome(true, false));
                 continue;
             }
             // MSBuild rejects, and the walk committed: wrong, unless the
@@ -1060,9 +1071,9 @@ fn project_sweep(
                 .chain(VARIED_VALUES)
                 .any(|value| evaluates(&mut oracle, &varied(value), &site))
             {
-                tally.rejected_on_an_uncertain_value += 1;
+                counts.rejected_on_an_uncertain_value += 1;
                 answered_wrongly("uncertain-value", grading.as_deref_mut());
-                census.reached(&hostile, "msbuild-rejects-on-an-uncertain-value");
+                reach(&hostile, "msbuild-rejects-on-an-uncertain-value");
                 continue;
             }
             // MSBuild may throw on every value of a name the walk is not sure
@@ -1144,9 +1155,9 @@ fn project_sweep(
                 }
             }
             if shown {
-                tally.rejected_on_an_uncertain_value += 1;
+                counts.rejected_on_an_uncertain_value += 1;
                 answered_wrongly("uncertain-value", grading.as_deref_mut());
-                census.reached(&hostile, "msbuild-rejects-on-an-uncertain-value");
+                reach(&hostile, "msbuild-rejects-on-an-uncertain-value");
                 continue;
             }
             // A text's expressions the walk does not model, on the values it
@@ -1219,16 +1230,16 @@ fn project_sweep(
                  the walk is not sure of hold, and the walk committed {ours:?}\n{}",
                 describe()
             );
-            tally.rejected_on_an_unmodelled_body += 1;
+            counts.rejected_on_an_unmodelled_body += 1;
             answered_wrongly(
                 if shown {
                     "unmodelled-body"
                 } else {
                     "unmodelled-body-and-uncertain-value"
                 },
-                grading.as_deref_mut(),
+                grading,
             );
-            census.reached(&hostile, "msbuild-rejects-on-an-unmodelled-body");
+            reach(&hostile, "msbuild-rejects-on-an-unmodelled-body");
             continue;
         };
         assert_ne!(
@@ -1239,7 +1250,7 @@ fn project_sweep(
             describe()
         );
         for (name, value) in &ours {
-            tally.committed += 1;
+            counts.committed += 1;
             assert_eq!(
                 Some(value),
                 theirs.get(*name),
@@ -1248,9 +1259,9 @@ fn project_sweep(
             );
         }
         let committed = ours.iter().any(|(name, _)| name.as_str() == "After");
-        tally.evaluated_and_committed += usize::from(committed);
-        tally.baseline_wrong_now_not += usize::from(baseline_wrong == Some(true));
-        census.reached(&hostile, outcome(false, committed));
+        counts.evaluated_and_committed += usize::from(committed);
+        counts.baseline_wrong_now_not += usize::from(baseline_wrong == Some(true));
+        reach(&hostile, outcome(false, committed));
     }
     if let Some((key, gap)) = expected {
         assert_eq!(
@@ -1304,6 +1315,12 @@ fn project_sweep_fixed_seed() {
     // many the baseline answered wrongly that the walk under test does not is
     // reported, not floored: a baseline recorded at an unchanged evaluator
     // has none.
+    // What is counted is what is pinned: the drawn projects alone.
+    assert_eq!(
+        tally.rejected_on_an_uncertain_value + tally.rejected_on_an_unmodelled_body,
+        grading.wrong.len(),
+        "{tally:?}"
+    );
     assert!(tally.msbuild_rejects >= 200, "{tally:?}");
     assert!(tally.certain >= 100, "{tally:?}");
     assert!(tally.possible >= 100, "{tally:?}");
