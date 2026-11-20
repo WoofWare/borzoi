@@ -47,18 +47,66 @@ fn illegal_corners() -> Vec<Case> {
         // it, so a syntax error rejects it whatever the values, and behind a
         // deciding `And`/`Or` operand too.
         ("tr ue", props(&[]), Verdict::Illegal),
+        // A typed result spliced among text in a version argument renders as
+        // text; one alone is no string.
+        (
+            "$([MSBuild]::VersionGreaterThan($(P.Length).0, 0))",
+            props(&[("P", "1")]),
+            Verdict::True,
+        ),
+        (
+            "$([MSBuild]::VersionGreaterThan('$(P.Length).0', 0))",
+            props(&[("P", "1")]),
+            Verdict::True,
+        ),
+        (
+            "$([MSBuild]::VersionGreaterThan('$(P[0]).0', 0))",
+            props(&[("P", "1")]),
+            Verdict::True,
+        ),
+        (
+            "$([MSBuild]::VersionGreaterThan($(P.Length), 0))",
+            props(&[("P", "1")]),
+            Verdict::Unsupported,
+        ),
         // Equality asks each side whether it is empty first, expanding only
-        // a side that is one reference whole: where one is empty, the other
-        // is not expanded, so its throw is not reached.
-        ("'a$(P[9])' == ''", props(&[("P", "abc")]), Verdict::False),
-        ("'' != 'a$(P[9])'", props(&[("P", "abc")]), Verdict::True),
+        // a side that is one reference whole: where one is empty, a build
+        // does not expand the other, so its throw is not reached; design-time
+        // evaluation of a property's condition expands it all the same (for
+        // its conditioned-properties table) and throws. Not knowing which
+        // evaluation it is, we decline.
+        (
+            "'a$(P[9])' == ''",
+            props(&[("P", "abc")]),
+            Verdict::Unsupported,
+        ),
+        (
+            "'' != 'a$(P[9])'",
+            props(&[("P", "abc")]),
+            Verdict::Unsupported,
+        ),
         (
             "'$(P[9])x' == '$(E)'",
             props(&[("P", "abc")]),
-            Verdict::False,
+            Verdict::Unsupported,
         ),
-        ("'%41$(P[9])' == ''", props(&[("P", "abc")]), Verdict::False),
-        ("' $(P[9])' == ''", props(&[("P", "abc")]), Verdict::False),
+        (
+            "'%41$(P[9])' == ''",
+            props(&[("P", "abc")]),
+            Verdict::Unsupported,
+        ),
+        (
+            "' $(P[9])' == ''",
+            props(&[("P", "abc")]),
+            Verdict::Unsupported,
+        ),
+        // A side whose emptiness is unknown may be empty, and then the other
+        // is not expanded.
+        (
+            "'$(E.Trim())' == 'a$(P[9])'",
+            props(&[("P", "abc")]),
+            Verdict::Unsupported,
+        ),
         (
             "'$(A)$(P[9])' == ''",
             props(&[("P", "abc"), ("A", "x")]),
@@ -1432,6 +1480,18 @@ fn using_task_texts_are_judged_where_msbuild_expands_them() {
     ));
     rows.push(format!(
         "<UsingTask {INLINE}><Task><Code>{T}</Code></Task></UsingTask>"
+    ));
+    // A body holding an element MSBuild expands as serialized XML: an entity
+    // kept escaped, a comment included.
+    rows.push(format!(
+        "<UsingTask {INLINE}><Task><Code>$(P.Split('&amp;')[1])</Code></Task></UsingTask>"
+    ));
+    rows.push(format!(
+        "<UsingTask {INLINE}><Task><Code>x</Code><!-- {T} --></Task></UsingTask>"
+    ));
+    // The flag compared as expanded, escapes and all.
+    rows.push(format!(
+        "<UsingTask {INLINE}><Task Evaluate=\"%66alse\">{T}</Task></UsingTask>"
     ));
     let mut oracle = Oracle::spawn();
     let tmp = tempfile::TempDir::new().unwrap();

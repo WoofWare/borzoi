@@ -468,10 +468,19 @@ fn deep_project_text_evaluates_without_aborting() {
 }
 
 /// A name the walk holds no value of (`X`, a write it refuses), read `width`
-/// times over in the argument of a function that throws whatever it returns:
-/// no repetition of a value is a version.
+/// times over in the argument of a function that throws whatever it returns
+/// (no repetition of a value is a version): half as itself, half in
+/// distinct calls, so that neither one spelling nor many repeat cheaply.
 fn wide_unheld_reads(width: usize) -> String {
-    let wide = "$(X)".repeat(width);
+    let wide: String = (0..width)
+        .map(|i| {
+            if i % 2 == 0 {
+                "$(X)".to_owned()
+            } else {
+                format!("$(X.Contains(`{i}`))")
+            }
+        })
+        .collect();
     format!(
         "<PropertyGroup><X>$([System.String]::Copy('d'))</X>\
          <R>$([MSBuild]::VersionLessThan('{wide}', '1.0'))</R></PropertyGroup>"

@@ -58,6 +58,8 @@
 
 mod syntax;
 
+use std::ops::Range;
+
 use super::observed::Observer;
 use super::properties::escaping::Escaped;
 use super::properties::{
@@ -430,8 +432,8 @@ pub fn judge(
 }
 
 /// How far [`judge_expr`] walks a condition.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Walk {
+#[derive(Clone, Copy)]
+enum Walk<'a> {
     /// To the operand that ends each chain, judging whether MSBuild throws.
     #[cfg(any(test, feature = "test-support"))]
     Judge,
@@ -447,11 +449,16 @@ enum Walk {
     /// whether it may throw (`may_throw`, [`may_throw_on_held`]) need go no
     /// further. Nor need it evaluate an operand that cannot throw and gates no
     /// later one that can (`later` says whether any operand after this
-    /// subtree, in the chains around it, can throw). `on_held`: a leaf that
-    /// reads a name the caller is not certain of is evaluated on the value
-    /// held and judged as [`Reject::judged_on_doubted_values`] says, rather
-    /// than by its kind.
-    Possibility { later: bool, on_held: bool },
+    /// subtree, in the chains around it, can throw). `on_held`, the names
+    /// whose value held MSBuild need not hold at all: a leaf that reads a name
+    /// the caller is not certain of is evaluated on the values held, its
+    /// failure judged as [`Reject::judged_on_doubted_values`] says where it
+    /// rests on such a name, rather than by its kind, and its boolean is none
+    /// of MSBuild's.
+    Possibility {
+        later: bool,
+        on_held: Option<&'a dyn Fn(&str) -> bool>,
+    },
 }
 
 /// Whether MSBuild throws evaluating `source` whatever the properties
@@ -486,7 +493,7 @@ pub fn may_throw(
     fs: Option<Probes<'_>>,
     uncertain: &dyn Fn(&str) -> bool,
 ) -> bool {
-    may_throw_walked(source, props, fs, uncertain, false)
+    may_throw_walked(source, props, fs, uncertain, None)
 }
 
 /// Whether MSBuild may throw evaluating `source` on the values `props`
@@ -503,9 +510,10 @@ pub fn may_throw_on_held(
     source: &str,
     props: &PropertyMap,
     fs: Option<Probes<'_>>,
+    unsure: &dyn Fn(&str) -> bool,
     doubted: &dyn Fn(&str) -> bool,
 ) -> bool {
-    may_throw_walked(source, props, fs, doubted, true)
+    may_throw_walked(source, props, fs, unsure, Some(doubted))
 }
 
 /// `may_throw` or [`may_throw_on_held`], as `on_held` says.
@@ -514,7 +522,7 @@ fn may_throw_walked(
     props: &PropertyMap,
     fs: Option<Probes<'_>>,
     uncertain: &dyn Fn(&str) -> bool,
-    on_held: bool,
+    on_held: Option<&dyn Fn(&str) -> bool>,
 ) -> bool {
     match parse_condition(source) {
         Ok(Some(expr)) => {
@@ -540,7 +548,7 @@ fn may_throw_walked(
         // metadatum, `'@(…)' == ''` on a group), MSBuild evaluates them
         // without throwing, and a model of what they expand to is what tells
         // the two apart (#1095).
-        Err(Reject::Unmodelled) => !on_held,
+        Err(Reject::Unmodelled) => on_held.is_none(),
         Err(Reject::Throws | Reject::Illegal) => true,
     }
 }
@@ -551,7 +559,7 @@ fn judge_expr(
     props: &PropertyMap,
     fs: Option<Probes<'_>>,
     uncertain: &dyn Fn(&str) -> bool,
-    walk: Walk,
+    walk: Walk<'_>,
 ) -> Judgement {
     match expr {
         BoolExpr::Not(inner) => {
@@ -576,8 +584,14 @@ fn judge_expr(
             leaf_implicit_references(expr, &mut implicit);
             let explicit_doubt = references.iter().any(|name| uncertain(name));
             let implicit_doubt = implicit.iter().any(|name| uncertain(name));
-            let on_held = matches!(walk, Walk::Possibility { on_held: true, .. });
-            if !on_held {
+            let doubted = match walk {
+                Walk::Possibility {
+                    on_held: Some(doubted),
+                    ..
+                } => Some(doubted),
+                _ => None,
+            };
+            if doubted.is_none() {
                 if explicit_doubt {
                     // A certain value that may complete an item or metadata
                     // expression beside an uncertain one (`$(U)$(V)` with
@@ -607,23 +621,25 @@ fn judge_expr(
             // The undefined names are the caller's to report from its own
             // `evaluate`; this evaluation only judges.
             let mut undefined = Vec::new();
+            // On held values, the names whose value held MSBuild need not
+            // hold at all; a failure resting on one is judged apart.
+            let doubted: &dyn Fn(&str) -> bool = doubted.unwrap_or(uncertain);
+            let reads_doubted = references.iter().chain(&implicit).any(|name| doubted(name));
             match eval_bool(expr, props, fs, &mut undefined) {
-                // On a value held of a doubted name, which MSBuild need not
-                // hold, the boolean is none of MSBuild's: what comes after the
-                // leaf is reached perhaps, whichever way it went here.
+                // On a value held of a name the caller is not certain of, the
+                // boolean is none of MSBuild's: what comes after the leaf is
+                // reached perhaps, whichever way it went here.
                 Ok(_) if explicit_doubt || implicit_doubt => {
                     Judgement::of(None, Throws::Never, false)
                 }
                 Ok(value) => Judgement::of(Some(value), Throws::Never, false),
-                Err(reject) if explicit_doubt || implicit_doubt => {
-                    match doubted_failures(expr, props, fs, uncertain) {
-                        None => reject.judged(),
-                        Some(_) if throws_whatever_they_return(expr, props, fs, uncertain) => {
-                            Judgement::of(None, Throws::Maybe, true)
-                        }
-                        Some(_) => reject.judged_on_doubted_values(),
+                Err(reject) if reads_doubted => match doubted_failures(expr, props, fs, doubted) {
+                    None => reject.judged(),
+                    Some(_) if throws_whatever_they_return(expr, props, fs, doubted) => {
+                        Judgement::of(None, Throws::Maybe, true)
                     }
-                }
+                    Some(_) => reject.judged_on_doubted_values(),
+                },
                 Err(reject) => reject.judged(),
             }
         }
@@ -716,73 +732,63 @@ const RETURNED: &[&str] = &["", "x", "1", "1.2", "true", "false", "a;b"];
 /// ([`MAX_EXPRESSION_NESTING`]): an expression at that depth is taken whole,
 /// which the evaluator declines anyway, so each level costs one scan of the
 /// text and the whole search is linear in it.
-fn uncertain_expressions(text: &str, uncertain: &dyn Fn(&str) -> bool) -> Vec<String> {
+fn uncertain_spans(text: &str, uncertain: &dyn Fn(&str) -> bool) -> Vec<Range<usize>> {
     let reads = |expression: &str| {
         let mut names = Vec::new();
         explicit_references(expression, &mut names);
         implicit_references(expression, &mut names);
         names.iter().any(|name| uncertain(name))
     };
-    let outermost = |text: &str| {
+    // The outermost expressions of `text[span]`, as spans of `text`.
+    let outermost = |span: Range<usize>| {
         let mut found = Vec::new();
-        let mut rest = text;
-        while let Some(at) = rest.find("$(") {
-            let Some(close) = find_balanced_property_expression_close(&rest[at + 2..]) else {
+        let mut at = span.start;
+        while let Some(open) = text[at..span.end].find("$(") {
+            let start = at + open;
+            let Some(close) = find_balanced_property_expression_close(&text[start + 2..span.end])
+            else {
                 break;
             };
-            found.push(rest[at..at + 2 + close + 1].to_owned());
-            rest = &rest[at + 2 + close + 1..];
+            let end = start + 2 + close + 1;
+            found.push(start..end);
+            at = end;
         }
         found
     };
     let mut found = Vec::new();
-    let mut pending = vec![(text.to_owned(), 0)];
-    while let Some((text, depth)) = pending.pop() {
-        for expression in outermost(&text) {
-            if !reads(&expression) {
+    let mut pending = vec![(0..text.len(), 0)];
+    while let Some((span, depth)) = pending.pop() {
+        for expression in outermost(span) {
+            if !reads(&text[expression.clone()]) {
                 continue;
             }
-            let inner = &expression[2..expression.len() - 1];
+            let inner = expression.start + 2..expression.end - 1;
             if depth + 1 < MAX_EXPRESSION_NESTING
-                && outermost(inner).iter().any(|nested| reads(nested))
+                && outermost(inner.clone())
+                    .into_iter()
+                    .any(|nested| reads(&text[nested]))
             {
-                pending.push((inner.to_owned(), depth + 1));
+                pending.push((inner, depth + 1));
             } else {
                 found.push(expression);
             }
         }
     }
+    found.sort_by_key(|span| span.start);
     found
 }
 
-/// `text` with each occurrence of one of `expressions` (`$(…)` texts)
-/// replaced by `value`, in one pass from the left: the text is scanned once
-/// and each opener compared with the expressions, so a text repeating one
-/// costs its length, not its length per occurrence.
-fn strike(text: &str, expressions: &[String], value: &str) -> String {
-    let mut expressions: Vec<&str> = expressions.iter().map(String::as_str).collect();
-    expressions.sort_unstable();
-    expressions.dedup();
+/// `text` with each of `spans` (disjoint, in order: those
+/// [`uncertain_spans`] finds) replaced by `value`, in one pass.
+fn strike(text: &str, spans: &[Range<usize>], value: &str) -> String {
     let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(at) = rest.find("$(") {
-        out.push_str(&rest[..at]);
-        rest = &rest[at..];
-        match expressions
-            .iter()
-            .find(|expression| rest.starts_with(**expression))
-        {
-            Some(expression) => {
-                out.push_str(value);
-                rest = &rest[expression.len()..];
-            }
-            None => {
-                out.push_str("$(");
-                rest = &rest[2..];
-            }
-        }
+    let mut from = 0;
+    for span in spans {
+        out.push_str(&text[from..span.start]);
+        out.push_str(value);
+        from = span.end;
     }
-    out.push_str(rest);
+    out.push_str(&text[from..]);
     out
 }
 
@@ -798,7 +804,7 @@ pub(crate) fn expression_throws_whatever_they_return(
     observer: Option<&Observer>,
     unheld: &dyn Fn(&str) -> bool,
 ) -> bool {
-    let inner = uncertain_expressions(expression, unheld);
+    let inner = uncertain_spans(expression, unheld);
     if inner.is_empty() {
         return false;
     }
@@ -829,14 +835,13 @@ fn throws_whatever_they_return(
     let Some(texts) = leaf_texts(expr) else {
         return false;
     };
-    let expressions: Vec<String> = texts
+    if texts
         .iter()
-        .flat_map(|text| uncertain_expressions(text, uncertain))
-        .collect();
-    if expressions.is_empty() {
+        .all(|text| uncertain_spans(text, uncertain).is_empty())
+    {
         return false;
     }
-    let strike = |raw: &str, value: &str| strike(raw, &expressions, value);
+    let strike = |raw: &str, value: &str| strike(raw, &uncertain_spans(raw, uncertain), value);
     let scalar = |scalar: &ScalarExpr, value: &str| match scalar {
         ScalarExpr::String(raw) | ScalarExpr::Property(raw) => {
             Some(ScalarExpr::String(strike(raw, value)))
@@ -883,7 +888,7 @@ fn judge_chain(
     props: &PropertyMap,
     fs: Option<Probes<'_>>,
     uncertain: &dyn Fn(&str) -> bool,
-    walk: Walk,
+    walk: Walk<'_>,
 ) -> Judgement {
     let mut throws = Throws::Never;
     let mut reached_for_certain = true;
@@ -910,7 +915,7 @@ fn judge_chain(
         };
         let judged = judge_expr(operand, props, fs, uncertain, walk);
         unevaluated |= judged.unevaluated;
-        if walk == Walk::Decide && unevaluated {
+        if matches!(walk, Walk::Decide) && unevaluated {
             return Judgement::of(None, throws.max(judged.throws), true);
         }
         if judged.throws == Throws::Certainly {
@@ -929,7 +934,7 @@ fn judge_chain(
                 return Judgement::of(Some(absorbing), throws, unevaluated);
             }
             Some(_) => {}
-            None if walk == Walk::Certainty => {
+            None if matches!(walk, Walk::Certainty) => {
                 return Judgement::of(None, throws.max(Throws::Maybe), unevaluated);
             }
             None => {
@@ -2151,7 +2156,14 @@ fn eval_bool(
             // Equality asks each side, left then right, whether it is empty
             // first, expanding only a side that is one reference whole
             // (`MultipleComparisonExpressionNode`, `EvaluatesToEmpty`); where
-            // one is, emptiness decides it and nothing more is expanded.
+            // one is, emptiness decides it and a build expands nothing more.
+            // Design-time evaluation of a property's condition then expands
+            // both sides in full all the same, for its table of conditioned
+            // properties (`UpdateConditionedProperties`); an item's does not.
+            // So a side whose full expansion fails may throw: we do not know
+            // which evaluation this is. Where a side's emptiness is unknown, a
+            // throw expanding the other may be one MSBuild never reaches.
+            let mut emptiness_unknown = false;
             if !relational {
                 let lhs_empty =
                     evaluates_to_empty(lhs_scalar, props, fs.map(|fs| fs.observer), undefined);
@@ -2162,26 +2174,51 @@ fn eval_bool(
                     evaluates_to_empty(rhs_scalar, props, fs.map(|fs| fs.observer), undefined);
                 match (lhs_empty, rhs_empty) {
                     (Ok(lhs_empty), Ok(rhs_empty)) if lhs_empty || rhs_empty => {
-                        let equal = lhs_empty == rhs_empty;
-                        return Ok(matches!(op, CompareOp::Eq) == equal);
+                        let observer = fs.map(|fs| fs.observer);
+                        // Each name a side reads is reported once, however
+                        // many times it is expanded.
+                        let mut read = Vec::new();
+                        let worst = [lhs_scalar, rhs_scalar]
+                            .into_iter()
+                            .filter_map(|scalar| {
+                                expand_scalar_for_condition(scalar, props, observer, &mut read)
+                                    .err()
+                            })
+                            .max();
+                        for name in read {
+                            if !undefined.contains(&name) {
+                                undefined.push(name);
+                            }
+                        }
+                        return match worst {
+                            Some(Reject::Throws | Reject::Illegal | Reject::Unmodelled) => {
+                                Err(Reject::Unmodelled)
+                            }
+                            _ => Ok(matches!(op, CompareOp::Eq) == (lhs_empty == rhs_empty)),
+                        };
                     }
                     (Ok(true), Err(reject)) | (Err(reject), Ok(true)) => return Err(reject),
                     (_, Err(reject @ (Reject::Throws | Reject::Illegal))) => return Err(reject),
+                    (Err(_), _) | (_, Err(_)) => emptiness_unknown = true,
                     _ => {}
                 }
             }
+            let reached_perhaps = |reject: Reject| match reject {
+                Reject::Throws | Reject::Illegal if emptiness_unknown => Reject::Unmodelled,
+                other => other,
+            };
             // MSBuild expands both operands before it compares them, so an
             // operand whose value we do not know does not keep it from the
             // other, which may throw: the worse of the two stands. One that
             // throws ends it.
             let lhs = expand_scalar_for_condition(lhs, props, fs.map(|fs| fs.observer), undefined)
-                .map_err(|reject| operand(reject, lhs_scalar));
+                .map_err(|reject| reached_perhaps(operand(reject, lhs_scalar)));
             let lhs = match lhs {
                 Err(reject @ (Reject::Throws | Reject::Illegal)) => return Err(reject),
                 other => other,
             };
             let rhs = expand_scalar_for_condition(rhs, props, fs.map(|fs| fs.observer), undefined)
-                .map_err(|reject| operand(reject, rhs_scalar));
+                .map_err(|reject| reached_perhaps(operand(reject, rhs_scalar)));
             let (lhs, rhs) = match (lhs, rhs) {
                 (Ok(lhs), Ok(rhs)) => (lhs, rhs),
                 (Err(lhs), Err(rhs)) => return Err(lhs.max(rhs)),

@@ -1298,8 +1298,13 @@ fn eval_version_arg(
     depth: usize,
 ) -> Result<String, Failure> {
     let arg = arg.trim();
+    for delim in ['\'', '`', '"'] {
+        if let Some(body) = arg.strip_prefix(delim).and_then(|s| s.strip_suffix(delim)) {
+            return eval_str_template(body, delim, props, issues, false, true, depth);
+        }
+    }
     if arg.starts_with(['\'', '`', '"']) {
-        return eval_string_arg(arg, props, issues, depth);
+        return Err(Unsupported);
     }
     if arg.contains("$(") {
         // Unquoted text around expressions (`$(Major).0`, as the previous
@@ -1321,7 +1326,7 @@ fn eval_version_arg(
         if outside.contains(['\'', '`', '"']) {
             return Err(Unsupported);
         }
-        return eval_str_template(arg, '\'', props, issues, false, depth);
+        return eval_str_template(arg, '\'', props, issues, false, true, depth);
     }
     Ok(super::escaping::unescape(arg))
 }
@@ -1535,7 +1540,15 @@ fn eval_string_arg_inner(
     // same delimiter closes it (the other two are ordinary text inside).
     for delim in ['\'', '`', '"'] {
         if let Some(body) = arg.strip_prefix(delim).and_then(|s| s.strip_suffix(delim)) {
-            return eval_str_template(body, delim, props, issues, allow_boundary_backslash, depth);
+            return eval_str_template(
+                body,
+                delim,
+                props,
+                issues,
+                allow_boundary_backslash,
+                false,
+                depth,
+            );
         }
     }
     // An unquoted argument that is exactly one `$(…)` expression — the
@@ -1589,14 +1602,27 @@ fn eval_string_arg_inner(
 /// argument — the *other* two delimiter characters are ordinary text); an
 /// unbalanced `$(` is ordinary literal text (`'$('`), consistent with the
 /// scanner.
+///
+/// `render_typed`: a typed result spliced among other text (`$(P.Length).0`)
+/// is rendered as text, as MSBuild renders it when it composes a string
+/// (probed, `msbuild-condition-oracle`, SDK 10.0.401: true for
+/// `VersionGreaterThan('$(P.Length).0', 0)` with `P=1`, where the lone
+/// `'$(P.Length)'` throws). Only where the caller reads the argument as such
+/// a string; one typed result alone still declines.
 fn eval_str_template(
     body: &str,
     delim: char,
     props: &Reads<'_>,
     issues: &mut Vec<Issue>,
     allow_boundary_backslash: bool,
+    render_typed: bool,
     depth: usize,
 ) -> Result<String, Failure> {
+    let lone = body
+        .strip_prefix("$(")
+        .and_then(find_close)
+        .is_some_and(|close| close + 3 == body.len());
+    let render_typed = render_typed && !lone;
     let mut out = String::new();
     let mut rest = body;
     while let Some(idx) = rest.find("$(") {
@@ -1628,6 +1654,14 @@ fn eval_str_template(
                     }
                     // Already escaped at its leaf — spliced verbatim.
                     Value::Str(s) => out.push_str(&s),
+                    // Digits, dots and letters, which need no escape; a
+                    // character only where it is one of them.
+                    typed @ (Value::Int(_) | Value::Version(_) | Value::Bool(_))
+                        if render_typed =>
+                    {
+                        out.push_str(&typed.render()?);
+                    }
+                    Value::Char(c) if render_typed && c.is_ascii_alphanumeric() => out.push(c),
                     _ => return Err(Unsupported),
                 }
                 rest = &after[close + 1..];

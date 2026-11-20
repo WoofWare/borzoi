@@ -1093,8 +1093,15 @@ fn classified_judgement_sweep(rng: &mut SplitMix64, cases: usize) -> JudgeCensus
         {
             continue;
         }
-        let hostile: BTreeSet<Dimension> = a.hostile.iter().chain(&b.hostile).copied().collect();
         let condition = condition(rng, &["A", "B", "U", "V"], 3);
+        // Credited only for the names the condition reads: a value it never
+        // reads reaches nothing.
+        let reads = property_references(&condition);
+        let hostile: BTreeSet<Dimension> = [("A", &a), ("B", &b)]
+            .into_iter()
+            .filter(|(name, _)| reads.iter().any(|read| read == name))
+            .flat_map(|(_, drawn)| drawn.hostile.iter().copied())
+            .collect();
         let certain = vec![("A".to_owned(), a.value), ("B".to_owned(), b.value)];
         // The values the walk holds for the uncertain names, which a sound
         // judgement never reads.

@@ -274,16 +274,15 @@ pub(super) fn import_failure_certainty(
 /// compute (a string equality whose case folding we do not model), is no
 /// site of its own ([`condition::Throws::Never`]).
 ///
-/// A condition legal on the values the walk holds is judged too where a leaf
-/// it decides by reads a name the walk holds no value of
-/// ([`holds_a_value_msbuild_may`]): that leaf's boolean is none of MSBuild's,
-/// so an operand after it is reached perhaps, and a throw there on the values
-/// held is a Possible site ([`condition::may_throw_on_held`]). Otherwise it is
-/// no site, though one it reaches may throw on another value of a name the
-/// walk is not certain of ([`condition::Throws::Maybe`]): judging that
-/// withdraws every project the SDK's own conditions read such a name in, so
-/// it waits on knowing what values such a name may hold (#1009's second
-/// stage).
+/// A condition legal on the values the walk holds is judged too where it
+/// reads a name the walk is not certain of: a leaf on one has none of
+/// MSBuild's booleans, so an operand after it is reached perhaps, and a throw
+/// there on the values held is a Possible site
+/// ([`condition::may_throw_on_held`]). The leaf itself is judged on the value
+/// held, though it may throw on another value of the name
+/// ([`condition::Throws::Maybe`]): judging that withdraws every project the
+/// SDK's own conditions read such a name in, so it waits on knowing what
+/// values such a name may hold (#1009's second stage).
 pub(super) fn judge_condition_rejection(
     state: &mut State<'_>,
     condition: &str,
@@ -299,14 +298,14 @@ pub(super) fn judge_condition_rejection(
         observer,
     });
     let doubted = |name: &str| !holds_a_value_msbuild_may(state, name);
+    let uncertain = |name: &str| !directory_build::is_certain(state, name);
     if matches!(
         outcome,
         condition::Outcome::True | condition::Outcome::False
-    ) && !properties::property_references(condition).any(doubted)
+    ) && !properties::property_references(condition).any(uncertain)
     {
         return;
     }
-    let uncertain = |name: &str| !directory_build::is_certain(state, name);
     // Reached only perhaps, it is Possible however its operands stand, and
     // judging them would only probe the file system for nothing.
     let certainly = reached
@@ -317,7 +316,9 @@ pub(super) fn judge_condition_rejection(
     // one it throws on with the values the walk holds. What an operand past
     // it reads from the file system may decide whether it throws, so the
     // judgement probes as the evaluation would have.
-    if certainly || condition::may_throw_on_held(condition, &state.lookup, probes, &doubted) {
+    if certainly
+        || condition::may_throw_on_held(condition, &state.lookup, probes, &uncertain, &doubted)
+    {
         state.note_rejection(
             certain_if(certainly),
             RejectionCause::IllegalCondition {
@@ -736,9 +737,11 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
                     Some(evaluate) => {
                         judge_unwalked_text(state, &evaluate, reached, child.range());
                         let (value, issues) = properties::substitute(&evaluate, &state.lookup);
-                        // Its trust is judged just below, name by name.
-                        let value =
-                            properties::escaping::unescape(value.ignoring_trust().as_escaped());
+                        // Its trust is judged just below, name by name. MSBuild
+                        // reads the flag as expanded, escapes and all
+                        // (`%66alse` is no `false`; probed,
+                        // `msbuild-condition-oracle`, SDK 10.0.401).
+                        let value = value.ignoring_trust().as_escaped().to_owned();
                         if !issues.is_empty() || !operands_are_certain(state, &evaluate) {
                             Some(false)
                         } else if value.trim().eq_ignore_ascii_case("false") {
@@ -753,10 +756,12 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
                         Some(body) => {
                             judge_unwalked_text(state, &body, body_reached, child.range())
                         }
-                        // Text read apart from MSBuild's reading (a CDATA
-                        // section) is judged as its source, comments and
-                        // all: perhaps reached, so a throw there claims no
-                        // more than that MSBuild may reject.
+                        // A body MSBuild reads as serialized XML, or text read
+                        // apart from MSBuild's reading (a CDATA section), is
+                        // judged as its source, comments and all, which is
+                        // close to what it reads but not it: perhaps reached,
+                        // so a throw there claims no more than that MSBuild
+                        // may reject.
                         None => {
                             let source = &child.document().input_text()[child.range()];
                             judge_unwalked_text(state, source, false, child.range());
@@ -769,23 +774,18 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
     }
 }
 
-/// The text MSBuild expands of the inline task body at `task`: each text
-/// node, and each attribute of an element in it, apart, so that no two form
-/// an expression; `None` where a text node is one `document::text` does not
-/// read as MSBuild does.
+/// The text MSBuild expands of the inline task body at `task`, where it is
+/// text alone: its text nodes, as MSBuild reads them (`InnerText`). `None`
+/// where it holds an element, which MSBuild expands as serialized XML
+/// (`InnerXml`: entities kept escaped, comments included), or a text node
+/// `document::text` does not read as MSBuild does.
 fn task_body(task: Node<'_, '_>) -> Option<String> {
+    if task.children().any(|child| child.is_element()) {
+        return None;
+    }
     let mut body = String::new();
-    for descendant in task.descendants().skip(1) {
-        if descendant.is_text() {
-            body.push_str(&crate::document::text(descendant)?);
-            body.push('\n');
-        }
-        for attr in descendant.attributes() {
-            if let Some(value) = attribute(descendant, attr.name()) {
-                body.push_str(&value);
-                body.push('\n');
-            }
-        }
+    for child in task.children().filter(Node::is_text) {
+        body.push_str(&crate::document::text(child)?);
     }
     Some(body)
 }
@@ -927,7 +927,17 @@ fn judge_item_group(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
             });
         let metadata_reached = reached && attribute(item, "Include").is_some() && !per_item;
         // An `Update`'s metadata is expanded only where the update applies,
-        // which the walk does not know here: reached perhaps.
+        // which the walk does not know here: reached perhaps. One under a
+        // gate certainly false applies nowhere.
+        let ruled_out = |node: Node<'_, '_>| {
+            attribute(node, "Condition").is_some_and(|condition| {
+                directory_build::decision_from_certain_inputs(state, &condition, &entry_dir)
+                    == Some(false)
+            })
+        };
+        if attribute(item, "Include").is_none() && (ruled_out(node) || ruled_out(item)) {
+            continue;
+        }
         judge_metadata_attributes(item, metadata_reached, state);
         for metadata in item.children().filter(Node::is_element) {
             if let Some(value_reached) =

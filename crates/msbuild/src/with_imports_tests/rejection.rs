@@ -1457,3 +1457,65 @@ fn a_throw_under_a_gate_decided_true_past_an_unknown_operand_is_judged() {
         }
     }
 }
+
+/// Design-time evaluation of a property's condition expands both sides of an
+/// equality, for its table of conditioned properties, even where one side
+/// is empty and decides it: `'' != 'a$(P[9])'` throws there, though a build
+/// never expands `'a$(P[9])'`.
+#[test]
+fn an_empty_side_does_not_spare_the_other_from_design_time_expansion() {
+    for c in ["'' != 'a$(P[9])'", "'a$(P[9])' == ''"] {
+        let body = format!("<PropertyGroup><P>a</P><R Condition=\"{c}\">x</R></PropertyGroup>");
+        for parsed in both_walkers(&format!("  {body}")) {
+            assert_withdrawn(&parsed, &["Before", "After"]);
+        }
+    }
+}
+
+/// A leaf on a name the walk is not sure of, though it holds a value MSBuild
+/// may hold, has none of MSBuild's booleans: `U` is `''` as the walk holds it,
+/// but MSBuild takes the write the walk could not decide, so its `Or` goes on
+/// to an order on a word, which throws.
+#[test]
+fn a_leaf_on_a_value_the_walk_is_not_sure_of_decides_nothing_after_it() {
+    let body = format!(
+        "<PropertyGroup><U></U><U Condition=\"{UNDECIDED_TRUE}\">yes</U>\
+         <R Condition=\"$([System.String]::IsNullOrWhiteSpace('$(U)')) Or 1 &lt; abc\">x</R></PropertyGroup>"
+    );
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_withdrawn(&parsed, &["Before", "After"]);
+    }
+}
+
+/// An `Update` under a gate certainly false applies nowhere, so MSBuild
+/// expands none of its metadata.
+#[test]
+fn an_update_under_a_false_gate_expands_no_metadata() {
+    for body in [
+        "<ItemGroup><I Include=\"x\" /><I Update=\"x\" Condition=\"false\" M=\"$(P[9])\" /></ItemGroup>",
+        "<ItemGroup><I Include=\"x\" /></ItemGroup><ItemGroup Condition=\"false\"><I Update=\"x\" M=\"$(P[9])\" /></ItemGroup>",
+        "<ItemGroup><I Include=\"x\" /><I Update=\"x\" Condition=\"false\"><M>$(P[9])</M></I></ItemGroup>",
+    ] {
+        let body = format!("<PropertyGroup><P>a</P></PropertyGroup>{body}");
+        for parsed in both_walkers(&format!("  {body}")) {
+            assert_eq!(parsed.rejection, None, "{body}: {:#?}", parsed.diagnostics);
+        }
+    }
+}
+
+/// A typed result spliced among other text in a version argument is the
+/// text it renders as: `VersionGreaterThan($(P.Length).0, 0)` is true for
+/// `P=1`, quoted or not.
+#[test]
+fn a_typed_result_among_text_in_a_version_argument_is_its_text() {
+    for c in [
+        "$([MSBuild]::VersionGreaterThan($(P.Length).0, 0))",
+        "$([MSBuild]::VersionGreaterThan('$(P.Length).0', 0))",
+    ] {
+        let body = format!("<PropertyGroup><P>1</P><R Condition=\"{c}\">x</R></PropertyGroup>");
+        for parsed in both_walkers(&format!("  {body}")) {
+            assert_eq!(parsed.rejection, None, "{body}: {:#?}", parsed.diagnostics);
+            assert_eq!(parsed.property("R").value(), Some("x"), "{body}");
+        }
+    }
+}
