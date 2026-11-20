@@ -914,6 +914,14 @@ pub(super) fn judge_branch(
 /// does not evaluate it: so a chain of `n` arms costs `n` decisions, and the
 /// read set gains no probe MSBuild does not make.
 fn arm_is_dead(branch: Node<'_, '_>, state: &mut State<'_>) -> bool {
+    // Once the walk has hidden content no arm is ruled out (a gate reading a
+    // doubted name settles nothing then, `State::reference_gate_decision`),
+    // and a gate decided on held values alone may itself rest on a value the
+    // hidden content rewrote, so none is probed: an arm counts as live, which
+    // costs at most a decline.
+    if state.walk_opaque.is_some() {
+        return false;
+    }
     let Some(choose) = branch.parent_element() else {
         return false;
     };

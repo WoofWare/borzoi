@@ -736,13 +736,35 @@ fn reference_gate_is_dead(element: Node<'_, '_>, state: &State<'_>) -> bool {
 /// One it does not compute, it drops with the element, though MSBuild holds
 /// items there that the list then lacks (#1098). So the list is flagged
 /// whatever the walk then does with the element.
+///
+/// An `Exclude` excludes nothing from an `Include` that is empty whatever the
+/// names the walk doubts hold: one that reads none of them and expands, with
+/// no file system, to no item. Its doubt then moves no reference.
 fn reads_a_doubted_name(node: Node<'_, '_>, state: &State<'_>) -> bool {
-    node.is_element()
-        && modelled_item_kind_for_element(node) == Some(ItemKind::ProjectReference)
-        && node.has_attribute("Include")
-        && ["Include", "Exclude"].into_iter().any(|name| {
-            attribute(node, name).is_some_and(|raw| state.raw_reads_a_doubted_name(&raw))
-        })
+    if !(node.is_element()
+        && modelled_item_kind_for_element(node) == Some(ItemKind::ProjectReference))
+    {
+        return false;
+    }
+    let Some(include) = attribute(node, "Include") else {
+        return false;
+    };
+    if state.raw_reads_a_doubted_name(&include) {
+        return true;
+    }
+    let include_is_empty = || {
+        let (value, issues) = properties::substitute(&include, &state.lookup);
+        // An undefined read the walk shows exact is MSBuild's empty too.
+        issues.iter().all(|issue| {
+            matches!(issue, Issue::Undefined { name } if state.undefined_read_is_exact(name))
+        }) && value
+                .ignoring_trust()
+                .as_escaped()
+                .split(';')
+                .all(|fragment| fragment.trim().is_empty())
+    };
+    attribute(node, "Exclude").is_some_and(|raw| state.raw_reads_a_doubted_name(&raw))
+        && !include_is_empty()
 }
 
 /// Flag the reference list for the `<ProjectReference>` at

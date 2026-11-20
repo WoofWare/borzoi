@@ -755,6 +755,16 @@ fn the_arms_after_a_taken_one_are_not_probed() {
              <Choose><When{UNSUPPORTED_TRUE}><ItemGroup Condition=\"$(G) And Exists('not-reached')\">\
              <None Include=\"n\" /></ItemGroup></When></Choose></Project>"
         ),
+        // A nested `<Choose>` after hidden content (an import under a gate
+        // the walk cannot decide), whose first `<When>` holds whatever any
+        // name holds.
+        format!(
+            "<Project><Import Project=\"hidden.props\"{UNSUPPORTED_TRUE} />\
+             <Choose><When{UNSUPPORTED_TRUE}><Choose>\
+             <When Condition=\"true Or '$(Unknown)' != ''\"><PropertyGroup><Y>1</Y></PropertyGroup></When>\
+             <When Condition=\"Exists('not-reached')\"><PropertyGroup><Z>1</Z></PropertyGroup></When>\
+             </Choose></When></Choose></Project>"
+        ),
     ] {
         not_probed(&xml);
     }
@@ -867,6 +877,10 @@ fn a_dead_reference_reading_a_refused_name_costs_no_certainty() {
         // holds.
         "<ItemGroup><ProjectReference Include=\"B$( P).fsproj\" /></ItemGroup>".to_owned(),
         "<ItemGroup><ProjectReference Include=\"B$(P ).fsproj\" /></ItemGroup>".to_owned(),
+        // An `Exclude` reading it from an `Include` empty whatever any name
+        // holds: it excludes nothing.
+        "<ItemGroup><ProjectReference Include=\"$(OptionalProjects)\" Exclude=\"$(P)\" /></ItemGroup>"
+            .to_owned(),
         // A gate false whatever a doubted name holds, which the walk cannot
         // evaluate on the value it holds (`É` against `é`).
         format!(
