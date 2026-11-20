@@ -9,7 +9,7 @@ abbreviation_to_unknown_lower_case	certified: exact, FCS rejects [AbbreviationOr
 abbreviations	certified: exact []; unknown: exact []
 access	certified: exact []; unknown: exact []
 access_inherited	certified: exact []; unknown: exact []
-active_pattern_in_compound_binding	certified: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 2) [BindingPattern]; unknown: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 2) [UncertainAttribute,BindingPattern]
+active_pattern_in_compound_binding	certified: unread OutsideDomain(0, BindingHead); unknown: unread OutsideDomain(0, BindingHead)
 assembly_auto_open	certified: exact []; unknown: unread TypeProvider(0)
 assembly_auto_open_constant	certified: unread UnreadableAutoOpen(0); unknown: unread TypeProvider(0)
 assembly_auto_open_no_argument	certified: exact []; unknown: unread TypeProvider(0)
@@ -82,6 +82,7 @@ hash_nowarn	certified: exact []; unknown: exact []
 headerless	certified: exact []; unknown: exact []
 headerless_last_of_two	certified: exact []; unknown: exact []
 intrinsic_augmentation_class_let	certified: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 8) [ClassLetName]; unknown: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 8) [UncertainAttribute,ClassLetName]
+lender_beside_signature_pair	certified: exact [SignaturePair]; unknown: exact [SignaturePair]
 lender_under_suffixed_module	certified: covers surplus(prefix 2, entity 2, lends 1, lender 1, auto-open 0, extension 0) [ModuleSuffix]; unknown: covers surplus(prefix 2, entity 2, lends 1, lender 1, auto-open 0, extension 0) [UncertainAttribute,ModuleSuffix]
 local_alias_auto_open_FooAttributeAttribute_Foo	certified: exact, FCS rejects []; unknown: covers, FCS rejects surplus(prefix 0, entity 0, lends 1, lender 0, auto-open 0, extension 0) [UncertainAttribute] [FCS: FS39]
 local_alias_auto_open_FooAttributeAttribute_FooAttribute	certified: exact [UncertainAttribute]; unknown: exact [UncertainAttribute]

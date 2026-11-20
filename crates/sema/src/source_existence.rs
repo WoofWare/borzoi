@@ -2483,23 +2483,16 @@ impl Lines {
     }
 }
 
-/// Every identifier in `pat`, and every active pattern's name (`|Foo|_|`),
-/// with its offset: a superset of its binders.
+/// Every identifier in `pat`, with its offset: a superset of the binders of
+/// a certified pattern ([`certified_pattern`]), none of which holds an
+/// active pattern.
 fn pattern_idents(pat: &Pat) -> Vec<(String, TextSize)> {
-    let mut names: Vec<(String, TextSize)> = pat
-        .syntax()
+    pat.syntax()
         .descendants_with_tokens()
         .filter_map(|el| el.into_token())
         .filter(|t| t.kind() == SyntaxKind::IDENT_TOK)
         .map(|t| (id_text(&t).into_owned(), t.fcs_range().start()))
-        .collect();
-    names.extend(
-        pat.syntax()
-            .descendants()
-            .filter_map(borzoi_cst::syntax::ActivePatName::cast)
-            .map(|ap| (active_pattern_name(&ap), ap.syntax().text_range().start())),
-    );
-    names
+        .collect()
 }
 
 /// Whether a binding's pattern, when it names no single value
