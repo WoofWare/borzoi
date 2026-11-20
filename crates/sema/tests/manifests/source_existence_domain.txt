@@ -2,27 +2,28 @@
 # Regenerate with:
 #   BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-sema --test all source_existence_domain::every_leaf_form_is_read_or_declined_as_the_table_says
 domain_AugmentationHead_arity_less_generic	certified: unread OutsideDomain(0, AugmentationHead); unknown: unread OutsideDomain(0, AugmentationHead) [FCS: FS964,FS895,FS875]
-domain_AugmentationHead_generic	certified: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 1) []; unknown: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 1) []
+domain_AugmentationHead_generic	certified: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 43) []; unknown: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 43) []
 domain_AugmentationHead_global	certified: unread OutsideDomain(0, AugmentationHead); unknown: unread OutsideDomain(0, AugmentationHead)
 domain_AugmentationHead_local	certified: exact []; unknown: exact []
-domain_AugmentationHead_module_alias	certified: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 3) [AugmentationKind]; unknown: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 13) [UncertainAttribute,AugmentationKind]
+domain_AugmentationHead_module_alias	certified: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 53) [AugmentationKind]; unknown: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 53) [UncertainAttribute,AugmentationKind]
 domain_AugmentationHead_qualified	certified: unread OutsideDomain(0, AugmentationHead); unknown: unread OutsideDomain(0, AugmentationHead)
-domain_AugmentationHead_qualified_generic	certified: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 1) []; unknown: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 1) []
-domain_AugmentationHead_tuple	certified: covers, FCS rejects surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 5) [RejectedShape]; unknown: covers, FCS rejects surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 5) [RejectedShape] [FCS: FS3350]
-domain_AugmentationHead_under_written_arity	certified: covers, FCS rejects surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 3) []; unknown: covers, FCS rejects surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 3) [] [FCS: FS957]
-domain_BindingHead_active_pattern	certified: exact []; unknown: exact [UncertainAttribute]
+domain_AugmentationHead_qualified_generic	certified: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 43) []; unknown: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 43) []
+domain_AugmentationHead_tuple	certified: covers, FCS rejects surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 363) [RejectedShape]; unknown: covers, FCS rejects surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 363) [RejectedShape] [FCS: FS3350]
+domain_AugmentationHead_under_written_arity	certified: covers, FCS rejects surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 45) []; unknown: covers, FCS rejects surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 45) [] [FCS: FS957]
+domain_BindingHead_active_pattern	certified: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 8) []; unknown: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 8) [UncertainAttribute]
 domain_BindingHead_as	certified: unread OutsideDomain(0, BindingHead); unknown: unread OutsideDomain(0, BindingHead)
-domain_BindingHead_function	certified: exact []; unknown: exact [UncertainAttribute]
+domain_BindingHead_attributed	certified: unread OutsideDomain(0, BindingHead); unknown: unread OutsideDomain(0, BindingHead) [FCS: FS683]
+domain_BindingHead_function	certified: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 8) []; unknown: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 8) [UncertainAttribute]
 domain_BindingHead_list	certified: unread OutsideDomain(0, BindingHead); unknown: unread OutsideDomain(0, BindingHead)
 domain_BindingHead_named_fields	certified: unread OutsideDomain(0, BindingHead); unknown: unread OutsideDomain(0, BindingHead)
 domain_BindingHead_nested_tuple	certified: unread OutsideDomain(0, BindingHead); unknown: unread OutsideDomain(0, BindingHead)
-domain_BindingHead_nullary_active_pattern	certified: exact []; unknown: exact [UncertainAttribute]
-domain_BindingHead_operator	certified: exact []; unknown: exact [UncertainAttribute]
-domain_BindingHead_parenthesised_typed	certified: exact []; unknown: exact [UncertainAttribute]
+domain_BindingHead_nullary_active_pattern	certified: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 8) []; unknown: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 8) [UncertainAttribute]
+domain_BindingHead_operator	certified: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 8) []; unknown: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 8) [UncertainAttribute]
+domain_BindingHead_parenthesised_typed	certified: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 8) []; unknown: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 8) [UncertainAttribute]
 domain_BindingHead_record	certified: unread OutsideDomain(0, BindingHead); unknown: unread OutsideDomain(0, BindingHead)
-domain_BindingHead_tuple	certified: exact [BindingPattern]; unknown: exact [UncertainAttribute,BindingPattern]
-domain_BindingHead_upper_case_head	certified: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 4) [BindingPattern]; unknown: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 4) [UncertainAttribute,BindingPattern]
-domain_BindingHead_value	certified: exact []; unknown: exact [UncertainAttribute]
+domain_BindingHead_tuple	certified: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 16) [BindingPattern]; unknown: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 16) [UncertainAttribute,BindingPattern]
+domain_BindingHead_upper_case_head	certified: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 28) [BindingPattern]; unknown: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 28) [UncertainAttribute,BindingPattern]
+domain_BindingHead_value	certified: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 8) []; unknown: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 8) [UncertainAttribute]
 domain_ProvidedTarget_anonymous_record	certified: exact []; unknown: exact []
 domain_ProvidedTarget_array	certified: exact []; unknown: exact []
 domain_ProvidedTarget_function	certified: exact []; unknown: exact []
