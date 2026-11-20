@@ -5327,16 +5327,15 @@ fn gate_may_skip_property_writes(node: Node<'_, '_>) -> bool {
     {
         return true;
     }
-    // A `When` decides whether each later arm runs too, so every arm of its
-    // `<Choose>` counts.
+    // A `When` decides whether each later arm runs too, so its own arm and
+    // every later one count; an earlier arm was already false.
     ["When", "Otherwise"]
         .iter()
         .any(|tag| name.eq_ignore_ascii_case(tag))
-        && node
-            .parent_element()
-            .unwrap_or(node)
-            .descendants()
-            .any(|descendant| descendant.is_element() && writes(descendant.tag_name().name()))
+        && std::iter::successors(Some(node), |arm| arm.next_sibling_element()).any(|arm| {
+            arm.descendants()
+                .any(|descendant| descendant.is_element() && writes(descendant.tag_name().name()))
+        })
 }
 
 /// Result of evaluating a node's `Condition` attribute.
@@ -5592,7 +5591,6 @@ fn evaluate_condition_with_exemptions(
     // A gate over property writes the walk declines for the startup
     // directory may skip writes MSBuild makes.
     if !state.startup_directory_declined
-        && gate_may_skip_property_writes(node)
         && state.declines_for_startup(
             cond,
             matches!(
@@ -5601,6 +5599,7 @@ fn evaluate_condition_with_exemptions(
             ),
             current_file_dir,
         )
+        && gate_may_skip_property_writes(node)
     {
         state.startup_directory_declined = true;
     }

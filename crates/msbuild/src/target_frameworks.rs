@@ -79,10 +79,14 @@ pub fn target_frameworks_undecided(project: &ParsedProject) -> bool {
             crate::PropertyRead::Untrusted(_) | crate::PropertyRead::UnsetInexact(_)
         )
     };
+    // A plural that turns on the startup directory is judged by its list
+    // (`target_frameworks_undecided`): worlds may spell one list apart.
+    let plural_unknown = !matches!(
+        project.property("TargetFrameworks"),
+        crate::PropertyRead::Untrusted(crate::UntrustedCause::StartupDirectory(_))
+    ) && unknown("TargetFrameworks");
     project.target_frameworks.is_empty()
-        && (project.target_frameworks_undecided
-            || unknown("TargetFrameworks")
-            || unknown("TargetFramework"))
+        && (project.target_frameworks_undecided || plural_unknown || unknown("TargetFramework"))
 }
 
 /// MSBuild property names are case-insensitive, but

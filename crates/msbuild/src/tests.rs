@@ -12296,6 +12296,132 @@ fn a_condition_undecided_in_one_world_is_not_illegal() {
     );
 }
 
+/// A condition illegal on the value the walk holds, after a write skipped
+/// for the startup directory, is still judged: `X` is `a` where `seg/` is
+/// missing and unset where it is there, and neither has a second field
+/// (MSB4184 from both directories). Where the skipped write is `a/b`, MSBuild
+/// accepts the project without `seg/`: a possible rejection.
+#[test]
+#[cfg(not(windows))]
+fn an_illegal_condition_after_a_startup_decline_rejects() {
+    let project = |x: &str| {
+        parse(&format!(
+            r#"<Project><PropertyGroup>
+    <S>seg\a</S>
+    <X Condition="'$(S)' != 'seg/a'">{x}</X>
+  </PropertyGroup>
+  <PropertyGroup Condition="$(X.Split('/')[1]) == 'y'"><Mid>m</Mid></PropertyGroup>
+  <PropertyGroup><After>ok</After></PropertyGroup></Project>"#
+        ))
+    };
+    let p = project("a");
+    assert!(
+        p.rejection.is_some(),
+        "{:?} {:#?}",
+        p.property("After"),
+        p.diagnostics
+    );
+    assert_eq!(
+        project("a/b").rejection.map(|r| r.certainty),
+        Some(crate::RejectionCertainty::Possible)
+    );
+}
+
+/// After a startup decline, a value the walk is not certain of may supply an
+/// item function's `@` in an item's condition: `A` is `@` where `seg/` is
+/// missing, and MSBuild then calls `NoSuchFunction` (MSB4184).
+#[test]
+#[cfg(not(windows))]
+fn an_uncertain_at_in_an_item_condition_may_reject() {
+    let p = parse(
+        r#"<Project><PropertyGroup>
+    <S>seg\a</S>
+    <A Condition="'$(S)' != 'seg/a'">@</A>
+  </PropertyGroup>
+  <ItemGroup><Foo Include="x" /></ItemGroup>
+  <ItemGroup><Bar Include="y" Condition="'$(A)(Foo->NoSuchFunction())' == 'x'" /></ItemGroup>
+  <PropertyGroup><After>ok</After></PropertyGroup></Project>"#,
+    );
+    assert!(
+        p.rejection.is_some(),
+        "{:?} {:#?}",
+        p.property("After"),
+        p.diagnostics
+    );
+}
+
+/// An item's condition past the segment cap may still form an item function
+/// from plain references: `$(A)$(B)` is `@(Foo->NoSuchFunction())`.
+#[test]
+#[cfg(not(windows))]
+fn an_item_condition_past_the_cap_may_form_an_item_function() {
+    let cap = crate::properties::worlds::MAX_SEGMENTS + 1;
+    let writes: String = (0..cap).map(|i| format!("<s{i}>s{i}\\x</s{i}>")).collect();
+    let left: String = (0..cap).map(|i| format!("$(s{i})")).collect();
+    let p = parse(&format!(
+        r#"<Project><PropertyGroup>{writes}
+    <A>@</A>
+    <B>(Foo->NoSuchFunction())</B>
+  </PropertyGroup>
+  <ItemGroup><Foo Include="x" /></ItemGroup>
+  <ItemGroup><Bar Include="y" Condition="'{left}' == '$(A)$(B)'" /></ItemGroup>
+  <PropertyGroup><After>ok</After></PropertyGroup></Project>"#
+    ));
+    assert!(
+        p.rejection.is_some(),
+        "{:?} {:#?}",
+        p.property("After"),
+        p.diagnostics
+    );
+}
+
+/// Only the arms a `When` decides count: a property write in an earlier arm
+/// already false is no write the startup directory may skip, so a later
+/// coercion of an unrelated boolean the walk is unsure of claims nothing.
+#[test]
+#[cfg(not(windows))]
+fn an_earlier_false_arms_write_is_no_startup_decline() {
+    let p = parse(
+        r#"<Project><PropertyGroup>
+    <S>seg\a</S>
+    <B>false</B>
+    <B Condition="'É' == 'é'">true</B>
+  </PropertyGroup>
+  <Choose>
+    <When Condition="false"><PropertyGroup><Z>1</Z></PropertyGroup></When>
+    <When Condition="'$(S)' == 'seg/a'"><ItemGroup><Compile Include="a.fs" /></ItemGroup></When>
+  </Choose>
+  <PropertyGroup Condition="$(B)"><Mid>m</Mid></PropertyGroup>
+  <PropertyGroup><After>ok</After></PropertyGroup></Project>"#,
+    );
+    assert!(p.rejection.is_none(), "{:#?}", p.rejection);
+}
+
+/// A plural whose worlds differ in spelling but declare the same empty list
+/// declares no framework: no undecided list.
+#[test]
+#[cfg(not(windows))]
+fn an_agreed_empty_framework_list_is_decided() {
+    // `X.Split('9')[1]` is empty and `X.Split('8')[1]` is ` `.
+    let p = parse(&format!(
+        "<Project><PropertyGroup>{SPLIT_Q}
+    <L>$(Q.Length)</L>
+    <X>99 8 8</X>
+    <TargetFrameworks>;$(X.Split('$(L)')[1])</TargetFrameworks>
+  </PropertyGroup></Project>"
+    ));
+    assert!(
+        matches!(
+            p.property("TargetFrameworks"),
+            crate::PropertyRead::Untrusted(crate::UntrustedCause::StartupDirectory(_))
+        ),
+        "{:?}",
+        p.property("TargetFrameworks")
+    );
+    assert!(!p.target_frameworks_undecided);
+    assert!(!crate::target_frameworks_undecided(&p));
+}
+
 /// `Q` is `./seg/a//` where `seg` is a directory under MSBuild's startup
 /// directory, and `./seg/a/` elsewhere: the whole value's pass respells it
 /// only where `S`'s `\` survived. Each reader below that would act on one of

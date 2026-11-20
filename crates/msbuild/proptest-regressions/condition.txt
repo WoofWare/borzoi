@@ -12,3 +12,5 @@ cc fbada066fcf44aecb252ffb01653d77533773d9bf71dd8a63f637c2a3280c73d # shrinks to
 cc ddac3234c674073aa71298292043234900418196ae22799e0e047b4212a5aa54 # shrinks to source = "!('$(U)')", a = None, b = None, u = None, v = None
 cc a1ccc478978a594928e0c38a8f57f98d2977377aea9dfb152ee42785a9bdac6c # shrinks to source = "(('' == 'x$(U)' Or '' != 'true') And '' < 'x$(A)')", a = None, b = None, u = None, v = None
 cc 168845daa20ebc2ebc6b3a28519d034fbf194233193fc0ffd738858eb52991dd # shrinks to source = "(('' == '$(A.Substring(1))' Or true) And (true And '' < ''))", a = None, b = None, u = None, v = None
+cc c0c8c455287f7fe9c8a06e4540bd9bf41ca019b19be0c01c4bdf806d65bd92f3 # shrinks to source = "!('' == 'x$(U)')", a = None, b = None, u = None, v = None
+cc 771a63045e95ff977e6ec33bb00843250307075d72bc69cd366e4ba159395ad0 # shrinks to source = "(false Or '' == 'x$(U)')", a = None, b = None, u = None, v = None

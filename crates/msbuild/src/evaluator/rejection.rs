@@ -441,7 +441,10 @@ pub(super) fn import_failure_certainty(
 /// (`State::startup_directory_declined`): that write holds, in some world, a
 /// value the walk does not, under any name it is copied to, so there a
 /// condition that may throw on any value of a name the walk is not certain of
-/// ([`condition::may_throw`]) is a Possible site. No SDK write is declined so.
+/// ([`condition::may_throw`]) is a Possible site, whatever the condition's
+/// outcome on the values held, and so is any condition past the property pass
+/// that reads such a name, which may hold an item expression's `@` itself. No
+/// SDK write is declined so.
 pub(super) fn judge_condition_rejection(
     state: &mut State<'_>,
     condition: &str,
@@ -459,16 +462,39 @@ pub(super) fn judge_condition_rejection(
     });
     let doubted = |name: &str| !holds_a_value_msbuild_may(state, name);
     let uncertain = |name: &str| !directory_build::is_certain(state, name);
-    if outcome != condition::Outcome::Illegal
-        && state.startup_directory_declined
-        && properties::property_references(condition).any(uncertain)
-        && condition::may_throw(
+    // Reached only perhaps, it is Possible however its operands stand, and
+    // judging them would only probe the file system for nothing.
+    let certainly = reached
+        && outcome == condition::Outcome::Illegal
+        && condition::throws_whatever(
             condition,
             &state.lookup,
             probes,
             state.condition_site(),
             &uncertain,
-        )
+        );
+    if certainly {
+        state.note_rejection(
+            RejectionCertainty::Certain,
+            RejectionCause::IllegalCondition {
+                condition: condition.to_owned(),
+            },
+            span,
+        );
+        return;
+    }
+    // Past the property pass, such a name may itself hold the `@` or `%` of
+    // an item or metadata expression MSBuild then expands.
+    if state.startup_directory_declined
+        && properties::property_references(condition).any(uncertain)
+        && (state.condition_site() != condition::Site::PropertyPass
+            || condition::may_throw(
+                condition,
+                &state.lookup,
+                probes,
+                state.condition_site(),
+                &uncertain,
+            ))
     {
         state.note_rejection(
             RejectionCertainty::Possible,
@@ -487,34 +513,21 @@ pub(super) fn judge_condition_rejection(
     {
         return;
     }
-    // Reached only perhaps, it is Possible however its operands stand, and
-    // judging them would only probe the file system for nothing.
-    let certainly = reached
-        && outcome == condition::Outcome::Illegal
-        && condition::throws_whatever(
-            condition,
-            &state.lookup,
-            probes,
-            state.condition_site(),
-            &uncertain,
-        );
     // Short of that, evaluation threw, or stopped at an operand we cannot
     // evaluate, which may throw, or return a value that lets MSBuild reach
     // one it throws on with the values the walk holds. What an operand past
     // it reads from the file system may decide whether it throws, so the
     // judgement probes as the evaluation would have.
-    if certainly
-        || condition::may_throw_on_held(
-            condition,
-            &state.lookup,
-            probes,
-            state.condition_site(),
-            &uncertain,
-            &doubted,
-        )
-    {
+    if condition::may_throw_on_held(
+        condition,
+        &state.lookup,
+        probes,
+        state.condition_site(),
+        &uncertain,
+        &doubted,
+    ) {
         state.note_rejection(
-            certain_if(certainly),
+            RejectionCertainty::Possible,
             RejectionCause::IllegalCondition {
                 condition: condition.to_owned(),
             },

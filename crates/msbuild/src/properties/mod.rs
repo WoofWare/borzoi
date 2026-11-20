@@ -22,7 +22,7 @@
 //! MSBuild does a separate pre-pass that catches some of these, but phase
 //! 2 deliberately stays single-pass for predictability.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 pub(crate) mod escaping;
@@ -808,74 +808,67 @@ fn expand_in_every_world(
         result
     };
     let (value, issues) = match worlds::in_every_world(start, &mut run) {
+        // One world's expansion is every world's: its throws are thrown
+        // everywhere, and nothing it refuses turns on the startup directory.
+        Ok(Worlds::Same((value, issues))) => (Worlds::Same(value), issues),
         Ok(results) => {
-            // The first world's issues as they came, then any other world's
-            // it lacks.
             let worlds = results.values();
-            let mut issues: Vec<Issue> = worlds[0].1.clone();
-            if worlds.len() > 1 {
-                let mut seen: std::collections::HashSet<Issue> = issues.iter().cloned().collect();
-                for (_, world_issues) in &worlds[1..] {
-                    for issue in world_issues {
-                        if seen.insert(issue.clone()) {
-                            issues.push(issue.clone());
+            // For each expression some world throws on: how many worlds
+            // throw on it, and what any of them read before it threw (in
+            // order of first reading).
+            let mut thrown: HashMap<&str, (usize, Vec<String>, HashSet<&str>)> = HashMap::new();
+            for (_, world_issues) in &worlds {
+                let mut counted: HashSet<&str> = HashSet::new();
+                for issue in world_issues {
+                    if let Issue::Throws {
+                        expression, reads, ..
+                    } = issue
+                    {
+                        let entry = thrown.entry(expression.as_str()).or_default();
+                        if counted.insert(expression.as_str()) {
+                            entry.0 += 1;
                         }
-                    }
-                }
-            }
-            // A throw some world does not make is one MSBuild may not make,
-            // and one rests on what any world read before it threw.
-            let thrown_in = |world_issues: &[Issue], thrown: &str| {
-                world_issues.iter().any(|issue| {
-                    matches!(issue, Issue::Throws { expression, .. } if expression == thrown)
-                })
-            };
-            let reads_before = |thrown: &str| {
-                let mut all: Vec<String> = Vec::new();
-                for (_, world_issues) in &worlds {
-                    for issue in world_issues {
-                        if let Issue::Throws {
-                            expression, reads, ..
-                        } = issue
-                            && expression == thrown
-                        {
-                            for name in reads {
-                                if !all.contains(name) {
-                                    all.push(name.clone());
-                                }
+                        for name in reads {
+                            if entry.2.insert(name.as_str()) {
+                                entry.1.push(name.clone());
                             }
                         }
                     }
                 }
-                all
-            };
-            let mut merged: Vec<Issue> = Vec::with_capacity(issues.len());
-            for mut issue in issues {
-                if let Issue::Throws {
-                    expression,
-                    reads,
-                    everywhere,
-                } = &mut issue
-                {
-                    *everywhere = worlds.iter().all(|(_, w)| thrown_in(w, expression));
-                    *reads = reads_before(expression);
-                }
-                if !merged.contains(&issue) {
-                    merged.push(issue);
+            }
+            // The first world's issues as they came, then any other world's
+            // it lacks. A throw some world does not make is one MSBuild may
+            // not make, and one rests on what any world read before it threw.
+            let mut issues: Vec<Issue> = Vec::new();
+            let mut seen: HashSet<Issue> = HashSet::new();
+            for (_, world_issues) in &worlds {
+                for issue in world_issues {
+                    let issue = match issue {
+                        Issue::Throws { expression, .. } => {
+                            let (throwing, reads, _) = &thrown[expression.as_str()];
+                            Issue::Throws {
+                                expression: expression.clone(),
+                                reads: reads.clone(),
+                                everywhere: *throwing == worlds.len(),
+                            }
+                        }
+                        other => other.clone(),
+                    };
+                    if seen.insert(issue.clone()) {
+                        issues.push(issue);
+                    }
                 }
             }
-            let mut issues = merged;
             // An expansion some world refuses (an unsupported expression, an
             // undefined name) that the world where no segment is a directory
             // does not is declined for the startup directory: knowing that
             // world is MSBuild's, the walk would have its value. One that
             // world refuses too is refused whatever the startup directory.
-            let refuses = |issue: &Issue| !matches!(issue, Issue::Throws { .. });
-            let absent = &results.absent_everywhere().1;
+            let absent: HashSet<&Issue> = results.absent_everywhere().1.iter().collect();
             let refused_for_the_start = worlds.iter().any(|(_, world_issues)| {
                 world_issues
                     .iter()
-                    .any(|issue| refuses(issue) && !absent.contains(issue))
+                    .any(|issue| !matches!(issue, Issue::Throws { .. }) && !absent.contains(issue))
             });
             if refused_for_the_start {
                 issues.push(Issue::PathAdjustmentUndecided {

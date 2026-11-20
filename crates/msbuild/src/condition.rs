@@ -822,8 +822,12 @@ fn judge_leaf_in_every_world(
             };
             Judgement::of(None, throws, values.iter().any(|j| j.unevaluated))
         }
+        // In an item's condition, a substitution may form an item or
+        // metadata expression the world left unenumerated would expand.
         Err(worlds::TooManySegments) => {
-            let throws = if leaf_may_throw_on_some_value(expr) {
+            let throws = if leaf_may_throw_on_some_value(expr)
+                || (fs.site == Site::ItemPass && leaf_substitutes(expr))
+            {
                 Throws::Maybe
             } else {
                 Throws::Never
