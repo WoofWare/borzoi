@@ -123,12 +123,14 @@
 ///
 ///   {"op":"rejectionCode","xml":s,"path":s}
 ///     -> {"ok":true}                     // MSBuild evaluated the project
-///      | {"ok":false,"code":s}           // MSBuild rejects it, with this code
+///      | {"ok":false,"code":s,"message":s,"line":n,"column":n}
+///                                        // MSBuild rejects it, so, there
 ///     The design-time evaluation of the document as the file at `path`, as
 ///     `project` with `"designTime":true` evaluates it, reporting the
-///     `InvalidProjectFileException`'s error code (`MSB4184`, …), for a
-///     differential that grades which refusal rejected the project
-///     (`respondRejectionCode`).
+///     `InvalidProjectFileException`'s error code (`MSB4184`, …; `null` for
+///     an XML error, whose message stands for it) and where in the file it
+///     points, for a differential that grades which refusal rejected the
+///     project (`respondRejectionCode`).
 ///
 ///   {"op":"globalName","name":s}
 ///     -> {"accepted":true}
@@ -674,7 +676,12 @@ let private respondRejectionCode (root: JsonElement) : string =
         Project(path, globalTable null, null, collection) |> ignore
         JsonSerializer.Serialize {| ok = true |}
     with :? InvalidProjectFileException as e ->
-        JsonSerializer.Serialize {| ok = false; code = e.ErrorCode; message = e.BaseMessage |}
+        JsonSerializer.Serialize
+            {| ok = false
+               code = e.ErrorCode
+               message = e.BaseMessage
+               line = e.LineNumber
+               column = e.ColumnNumber |}
 
 /// The `globalName` op: whether MSBuild takes `name` as a global property name,
 /// or the exception it refuses it with. MSBuild refuses a reserved name

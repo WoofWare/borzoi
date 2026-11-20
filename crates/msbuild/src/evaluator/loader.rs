@@ -192,13 +192,36 @@ struct Loader {
 }
 
 /// An element's or attribute's name as `XmlDocument` reads it.
-fn qname<'input>(node: Node<'_, 'input>) -> &'input str {
+pub(super) fn qname<'input>(node: Node<'_, 'input>) -> &'input str {
     let source = node.document().input_text();
     let tag = &source[node.range().start + 1..];
     let end = tag
         .find(|c: char| c.is_ascii_whitespace() || c == '/' || c == '>')
         .unwrap_or(tag.len());
     &tag[..end]
+}
+
+/// The first key of `keys` equal to an earlier one: `(earlier, later)`, the
+/// earliest such `later` and the first key it equals, in `O(n log n)`
+/// comparisons, each counted (`cost::WalkCosts::name_comparisons`).
+pub(super) fn first_repeat<K: Ord>(keys: &[K]) -> Option<(usize, usize)> {
+    let mut order: Vec<usize> = (0..keys.len()).collect();
+    order.sort_by(|&a, &b| {
+        crate::cost::count(|costs| costs.name_comparisons += 1);
+        keys[a].cmp(&keys[b]).then(a.cmp(&b))
+    });
+    // Equal keys sit together, in their order: each run's first two are a
+    // repeat.
+    let mut found: Option<(usize, usize)> = None;
+    let mut run_start = 0;
+    for (i, pair) in order.windows(2).enumerate() {
+        if keys[pair[0]] != keys[pair[1]] {
+            run_start = i + 1;
+        } else if i == run_start && found.is_none_or(|(_, later)| pair[1] < later) {
+            found = Some((pair[0], pair[1]));
+        }
+    }
+    found
 }
 
 /// The qualified names of the attributes in `node`'s start tag, namespace
@@ -644,10 +667,15 @@ impl Loader {
         for name in attribute_names(group) {
             self.unrecognized_attribute(group, name)?;
         }
-        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
-        for parameter in self.children(group)? {
+        let parameters = self.children(group)?;
+        let names: Vec<&str> = parameters
+            .iter()
+            .map(|parameter| qname(*parameter))
+            .collect();
+        let repeat = first_repeat(&names);
+        for (at, parameter) in parameters.into_iter().enumerate() {
             let name = qname(parameter);
-            if seen.contains(name) {
+            if repeat.is_some_and(|(_, second)| second == at) {
                 return Err(malformed(parameter, "a second parameter of one name"));
             }
             self.attributes(parameter, PARAMETER_ATTRIBUTES)?;
@@ -659,7 +687,6 @@ impl Loader {
                     parameter,
                 ));
             }
-            seen.insert(name);
         }
         Ok(())
     }

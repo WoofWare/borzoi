@@ -695,25 +695,20 @@ fn wide_parameter_group(width: usize) -> String {
     )
 }
 
-/// A `<UsingTask>`'s parameters are registered, and their names checked for a
-/// case-folded collision, in one pass: four times the parameters cost about
-/// four times the time, where checking each against every earlier one costs
-/// sixteen. Timed as a ratio, as [`wide_unheld_reads_are_struck_in_one_pass`]
-/// is.
+/// A `<UsingTask>`'s parameter names are checked for a repeat, as the loader
+/// keys them and as the registration folds them, by sorting them
+/// (`loader::first_repeat`): `n` parameters cost `O(n log n)` comparisons,
+/// where checking each against every earlier one costs `n(n - 1) / 2`.
+/// Counted, so no load on the machine moves it.
 #[test]
 fn a_wide_parameter_group_is_registered_in_one_pass() {
-    let time = |width: usize| {
-        let body = wide_parameter_group(width);
-        let start = std::time::Instant::now();
-        evaluate_project(body);
-        start.elapsed()
-    };
-    time(1_000);
-    let narrow = time(5_000);
-    let wide = time(20_000);
-    let ratio = wide.as_secs_f64() / narrow.as_secs_f64().max(1e-6);
-    assert!(
-        ratio < 10.0,
-        "4× the parameters took {ratio:.1}× the time ({narrow:?} → {wide:?})"
-    );
+    for width in [500_u64, 2_000] {
+        let comparisons = walk_costs(wide_parameter_group(width as usize)).name_comparisons;
+        let log = u64::from(width.ilog2()) + 1;
+        assert!(comparisons > 0, "{width} parameters made no comparison");
+        assert!(
+            comparisons <= 4 * width * log,
+            "{width} parameters took {comparisons} comparisons"
+        );
+    }
 }

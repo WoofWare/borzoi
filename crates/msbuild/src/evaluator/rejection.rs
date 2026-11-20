@@ -1048,6 +1048,11 @@ enum RegistrationValue {
     /// hold of. Whether MSBuild refuses its own value is the judgement over
     /// the values a name may hold (#1051).
     Unheld,
+    /// A single property function, the whole of the value, that returns a
+    /// boolean the walk does not fold (`Issue::ReturnsBoolean`): `True` or
+    /// `False`. `operands_certain`: whether every name it reads is one the
+    /// walk is certain of, so that MSBuild computes it on the walk's values.
+    SomeBoolean { operands_certain: bool },
 }
 
 /// The value MSBuild registers `raw` as, expanded with the file system where
@@ -1068,9 +1073,23 @@ fn registration_value(raw: &str, state: &State<'_>) -> RegistrationValue {
     }) {
         return RegistrationValue::Unheld;
     }
+    // A function returning a boolean the walk does not fold, standing alone:
+    // `True` or `False`.
+    let mut expressions = properties::expression_texts(raw);
+    if !value.contains("@(")
+        && !issues.is_empty()
+        && issues
+            .iter()
+            .all(|issue| matches!(issue, properties::Issue::ReturnsBoolean { .. }))
+        && expressions.next() == Some(raw.trim())
+    {
+        return RegistrationValue::SomeBoolean {
+            operands_certain: operands_are_certain(state, raw),
+        };
+    }
     // A value MSBuild computes without throwing that the walk does not (a
-    // host's architecture, a boolean it cannot fold), or an item list MSBuild
-    // expands into it: any value.
+    // host's architecture, a boolean beside other text), or an item list
+    // MSBuild expands into it: any value.
     if value.contains("@(")
         || issues.iter().any(|issue| {
             matches!(
@@ -1132,18 +1151,36 @@ const PARAMETER_TYPES: &[&str] = &[
 ];
 
 /// Whether MSBuild expands `raw` to a value that is not empty, without
-/// throwing, whatever the names it reads hold: literal text, beside bare
-/// property references alone (an item list may expand to nothing, and a
-/// function may throw on a value the walk does not hold).
+/// throwing, whatever the names it reads hold. Bare property references
+/// alone never throw, but the values they stand for may hold anything, an
+/// item list's opening among them, which MSBuild expands with the text around
+/// it once properties are expanded (`$(At)(Nothing)`, `At` holding `@`, is
+/// `@(Nothing)`, which is empty). So it holds where literal text begins the
+/// value with a character that no item list can take in (not `@`, as nothing
+/// comes before it), or ends it with one (not `)`, as nothing comes after
+/// it). One scan over `raw`.
 fn certainly_not_empty(raw: &str) -> bool {
-    let mut literal = raw.to_owned();
+    if raw.contains("@(") {
+        return false;
+    }
+    let (mut first, mut last, mut count) = (None, None, 0);
     for expression in properties::expression_texts(raw) {
         if !properties::is_referenceable_name(&expression[2..expression.len() - 1]) {
             return false;
         }
-        literal = literal.replacen(expression, "", 1);
+        let at = expression.as_ptr() as usize - raw.as_ptr() as usize;
+        first.get_or_insert(at);
+        last = Some(at + expression.len());
+        count += 1;
     }
-    !literal.is_empty() && !literal.contains("@(")
+    // An opener without its close is not a reference, and not one MSBuild
+    // need read as literal text.
+    if raw.matches("$(").count() != count {
+        return false;
+    }
+    let begins = first != Some(0) && raw.chars().next().is_some_and(|c| c != '@');
+    let ends = last != Some(raw.len()) && raw.chars().next_back().is_some_and(|c| c != ')');
+    begins || ends
 }
 
 /// What MSBuild's registration of a task makes of a value.
@@ -1191,8 +1228,10 @@ enum Registered {
 /// rejection whose cause the walk cannot name, so it is only possible.
 fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
     let task = attribute(node, "TaskName").unwrap_or_default().into_owned();
-    // Whether MSBuild reaches the next step for certain.
-    let mut reach = reached;
+    // Whether MSBuild reaches the next step for certain: not past a construct
+    // before the task it may already have stopped at, an earlier task's step
+    // among them.
+    let mut reach = reached && state.rejection.is_none();
     // `rule` judges the value; `non_empty` says it takes any value that is
     // not empty, which the walk may know of a value it does not hold.
     let step = |state: &mut State<'_>,
@@ -1207,10 +1246,18 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
         let passes = match (&value, rule) {
             (RegistrationValue::Certain(value), Some(rule)) => rule(value) == Registered::Takes,
             (RegistrationValue::Certain(_), None) => true,
+            (
+                RegistrationValue::SomeBoolean {
+                    operands_certain: true,
+                },
+                rule,
+            ) => rule.is_none_or(|rule| {
+                rule("True") == Registered::Takes && rule("False") == Registered::Takes
+            }),
             _ => non_empty && certainly_not_empty(raw),
         };
         if let Some(rule) = rule {
-            judge_registered(state, &task, value, span, attribute_name, rule, *reach);
+            judge_registered(state, &task, raw, value, span, attribute_name, rule, *reach);
         }
         *reach &= passes;
     };
@@ -1228,12 +1275,15 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
             Registered::Refuses
         }
     };
-    // The children MSBuild parses: an element the loader does not take is
-    // one a parse configuration may have it skip, or one it refuses the
-    // file for (`judge_load_time`).
+    // The children MSBuild parses, by their names as written, prefix and all
+    // (`ProjectParser`): an element the loader does not take is one a parse
+    // configuration may have it skip, or one it refuses the file for
+    // (`judge_load_time`).
+    let named =
+        |child: &Node<'_, '_>, name: &str| child.is_element() && loader::qname(*child) == name;
     let children: Vec<Node<'_, '_>> = node
         .children()
-        .filter(|child| child.has_tag_name("Task") || child.has_tag_name("ParameterGroup"))
+        .filter(|child| named(child, "Task") || named(child, "ParameterGroup"))
         .collect();
     let others = node.children().filter(Node::is_element).count() > children.len();
     let factory = |value: &str| {
@@ -1312,7 +1362,7 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
         ),
         _ => {}
     }
-    if let Some(body) = children.last().filter(|child| child.has_tag_name("Task")) {
+    if let Some(body) = children.last().filter(|child| named(child, "Task")) {
         let body_reached = match attribute(*body, "Evaluate") {
             None => Some(reach),
             Some(evaluate) => {
@@ -1362,12 +1412,18 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
     }
     if let Some(group) = children
         .first()
-        .filter(|child| child.has_tag_name("ParameterGroup"))
+        .filter(|child| named(child, "ParameterGroup"))
     {
+        let parameters: Vec<Node<'_, '_>> = group.children().filter(Node::is_element).collect();
         // The names MSBuild keys the parameters by, folded as
-        // `OrdinalIgnoreCase` folds them: the loader admits only ASCII names.
-        let mut seen: HashMap<String, String> = HashMap::new();
-        for parameter in group.children().filter(Node::is_element) {
+        // `OrdinalIgnoreCase` folds them (the loader admits only ASCII
+        // names): it fails on the first that folds to an earlier one.
+        let folded: Vec<String> = parameters
+            .iter()
+            .map(|parameter| loader::qname(*parameter).to_ascii_lowercase())
+            .collect();
+        let collision = loader::first_repeat(&folded);
+        for (at, parameter) in parameters.iter().copied().enumerate() {
             for (name, rule) in [
                 (
                     "ParameterType",
@@ -1388,20 +1444,18 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
                     );
                 }
             }
-            let name = parameter.tag_name().name();
-            if let Some(first) = seen.get(&name.to_ascii_lowercase()) {
+            if let Some((first, _)) = collision.filter(|(_, second)| *second == at) {
                 state.note_rejection(
                     certain_if(reach),
                     RejectionCause::UsingTaskParameterCollision {
                         task: task.clone(),
-                        first: first.clone(),
-                        second: name.to_owned(),
+                        first: loader::qname(parameters[first]).to_owned(),
+                        second: loader::qname(parameter).to_owned(),
                     },
                     parameter.range(),
                 );
                 reach = false;
-            } else {
-                seen.insert(name.to_ascii_lowercase(), name.to_owned());
+                break;
             }
         }
     }
@@ -1412,15 +1466,17 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
     }
 }
 
-/// Judge `value`, as the walk holds it, of `attribute_name` of the
+/// Judge `value`, as the walk holds it (written `raw_text`), of `attribute_name` of the
 /// `<UsingTask>` of `task`, at `span`, which MSBuild registers as `reached`
 /// says, by what its registration makes of the value (`rule`): certain where
 /// the value is certain and the registration reached for certain; a refusal
 /// on a value the walk doubts, or one it cannot tell, possible; one on a
 /// value it holds none of no site (#1051).
+#[allow(clippy::too_many_arguments)]
 fn judge_registered(
     state: &mut State<'_>,
     task: &str,
+    raw_text: &str,
     value: RegistrationValue,
     span: Range<usize>,
     attribute_name: &str,
@@ -1437,6 +1493,15 @@ fn judge_registered(
             (false, value, verdict)
         }
         RegistrationValue::Opaque(value) => (false, value, Registered::Unknown),
+        RegistrationValue::SomeBoolean { .. } => {
+            let verdict = if rule("True") == Registered::Takes && rule("False") == Registered::Takes
+            {
+                Registered::Takes
+            } else {
+                Registered::Unknown
+            };
+            (false, raw_text.to_owned(), verdict)
+        }
         RegistrationValue::Unheld => return,
     };
     let certainty = match verdict {

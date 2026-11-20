@@ -844,6 +844,18 @@ impl Oracle {
         xml: &str,
         path: &Path,
     ) -> Result<Option<String>, String> {
+        Ok(self
+            .design_time_rejection(xml, path)?
+            .map(|rejection| rejection.code))
+    }
+
+    /// [`Self::design_time_rejection_code`], with where in `xml` MSBuild's
+    /// exception points.
+    pub fn design_time_rejection(
+        &mut self,
+        xml: &str,
+        path: &Path,
+    ) -> Result<Option<DesignTimeRejection>, String> {
         let line = serde_json::to_string(&serde_json::json!({
             "op": "rejectionCode",
             "xml": xml,
@@ -859,9 +871,13 @@ impl Oracle {
             Some(true) => None,
             // MSBuild's own XML errors carry no code: the message stands for
             // it.
-            _ => Some(match response["code"].as_str() {
-                Some(code) => code.to_owned(),
-                None => format!("no code: {}", response["message"]),
+            _ => Some(DesignTimeRejection {
+                code: match response["code"].as_str() {
+                    Some(code) => code.to_owned(),
+                    None => format!("no code: {}", response["message"]),
+                },
+                line: response["line"].as_u64().unwrap_or(0) as usize,
+                column: response["column"].as_u64().unwrap_or(0) as usize,
             }),
         })
     }
@@ -1201,6 +1217,19 @@ pub struct OracleItem {
 /// Fixed seeds keep every differential run identical, so a failure reproduces
 /// exactly; the *random* exploration lives in the proptest file.
 pub struct SplitMix64(pub u64);
+
+/// How MSBuild's design-time evaluation rejected a project
+/// ([`Oracle::design_time_rejection`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DesignTimeRejection {
+    /// The exception's error code (`MSB4184`, …), or `no code: ` and its
+    /// message where it has none.
+    pub code: String,
+    /// The 1-based line it points at, 0 for none.
+    pub line: usize,
+    /// The 1-based column it points at, 0 for none.
+    pub column: usize,
+}
 
 impl SplitMix64 {
     pub fn next(&mut self) -> u64 {
