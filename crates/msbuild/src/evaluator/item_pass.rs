@@ -153,6 +153,9 @@ pub(super) struct DeferredItemGroup {
     /// decide) that MSBuild may: judged in the item pass, against the final
     /// property table, and not evaluated ([`State::defer_judgement`]).
     judge_only: bool,
+    /// For a judge-only group, the names written on its path before it,
+    /// whose value there the walk does not hold.
+    unheld: Vec<String>,
 }
 
 impl<'r> State<'r> {
@@ -230,6 +233,11 @@ impl<'r> State<'r> {
                 DeferredFileKey::Imported(index)
             }
         };
+        let unheld = if judge_only {
+            self.speculatively_written()
+        } else {
+            Vec::new()
+        };
         self.deferred_item_groups.push(DeferredItemGroup {
             kind,
             file,
@@ -239,6 +247,7 @@ impl<'r> State<'r> {
             in_sdk_subtree: self.in_sdk_subtree,
             reach_certain,
             judge_only,
+            unheld,
         });
     }
 }
@@ -275,7 +284,9 @@ pub(super) fn replay_deferred_item_groups(entry_doc: &Document<'_>, state: &mut 
         // MSBuild evaluates the group's conditions in this pass, against the
         // final property table: judged here, before the group is walked.
         let judge = |node: Node<'_, '_>, dir: &Path, state: &mut State<'_>| {
-            rejection::judge_deferred(node, dir, group.reach_certain, state);
+            state.judge_from_path(&group.unheld, |state| {
+                rejection::judge_deferred(node, dir, group.reach_certain, state);
+            });
         };
         match group.file {
             DeferredFileKey::Entry => {

@@ -245,15 +245,16 @@ impl State<'_> {
             .is_some_and(|speculation| speculation.unheld.contains(&name.to_ascii_lowercase()))
     }
 
-    /// Open a speculative walk of content the walk does not take: writes the
-    /// judgement makes there ([`speculative_write`]) are seen by what follows
-    /// on that path, until the outermost one closes.
+    /// Open a walk of content the walk does not take: what a write there
+    /// names ([`speculative_write`]) is unknown to what follows on that path,
+    /// until the outermost walk closes. MSBuild's value on that path is the
+    /// judgement over the values a name may hold (#1009's second stage); the
+    /// value the walk holds is not it.
     fn open_speculation(&mut self) {
         match &mut self.speculation {
             Some(speculation) => speculation.depth += 1,
             None => {
                 self.speculation = Some(Speculation {
-                    saved: self.lookup.clone(),
                     unheld: HashSet::new(),
                     depth: 1,
                 });
@@ -261,64 +262,46 @@ impl State<'_> {
         }
     }
 
-    /// Close one speculative walk, restoring the table at the outermost.
+    /// Close one walk of content the walk does not take.
     fn close_speculation(&mut self) {
         let speculation = self.speculation.as_mut().expect("a speculation is open");
         speculation.depth -= 1;
         if speculation.depth == 0 {
-            let speculation = self.speculation.take().expect("a speculation is open");
-            self.lookup = speculation.saved;
+            self.speculation = None;
         }
+    }
+
+    /// The names written on the path the judgement walks now, for an item
+    /// group from it judged later ([`State::defer_judgement`]).
+    pub(super) fn speculatively_written(&self) -> Vec<String> {
+        self.speculation
+            .as_ref()
+            .map(|speculation| speculation.unheld.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Judge, as [`judge_deferred`] does, an item group from content the walk
+    /// does not take, with `unheld` the names written on its path before it.
+    pub(super) fn judge_from_path(
+        &mut self,
+        unheld: &[String],
+        judge: impl FnOnce(&mut State<'_>),
+    ) {
+        let saved = self.speculation.replace(Speculation {
+            unheld: unheld.iter().cloned().collect(),
+            depth: 1,
+        });
+        judge(self);
+        self.speculation = saved;
     }
 }
 
-/// On the speculative path, the write at `node` (a property element MSBuild
-/// takes as its gate says): a gate certainly true there with a body the walk
-/// computes binds its value for what follows on the path; any other leaves
-/// the name's value unknown, unless the gate is certainly false.
+/// On the path the judgement walks, the write at `node`: its name's value is
+/// unknown to what follows there, whether or not its gate holds.
 fn speculative_write(node: Node<'_, '_>, state: &mut State<'_>) {
-    let name = node.tag_name().name().to_owned();
-    // Decided without the file system: the speculative path probes nothing
-    // for itself, so an `Exists` leaves the gate undecided there.
-    let unknown = |name: &str| !directory_build::is_certain(state, name);
-    let taken = match attribute(node, "Condition") {
-        None => Some(true),
-        Some(condition) => match condition::decide_without(
-            &condition,
-            &state.lookup,
-            None,
-            state.condition_site(),
-            &unknown,
-        ) {
-            condition::Decision::Decided(value) => Some(value),
-            _ => None,
-        },
-    };
-    if taken == Some(false) {
-        return;
-    }
-    let value = (taken == Some(true))
-        .then(|| collect_element_text(node))
-        .flatten()
-        .and_then(|text| {
-            let (value, issues) = if state.follow_imports {
-                properties::substitute_with_fs(&text, &state.lookup, state.observer)
-            } else {
-                properties::substitute(&text, &state.lookup)
-            };
-            // A speculative value: its trust is the path's, which the
-            // judgement reads as never certain (`reached` is false there).
-            issues.is_empty().then(|| value.into_ignoring_trust())
-        });
-    let speculation = state.speculation.as_mut().expect("a speculation is open");
-    match value {
-        Some(value) => {
-            speculation.unheld.remove(&name.to_ascii_lowercase());
-            state.lookup.insert_expanded(name, value);
-        }
-        None => {
-            speculation.unheld.insert(name.to_ascii_lowercase());
-        }
+    let name = node.tag_name().name().to_ascii_lowercase();
+    if let Some(speculation) = state.speculation.as_mut() {
+        speculation.unheld.insert(name);
     }
 }
 
@@ -774,22 +757,25 @@ pub(super) fn judge_whens(
 ) {
     let entry_dir = state.entry_project_dir.clone();
     let mut reach = Some(reached);
+    // Each branch starts from what the path held before the `<Choose>`; what
+    // follows it on the path, from what any of them wrote.
+    let mut written = HashSet::new();
     for when in node
         .children()
         .filter(|c| c.has_tag_name("When"))
         .skip(from)
     {
         let Some(at) = reach else {
-            return;
+            break;
         };
         match judge_gate(when, &entry_dir, at, state) {
             Judged::Decided(true) => {
-                judge_branch(when, dir, at, state);
+                written.extend(judge_branch(when, dir, at, state));
                 reach = None;
             }
             Judged::Decided(false) => {}
             Judged::Undecided => {
-                judge_branch(when, dir, false, state);
+                written.extend(judge_branch(when, dir, false, state));
                 reach = Some(false);
             }
         }
@@ -797,16 +783,36 @@ pub(super) fn judge_whens(
     if let Some(at) = reach
         && let Some(otherwise) = node.children().find(|c| c.has_tag_name("Otherwise"))
     {
-        judge_branch(otherwise, dir, at, state);
+        written.extend(judge_branch(otherwise, dir, at, state));
+    }
+    if let Some(speculation) = state.speculation.as_mut() {
+        speculation.unheld.extend(written);
     }
 }
 
 /// Judge what the `<When>` or `<Otherwise>` at `branch` holds, which MSBuild
-/// evaluates as `reached` says.
-pub(super) fn judge_branch(branch: Node<'_, '_>, dir: &Path, reached: bool, state: &mut State<'_>) {
+/// evaluates as `reached` says, from what the path held before it. The names
+/// it writes, which it leaves the path as it found it without.
+pub(super) fn judge_branch(
+    branch: Node<'_, '_>,
+    dir: &Path,
+    reached: bool,
+    state: &mut State<'_>,
+) -> HashSet<String> {
     state.open_speculation();
+    let before = state
+        .speculation
+        .as_ref()
+        .map(|speculation| speculation.unheld.clone())
+        .unwrap_or_default();
     judge_branch_children(branch, dir, reached, state);
+    let mut written = HashSet::new();
+    if let Some(speculation) = state.speculation.as_mut() {
+        written = speculation.unheld.difference(&before).cloned().collect();
+        speculation.unheld = before;
+    }
     state.close_speculation();
+    written
 }
 
 /// [`judge_branch`] within its speculative walk.
@@ -851,6 +857,14 @@ const USING_TASK_EXPANDED: &[&str] = &[
 fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
     for name in USING_TASK_EXPANDED {
         if let Some(text) = attribute(node, name) {
+            // MSBuild turns `AssemblyFile`'s own `\` into `/` before it expands
+            // it (`ProjectUsingTaskElement.AssemblyFile`, `FixFilePath`), as an
+            // import's `Project`.
+            let text = if *name == "AssemblyFile" {
+                text.replace('\\', "/")
+            } else {
+                text.into_owned()
+            };
             judge_unwalked_text(state, &text, reached, node.range());
         }
     }
@@ -899,12 +913,16 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
                             Some(body) => {
                                 judge_unwalked_text(state, &body, body_reached, child.range());
                             }
+                            // An expression may be spelt with a reference
+                            // (`&#36;(…)`), so any `$` or character reference
+                            // in the source may be one.
                             None => {
                                 let source = &child.document().input_text()[child.range()];
-                                if let Some(expression) =
-                                    properties::expression_texts(source).next()
-                                {
-                                    let expression = expression.to_owned();
+                                if source.contains('$') || source.contains("&#") {
+                                    let expression = properties::expression_texts(source)
+                                        .next()
+                                        .unwrap_or(source)
+                                        .to_owned();
                                     state.note_possible_rejection(
                                         RejectionCause::ThrowingExpression { expression },
                                         child.range(),
@@ -920,30 +938,35 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
     }
 }
 
-/// The text MSBuild expands of the inline task body at `task`, where it is
-/// text alone: its text nodes, as MSBuild reads them (`InnerText`). `None`
-/// where it holds an element, which MSBuild expands as serialized XML
-/// (`InnerXml`: entities kept escaped, comments included), or a text node
-/// `document::text` does not read as MSBuild does.
+/// The text MSBuild expands of the inline task body at `task`, where it holds
+/// text, CDATA sections and comments alone: its text and sections joined, as
+/// MSBuild reads them (`InnerText`; `<![CDATA[$]]>(P[9])` is `$(P[9])`).
+/// `None` where it holds an element or a processing instruction, which
+/// MSBuild expands as serialized XML ([`task_inner_xml`]).
 fn task_body(task: Node<'_, '_>) -> Option<String> {
-    if task.children().any(|child| child.is_element()) {
-        return None;
-    }
     let mut body = String::new();
-    for child in task.children().filter(Node::is_text) {
-        body.push_str(&crate::document::text(child)?);
+    for content in crate::document::element_content(task)? {
+        match content {
+            crate::document::Content::Text { value, whitespace } => {
+                if !whitespace {
+                    body.push_str(&value);
+                }
+            }
+            crate::document::Content::CData(text) => body.push_str(text),
+            crate::document::Content::Comment(_) => {}
+        }
     }
     Some(body)
 }
 
 /// The inline task body at `task`, which holds an element, as MSBuild
 /// expands it: its inner XML as `XmlDocument` serializes it. Respelt from the
-/// source: a comment or CDATA section as written; in text, `&apos;` and
-/// `&quot;` as the characters they name (serializing escapes neither in
-/// text) and `&amp;`, `&lt;` and `&gt;` kept; a tag as written. `None` where
-/// the source spells what this respelling does not reproduce: any other
-/// reference, or a tag that holds an expression beside a quote or a
-/// reference (serializing requotes attributes).
+/// source: a comment, CDATA section or processing instruction as written; in
+/// text, `&apos;` and `&quot;` as the characters they name (serializing
+/// escapes neither in text), `>` as `&gt;` (which it does), and `&amp;`,
+/// `&lt;` and `&gt;` kept; a tag as written. `None` where the source spells
+/// what this respelling does not reproduce: any other reference, or a tag
+/// holding an expression (serializing requotes and re-escapes attributes).
 fn task_inner_xml(task: Node<'_, '_>) -> Option<String> {
     let source = &task.document().input_text()[task.range()];
     let open_end = source.find('>')? + 1;
@@ -963,7 +986,7 @@ fn task_inner_xml(task: Node<'_, '_>) -> Option<String> {
         } else if rest.starts_with('<') {
             let end = rest.find('>')? + 1;
             let tag = &rest[..end];
-            if tag.contains("$(") && tag.contains(['\'', '&']) {
+            if tag.contains("$(") {
                 return None;
             }
             out.push_str(tag);
@@ -977,8 +1000,11 @@ fn task_inner_xml(task: Node<'_, '_>) -> Option<String> {
                 _ => return None,
             }
             rest = &rest[end..];
+        } else if let Some(after) = rest.strip_prefix('>') {
+            out.push_str("&gt;");
+            rest = after;
         } else {
-            let end = rest.find(['<', '&']).unwrap_or(rest.len());
+            let end = rest.find(['<', '&', '>']).unwrap_or(rest.len());
             out.push_str(&rest[..end]);
             rest = &rest[end..];
         }
@@ -1109,17 +1135,24 @@ fn judge_item_group(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
                 item.range(),
             );
         }
-        let reads_items = |text: &str| text.contains("%(") || text.contains("@(");
-        let per_item = item.attributes().any(|a| reads_items(a.value()))
+        // Read as MSBuild reads each value (a metadatum attribute read again
+        // as XML, `&lt;![CDATA[%]]&gt;(Identity)` being `%(Identity)`); one the
+        // walk cannot read counts as reading.
+        let reads_items =
+            |text: Option<&str>| text.is_none_or(|text| text.contains("%(") || text.contains("@("));
+        let attribute_reads = |node: Node<'_, '_>, attr: &roxmltree::Attribute<'_, '_>| {
+            if item_attribute(node, attr.name()) == ItemAttribute::Metadata {
+                reads_items(metadata_attribute(node, attr).as_deref())
+            } else {
+                reads_items(attribute(node, attr.name()).as_deref())
+            }
+        };
+        let per_item = item.attributes().any(|a| attribute_reads(item, &a))
             || item.children().filter(Node::is_element).any(|metadata| {
-                // Text the reader declines (a CDATA section) counts as reading.
-                let text: Option<String> = metadata
-                    .descendants()
-                    .filter(|n| n.is_text())
-                    .map(crate::document::text)
-                    .collect();
-                text.is_none_or(|t| reads_items(&t))
-                    || metadata.attributes().any(|a| reads_items(a.value()))
+                reads_items(collect_element_text(metadata).as_deref())
+                    || metadata
+                        .attributes()
+                        .any(|a| reads_items(attribute(metadata, a.name()).as_deref()))
             });
         let metadata_reached = reached && attribute(item, "Include").is_some() && !per_item;
         // An `Update`'s metadata is expanded only where the update applies,

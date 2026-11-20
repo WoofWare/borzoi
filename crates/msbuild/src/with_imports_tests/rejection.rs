@@ -1554,27 +1554,76 @@ fn an_untaken_branchs_items_are_judged_against_the_final_table() {
     }
 }
 
-/// A write in content the walk does not take is judged after the writes
-/// before it there: `P` is `a` by the time `Q` reads it, which has no index
-/// 1, though it is `abc` before the group.
+/// A write in content the walk does not take leaves its name's value there
+/// unknown to what follows on that path: `P` is `abc` by the time `Q` reads
+/// it there, which has an index 1, though the walk holds `a`. That MSBuild
+/// throws on such a value is the judgement over the values a name may hold
+/// (#1097), not a judgement on the value the walk holds.
 #[test]
-fn an_untaken_groups_writes_are_judged_in_order() {
-    let group = |first: &str| {
-        format!(
-            "<PropertyGroup><P>{}</P></PropertyGroup><PropertyGroup Condition=\"{UNDECIDED_TRUE}\"><P>{first}</P><Q>$(P[1])</Q></PropertyGroup>",
-            if first == "a" { "abc" } else { "a" }
-        )
-    };
-    for parsed in both_walkers(&format!("  {}", group("a"))) {
+fn a_write_in_untaken_content_leaves_its_name_unknown_there() {
+    let body = format!(
+        "<PropertyGroup><P>a</P></PropertyGroup><PropertyGroup Condition=\"{UNDECIDED_TRUE}\"><P>abc</P><Q>$(P[1])</Q></PropertyGroup>"
+    );
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_eq!(parsed.rejection, None, "{body}: {:#?}", parsed.diagnostics);
+    }
+}
+
+/// Each branch of a `<Choose>` in content the walk does not take starts from
+/// what the path held before it: a write in one `<When>` is no write in the
+/// `<Otherwise>`, where `P` is `abc`, which has no index 9.
+#[test]
+fn a_branch_does_not_see_its_siblings_writes() {
+    let body = format!(
+        "<PropertyGroup><P>abc</P></PropertyGroup><Choose><When Condition=\"{UNDECIDED_TRUE}\"><Choose>\
+         <When Condition=\"'É' == 'x'\"><PropertyGroup><P>abcdefghijkl</P></PropertyGroup></When>\
+         <Otherwise><PropertyGroup><R>$(P[9])</R></PropertyGroup></Otherwise>\
+         </Choose></When></Choose>"
+    );
+    for parsed in both_walkers(&format!("  {body}")) {
         assert_withdrawn(&parsed, &["Before", "After"]);
     }
-    for parsed in both_walkers(&format!("  {}", group("abc"))) {
-        assert_eq!(
-            parsed.rejection,
-            None,
-            "{}: {:#?}",
-            group("abc"),
-            parsed.diagnostics
+}
+
+/// MSBuild turns a `UsingTask`'s `AssemblyFile`'s own `\` into `/` before it
+/// expands it: `$(P.Split('\')[1])` splits `a/b` on `/`.
+#[test]
+fn a_using_task_assembly_file_is_read_with_its_slashes_turned() {
+    let body = "<PropertyGroup><P>a/b</P></PropertyGroup><UsingTask TaskName=\"X\" AssemblyFile=\"$(P.Split('\\')[1])\" />";
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_eq!(parsed.rejection, None, "{body}: {:#?}", parsed.diagnostics);
+    }
+}
+
+/// Whether an item's metadata is evaluated item by item is read from the
+/// metadata as MSBuild reads it: `&lt;![CDATA[%]]&gt;(Identity)` in an
+/// attribute is `%(Identity)`, so with no item MSBuild evaluates no metadata,
+/// and a throw in it is no certain rejection.
+#[test]
+fn per_item_metadata_is_read_from_its_decoded_value() {
+    let body = "<PropertyGroup><Z>abc</Z></PropertyGroup><ItemGroup><I Include=\"$(Empty)\" V=\"&lt;![CDATA[%]]&gt;(Identity)\"><M>$(Z[9])</M></I></ItemGroup>";
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_ne!(
+            parsed.rejection.as_ref().map(|r| r.certainty),
+            Some(RejectionCertainty::Certain),
+            "{body}: {:#?}",
+            parsed.rejection
         );
+    }
+}
+
+/// An item group in a `<Choose>` branch the walk does not take, judged in the
+/// item pass, knows the names written before it on that path: `P` is long
+/// enough to index there, though the final table holds `abc`. A throw on the
+/// value the walk holds is no site.
+#[test]
+fn an_untaken_branchs_items_know_the_writes_before_them() {
+    let body = format!(
+        "<PropertyGroup><P>abc</P></PropertyGroup><Choose><When Condition=\"{UNDECIDED_TRUE}\">\
+         <PropertyGroup><P>abcdefghijkl</P></PropertyGroup>\
+         <ItemGroup><I Include=\"$(P[9])\" /></ItemGroup></When></Choose>"
+    );
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_eq!(parsed.rejection, None, "{body}: {:#?}", parsed.diagnostics);
     }
 }

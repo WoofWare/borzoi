@@ -1480,6 +1480,23 @@ fn using_task_texts_are_judged_where_msbuild_expands_them() {
     rows.push(format!(
         "<UsingTask {INLINE}><Task><Code>$(Q.Split(&quot;;&quot;)[1])</Code></Task></UsingTask>"
     ));
+    // Serializing spells a `>` in text as `&gt;`: `x>y` split on its
+    // characters has no second element.
+    rows.push(format!(
+        "<UsingTask {INLINE}><Task><Code>$(G.Split('>')[1])</Code></Task></UsingTask>"
+    ));
+    // An expression spelt with a reference, in an element and alone.
+    rows.push(format!(
+        "<UsingTask {INLINE}><Task><Code>&#36;(P[9])</Code></Task></UsingTask>"
+    ));
+    // A text body read as its text and sections joined; a processing
+    // instruction read as serialized XML.
+    rows.push(format!(
+        "<UsingTask {INLINE}><Task><![CDATA[$]]>(P[9])</Task></UsingTask>"
+    ));
+    rows.push(format!(
+        "<UsingTask {INLINE}><Task><?note {T}?></Task></UsingTask>"
+    ));
     // The flag compared as expanded, escapes and all.
     rows.push(format!(
         "<UsingTask {INLINE}><Task Evaluate=\"%66alse\">{T}</Task></UsingTask>"
@@ -1491,7 +1508,7 @@ fn using_task_texts_are_judged_where_msbuild_expands_them() {
     let (mut rejects, mut evaluates) = (0, 0);
     for row in rows {
         let xml = format!(
-            "<Project><PropertyGroup><P>abc</P><Q>quiet</Q><Fa>false</Fa></PropertyGroup>{}\
+            "<Project><PropertyGroup><P>abc</P><Q>quiet</Q><G>x&gt;y</G><Fa>false</Fa></PropertyGroup>{}\
              <PropertyGroup><After>ok</After></PropertyGroup></Project>",
             row.replace('\'', "&apos;")
         );

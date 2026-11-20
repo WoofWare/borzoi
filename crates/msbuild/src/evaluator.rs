@@ -1300,11 +1300,10 @@ struct State<'r> {
     /// ([`rejection::judge_deferred`]), not where the walk evaluates them.
     in_item_pass: bool,
     /// While the rejection judgement walks content the walk does not take
-    /// ([`rejection::judge_branch`], [`rejection::judge_properties`]): the
-    /// property table as it was before, which the judgement's speculative
-    /// writes replace until it leaves (`None` outside one), and the names
-    /// whose value the taken path leaves unknown (a write under a gate it
-    /// could not decide there, or one it could not compute).
+    /// ([`rejection::judge_branch`], [`rejection::judge_properties`]), or
+    /// judges an item group from it ([`State::defer_judgement`]): the names
+    /// written on that path before what it judges, whose value there the walk
+    /// does not hold. `None` outside one.
     speculation: Option<Speculation>,
     /// The root each root-surfacing diagnostic stood for, by its index in
     /// `diagnostics`, captured when it was pushed. A diagnostic carries only a
@@ -1421,14 +1420,12 @@ struct Expansion {
     throws: Vec<rejection::Thrown>,
 }
 
-/// The rejection judgement's speculative walk of content the walk does not
-/// take ([`State::speculation`]).
+/// The rejection judgement's walk of content the walk does not take
+/// ([`State::speculation`]).
 struct Speculation {
-    /// The property table before the speculative writes.
-    saved: properties::PropertyMap,
-    /// Lower-cased names whose value on the speculative path is unknown.
+    /// Lower-cased names written on the path, whose value there is unknown.
     unheld: HashSet<String>,
-    /// How many nested speculative walks are open.
+    /// How many nested walks are open.
     depth: usize,
 }
 

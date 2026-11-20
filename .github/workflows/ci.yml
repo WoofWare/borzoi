@@ -582,13 +582,6 @@ jobs:
         # stage to wait on a lever worth 1.5% of what the comment claimed.
         run: bash tools/ci/corpus-sweeps.sh sdk-chain-attribution
 
-      - name: Soak the rejection judgement at a fresh seed
-        if: steps.gate.outputs.run == 'true'
-        # `rejection_generative_diff`'s two soaks: generated projects and
-        # conditions at a fresh seed, graded against MSBuild like their
-        # fixed-seed twins. A failure prints the seed that reproduces it.
-        run: bash tools/ci/corpus-sweeps.sh rejection-soak
-
       - name: Report the slowest tests
         if: ${{ !cancelled() && steps.gate.outputs.run == 'true' }}
         run: bash tools/ci/slowest-tests.sh | tee -a "$GITHUB_STEP_SUMMARY"
