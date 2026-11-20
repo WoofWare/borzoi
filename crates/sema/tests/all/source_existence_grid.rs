@@ -513,6 +513,16 @@ pub fn cells() -> Vec<Cell> {
             "self_named_generic_abbreviation",
             "namespace SelfGeneric\ntype Foo = { X: int }\n[<System.Runtime.CompilerServices.Extension>]\ntype Foo<'a> = Foo\n",
         ),
+        // Codex round 7: an active pattern's mangled name carries its own
+        // line, and a quoted directive name is the directive.
+        one(
+            "class_let_active_pattern_on_next_line",
+            "module ApLine\nopen System.Runtime.CompilerServices\ntype T() =\n    static let (|A|_|) (x: int) = Some x\n    [<Extension>]\n    static let\n        (|A|_|) (x: int) = Some x\n    member _.G = match 1 with A x -> x | _ -> 0\n",
+        ),
+        one(
+            "quoted_load_directive",
+            "module QuotedLoad\n#``load`` \"y.fsx\"\nlet x = 1\n",
+        ),
         // A signature pair in one file excuses no lender in another: the
         // per-path accounting's witness.
         Cell::new(

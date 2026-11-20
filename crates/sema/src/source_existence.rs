@@ -374,6 +374,13 @@ pub const LEAF_FORMS: &[LeafForm] = &[
     },
     LeafForm {
         leaf: Leaf::BindingHead,
+        form: "named_fields",
+        source: "module D\ntype U = C of F: int\n[<System.Runtime.CompilerServices.Extension>]\nlet C(F = x) = C 1\n",
+        providers: ProviderReferences::None,
+        verdict: Verdict::Declined,
+    },
+    LeafForm {
+        leaf: Leaf::BindingHead,
         form: "nested_tuple",
         source: "module D\n[<System.Runtime.CompilerServices.Extension>]\nlet (a, (b, c)) = (1, (2, 3))\n",
         providers: ProviderReferences::None,
@@ -763,8 +770,8 @@ pub enum Treatment {
     Unconsumed,
 }
 
-/// The most rows one file's walk emits before it declines
-/// ([`ExistenceUnread::TooManyReadings`]).
+/// The most rows one file's walk emits, and the most declarations it visits,
+/// before it declines ([`ExistenceUnread::TooManyReadings`]).
 pub const MAX_ROWS: usize = 200_000;
 
 /// A's existence surface, read from its source. See the module docs.
@@ -832,6 +839,7 @@ fn walk_project(
             providers,
             module_abbreviations,
             paired: partners[i].is_some(),
+            visits: 0,
             out: std::mem::take(&mut out),
             lines: Lines::of(root).map(std::rc::Rc::new),
         };
@@ -879,7 +887,13 @@ fn brings_in_references(directive: &SyntaxNode) -> bool {
         .children_with_tokens()
         .filter_map(|el| el.into_token())
         .find(|t| t.kind() == SyntaxKind::IDENT_TOK)
-        .is_some_and(|t| matches!(t.text(), "r" | "reference" | "load" | "I" | "i" | "include"))
+        .is_some_and(|t| {
+            // `#``load```: FCS reads the quoted name as the directive.
+            matches!(
+                id_text(&t).as_ref(),
+                "r" | "reference" | "load" | "I" | "i" | "include"
+            )
+        })
 }
 
 #[derive(Default)]
@@ -1131,6 +1145,8 @@ struct FileWalk<'r> {
     module_abbreviations: bool,
     /// Whether this file is one of a signature pair.
     paired: bool,
+    /// Declarations visited, which a module's second reading repeats.
+    visits: usize,
     out: Out,
     /// The file's lines, or `None` when a `#line` directive may move them.
     lines: Option<std::rc::Rc<Lines>>,
@@ -1197,6 +1213,18 @@ impl FileWalk<'_> {
     fn within_budget(&self) -> Result<(), ExistenceUnread> {
         let rows = self.out.entities.len() + self.out.extensions.len() + self.out.namespaces.len();
         if rows > MAX_ROWS {
+            Err(ExistenceUnread::TooManyReadings)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Charge one declaration visit: each reading of a module whose name
+    /// ends in `Module` walks its contents again, rows or none, so the work
+    /// is bounded apart from the rows.
+    fn visit(&mut self) -> Result<(), ExistenceUnread> {
+        self.visits += 1;
+        if self.visits > MAX_ROWS {
             Err(ExistenceUnread::TooManyReadings)
         } else {
             Ok(())
@@ -1346,12 +1374,14 @@ impl FileWalk<'_> {
         match decls {
             Decls::Impl(ds) => {
                 for (i, d) in ds.iter().enumerate() {
+                    self.visit()?;
                     self.impl_decl(scope, d, i, &ctx, is_rec)?;
                     self.within_budget()?;
                 }
             }
             Decls::Sig(ds) => {
                 for (i, d) in ds.iter().enumerate() {
+                    self.visit()?;
                     self.sig_decl(scope, d, i, &ctx, is_rec)?;
                     self.within_budget()?;
                 }
@@ -1827,10 +1857,28 @@ impl FileWalk<'_> {
             };
             let named: Vec<(String, TextSize)> = match binding_name(&pat) {
                 Some(name) => {
-                    let at = pattern_idents(&pat)
-                        .into_iter()
-                        .find(|(n, _)| *n == name)
-                        .map_or_else(|| pat.syntax().text_range().start(), |(_, at)| at);
+                    // The binder's line is its name's: an active pattern's
+                    // `(|A|_|)`, else the identifier.
+                    let active = pat
+                        .syntax()
+                        .descendants()
+                        .find_map(borzoi_cst::syntax::ActivePatName::cast)
+                        .and_then(|ap| {
+                            // Its first token, past any trivia it holds.
+                            ap.syntax()
+                                .descendants_with_tokens()
+                                .filter_map(|el| el.into_token())
+                                .find(|t| !t.kind().is_trivia())
+                                .map(|t| t.fcs_range().start())
+                        });
+                    let at = active
+                        .or_else(|| {
+                            pattern_idents(&pat)
+                                .into_iter()
+                                .find(|(n, _)| *n == name)
+                                .map(|(_, at)| at)
+                        })
+                        .ok_or(ExistenceUnread::UnnamedDeclaration(self.index))?;
                     vec![(name, at)]
                 }
                 None => {
@@ -2509,6 +2557,7 @@ fn certified_pattern(pat: &Pat) -> bool {
         Pat::LongIdent(l) => {
             l.active_pat_name().is_none()
                 && l.args().next().is_none()
+                && l.name_pat_pairs().is_none()
                 && l.head().is_some_and(|h| h.idents().count() == 1)
         }
         Pat::Paren(_)
@@ -2535,6 +2584,7 @@ fn certified_pattern(pat: &Pat) -> bool {
         // A head that may be a union case, its arguments simple names.
         Pat::LongIdent(l) => {
             l.active_pat_name().is_none()
+                && l.name_pat_pairs().is_none()
                 && l.head().is_some_and(|h| h.idents().count() == 1)
                 && l.args().all(|a| {
                     // Through parentheses and annotations: `(s: string)`.
@@ -2618,7 +2668,8 @@ fn binding_name_at(pat: &Pat, top: bool) -> Option<String> {
             let name = id_text(&first).into_owned();
             let function_like = name.chars().next().is_some_and(char::is_lowercase);
             // An upper-case head may be a union case binding nothing.
-            (function_like && (l.args().next().is_none() || top)).then_some(name)
+            let no_args = l.args().next().is_none() && l.name_pat_pairs().is_none();
+            (function_like && (no_args || top) && l.name_pat_pairs().is_none()).then_some(name)
         }
         Pat::Paren(p) => p.inner().as_ref().and_then(|p| binding_name_at(p, false)),
         Pat::Typed(t) => t.pat().as_ref().and_then(|p| binding_name_at(p, top)),

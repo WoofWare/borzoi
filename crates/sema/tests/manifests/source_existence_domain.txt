@@ -11,6 +11,7 @@ domain_BindingHead_active_pattern	certified: exact []; unknown: exact [Uncertain
 domain_BindingHead_as	certified: unread OutsideDomain(0, BindingHead); unknown: unread OutsideDomain(0, BindingHead)
 domain_BindingHead_function	certified: exact []; unknown: exact [UncertainAttribute]
 domain_BindingHead_list	certified: unread OutsideDomain(0, BindingHead); unknown: unread OutsideDomain(0, BindingHead)
+domain_BindingHead_named_fields	certified: unread OutsideDomain(0, BindingHead); unknown: unread OutsideDomain(0, BindingHead)
 domain_BindingHead_nested_tuple	certified: unread OutsideDomain(0, BindingHead); unknown: unread OutsideDomain(0, BindingHead)
 domain_BindingHead_nullary_active_pattern	certified: exact []; unknown: exact [UncertainAttribute]
 domain_BindingHead_operator	certified: exact []; unknown: exact [UncertainAttribute]

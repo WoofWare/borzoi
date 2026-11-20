@@ -219,6 +219,35 @@ struct FcsRows {
     auto_opens: Vec<String>,
 }
 
+/// `why` with every absolute path reduced to its file name, so a verdict
+/// pins the same line on every host; the full text is in the test output.
+fn host_independent(why: &str) -> String {
+    eprintln!("ungraded: {why}");
+    why.split(' ')
+        .map(|word| {
+            if word.starts_with('/') {
+                let path = Path::new(word.trim_end_matches([',', ':', ')']));
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                format!("<{name}>")
+            } else {
+                word.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[test]
+fn an_ungraded_verdict_names_no_host_path() {
+    assert_eq!(
+        host_independent("project Producer: /tmp/x/Lib.fsx is a script, refused"),
+        "project Producer: <Lib.fsx> is a script, refused"
+    );
+}
+
 /// Why the loader skipped a project, without the details (which name host
 /// paths).
 fn skip_kind(skip: &borzoi_corpus_diff::LoadSkip) -> &'static str {
@@ -360,7 +389,8 @@ fn source_existence_covers_fcs_over_the_pinned_projects() {
                     SourceExistence::Unread(why) => format!("unread {why:?}"),
                 };
                 format!(
-                    "ungraded ({why}); unknown: {}; by spelling: {}",
+                    "ungraded ({}); unknown: {}; by spelling: {}",
+                    host_independent(&why),
                     read(&unknown),
                     read(&spelled)
                 )

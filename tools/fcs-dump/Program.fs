@@ -9207,13 +9207,18 @@ let private respondGraphReferenced (checker: FSharpChecker) (root: JsonElement) 
         // The producer, and every project it reads from source, was checked
         // against exactly the references the request names: its signature
         // describes that environment and no other.
-        let rec reachable (p: GraphProject) : GraphProject list =
-            p
-            :: (p.References
-                |> List.collect (function
-                    | ProjectRef q -> reachable graph.ById.[q]
-                    | Dll _ -> []))
-        for p in reachable producer |> List.distinctBy (fun p -> p.Id) do
+        // Each project once, however many paths reach it.
+        let reached = ResizeArray<GraphProject>()
+        let seen = System.Collections.Generic.HashSet<string>()
+        let rec visit (p: GraphProject) =
+            if seen.Add p.Id then
+                reached.Add p
+                for r in p.References do
+                    match r with
+                    | ProjectRef q -> visit graph.ById.[q]
+                    | Dll _ -> ()
+        visit producer
+        for p in reached do
             let results =
                 if p.Id = target then
                     producerResults

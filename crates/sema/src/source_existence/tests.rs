@@ -662,6 +662,29 @@ fn a_partial_certificate_loses_exactness() {
     );
 }
 
+/// Each reading of a module whose name ends in `Module` walks its contents
+/// again, rows or none: twelve such nested modules over a hundred `let`s
+/// emit few rows but visit hundreds of thousands of declarations, which the
+/// walk charges and declines.
+#[test]
+fn repeated_readings_are_charged_by_the_declarations_they_visit() {
+    let mut src = String::from("namespace N\n");
+    for depth in 0..12 {
+        src.push_str(&format!(
+            "{}module M{depth}Module =\n",
+            "    ".repeat(depth)
+        ));
+    }
+    for k in 0..100 {
+        src.push_str(&format!("{}let v{k} = 1\n", "    ".repeat(12)));
+    }
+    let r = read(&[("Lib.fs", &src)]);
+    assert!(
+        matches!(r, SourceExistence::Unread(ExistenceUnread::TooManyReadings)),
+        "{r:?}"
+    );
+}
+
 /// A provider applied to a literal-bound identifier parses as an ordinary
 /// type application: with a reference that may be a provider, the walk
 /// cannot tell it from one and declines; with none, it is no provider.
