@@ -1248,6 +1248,90 @@ fn where_msbuild_evaluates_a_text() {
     }
 }
 
+/// Every reserved attribute and a metadatum, on every item operation, holding
+/// a property function MSBuild throws on: whether design-time evaluation
+/// expands it is MSBuild's to say, and the walk's rejection judgement
+/// (`evaluator/rejection.rs`) is held to it, certain-implies-exact. MSBuild
+/// builds an `Include` (with its `Exclude` and metadata), else a `Remove`
+/// (with its `MatchOnMetadata`), else an `Update` (with its metadata), each
+/// expanding only its own attributes; the `MatchOnMetadata` options are
+/// parsed as written. An attribute an item takes nowhere is the loader's.
+#[test]
+fn item_attributes_are_judged_by_their_operation() {
+    const T: &str = "$(P.Split(';')[3])";
+    const OPERATIONS: &[&str] = &[
+        "Include=\"x\"",
+        "Remove=\"@(J)\"",
+        "Remove=\"@(J)\" MatchOnMetadata=\"M\"",
+        "Update=\"x\"",
+    ];
+    const ATTRIBUTES: &[&str] = &[
+        "Include",
+        "Exclude",
+        "Remove",
+        "Update",
+        "MatchOnMetadata",
+        "MatchOnMetadataOptions",
+        "Label",
+        "KeepMetadata",
+        "RemoveMetadata",
+        "KeepDuplicates",
+        "M",
+    ];
+    let mut oracle = Oracle::spawn();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let dir = borzoi_msbuild::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    let project_path = dir.join("Demo.fsproj");
+    let (mut rejects, mut evaluates) = (0, 0);
+    for operation in OPERATIONS {
+        for attribute in ATTRIBUTES {
+            if operation.contains(&format!("{attribute}=")) {
+                continue;
+            }
+            let xml = format!(
+                "<Project><PropertyGroup><P>a;b</P></PropertyGroup><ItemGroup><J Include=\"x\" \
+                 /><I Include=\"x\" /><I {operation} {attribute}=\"{T}\" /></ItemGroup>\
+                 <PropertyGroup><After>ok</After></PropertyGroup></Project>"
+            );
+            std::fs::write(&project_path, &xml).unwrap();
+            let parsed = common::parse_fsproj_with_imports(
+                &borzoi_msbuild::ProjectFile::buffer(&project_path, &xml)
+                    .expect("a project path spelt as its full path"),
+                &std::collections::HashMap::new(),
+                &common::oracle_environment(),
+                None,
+                None,
+            )
+            .expect("well-formed");
+            let msbuild_rejects = oracle
+                .project_design_time(&xml, &["After".to_string()], Some(&project_path), &[])
+                .is_none();
+            let certainty = parsed.rejection.as_ref().map(|r| r.certainty);
+            if msbuild_rejects {
+                rejects += 1;
+                assert!(
+                    certainty.is_some(),
+                    "MSBuild rejects, and the walk claims nothing: {xml}"
+                );
+            } else {
+                evaluates += 1;
+                assert_ne!(
+                    certainty,
+                    Some(borzoi_msbuild::RejectionCertainty::Certain),
+                    "MSBuild evaluates, and the walk claims it rejects: {xml}"
+                );
+                assert_eq!(
+                    parsed.property("After").value(),
+                    Some("ok"),
+                    "MSBuild evaluates, and the walk withdrew: {xml}\n{:#?}",
+                    parsed.rejection
+                );
+            }
+        }
+    }
+    assert!(rejects >= 10 && evaluates >= 10, "{rejects} {evaluates}");
+}
+
 /// Fresh-seed twin of [`whitespace_variant_sweep_fixed_seed`].
 #[test]
 #[ignore = "fresh-seed soak; run it when touching condition.rs"]

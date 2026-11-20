@@ -251,6 +251,32 @@ pub(crate) fn property_references(raw: &str) -> impl Iterator<Item = &str> {
     refs.into_iter()
 }
 
+/// The outermost `$(…)` expressions of `raw` whose text holds a metadata
+/// reference (`%(`), in order. In an item's text MSBuild expands metadata
+/// before properties (`Expander.ExpandIntoStringLeaveEscaped`: metadata, then
+/// properties, then item lists), so a property function there is handed the
+/// metadatum's value where the walk's expansion hands it the reference's
+/// characters: what it returns, or throws, is not MSBuild's. Each opener's
+/// close is found once, from the end of the last, so the scan is linear.
+pub(crate) fn expressions_reading_metadata(raw: &str) -> Vec<&str> {
+    let mut found = Vec::new();
+    let mut rest = raw;
+    while let Some(at) = rest.find("$(") {
+        let after = &rest[at + 2..];
+        // An unbalanced opener is literal text from here on, and an issue of
+        // the expansion's own.
+        let Some(close) = find_close(after) else {
+            break;
+        };
+        let expression = &rest[at..at + 2 + close + 1];
+        if expression.contains("%(") {
+            found.push(expression);
+        }
+        rest = &after[close + 1..];
+    }
+    found
+}
+
 /// The property a `$(…)` interior reads as its receiver: the maximal run of
 /// name bytes at its start, or `None` when there is none (a static
 /// `[Type]::Member(…)` root, or text outside the grammar that starts with no
@@ -1263,8 +1289,8 @@ fn version_compare_op(member_name: &str) -> Option<fn(std::cmp::Ordering) -> boo
 /// admits a **bare unquoted literal** (`0.0`, `10.0`, `2` — the right-hand side
 /// of the SDK's `VersionEquals($(TPV), 0.0)`), which the string-arg path
 /// declines. Such a literal is expanded to itself; it leaves the escaped domain
-/// once here, mirroring a quoted literal. An unquoted arg that *embeds* an
-/// expansion (`$(X).0`) is outside the pinned envelope and declines.
+/// once here, mirroring a quoted literal. An unquoted arg that holds
+/// expansions (`$(X)`, `$(X).0`) is composed as a quoted argument's body is.
 fn eval_version_arg(
     arg: &str,
     props: &Reads<'_>,
@@ -1272,11 +1298,30 @@ fn eval_version_arg(
     depth: usize,
 ) -> Result<String, Failure> {
     let arg = arg.trim();
-    if arg.starts_with(['\'', '`', '"']) || arg.starts_with("$(") {
+    if arg.starts_with(['\'', '`', '"']) {
         return eval_string_arg(arg, props, issues, depth);
     }
     if arg.contains("$(") {
-        return Err(Unsupported);
+        // Unquoted text around expressions (`$(Major).0`, as the previous
+        // condition evaluator read it and MSBuild does: true for
+        // `VersionLessThan($(Major).0, 4.0)` with `Major=3`; probed,
+        // `msbuild-condition-oracle`, SDK 10.0.401) is composed as a quoted
+        // argument's body is. A delimiter outside the expressions is text
+        // whose reading we have not pinned.
+        let mut outside = String::new();
+        let mut rest = arg;
+        while let Some(at) = rest.find("$(") {
+            outside.push_str(&rest[..at]);
+            let Some(close) = find_close(&rest[at + 2..]) else {
+                return Err(Unsupported);
+            };
+            rest = &rest[at + 2 + close + 1..];
+        }
+        outside.push_str(rest);
+        if outside.contains(['\'', '`', '"']) {
+            return Err(Unsupported);
+        }
+        return eval_str_template(arg, '\'', props, issues, false, depth);
     }
     Ok(super::escaping::unescape(arg))
 }

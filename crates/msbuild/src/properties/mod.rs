@@ -39,7 +39,9 @@ use crate::observed::Observer;
 
 #[cfg(feature = "test-support")]
 pub use expr::MAX_EXPRESSION_NESTING;
-pub(crate) use expr::{is_referenceable_name, property_references};
+#[cfg(not(feature = "test-support"))]
+pub(crate) use expr::MAX_EXPRESSION_NESTING;
+pub(crate) use expr::{expressions_reading_metadata, is_referenceable_name, property_references};
 
 const MAX_TARGET_FRAMEWORK_VERSION_PARTS: usize = 4;
 
@@ -59,7 +61,14 @@ pub enum Issue {
     /// substitution read (`expr::Failure::Throws`). Left literal in the output,
     /// as an unsupported one is. MSBuild rejects the project wherever it
     /// evaluates the text.
-    Throws { expression: String },
+    Throws {
+        expression: String,
+        /// The names the evaluation looked up before it threw, in order:
+        /// what the throw rests on. A later step of the expression, which
+        /// MSBuild never reaches (`$(P.Split(';')[9].Contains('$(X)'))`
+        /// throws at `[9]`, whatever `X` holds), is not among them.
+        reads: Vec<String>,
+    },
     /// `$(...)` MSBuild evaluates without throwing, to a boolean we do not
     /// compute (`expr::Failure::ReturnsBoolean`). Left literal in the output,
     /// as an unsupported one is.
@@ -415,6 +424,8 @@ impl PropertyMap {
 pub(crate) struct Reads<'m> {
     map: &'m PropertyMap,
     joined: std::cell::RefCell<Trust>,
+    /// Every name looked up, bound or not, in order.
+    names: std::cell::RefCell<Vec<String>>,
 }
 
 impl<'m> Reads<'m> {
@@ -422,7 +433,18 @@ impl<'m> Reads<'m> {
         Reads {
             map,
             joined: std::cell::RefCell::new(Trust::CERTAIN),
+            names: std::cell::RefCell::new(Vec::new()),
         }
+    }
+
+    /// How many lookups have been made: a mark for [`Self::names_since`].
+    fn lookups(&self) -> usize {
+        self.names.borrow().len()
+    }
+
+    /// The names looked up since `mark` ([`Self::lookups`]), in order.
+    fn names_since(&self, mark: usize) -> Vec<String> {
+        self.names.borrow()[mark..].to_vec()
     }
 
     /// The stored value of `key`, joining its entry's trust into the
@@ -433,6 +455,7 @@ impl<'m> Reads<'m> {
 
     /// [`Self::get`], with how the value was stored.
     fn get_with_origin(&self, key: &str) -> Option<(&'m Escaped, Origin)> {
+        self.names.borrow_mut().push(key.to_owned());
         let entry = self.map.inner.get(&key.to_ascii_lowercase())?;
         self.joined.borrow_mut().join_in(&entry.trust);
         Some((entry.value.as_ref()?, entry.origin))
@@ -868,6 +891,7 @@ fn substitute_impl(
             Some(close) => {
                 let inner = &after[..close];
                 rest = &after[close + 1..];
+                let mark = props.lookups();
                 match expr::evaluate(inner, props, fs_observer) {
                     Ok(evaluated) => {
                         issues.extend(evaluated.issues);
@@ -884,7 +908,10 @@ fn substitute_impl(
                         let expression = format!("$({inner})");
                         issues.push(match failure {
                             expr::Failure::Unsupported => Issue::Unsupported { expression },
-                            expr::Failure::Throws => Issue::Throws { expression },
+                            expr::Failure::Throws => Issue::Throws {
+                                expression,
+                                reads: props.names_since(mark),
+                            },
                             expr::Failure::ReturnsBoolean => Issue::ReturnsBoolean { expression },
                         });
                         out.push(

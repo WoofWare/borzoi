@@ -60,7 +60,9 @@ mod syntax;
 
 use super::observed::Observer;
 use super::properties::escaping::Escaped;
-use super::properties::{Issue, PropertyMap, substitute, substitute_with_fs};
+use super::properties::{
+    Issue, MAX_EXPRESSION_NESTING, PropertyMap, substitute, substitute_with_fs,
+};
 
 /// The file-system queries a condition may make: `exists` answers
 /// `Exists('…')` for one decoded, trimmed entry of its argument's list,
@@ -606,6 +608,12 @@ fn judge_expr(
             // `evaluate`; this evaluation only judges.
             let mut undefined = Vec::new();
             match eval_bool(expr, props, fs, &mut undefined) {
+                // On a value held of a doubted name, which MSBuild need not
+                // hold, the boolean is none of MSBuild's: what comes after the
+                // leaf is reached perhaps, whichever way it went here.
+                Ok(_) if explicit_doubt || implicit_doubt => {
+                    Judgement::of(None, Throws::Never, false)
+                }
                 Ok(value) => Judgement::of(Some(value), Throws::Never, false),
                 Err(reject) if explicit_doubt || implicit_doubt => {
                     match doubted_failures(expr, props, fs, uncertain) {
@@ -643,24 +651,36 @@ fn doubted_failures(
         names.iter().any(|name| uncertain(name))
     };
     let texts = leaf_texts(expr)?;
-    let mut failing = Vec::new();
+    // Each failing expression, and whether its failure reads a doubted name:
+    // a throw rests on what it read before it threw, a shape we do not model
+    // on everything it names.
+    let mut failing: Vec<(String, bool)> = Vec::new();
     for text in &texts {
         let (_, issues) = match fs {
             Some(fs) => substitute_with_fs(text, props, fs.observer),
             None => substitute(text, props),
         };
         failing.extend(issues.into_iter().filter_map(|issue| match issue {
-            Issue::Throws { expression } | Issue::Unsupported { expression } => Some(expression),
+            Issue::Throws { expression, reads } => {
+                let doubted = reads.iter().any(|name| uncertain(name));
+                Some((expression, doubted))
+            }
+            Issue::Unsupported { expression } => {
+                let doubted = reads_doubted(&expression);
+                Some((expression, doubted))
+            }
             _ => None,
         }));
     }
     if failing.is_empty() {
         return texts.iter().any(|text| reads_doubted(text)).then(Vec::new);
     }
-    failing
-        .iter()
-        .all(|expression| reads_doubted(expression))
-        .then_some(failing)
+    failing.iter().all(|(_, doubted)| *doubted).then(|| {
+        failing
+            .into_iter()
+            .map(|(expression, _)| expression)
+            .collect()
+    })
 }
 
 /// The texts the leaf `expr` expands, in MSBuild's order; `None` for a leaf
@@ -692,7 +712,10 @@ const RETURNED: &[&str] = &["", "x", "1", "1.2", "true", "false", "a;b"];
 /// The innermost `$(…)` expressions of `text` that read a name `uncertain`
 /// names, by the scanner's extents: those holding no other such expression,
 /// so that one in a function's argument leaves the function, and the type it
-/// returns, standing.
+/// returns, standing. The search descends no deeper than the evaluator does
+/// ([`MAX_EXPRESSION_NESTING`]): an expression at that depth is taken whole,
+/// which the evaluator declines anyway, so each level costs one scan of the
+/// text and the whole search is linear in it.
 fn uncertain_expressions(text: &str, uncertain: &dyn Fn(&str) -> bool) -> Vec<String> {
     let reads = |expression: &str| {
         let mut names = Vec::new();
@@ -713,21 +736,53 @@ fn uncertain_expressions(text: &str, uncertain: &dyn Fn(&str) -> bool) -> Vec<St
         found
     };
     let mut found = Vec::new();
-    let mut pending = vec![text.to_owned()];
-    while let Some(text) = pending.pop() {
+    let mut pending = vec![(text.to_owned(), 0)];
+    while let Some((text, depth)) = pending.pop() {
         for expression in outermost(&text) {
             if !reads(&expression) {
                 continue;
             }
             let inner = &expression[2..expression.len() - 1];
-            if outermost(inner).iter().any(|nested| reads(nested)) {
-                pending.push(inner.to_owned());
+            if depth + 1 < MAX_EXPRESSION_NESTING
+                && outermost(inner).iter().any(|nested| reads(nested))
+            {
+                pending.push((inner.to_owned(), depth + 1));
             } else {
                 found.push(expression);
             }
         }
     }
     found
+}
+
+/// Whether MSBuild throws evaluating `expression`, one `$(…)` of a text that
+/// throws on the values `props` holds, whatever the expressions in it that
+/// read a name `unheld` names return: with each of them in turn returning each
+/// value of [`RETURNED`], it still throws, on what it read of the other names
+/// (`VersionLessThan($(A), $(X))` with `A` holding `true`, whatever `X` is).
+/// The text's counterpart of [`throws_whatever_they_return`].
+pub(crate) fn expression_throws_whatever_they_return(
+    expression: &str,
+    props: &PropertyMap,
+    observer: Option<&Observer>,
+    unheld: &dyn Fn(&str) -> bool,
+) -> bool {
+    let inner = uncertain_expressions(expression, unheld);
+    if inner.is_empty() {
+        return false;
+    }
+    RETURNED.iter().all(|value| {
+        let struck = inner.iter().fold(expression.to_owned(), |text, inner| {
+            text.replace(inner.as_str(), value)
+        });
+        let (_, issues) = match observer {
+            Some(observer) => substitute_with_fs(&struck, props, observer),
+            None => substitute(&struck, props),
+        };
+        issues.iter().any(|issue| {
+            matches!(issue, Issue::Throws { reads, .. } if !reads.iter().any(|name| unheld(name)))
+        })
+    })
 }
 
 /// Whether MSBuild throws evaluating the leaf `expr`, or may, whatever the
@@ -775,6 +830,7 @@ fn throws_whatever_they_return(
                 None => return false,
             },
             BoolExpr::HasTrailingSlash(raw) => BoolExpr::HasTrailingSlash(strike(raw, value)),
+            BoolExpr::Exists(raw) => BoolExpr::Exists(strike(raw, value)),
             BoolExpr::MsbuildVersionFunction(inner) => {
                 BoolExpr::MsbuildVersionFunction(strike(inner, value))
             }
@@ -2129,11 +2185,10 @@ fn lone_boolean(scalar: &ScalarExpr, props: &PropertyMap) -> bool {
     let (ScalarExpr::String(raw) | ScalarExpr::Property(raw)) = scalar else {
         return false;
     };
-    // An expression we do not compute is left as its text, so the operand
-    // is that one expression where nothing else is left beside it.
-    let (value, issues) = substitute(raw, props);
-    matches!(issues.as_slice(), [Issue::ReturnsBoolean { .. }])
-        && value.ignoring_trust().as_escaped() == raw.as_str()
+    // The operand is that one expression, with nothing beside it: text
+    // around it would make the boolean a word (`'x$(…)'` is `xFalse`).
+    let (_, issues) = substitute(raw, props);
+    matches!(issues.as_slice(), [Issue::ReturnsBoolean { expression }] if expression == raw)
 }
 
 fn expand_scalar_for_condition(
@@ -2152,7 +2207,10 @@ fn expand_scalar_for_condition(
         ScalarExpr::Bare(raw) => Ok(raw.clone()),
         ScalarExpr::Property(raw) => expand_operand(raw, props, fs_observer, undefined),
         ScalarExpr::SystemVersionPart { arg, part } => {
-            let version = expand_system_version_parse_arg(arg, props, fs_observer, undefined)?;
+            // `Parse` throws on what it cannot read, so an argument whose value
+            // we do not know (a boolean we do not compute) may throw here.
+            let version = expand_system_version_parse_arg(arg, props, fs_observer, undefined)
+                .map_err(|reject| reject.max(Reject::Unmodelled))?;
             let version = parse_system_version(&version).map_err(Reject::from)?;
             let idx = match part {
                 VersionPart::Build => 2,
@@ -2523,15 +2581,19 @@ fn expand_for_condition(
         };
         worst = worst.max(Some(reject));
     }
-    if let Some(reject) = worst {
-        return Err(reject);
-    }
     // Item and metadata references are scanned on the **escaped** text, exactly
     // as MSBuild scans them: an escaped `%25(` is not a metadata reference. In
     // an item's condition MSBuild expands one the substituted text forms, and
-    // may throw on it (an item function it does not know, MSB4184).
+    // may throw on it (an item function it does not know, MSB4184). It expands
+    // them after the properties, so an operand whose properties leave a value
+    // we do not know still forms one (`$(…)$(A)$(B)` with `A` holding `@`):
+    // the scan joins the issues' verdict rather than waiting on it. The text
+    // of an expression we left unexpanded is scanned too, which only declines.
     if value.as_escaped().contains("@(") || value.as_escaped().contains("%(") {
-        return Err(Reject::Unmodelled);
+        worst = worst.max(Some(Reject::Unmodelled));
+    }
+    if let Some(reject) = worst {
+        return Err(reject);
     }
     // The value stays **in the domain**. Most operands are compared as text and
     // decode immediately ([`expand_operand`]) — but a built-in that splits or

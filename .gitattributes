@@ -10,6 +10,7 @@ crates/msbuild/tests/manifests/restore_cone_fixtures.txt merge=borzoi-manifest
 crates/msbuild/tests/manifests/restore_cone_projects.txt merge=borzoi-manifest
 crates/msbuild/tests/manifests/restore_cone_reads_fixtures.txt merge=borzoi-manifest
 crates/msbuild/tests/manifests/restore_cone_reads_projects.txt merge=borzoi-manifest
+crates/msbuild/tests/manifests/rejection_projects_wrong.txt merge=borzoi-manifest
 crates/sema/tests/manifests/infer_corpus_diff.txt merge=borzoi-manifest
 crates/sema/tests/manifests/infer_corpus_dump.txt merge=borzoi-manifest
 crates/sema/tests/manifests/infer_check_order_pins.txt merge=borzoi-manifest

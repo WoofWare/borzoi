@@ -1411,7 +1411,7 @@ struct Expansion {
     /// Every `$(…)` MSBuild throws on, on the values the expansion read
     /// ([`rejection::throws_in`]); `had_unsupported` is set with any. A
     /// rejection wherever MSBuild evaluates the text: the caller judges where.
-    throws: Vec<String>,
+    throws: Vec<rejection::Thrown>,
 }
 
 impl Expansion {
@@ -3421,7 +3421,7 @@ impl<'r> State<'r> {
                 }
                 Issue::Unsupported { expression }
                 | Issue::ReturnsBoolean { expression }
-                | Issue::Throws { expression } => {
+                | Issue::Throws { expression, .. } => {
                     had_unsupported = true;
                     DiagnosticKind::UnsupportedPropertyExpression { expression }
                 }

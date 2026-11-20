@@ -1250,3 +1250,169 @@ fn an_include_beside_an_empty_remove_is_rejected() {
         assert_rejected(&parsed, &["Before", "After"]);
     }
 }
+
+/// A leaf over a name the walk holds no value of (`X`, a write it refused to
+/// compute) has none of MSBuild's booleans, whatever it computes on the `""`
+/// it substitutes: `IsNullOrWhiteSpace('')` is true, but MSBuild's `X` is
+/// `Debug`, so its `Or` goes on to an order on a word, which throws. What
+/// comes after such a leaf is reached perhaps.
+#[test]
+fn a_leaf_on_a_value_the_walk_holds_none_of_decides_nothing_after_it() {
+    let refused = "<X>$([System.String]::Copy('Debug'))</X>";
+    for c in [
+        "'$([System.String]::IsNullOrWhiteSpace(`$(X)`))' Or '' &gt; 'x'",
+        "'$(X)' == '' Or '' &gt; 'x'",
+        "!('$(X)' != '') Or '' &gt; 'x'",
+    ] {
+        let body = format!("<PropertyGroup>{refused}<R Condition=\"{c}\">x</R></PropertyGroup>");
+        for parsed in both_walkers(&format!("  {body}")) {
+            assert_withdrawn(&parsed, &["Before", "After"]);
+        }
+    }
+}
+
+/// MSBuild expands an item's operation by what the operation reads
+/// (`LazyItemEvaluator`): an `Include` and its `Exclude`, a `Remove` and its
+/// `MatchOnMetadata`, an `Update`. The `MatchOnMetadata` options are parsed
+/// as written, and an operation's attribute on another operation's item is
+/// not expanded (probed, `msbuild-condition-oracle`, SDK 10.0.401).
+#[test]
+fn an_item_attribute_is_judged_by_the_operation_that_reads_it() {
+    for body in [
+        "<ItemGroup><I Include=\"x\" MatchOnMetadata=\"$(P[9])\" /></ItemGroup>",
+        "<ItemGroup><I Include=\"x\" MatchOnMetadataOptions=\"$(P[9])\" /></ItemGroup>",
+        "<ItemGroup><I Update=\"x\" MatchOnMetadata=\"$(P[9])\" /></ItemGroup>",
+        "<ItemGroup><J Include=\"x\" /><I Remove=\"@(J)\" MatchOnMetadata=\"M\" MatchOnMetadataOptions=\"$(P[9])\" /></ItemGroup>",
+    ] {
+        let body = format!("<PropertyGroup><P>abc</P></PropertyGroup>{body}");
+        for parsed in both_walkers(&format!("  {body}")) {
+            assert_eq!(parsed.rejection, None, "{body}: {:#?}", parsed.diagnostics);
+        }
+    }
+    let body = "<PropertyGroup><P>abc</P></PropertyGroup><ItemGroup><J Include=\"x\" /><I Remove=\"@(J)\" MatchOnMetadata=\"$(P[9])\" /></ItemGroup>";
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_rejected(&parsed, &["Before", "After"]);
+    }
+}
+
+/// A boolean the walk does not compute coerces without throwing only where it
+/// is the whole operand: beside text it is a word (`xFalse`), which MSBuild
+/// throws on coercing.
+#[test]
+fn a_boolean_beside_text_is_no_boolean() {
+    for c in [
+        "'x$([System.String]::IsNullOrWhiteSpace(`é`))'",
+        "'$([System.String]::IsNullOrWhiteSpace(`é`))x'",
+    ] {
+        let body = format!("<PropertyGroup><R Condition=\"{c}\">x</R></PropertyGroup>");
+        for parsed in both_walkers(&format!("  {body}")) {
+            let certainty = parsed
+                .rejection
+                .as_ref()
+                .map_or(RejectionCertainty::Possible, |r| r.certainty);
+            assert_withdrawn_as(&parsed, &["Before", "After"], certainty);
+        }
+    }
+    let body = "<PropertyGroup><R Condition=\"'$([System.String]::IsNullOrWhiteSpace(`é`))'\">x</R></PropertyGroup>";
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_eq!(parsed.rejection, None, "{body}: {:#?}", parsed.diagnostics);
+    }
+}
+
+/// A throw rests on what its expression read before it threw: a later step,
+/// which MSBuild never reaches, reading a name the walk holds no value of
+/// does not make the throw one the walk cannot judge.
+#[test]
+fn a_throw_rests_only_on_what_it_read_before_it() {
+    let refused = "<X>$([System.String]::Copy('Debug'))</X>";
+    for body in [
+        format!(
+            "<PropertyGroup><P>abc</P>{refused}<R>$(P.Split(';')[9].Contains('$(X)'))</R></PropertyGroup>"
+        ),
+        format!(
+            "<PropertyGroup><P>abc</P>{refused}<R Condition=\"'$(P.Split(`;`)[9].Contains(`$(X)`))' == ''\">x</R></PropertyGroup>"
+        ),
+    ] {
+        // In a condition the throw's certainty is judged leaf-wise, a
+        // doubted name anywhere in the leaf leaving it Possible.
+        let certainty = if body.contains("Condition") {
+            RejectionCertainty::Possible
+        } else {
+            RejectionCertainty::Certain
+        };
+        for parsed in both_walkers(&format!("  {body}")) {
+            assert_withdrawn_as(&parsed, &["Before", "After"], certainty);
+        }
+    }
+}
+
+/// MSBuild expands an item's text's properties before its item lists, so a
+/// function is handed an item list as written, in an operation or a
+/// metadatum alike: `VersionEquals('@(J)', '1.0')` throws whatever `J` holds
+/// (probed, `msbuild-condition-oracle`, SDK 10.0.401). A metadata reference
+/// in an operation is likewise read as written; in a metadatum it is the
+/// metadatum's value, which the walk does not judge (#1094).
+#[test]
+fn an_item_list_in_an_items_function_is_read_as_written() {
+    let call = "$([MSBuild]::VersionEquals('@(J)','1.0'))";
+    for body in [
+        format!("<ItemGroup><J Include=\"1.0\" /><I Include=\"{call}\" /></ItemGroup>"),
+        format!("<ItemGroup><J Include=\"1.0\" /><I Include=\"x\" M=\"{call}\" /></ItemGroup>"),
+        format!("<ItemGroup><J Include=\"1.0\" /><I Include=\"x\"><M>{call}</M></I></ItemGroup>"),
+        "<ItemGroup><I Include=\"$([MSBuild]::VersionEquals('%(M)','1.0'))\" /></ItemGroup>"
+            .to_owned(),
+    ] {
+        // Metadata reading an item list is evaluated item by item, which the
+        // walk does not count here: reached perhaps.
+        let certainty = if body.contains("<I Include=\"x\"") {
+            RejectionCertainty::Possible
+        } else {
+            RejectionCertainty::Certain
+        };
+        for parsed in both_walkers(&format!("  {body}")) {
+            assert_withdrawn_as(&parsed, &["Before", "After"], certainty);
+        }
+    }
+}
+
+/// In an item's condition MSBuild expands an item expression its properties
+/// form after it expands them, so one formed beside a boolean the walk does
+/// not compute is still formed: `@(Foo->NoSuchFunction())` throws.
+#[test]
+fn an_item_expression_beside_an_unknown_boolean_may_reject() {
+    let body = "<PropertyGroup><A>@</A><B>(Foo-&gt;NoSuchFunction())</B></PropertyGroup><ItemGroup><Foo Include=\"f\" /><I Include=\"x\" Condition=\"'$([System.String]::IsNullOrWhiteSpace(`é`))$(A)$(B)' == 'z'\" /></ItemGroup>";
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_withdrawn(&parsed, &["Before", "After"]);
+    }
+}
+
+/// `Version.Parse` throws on what it cannot read, a boolean among them.
+#[test]
+fn a_version_parse_of_an_unknown_boolean_may_reject() {
+    let body = "<PropertyGroup><R Condition=\"$([System.Version]::Parse($([System.String]::IsNullOrWhiteSpace('é'))).Build) == 1\">x</R></PropertyGroup>";
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_withdrawn(&parsed, &["Before", "After"]);
+    }
+}
+
+/// An unquoted version argument holding an expansion is read as MSBuild
+/// reads it: `VersionLessThan($(Major).0, 4.0)` is true for `Major=3`.
+#[test]
+fn an_unquoted_version_argument_around_an_expansion_is_read() {
+    let body = "<PropertyGroup><Major>3</Major><R Condition=\"$([MSBuild]::VersionLessThan($(Major).0,4.0))\">x</R></PropertyGroup>";
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_eq!(parsed.rejection, None, "{body}: {:#?}", parsed.diagnostics);
+        assert_eq!(parsed.property("R").value(), Some("x"), "{body}");
+    }
+}
+
+/// A file-system function MSBuild throws on, in text the walk does not
+/// expand itself (an item's `Include`), is judged on what the file system
+/// holds, as the walk's own expansions are: `GetDirectoryNameOfFileAbove`
+/// finds no file and returns `''`, which has no first character.
+#[test]
+fn a_file_system_function_in_an_items_text_is_judged_on_the_file_system() {
+    let body = "<ItemGroup><I Include=\"$([MSBuild]::GetDirectoryNameOfFileAbove($(MSBuildProjectDirectory), 'surely-not-here-1009.props')[0])\" /></ItemGroup>";
+    let [with_imports, _] = both_walkers(&format!("  {body}"));
+    assert_rejected(&with_imports, &["Before", "After"]);
+}

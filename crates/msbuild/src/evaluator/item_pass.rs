@@ -1695,7 +1695,7 @@ fn read_compile_order_metadata_write(
         span: Range<usize>,
         state: &mut State<'_>,
     ) -> Option<String> {
-        let expansion = state.expand(raw, span.clone());
+        let expansion = expand_metadata(state, raw, span.clone());
         if expansion.had_issue() {
             return None;
         }
@@ -3119,7 +3119,7 @@ fn read_item_metadata(node: Node<'_, '_>, name: &str, state: &mut State<'_>) -> 
         state: &mut State<'_>,
     ) -> MetadataValue {
         state.note_package_uncertain_from_sdk_property_taint(raw);
-        let expansion = state.expand(raw, range.clone());
+        let expansion = expand_metadata(state, raw, range.clone());
         if expansion.had_issue() {
             return MetadataValue::Clear;
         }
@@ -3718,7 +3718,7 @@ fn set_generic_metadata_value(
     let (normalised, exact, rewritable) = if raw.is_empty() {
         (String::new(), String::new(), false)
     } else {
-        let expansion = expand_silent(raw, state);
+        let expansion = expand_metadata_silent(raw, state);
         if expansion.had_issue() {
             forget(metadata, raw);
             return;
@@ -3814,6 +3814,40 @@ fn evaluate_item_condition_silent_with_sdk_taint(
                 .is_some()
         });
     (gate, condition_tainted || sdk_tainted)
+}
+
+/// Expand `raw`, the value of an item's metadatum, reporting as
+/// [`State::expand`] does. MSBuild expands a metadatum's own metadata
+/// references first, so a property function reading one is handed the
+/// metadatum's value, not the reference the walk's expansion leaves it
+/// ([`properties::expressions_reading_metadata`]): an unsupported expression.
+/// An operation (`Include`, `Exclude`, `Remove`, `Update`) is no such text:
+/// MSBuild expands its properties first and reads a metadata reference left
+/// in it as written (`Include="$([System.String]::Copy('%(M)'))"` names
+/// `%(M)`; probed, `msbuild-condition-oracle`, SDK 10.0.401), as the walk
+/// does.
+fn expand_metadata(state: &mut State<'_>, raw: &str, span: Range<usize>) -> Expansion {
+    let mut expansion = state.expand(raw, span.clone());
+    for expression in properties::expressions_reading_metadata(raw) {
+        expansion.had_unsupported = true;
+        state.push(
+            DiagnosticKind::UnsupportedPropertyExpression {
+                expression: expression.to_owned(),
+            },
+            span.clone(),
+        );
+    }
+    expansion
+}
+
+/// [`expand_silent`] of a metadatum's value: a property function reading
+/// item metadata is unsupported, as in [`expand_metadata`].
+fn expand_metadata_silent(raw: &str, state: &State<'_>) -> Expansion {
+    let mut expansion = expand_silent(raw, state);
+    if !properties::expressions_reading_metadata(raw).is_empty() {
+        expansion.had_unsupported = true;
+    }
+    expansion
 }
 
 pub(super) fn expand_silent(raw: &str, state: &State<'_>) -> Expansion {
@@ -4609,7 +4643,7 @@ fn resolve_string_metadata(
         // A value MSBuild reads as XML is `Unknown`.
         let reading = metadata_attribute(node, &attr);
         let raw = reading.as_deref().unwrap_or(attr.value());
-        let expansion = state.expand(raw, node.range());
+        let expansion = expand_metadata(state, raw, node.range());
         resolved = if reading.is_none()
             || expansion.had_issue()
             || expansion.unpinned_root.is_some()
@@ -4674,7 +4708,7 @@ fn resolve_string_metadata(
             resolved = ItemMetadataValue::Known(None);
             continue;
         }
-        let expansion = state.expand(&raw, child.range());
+        let expansion = expand_metadata(state, &raw, child.range());
         if expansion.had_issue()
             || expansion.unpinned_root.is_some()
             || state.raw_uses_sdk_package_taint(&raw)

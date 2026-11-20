@@ -1576,6 +1576,10 @@ fn gen_grammar_root(rng: &mut SplitMix64, depth: u32) -> String {
     ];
     const STATICS: &[&str] = &[
         "Parse",
+        "VersionLessThan",
+        "VersionEquals",
+        "IsNullOrEmpty",
+        "IsNullOrWhiteSpace",
         "Combine",
         "GetTargetFrameworkVersion",
         "GetTargetFrameworkIdentifier",
@@ -1630,9 +1634,27 @@ fn gen_grammar_args(rng: &mut SplitMix64, depth: u32) -> String {
 }
 
 fn gen_grammar_arg(rng: &mut SplitMix64, depth: u32) -> String {
-    match rng.below(5) {
+    match rng.below(7) {
         0 => rng.below(10).to_string(),
         1 => format!("$({})", gen_grammar_inner(rng, depth)),
+        // The argument spellings MSBuild reads other than as a quoted literal:
+        // an unquoted word (`TrimStart(vV)`), `null` in any case (no string at
+        // all), unquoted text around an expansion (`$(V).0`), a tab, a
+        // version.
+        5 => match rng.below(6) {
+            0 => format!("$({}).0", rng.pick(CONTROLLED_PROPERTY_NAMES)),
+            1 => format!("$({})", rng.pick(CONTROLLED_PROPERTY_NAMES)),
+            _ => rng
+                .pick(&["vV", "null", "NULL", "1.0", "\t", "ab"])
+                .to_string(),
+        },
+        // A quoted literal holding the markers a property body reads as text
+        // (`%(M)`, `@(J)`: no metadata or item list there) and a tab.
+        6 => {
+            let delim = *rng.pick(&['\'', '`', '"']);
+            let body = rng.pick(&["%(M)", "@(J)", "a\tb", "%(M)$(B)"]);
+            format!("{delim}{body}{delim}")
+        }
         // Quoted literal, whose body may itself be a nested `$(…)` carrying its
         // own quotes (`'$(X.Split('-')[0])'`) — the scanner's hard case. All
         // three MSBuild delimiters are generated; a literal that happens to

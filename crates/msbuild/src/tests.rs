@@ -4030,6 +4030,39 @@ fn project_reference_metadata_child_overrides_attribute_case_insensitively() {
     );
 }
 
+/// MSBuild expands a metadatum's own metadata references before its
+/// properties, so a property function in it is handed the metadatum's value:
+/// `''` for an `X` the reference has none of, which `IsNullOrEmpty` and
+/// `IsNullOrWhiteSpace` call empty (`True` in every spelling; probed,
+/// `msbuild-condition-oracle`'s `itemsMeta`, SDK 10.0.401). The walk's
+/// expansion leaves the reference as text, which neither calls empty, so it
+/// declines rather than read `False`, which would drop a reference the build
+/// keeps.
+#[test]
+fn a_property_function_over_item_metadata_in_a_metadatum_is_unknown() {
+    for function in ["IsNullOrEmpty", "IsNullOrWhiteSpace"] {
+        let call = format!("$([System.String]::{function}('%(X)'))");
+        let src = format!(
+            r#"<Project>
+  <ItemGroup>
+    <ProjectReference Include="../A/A.fsproj" ReferenceOutputAssembly="{call}" />
+    <ProjectReference Include="../B/B.fsproj">
+      <ReferenceOutputAssembly>{call}</ReferenceOutputAssembly>
+    </ProjectReference>
+  </ItemGroup>
+</Project>"#
+        );
+        let p = parse(&src);
+        for reference in &p.project_references {
+            assert_eq!(
+                reference.reference_output_assembly,
+                ItemMetadataValue::Unknown,
+                "{function}: {reference:?}"
+            );
+        }
+    }
+}
+
 #[test]
 fn case_variant_duplicate_metadata_attribute_is_last_write_wins() {
     // Valid XML: attribute names differing only by case are distinct XML

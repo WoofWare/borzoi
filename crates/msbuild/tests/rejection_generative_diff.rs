@@ -38,6 +38,7 @@ use borzoi_msbuild::test_support::{
 };
 use borzoi_msbuild::{PropertyRead, RejectionCertainty};
 use borzoi_oracle_harness::hostile::{self, Dimension, coverage, value};
+use borzoi_oracle_harness::manifest::{self, Manifest};
 use common::{Oracle, SplitMix64, parse_fsproj_with_imports, soak_parameters};
 use tempfile::TempDir;
 
@@ -75,7 +76,7 @@ fn draw_value(rng: &mut SplitMix64) -> hostile::Drawn<String> {
 fn operand(rng: &mut SplitMix64, names: &[&str]) -> String {
     let name = *rng.pick(names);
     let other = *rng.pick(names);
-    match rng.below(21) {
+    match rng.below(30) {
         0 => format!("'{}'", rng.pick(&["", "1", "2.0", "abc", "true", "x", "É"])),
         1 => format!("'$({name})'"),
         2 => format!("$({name})"),
@@ -111,7 +112,41 @@ fn operand(rng: &mut SplitMix64, names: &[&str]) -> String {
         // A literal tab, which MSBuild reads as itself in an attribute.
         18 => format!("'$({name}.Split(\"\t\")[1])'"),
         19 => format!("'$({name}[0])$({other}[9])'"),
+        // Arguments in each spelling MSBuild reads: unquoted around an
+        // expansion, unquoted and bare, two expansions.
+        21 => format!("'$([MSBuild]::VersionLessThan($({name}).0, 2.0))'"),
+        22 => format!("'$([MSBuild]::VersionGreaterThan($({name}), 1.0))'"),
+        23 => format!("'$([MSBuild]::VersionLessThan($({name}),$({other})))'"),
+        // An item list and a metadatum in a function's argument: read as
+        // written in a condition or an operation, the metadatum's value in a
+        // metadatum.
+        24 => "'$([MSBuild]::VersionEquals(\"@(J)\", \"1.0\"))'".to_owned(),
+        25 => "'$([System.String]::IsNullOrEmpty(\"%(V)\"))'".to_owned(),
+        // A boolean the walk does not compute beside each check that may
+        // throw on it: text, a version parse, a reference that may complete
+        // an item expression.
+        26 => "'x$([System.String]::IsNullOrWhiteSpace(\"\u{a0}\"))'".to_owned(),
+        27 => {
+            "'$([System.Version]::Parse($([System.String]::IsNullOrWhiteSpace(\"\u{a0}\"))).Build)'"
+                .to_owned()
+        }
+        28 => format!("'$([System.String]::IsNullOrWhiteSpace(\"\u{a0}\"))$({name})$({other})'"),
+        // A throw before a later step that reads another name.
+        29 => format!("'$({name}.Split(\";\")[9].Contains(\"$({other})\"))'"),
         _ => format!("'$({name}.Split(\";\")[1].Length)'"),
+    }
+}
+
+/// An [`operand`] for a condition: one without an item list or metadata
+/// reference written in it, which puts the whole condition outside the
+/// grammar the walk parses, a gap of its own (#1095) the sweep would only
+/// pin.
+fn condition_operand(rng: &mut SplitMix64, names: &[&str]) -> String {
+    loop {
+        let op = operand(rng, names);
+        if !op.contains("@(") && !op.contains("%(") {
+            break op;
+        }
     }
 }
 
@@ -121,20 +156,26 @@ fn condition(rng: &mut SplitMix64, names: &[&str], depth: u32) -> String {
     if depth == 0 || rng.below(3) == 0 {
         return match rng.below(10) {
             0 => rng.pick(&["true", "false"]).to_string(),
-            1 => operand(rng, names),
-            2 => format!("HasTrailingSlash({})", operand(rng, names)),
+            1 => condition_operand(rng, names),
+            2 => format!("HasTrailingSlash({})", condition_operand(rng, names)),
             3 => format!(
                 "$([MSBuild]::VersionLessThan({q}$({}){q}, {q}2.0{q}))",
                 rng.pick(names),
                 q = rng.pick(&["'", "`", "\""])
             ),
             9 => "$([System.String]::IsNullOrWhiteSpace('\u{a0}'))".to_owned(),
-            4 => format!("Exists({})", operand(rng, names)),
+            // The version part the condition grammar reads itself, of a
+            // boolean the walk does not compute.
+            8 => format!(
+                "$([System.Version]::Parse($([System.String]::IsNullOrWhiteSpace('\u{a0}'))).Build) {} 1",
+                rng.pick(&["==", "<"])
+            ),
+            4 => format!("Exists({})", condition_operand(rng, names)),
             _ => format!(
                 "{} {} {}",
-                operand(rng, names),
+                condition_operand(rng, names),
                 rng.pick(&["==", "!=", "<", "<=", ">", ">="]),
-                operand(rng, names)
+                condition_operand(rng, names)
             ),
         };
     }
@@ -232,6 +273,28 @@ fn innermost_expressions(piece: &str, reads: &dyn Fn(&str) -> bool) -> Vec<Strin
     found
 }
 
+/// Every `$(…)` expression of a generated `piece`, at any depth, whose
+/// receiver is one of `names` (`$(X.Split(';')[9])`): its evaluation reads
+/// that name before anything else.
+fn receiver_expressions(piece: &str, names: &[&str]) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut pending = vec![piece.to_owned()];
+    while let Some(text) = pending.pop() {
+        for expression in expressions(&text) {
+            let inner = &expression[2..expression.len() - 1];
+            let receiver: String = inner
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            if names.contains(&receiver.as_str()) {
+                found.push(expression.to_owned());
+            }
+            pending.push(inner.to_owned());
+        }
+    }
+    found
+}
+
 /// The outermost `$(…)` expressions of a generated `piece`, in order. The
 /// generator writes no parenthesis inside a string, so counting them finds
 /// each one's end.
@@ -283,6 +346,12 @@ fn xml_attribute(s: &str) -> String {
     xml_text(s).replace('"', "&quot;")
 }
 
+/// Items every generated project declares before its site: `J`, which a
+/// function's argument names as an item list (`@(J)`), and `Foo`, which a
+/// value of the item-expression dimension completes one over
+/// (`@(Foo->…)`).
+const ITEMS: &str = "<ItemGroup><J Include=\"1.0\" /><Foo Include=\"f\" /></ItemGroup>";
+
 /// Where a generated piece goes: `{c}` a condition, `{t}` a text.
 const SITES: &[&str] = &[
     "<PropertyGroup><R Condition=\"{c}\">x</R></PropertyGroup>",
@@ -311,10 +380,25 @@ const SITES: &[&str] = &[
     "<UsingTask TaskName=\"X\" AssemblyFile=\"y.dll\" Runtime=\"{t}\" />",
     "<ItemGroup><I Update=\"nothere\" M=\"{t}\" /></ItemGroup>",
     "<ItemGroup><I Include=\"x\" /><I Update=\"x\" M=\"{t}\" /></ItemGroup>",
+    // Each operation's attributes, on its own item and on others'.
+    "<ItemGroup><I Include=\"x\" /><I Remove=\"{t}\" /></ItemGroup>",
+    "<ItemGroup><I Update=\"{t}\" /></ItemGroup>",
+    "<ItemGroup><I Include=\"x\" /><I Remove=\"@(J)\" MatchOnMetadata=\"{t}\" /></ItemGroup>",
+    "<ItemGroup><I Remove=\"@(J)\" MatchOnMetadata=\"M\" MatchOnMetadataOptions=\"{t}\" /></ItemGroup>",
+    "<ItemGroup><I Include=\"x\" MatchOnMetadata=\"{t}\" /></ItemGroup>",
+    "<ItemGroup><I Update=\"x\" MatchOnMetadata=\"{t}\" /></ItemGroup>",
+    "<ItemGroup><I Include=\"x\" KeepMetadata=\"{t}\" /></ItemGroup>",
+    "<ItemGroup><I Include=\"x\" V=\"1.0\"><M>{t}</M></I></ItemGroup>",
     "<Import Project=\"there.props\" Condition=\"{c}\" />",
     "<Choose><When Condition=\"{c}\"><PropertyGroup><R>x</R></PropertyGroup></When></Choose>",
     "<Choose><When Condition=\"UNDECIDED_FALSE\" /><When Condition=\"{c}\" /></Choose>",
 ];
+
+/// Whether `template` puts its text in a metadatum's value, where MSBuild
+/// expands metadata references before properties.
+fn is_metadata_site(template: &str) -> bool {
+    template.contains("<M>{t}") || template.contains("M=\"{t}")
+}
 
 /// What became of a generated project, as the census counts it.
 fn outcome(rejected: bool, committed: bool) -> &'static str {
@@ -343,6 +427,126 @@ struct ProjectCensus {
     /// does not model, which the walk commits: a refused body is no rejection
     /// site yet (#1094).
     rejected_on_an_unmodelled_body: usize,
+    /// Projects the baseline revision answers wrongly
+    /// (`manifests/rejection_projects_baseline.txt`): it commits a value of a
+    /// project MSBuild rejects, a value MSBuild does not hold, or a certain
+    /// rejection of a project MSBuild evaluates.
+    baseline_wrong: usize,
+    /// Of those, the ones the walk under test answers rightly or withdraws.
+    baseline_wrong_now_not: usize,
+}
+
+/// What the baseline revision made of each fixed-seed project, by case
+/// (`tests/rejection_baseline.rs`, `tools/rejection-baseline.sh`).
+struct Baseline {
+    revision: String,
+    cases: HashMap<String, BaselineCase>,
+}
+
+struct BaselineCase {
+    hash: String,
+    certain: bool,
+    /// Each value committed, by name, as [`encode`] spells it.
+    committed: Vec<(String, String)>,
+}
+
+impl Baseline {
+    fn load() -> Self {
+        let path = format!(
+            "{}/tests/manifests/rejection_projects_baseline.txt",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        let mut revision = String::new();
+        let mut cases = HashMap::new();
+        for line in text.lines() {
+            if let Some(rest) = line.strip_prefix("# Regenerate: bash tools/rejection-baseline.sh ")
+            {
+                revision = rest.to_owned();
+            }
+            if line.starts_with('#') || line.is_empty() {
+                continue;
+            }
+            let mut fields = line.splitn(4, '\t');
+            let (Some(key), Some(hash), Some(rejection), committed) =
+                (fields.next(), fields.next(), fields.next(), fields.next())
+            else {
+                panic!("{path}: malformed line {line:?}");
+            };
+            let committed = committed
+                .unwrap_or("")
+                .split(' ')
+                .filter(|field| !field.is_empty())
+                .map(|field| {
+                    let (name, value) = field.split_once('=').expect("name=value");
+                    (name.to_owned(), value.to_owned())
+                })
+                .collect();
+            cases.insert(
+                key.to_owned(),
+                BaselineCase {
+                    hash: hash.to_owned(),
+                    certain: rejection == "certain",
+                    committed,
+                },
+            );
+        }
+        Baseline { revision, cases }
+    }
+
+    /// Whether the baseline answered `key` wrongly, MSBuild holding `theirs`
+    /// (`None`: it rejects); `None` where the baseline has no record of this
+    /// project's text, `hash`.
+    fn wrong(
+        &self,
+        key: &str,
+        hash: &str,
+        theirs: Option<&HashMap<String, String>>,
+    ) -> Option<bool> {
+        let case = self.cases.get(key).filter(|case| case.hash == hash)?;
+        Some(match theirs {
+            None => !case.committed.is_empty(),
+            Some(theirs) => {
+                case.certain
+                    || case.committed.iter().any(|(name, value)| {
+                        theirs.get(name).map(|v| encode(v)) != Some(value.clone())
+                    })
+            }
+        })
+    }
+}
+
+/// `value` as one space-free field, as `tests/rejection_baseline.rs` spells
+/// it.
+fn encode(value: &str) -> String {
+    value.escape_default().to_string().replace(' ', "\\x20")
+}
+
+/// FNV-1a over `text`'s bytes, as hex, as `tests/rejection_baseline.rs`
+/// computes it.
+fn fnv1a(text: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in text.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
+
+/// What [`project_sweep`] holds the walk to beyond MSBuild, at a fixed seed:
+/// the baseline revision's answers, and the pin of each project the walk
+/// answers wrongly.
+struct Grading {
+    baseline: Baseline,
+    /// Where to write each generated project, for `tools/rejection-baseline.sh`.
+    dump: Option<std::path::PathBuf>,
+    /// Projects whose text the baseline has no record of.
+    stale: Vec<String>,
+    /// Projects the baseline answered rightly, or withdrew, that the walk
+    /// under test answers wrongly.
+    regressed: Vec<String>,
+    /// Each project the walk under test answers wrongly, by the gap it is.
+    wrong: Vec<(String, String)>,
 }
 
 /// The hostile values the project sweep cannot carry yet.
@@ -364,7 +568,11 @@ const REFUSED: &str = "$([System.String]::Copy('Debug'))";
 const VARIED_VALUES: &[&str] = &["1", "abc", "a;b\tc;d\te;f\tg;h\ti;j;k\tl", "1.2.3", "true"];
 
 /// Generate `cases` projects from `rng` and grade each against MSBuild.
-fn project_sweep(rng: &mut SplitMix64, cases: usize) -> ProjectCensus {
+fn project_sweep(
+    rng: &mut SplitMix64,
+    cases: usize,
+    mut grading: Option<&mut Grading>,
+) -> ProjectCensus {
     let census = coverage::open(
         "crates/msbuild/tests/rejection_generative_diff.rs",
         "rejection_projects",
@@ -393,6 +601,13 @@ fn project_sweep(rng: &mut SplitMix64, cases: usize) -> ProjectCensus {
         for drawn in [&a, &b, &held, &real] {
             hostile.extend(drawn.hostile.iter().copied());
         }
+        // A later write is made of `A` and `B` alone (below): a value of `U`
+        // drawn as overwritten later is written once, and reaches nothing.
+        if !a.hostile.contains(&Dimension::OverwrittenLater)
+            && !b.hostile.contains(&Dimension::OverwrittenLater)
+        {
+            hostile.remove(&Dimension::OverwrittenLater);
+        }
         if hostile.iter().any(|d| excluded.contains(d)) {
             continue;
         }
@@ -418,7 +633,7 @@ fn project_sweep(rng: &mut SplitMix64, cases: usize) -> ProjectCensus {
         // know.
         let document = |writes: &str, site: &str| {
             format!(
-                "<Project>\n  <PropertyGroup>{writes}</PropertyGroup>\n  {site}\n  \
+                "<Project>\n  <PropertyGroup>{writes}</PropertyGroup>\n  {ITEMS}\n  {site}\n  \
                  <PropertyGroup><After>ok</After>{later}</PropertyGroup>\n</Project>\n"
             )
         };
@@ -457,9 +672,35 @@ fn project_sweep(rng: &mut SplitMix64, cases: usize) -> ProjectCensus {
             None => {}
         }
         let both = oracle.project_both(&xml, &names, Some(&project_path), &[]);
+        let key = format!("case-{:04}", tally.cases);
+        let hash = fnv1a(&xml);
+        // Whether the baseline answered this project wrongly, and a note of
+        // the walk under test answering it wrongly.
+        let baseline_wrong = grading.as_deref_mut().and_then(|grading| {
+            if let Some(dump) = &grading.dump {
+                std::fs::write(dump.join(format!("{key}.xml")), &xml).unwrap();
+            }
+            let wrong = grading
+                .baseline
+                .wrong(&key, &hash, both.design_time.as_ref());
+            if wrong.is_none() {
+                grading.stale.push(key.clone());
+            }
+            wrong
+        });
+        tally.baseline_wrong += usize::from(baseline_wrong == Some(true));
+        let answered_wrongly = |gap: &str, grading: Option<&mut Grading>| {
+            if let Some(grading) = grading {
+                grading.wrong.push((key.clone(), format!("{hash} {gap}")));
+                if baseline_wrong == Some(false) {
+                    grading.regressed.push(format!("{key} ({gap})"));
+                }
+            }
+        };
         let Some(theirs) = both.design_time else {
             tally.msbuild_rejects += 1;
             if ours.is_empty() {
+                tally.baseline_wrong_now_not += usize::from(baseline_wrong == Some(true));
                 census.reached(&hostile, outcome(true, false));
                 continue;
             }
@@ -478,7 +719,7 @@ fn project_sweep(rng: &mut SplitMix64, cases: usize) -> ProjectCensus {
                 None
             } else {
                 let xml = format!(
-                    "<Project>\n  <PropertyGroup>{writes}</PropertyGroup>\n  {site}\n</Project>\n"
+                    "<Project>\n  <PropertyGroup>{writes}</PropertyGroup>\n  {ITEMS}\n  {site}\n</Project>\n"
                 );
                 std::fs::write(&project_path, &xml).unwrap();
                 Some(
@@ -522,6 +763,7 @@ fn project_sweep(rng: &mut SplitMix64, cases: usize) -> ProjectCensus {
                 .any(|value| evaluates(&mut oracle, &varied(value), &site))
             {
                 tally.rejected_on_an_uncertain_value += 1;
+                answered_wrongly("uncertain-value", grading.as_deref_mut());
                 census.reached(&hostile, "msbuild-rejects-on-an-uncertain-value");
                 continue;
             }
@@ -547,39 +789,65 @@ fn project_sweep(rng: &mut SplitMix64, cases: usize) -> ProjectCensus {
             } else {
                 &gate
             };
-            let unsure_expressions = innermost_expressions(piece, &reads_unsure);
-            // The walk judges each leaf alone, and follows no correlation
-            // between two such expressions, nor between two places one
-            // stands: each place takes its own value, every assignment up to a
-            // bound.
-            let mut places: Vec<(usize, &str)> = Vec::new();
-            for expression in &unsure_expressions {
-                for (at, _) in piece.match_indices(expression.as_str()) {
-                    if !places.iter().any(|(seen, _)| *seen == at) {
-                        places.push((at, expression.as_str()));
+            // Struck two ways: the innermost expressions on such names, which
+            // leaves a function around one standing (`VersionLessThan('$(U)',
+            // …)`), and each expression whose receiver is such a name, whose
+            // throw rests on it whatever a later step reads
+            // (`$(X.Split(';')[9].Contains('$(U)'))`).
+            let strike_sets = [
+                innermost_expressions(piece, &reads_unsure),
+                receiver_expressions(piece, &unsure_names),
+            ];
+            let mut shown = false;
+            for unsure_expressions in &strike_sets {
+                // The walk judges each leaf alone, and follows no correlation
+                // between two such expressions, nor between two places one
+                // stands: each place takes its own value, every assignment up
+                // to a bound.
+                let mut places: Vec<(usize, &str)> = Vec::new();
+                for expression in unsure_expressions {
+                    for (at, _) in piece.match_indices(expression.as_str()) {
+                        if !places.iter().any(|(seen, _)| *seen == at) {
+                            places.push((at, expression.as_str()));
+                        }
                     }
                 }
-            }
-            places.sort();
-            let struck_sites: Vec<String> = assignments(places.len())
-                .into_iter()
-                .map(|assignment| {
-                    let mut struck = String::new();
-                    let mut from = 0;
-                    for ((at, expression), value) in places.iter().zip(assignment) {
-                        struck.push_str(&piece[from..*at]);
-                        struck.push_str(value);
-                        from = at + expression.len();
+                places.sort();
+                // Places nested in an earlier one are struck with it.
+                let mut outer: Vec<(usize, &str)> = Vec::new();
+                for (at, expression) in places {
+                    if outer
+                        .last()
+                        .is_none_or(|(last, text)| at >= last + text.len())
+                    {
+                        outer.push((at, expression));
                     }
-                    struck.push_str(&piece[from..]);
-                    site.replace(&xml_attribute(piece), &xml_attribute(&struck))
-                })
-                .collect();
-            if struck_sites
-                .iter()
-                .any(|struck| evaluates(&mut oracle, &varied(""), struck))
-            {
+                }
+                let struck_sites: Vec<String> = assignments(outer.len())
+                    .into_iter()
+                    .map(|assignment| {
+                        let mut struck = String::new();
+                        let mut from = 0;
+                        for ((at, expression), value) in outer.iter().zip(assignment) {
+                            struck.push_str(&piece[from..*at]);
+                            struck.push_str(value);
+                            from = at + expression.len();
+                        }
+                        struck.push_str(&piece[from..]);
+                        site.replace(&xml_attribute(piece), &xml_attribute(&struck))
+                    })
+                    .collect();
+                if struck_sites
+                    .iter()
+                    .any(|struck| evaluates(&mut oracle, &varied(""), struck))
+                {
+                    shown = true;
+                    break;
+                }
+            }
+            if shown {
                 tally.rejected_on_an_uncertain_value += 1;
+                answered_wrongly("uncertain-value", grading.as_deref_mut());
                 census.reached(&hostile, "msbuild-rejects-on-an-uncertain-value");
                 continue;
             }
@@ -607,8 +875,12 @@ fn project_sweep(rng: &mut SplitMix64, cases: usize) -> ProjectCensus {
                     .into_iter()
                     .filter_map(|issue| match issue {
                         Issue::Unsupported { expression } => Some(expression),
-                        // One reading item metadata the walk does not hold.
-                        Issue::Throws { expression } if expression.contains("%(") => {
+                        // One reading item metadata in a metadatum, which
+                        // MSBuild hands the metadatum's value the walk does
+                        // not hold; an operation reads it as written.
+                        Issue::Throws { expression, .. }
+                            if expression.contains("%(") && is_metadata_site(template) =>
+                        {
                             Some(expression)
                         }
                         _ => None,
@@ -632,6 +904,7 @@ fn project_sweep(rng: &mut SplitMix64, cases: usize) -> ProjectCensus {
                 describe()
             );
             tally.rejected_on_an_unmodelled_body += 1;
+            answered_wrongly("unmodelled-body", grading.as_deref_mut());
             census.reached(&hostile, "msbuild-rejects-on-an-unmodelled-body");
             continue;
         };
@@ -653,6 +926,7 @@ fn project_sweep(rng: &mut SplitMix64, cases: usize) -> ProjectCensus {
         }
         let committed = ours.iter().any(|(name, _)| name.as_str() == "After");
         tally.evaluated_and_committed += usize::from(committed);
+        tally.baseline_wrong_now_not += usize::from(baseline_wrong == Some(true));
         census.reached(&hostile, outcome(false, committed));
     }
     census.finish(
@@ -662,29 +936,54 @@ fn project_sweep(rng: &mut SplitMix64, cases: usize) -> ProjectCensus {
     tally
 }
 
-/// [`project_sweep`] at a fixed seed.
+/// [`project_sweep`] at a fixed seed, held to the baseline revision's answers
+/// (`manifests/rejection_projects_baseline.txt`): no project the baseline
+/// answered rightly, or withdrew, is one the walk under test answers wrongly.
+/// Each project it answers wrongly (one MSBuild rejects over what the walk
+/// does not judge yet) is pinned in `manifests/rejection_projects_wrong.txt`,
+/// so that one closing, or opening, shows there.
 #[test]
 fn project_sweep_fixed_seed() {
     let mut rng = SplitMix64(0x1009_0b5e_55ed);
-    let tally = project_sweep(&mut rng, 1_500);
+    let mut grading = Grading {
+        baseline: Baseline::load(),
+        dump: std::env::var_os("BORZOI_REJECTION_DUMP").map(std::path::PathBuf::from),
+        stale: Vec::new(),
+        regressed: Vec::new(),
+        wrong: Vec::new(),
+    };
+    let tally = project_sweep(&mut rng, 1_500, Some(&mut grading));
     eprintln!("rejection project sweep: {tally:?}");
+    assert!(
+        grading.stale.is_empty(),
+        "the generated projects moved: {} of them have no record at the baseline revision; \
+         regenerate it with `bash tools/rejection-baseline.sh {}` (or the branch's new merge \
+         base with main): {:?}",
+        grading.stale.len(),
+        grading.baseline.revision,
+        &grading.stale[..grading.stale.len().min(10)]
+    );
+    assert!(
+        grading.regressed.is_empty(),
+        "projects the baseline ({}) answered rightly, or withdrew, are answered wrongly now: {:?}",
+        grading.baseline.revision,
+        grading.regressed
+    );
     // Anti-vacuity: MSBuild rejects and evaluates generated projects, the walk
-    // claims rejections and allows them, and commits values beside them.
+    // claims rejections and allows them, and commits values beside them; the
+    // baseline answered some wrongly that the walk under test does not.
     assert!(tally.msbuild_rejects >= 200, "{tally:?}");
     assert!(tally.certain >= 100, "{tally:?}");
     assert!(tally.possible >= 100, "{tally:?}");
     assert!(tally.evaluated_and_committed >= 200, "{tally:?}");
-    // The projects MSBuild rejects that the walk commits, by the open gap
-    // each is: pinned, so that closing one, or widening one, shows here.
-    assert_eq!(
-        (
-            tally.rejected_on_an_uncertain_value,
-            tally.rejected_on_an_unmodelled_body
-        ),
-        (91, 25),
-        "the projects MSBuild rejects that the walk commits moved: pin the new counts if \
-         #1051's second stage or #1094 now judges more of them, or if the generator changed \
-         ({tally:?})"
+    assert!(tally.baseline_wrong_now_not >= 50, "{tally:?}");
+    let manifest = Manifest::from_keyed(grading.wrong).expect("well-formed entries");
+    manifest::check(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/manifests/rejection_projects_wrong.txt"),
+        &manifest,
+        "BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-msbuild --test \
+         rejection_generative_diff project_sweep_fixed_seed",
     );
 }
 
@@ -694,7 +993,7 @@ fn project_sweep_fixed_seed() {
 fn project_sweep_soak() {
     let (seed, cases) = soak_parameters("rejection project", 10_000);
     let mut rng = SplitMix64(seed);
-    let tally = project_sweep(&mut rng, cases);
+    let tally = project_sweep(&mut rng, cases, None);
     eprintln!("rejection project soak: {tally:?}");
 }
 
@@ -735,7 +1034,7 @@ struct JudgeCensus {
     /// values had no boolean: MSBuild evaluated them without throwing.
     never_though_unevaluated: usize,
     /// Conditions judged to throw perhaps, past an operand the walk does not
-    /// model on certain values, where MSBuild threw.
+    /// model on certain values, where MSBuild threw on those values.
     maybe_on_certain_values_threw: usize,
     /// Conditions judged to throw whatever the uncertain values hold.
     certainly: usize,
@@ -808,13 +1107,21 @@ fn classified_judgement_sweep(rng: &mut SplitMix64, cases: usize) -> JudgeCensus
             &|_| false,
         );
         tally.cases += 1;
-        let (mut threw, mut held_value) = (false, false);
+        let held_of = |name: &str| {
+            held.iter()
+                .find(|(held_name, _)| held_name == name)
+                .map(|(_, value)| value.as_str())
+        };
+        let (mut threw_on_held, mut held_value) = (false, false);
         for u in GRADED {
             for v in GRADED {
                 let mut props = certain.clone();
                 props.extend(u.map(|u| ("U".to_string(), u.to_string())));
                 props.extend(v.map(|v| ("V".to_string(), v.to_string())));
-                match oracle.eval(&condition, &props) {
+                let is_held = *u == held_of("U") && *v == held_of("V");
+                let evaluated = oracle.eval(&condition, &props);
+                threw_on_held |= is_held && evaluated.is_none();
+                match evaluated {
                     Some(value) => {
                         held_value = true;
                         assert!(
@@ -828,7 +1135,6 @@ fn classified_judgement_sweep(rng: &mut SplitMix64, cases: usize) -> JudgeCensus
                         );
                     }
                     None => {
-                        threw = true;
                         assert_ne!(
                             judged.throws,
                             Throws::Never,
@@ -840,8 +1146,10 @@ fn classified_judgement_sweep(rng: &mut SplitMix64, cases: usize) -> JudgeCensus
         }
         tally.never_though_unevaluated +=
             usize::from(judged.throws == Throws::Never && judged.unevaluated && held_value);
+        // On the held values `on_held` judged, MSBuild threw: under that one
+        // assignment, not any.
         tally.maybe_on_certain_values_threw +=
-            usize::from(on_held.throws == Throws::Maybe && on_held.unevaluated && threw);
+            usize::from(on_held.throws == Throws::Maybe && on_held.unevaluated && threw_on_held);
         tally.certainly += usize::from(judged.throws == Throws::Certainly);
         let verdict = match judged.throws {
             Throws::Never => "never",

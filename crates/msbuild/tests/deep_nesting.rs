@@ -456,4 +456,13 @@ fn deep_project_text_evaluates_without_aborting() {
              <ItemGroup><Compile Include=\"{text}.fs\" /></ItemGroup>"
         ));
     }
+    // A condition that fails around a name the walk holds no value of (`X`, a
+    // write it refuses), nested deep: the rejection judgement searches it for
+    // the expressions on that name, and descends no deeper than the
+    // evaluator does, so the search is linear in the text.
+    let deep = xml_attr(&nest("$(P.TrimStart(", "$(X)", "))", DEEP));
+    evaluate_project(format!(
+        "<PropertyGroup><P>abc</P><X>$([System.String]::Copy('d'))</X>\
+         <R Condition=\"'{deep}' == 'y'\">1</R></PropertyGroup>"
+    ));
 }
