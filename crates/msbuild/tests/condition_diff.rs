@@ -1816,13 +1816,11 @@ fn using_task_texts_are_judged_where_msbuild_expands_them() {
             "<UsingTask {INLINE}><Task{attribute}>{T}</Task></UsingTask>"
         ));
         // An `Evaluate` other than `true` or `false` MSBuild refuses as it
-        // registers the task whatever the body holds, a rule of its own the
-        // walk does not model (#1099): only with a body that throws anyway.
-        if !matches!(evaluate, Some("off" | "$(Missing)")) {
-            rows.push(format!(
-                "<UsingTask {INLINE}><Task{attribute}>x</Task></UsingTask>"
-            ));
-        }
+        // registers the task whatever the body holds (#1099,
+        // `tests/using_task_registration_diff.rs`).
+        rows.push(format!(
+            "<UsingTask {INLINE}><Task{attribute}>x</Task></UsingTask>"
+        ));
     }
     for parameter in ["ParameterType", "Required", "Output"] {
         rows.push(format!(
