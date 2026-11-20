@@ -1416,3 +1416,24 @@ fn a_file_system_function_in_an_items_text_is_judged_on_the_file_system() {
     let [with_imports, _] = both_walkers(&format!("  {body}"));
     assert_rejected(&with_imports, &["Before", "After"]);
 }
+
+/// A throw that read a name the walk holds no value of is judged where it
+/// throws whatever that name's expressions return, on the rest: `true` is no
+/// version, whatever `X` is (MSBuild's `X` is `Debug`; it throws). In a text
+/// and in a condition's `Exists` alike.
+#[test]
+fn a_throw_whatever_an_unheld_name_returns_may_reject() {
+    let refused = "<X>$([System.String]::Copy('Debug'))</X>";
+    for body in [
+        format!(
+            "<PropertyGroup><A>true</A>{refused}<R>$([MSBuild]::VersionLessThan($(A),$(X)))</R></PropertyGroup>"
+        ),
+        format!(
+            "<PropertyGroup><A>true</A>{refused}</PropertyGroup><ItemGroup><I Include=\"x\" Condition=\"Exists('$([MSBuild]::VersionLessThan($(X),$(A)))')\" /></ItemGroup>"
+        ),
+    ] {
+        for parsed in both_walkers(&format!("  {body}")) {
+            assert_withdrawn(&parsed, &["Before", "After"]);
+        }
+    }
+}

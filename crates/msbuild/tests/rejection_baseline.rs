@@ -33,20 +33,21 @@ fn record_baseline() {
     )
     .unwrap();
     let project_path = dir.join("Demo.fsproj");
-    let mut cases: Vec<(String, std::path::PathBuf)> = std::fs::read_dir(&dump)
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .filter(|path| path.extension().is_some_and(|e| e == "xml"))
-        .map(|path| {
-            let key = path.file_stem().unwrap().to_string_lossy().into_owned();
-            (key, path)
-        })
-        .collect();
+    let mut cases: Vec<(String, std::path::PathBuf)> =
+        borzoi_msbuild::observed::host_fs::read_dir(&dump)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|e| e == "xml"))
+            .map(|path| {
+                let key = path.file_stem().unwrap().to_string_lossy().into_owned();
+                (key, path)
+            })
+            .collect();
     cases.sort();
     assert!(!cases.is_empty(), "no project dumped in {}", dump.display());
     let mut out = String::new();
     for (key, path) in cases {
-        let xml = std::fs::read_to_string(&path).unwrap();
+        let xml = borzoi_msbuild::observed::host_fs::read_to_string(&path).unwrap();
         std::fs::write(&project_path, &xml).unwrap();
         let parsed = common::parse_fsproj_with_imports(
             &borzoi_msbuild::ProjectFile::buffer(&project_path, &xml)

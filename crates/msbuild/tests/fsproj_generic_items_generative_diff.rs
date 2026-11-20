@@ -73,8 +73,12 @@ const INCLUDES: [&str; 14] = [
 /// What an `Exclude` names: MSBuild matches it by normalised path.
 const EXCLUDES: [&str; 6] = ["a", "./a", "A", "b;x%3By", "\\tmp\\foo", "$(Name)"];
 /// Values for a metadata attribute.
-const VALUES: [&str; 19] = [
+const VALUES: [&str; 21] = [
     "1.0",
+    // A property function over a metadatum, which MSBuild hands the
+    // metadatum's value (it expands metadata first), not the reference.
+    "$([System.String]::IsNullOrEmpty('%(Flavor)'))",
+    "$([System.String]::IsNullOrWhiteSpace('%(Identity)'))",
     "$(Name)",
     "pre$(Name)post",
     "",

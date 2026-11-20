@@ -456,7 +456,7 @@ impl Baseline {
             "{}/tests/manifests/rejection_projects_baseline.txt",
             env!("CARGO_MANIFEST_DIR")
         );
-        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        let text = borzoi_msbuild::observed::host_fs::read_to_string(&path).unwrap_or_default();
         let mut revision = String::new();
         let mut cases = HashMap::new();
         for line in text.lines() {

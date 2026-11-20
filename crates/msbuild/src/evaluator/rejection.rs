@@ -742,7 +742,7 @@ enum ItemAttribute {
 fn item_attribute(node: Node<'_, '_>, name: &str) -> ItemAttribute {
     let operation = ["Include", "Remove", "Update"]
         .into_iter()
-        .find(|operation| node.attribute(*operation).is_some());
+        .find(|operation| attribute(node, operation).is_some());
     match (operation, name) {
         (
             _,
