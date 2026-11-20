@@ -463,7 +463,7 @@ pub const LEAF_FORMS: &[LeafForm] = &[
     LeafForm {
         leaf: Leaf::AugmentationHead,
         form: "global",
-        source: "namespace rec D\ntype C() = class end\ntype global.D.C with\n    static member E(s: string) = s\n",
+        source: "namespace rec D\ntype C<'a>() = class end\ntype global.D.C<'a> with\n    static member E(s: string) = s\n",
         providers: ProviderReferences::None,
         verdict: Verdict::Declined,
     },

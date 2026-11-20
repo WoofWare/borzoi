@@ -519,11 +519,30 @@ pub fn cells() -> Vec<Cell> {
             "class_let_active_pattern_on_next_line",
             "module ApLine\nopen System.Runtime.CompilerServices\ntype T() =\n    static let (|A|_|) (x: int) = Some x\n    [<Extension>]\n    static let\n        (|A|_|) (x: int) = Some x\n    member _.G = match 1 with A x -> x | _ -> 0\n",
         ),
+        // The augmentation cells whose arity-less heads decline, with heads
+        // that write their parameters, so the kinds and placement they
+        // exercise stay graded.
+        one(
+            "extension_intrinsic_generic",
+            "module ExtIntrG\ntype Rec<'a> = { X: 'a }\ntype Rec<'a> with\n    member r.Y = r.X\ntype Cls<'a>() = member _.A = 1\ntype Cls<'a> with\n    member _.B = 2\ntype IFace<'a> = abstract M: 'a\nmodule IFaceExt =\n    type IFace<'a> with\n        member i.N = i.M\ntype Uni<'a> = | U of 'a\nmodule Later =\n    type Rec<'a> with\n        member r.Z = r.X\n",
+        ),
+        one(
+            "augmentation_of_single_case_abbreviation_generic",
+            "module AugCaseG\nopen System.Runtime.CompilerServices\ntype T<'a> = Case\ntype T<'a> with\n    [<Extension>]\n    static member M(s: string) = s\n",
+        ),
+        one(
+            "extension_namespace_level_generic",
+            "namespace ExtNsG\ntype System.Collections.Generic.List<'T> with\n    member l.Double = l.Count * 2\n",
+        ),
+        one(
+            "attribute_made_interface_augmentation_generic",
+            "module AttrInterfaceG\n[<Interface>]\ntype I<'a>() =\n    abstract M: string -> string\ntype I<'a> with\n    static member Foo() = 1\n",
+        ),
         // A head whose argument pattern holds an active pattern on a later
         // line: FCS mangles by the binder's line, the head's first.
         one(
             "class_let_active_pattern_argument",
-            "module ApArg\nopen System.Runtime.CompilerServices\ntype T(f: int) =\n    [<Extension>] static let f\n                    ((|Hi|_|): string -> unit option) = 1\n    member _.G = f (fun _ -> None) + f\n",
+            "module ApArg\nopen System.Runtime.CompilerServices\ntype T(f: int) =\n    [<Extension>] static let f\n                    ((|Hi|_|): string -> unit option) = 1\n    member _.G = f\n",
         ),
         one(
             "quoted_load_directive",
