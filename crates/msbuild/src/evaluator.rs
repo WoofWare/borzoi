@@ -1299,6 +1299,13 @@ struct State<'r> {
     /// Set while the item pass runs: its conditions are judged group by group
     /// ([`rejection::judge_deferred`]), not where the walk evaluates them.
     in_item_pass: bool,
+    /// While the rejection judgement walks content the walk does not take
+    /// ([`rejection::judge_branch`], [`rejection::judge_properties`]): the
+    /// property table as it was before, which the judgement's speculative
+    /// writes replace until it leaves (`None` outside one), and the names
+    /// whose value the taken path leaves unknown (a write under a gate it
+    /// could not decide there, or one it could not compute).
+    speculation: Option<Speculation>,
     /// The root each root-surfacing diagnostic stood for, by its index in
     /// `diagnostics`, captured when it was pushed. A diagnostic carries only a
     /// name, and that name's root may change later in the walk;
@@ -1412,6 +1419,17 @@ struct Expansion {
     /// ([`rejection::throws_in`]); `had_unsupported` is set with any. A
     /// rejection wherever MSBuild evaluates the text: the caller judges where.
     throws: Vec<rejection::Thrown>,
+}
+
+/// The rejection judgement's speculative walk of content the walk does not
+/// take ([`State::speculation`]).
+struct Speculation {
+    /// The property table before the speculative writes.
+    saved: properties::PropertyMap,
+    /// Lower-cased names whose value on the speculative path is unknown.
+    unheld: HashSet<String>,
+    /// How many nested speculative walks are open.
+    depth: usize,
 }
 
 impl Expansion {
@@ -1748,6 +1766,7 @@ impl<'r> State<'r> {
             reach_doubted: 0,
             taken_import_path_certain: false,
             in_item_pass: false,
+            speculation: None,
             diagnostic_roots: HashMap::new(),
         }
     }
@@ -2231,6 +2250,7 @@ impl<'r> State<'r> {
             reach_doubted: _,
             taken_import_path_certain: _,
             in_item_pass: _,
+            speculation: _,
             diagnostic_roots: _,
         } = self;
         // Central Package Management opt-in: a versionless
@@ -3245,7 +3265,7 @@ impl<'r> State<'r> {
             _ => None,
         };
         matches!(
-            condition::decide_without(cond, &self.lookup, probes, &unknown),
+            condition::decide_without(cond, &self.lookup, probes, self.condition_site(), &unknown),
             condition::Decision::Decided(_)
         )
     }
@@ -4880,16 +4900,17 @@ fn evaluate_condition_with_exemptions(
     };
     let mut eval = if state.follow_imports {
         let exists = |path: &str| condition_exists(state.observer, path, current_file_dir);
-        condition::evaluate_with_exists(
+        condition::evaluate_at(
             cond,
             &state.lookup,
-            condition::Probes {
+            Some(condition::Probes {
                 exists: &exists,
                 observer: state.observer,
-            },
+            }),
+            state.condition_site(),
         )
     } else {
-        condition::evaluate(cond, &state.lookup)
+        condition::evaluate_at(cond, &state.lookup, None, state.condition_site())
     };
     // The undefined names the evaluation visited, before the exemptions below
     // vouch for some of them.
@@ -5624,16 +5645,17 @@ fn property_child_could_write(child: Node<'_, '_>, state: &State<'_>) -> bool {
     };
     let eval = if state.follow_imports {
         let exists = |path: &str| condition_exists(state.observer, path, &state.entry_project_dir);
-        condition::evaluate_with_exists(
+        condition::evaluate_at(
             cond,
             &state.lookup,
-            condition::Probes {
+            Some(condition::Probes {
                 exists: &exists,
                 observer: state.observer,
-            },
+            }),
+            state.condition_site(),
         )
     } else {
-        condition::evaluate(cond, &state.lookup)
+        condition::evaluate_at(cond, &state.lookup, None, state.condition_site())
     };
     // An undefined read the walk can prove is undefined in the real build too
     // substitutes to exactly "" (C.2b), so a child gated on a provably-false

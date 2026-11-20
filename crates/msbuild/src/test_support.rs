@@ -18,7 +18,13 @@ pub use crate::condition::{Eval, Judgement, MAX_CONDITION_NESTING, Outcome, Thro
 /// The condition module's `judge` with no file system: what MSBuild makes of
 /// `condition` without the values of the properties `uncertain` names.
 pub fn judge(condition: &str, props: &PropertyMap, uncertain: &dyn Fn(&str) -> bool) -> Judgement {
-    crate::condition::judge(condition, props, None, uncertain)
+    crate::condition::judge(
+        condition,
+        props,
+        None,
+        crate::condition::Site::Plain,
+        uncertain,
+    )
 }
 pub use crate::properties::MAX_EXPRESSION_NESTING;
 pub use crate::properties::escaping::{escape, unescape};

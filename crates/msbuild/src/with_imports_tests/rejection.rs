@@ -1461,13 +1461,20 @@ fn a_throw_under_a_gate_decided_true_past_an_unknown_operand_is_judged() {
 /// Design-time evaluation of a property's condition expands both sides of an
 /// equality, for its table of conditioned properties, even where one side
 /// is empty and decides it: `'' != 'a$(P[9])'` throws there, though a build
-/// never expands `'a$(P[9])'`.
+/// never expands `'a$(P[9])'`. An item's condition does not: there the empty
+/// side decides it, and the item is excluded.
 #[test]
 fn an_empty_side_does_not_spare_the_other_from_design_time_expansion() {
     for c in ["'' != 'a$(P[9])'", "'a$(P[9])' == ''"] {
         let body = format!("<PropertyGroup><P>a</P><R Condition=\"{c}\">x</R></PropertyGroup>");
         for parsed in both_walkers(&format!("  {body}")) {
-            assert_withdrawn(&parsed, &["Before", "After"]);
+            assert_rejected(&parsed, &["Before", "After"]);
+        }
+        let body = format!(
+            "<PropertyGroup><P>a</P></PropertyGroup><ItemGroup><I Include=\"x\" Condition=\"{c}\" /></ItemGroup>"
+        );
+        for parsed in both_walkers(&format!("  {body}")) {
+            assert_eq!(parsed.rejection, None, "{body}: {:#?}", parsed.diagnostics);
         }
     }
 }
@@ -1517,5 +1524,57 @@ fn a_typed_result_among_text_in_a_version_argument_is_its_text() {
             assert_eq!(parsed.rejection, None, "{body}: {:#?}", parsed.diagnostics);
             assert_eq!(parsed.property("R").value(), Some("x"), "{body}");
         }
+    }
+}
+
+/// MSBuild expands an item's text after every property write, so an item in
+/// a `<Choose>` branch the walk does not take is judged against the final
+/// table: `P` is `a` there, which has no index 1, though it is `abc` where
+/// the branch stands.
+#[test]
+fn an_untaken_branchs_items_are_judged_against_the_final_table() {
+    let branch = format!(
+        "<Choose><When Condition=\"{UNDECIDED_TRUE}\"><ItemGroup><I Include=\"$(P[1])\" /></ItemGroup></When></Choose>"
+    );
+    let rejected = format!(
+        "<PropertyGroup><P>abc</P></PropertyGroup>{branch}<PropertyGroup><P>a</P></PropertyGroup>"
+    );
+    for parsed in both_walkers(&format!("  {rejected}")) {
+        assert_withdrawn(&parsed, &["Before", "After"]);
+    }
+    let evaluated = format!(
+        "<PropertyGroup><P>a</P></PropertyGroup>{branch}<PropertyGroup><P>abc</P></PropertyGroup>"
+    );
+    for parsed in both_walkers(&format!("  {evaluated}")) {
+        assert_eq!(
+            parsed.rejection, None,
+            "{evaluated}: {:#?}",
+            parsed.diagnostics
+        );
+    }
+}
+
+/// A write in content the walk does not take is judged after the writes
+/// before it there: `P` is `a` by the time `Q` reads it, which has no index
+/// 1, though it is `abc` before the group.
+#[test]
+fn an_untaken_groups_writes_are_judged_in_order() {
+    let group = |first: &str| {
+        format!(
+            "<PropertyGroup><P>{}</P></PropertyGroup><PropertyGroup Condition=\"{UNDECIDED_TRUE}\"><P>{first}</P><Q>$(P[1])</Q></PropertyGroup>",
+            if first == "a" { "abc" } else { "a" }
+        )
+    };
+    for parsed in both_walkers(&format!("  {}", group("a"))) {
+        assert_withdrawn(&parsed, &["Before", "After"]);
+    }
+    for parsed in both_walkers(&format!("  {}", group("abc"))) {
+        assert_eq!(
+            parsed.rejection,
+            None,
+            "{}: {:#?}",
+            group("abc"),
+            parsed.diagnostics
+        );
     }
 }

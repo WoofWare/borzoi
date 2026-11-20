@@ -120,12 +120,13 @@ use crate::document::attribute;
 use crate::imports::normalise;
 use crate::{Rejection, RejectionCause, RejectionCertainty, UnloadableImport};
 
-use super::item_pass::{expand_silent, metadata_attribute};
+use super::item_pass::{DeferredGroupKind, expand_silent, metadata_attribute};
 use super::observed::{self, EntryKind};
 use super::{
-    SdkResolution, State, collect_element_text, condition, condition_exists, directory_build,
-    import_dedup_key, loader, properties, sdk_import_path, sdk_project_in_alphabet,
-    sdk_project_under_root, sdk_project_written_rooted, sdk_root_is_reparsed,
+    SdkResolution, Speculation, State, collect_element_text, condition, condition_exists,
+    directory_build, import_dedup_key, loader, properties, sdk_import_path,
+    sdk_project_in_alphabet, sdk_project_under_root, sdk_project_written_rooted,
+    sdk_root_is_reparsed,
 };
 
 impl State<'_> {
@@ -221,7 +222,104 @@ pub(super) fn operands_are_certain(state: &State<'_>, text: &str) -> bool {
 /// MSBuild need not hold at all, so what a function does on it says nothing of
 /// the build.
 pub(super) fn holds_a_value_msbuild_may(state: &State<'_>, name: &str) -> bool {
-    state.lookup.is_bound(name) || state.undefined_read_is_exact(name)
+    (state.lookup.is_bound(name) || state.undefined_read_is_exact(name))
+        && !state.speculatively_unheld(name)
+}
+
+impl State<'_> {
+    /// Where the conditions the walk evaluates now are MSBuild's: the item
+    /// pass's, or the property pass's ([`condition::Site`]).
+    pub(super) fn condition_site(&self) -> condition::Site {
+        if self.in_item_pass {
+            condition::Site::Plain
+        } else {
+            condition::Site::PropertyPass
+        }
+    }
+
+    /// Whether the speculative walk of content the walk does not take
+    /// ([`State::speculation`]) leaves `name`'s value unknown.
+    pub(super) fn speculatively_unheld(&self, name: &str) -> bool {
+        self.speculation
+            .as_ref()
+            .is_some_and(|speculation| speculation.unheld.contains(&name.to_ascii_lowercase()))
+    }
+
+    /// Open a speculative walk of content the walk does not take: writes the
+    /// judgement makes there ([`speculative_write`]) are seen by what follows
+    /// on that path, until the outermost one closes.
+    fn open_speculation(&mut self) {
+        match &mut self.speculation {
+            Some(speculation) => speculation.depth += 1,
+            None => {
+                self.speculation = Some(Speculation {
+                    saved: self.lookup.clone(),
+                    unheld: HashSet::new(),
+                    depth: 1,
+                });
+            }
+        }
+    }
+
+    /// Close one speculative walk, restoring the table at the outermost.
+    fn close_speculation(&mut self) {
+        let speculation = self.speculation.as_mut().expect("a speculation is open");
+        speculation.depth -= 1;
+        if speculation.depth == 0 {
+            let speculation = self.speculation.take().expect("a speculation is open");
+            self.lookup = speculation.saved;
+        }
+    }
+}
+
+/// On the speculative path, the write at `node` (a property element MSBuild
+/// takes as its gate says): a gate certainly true there with a body the walk
+/// computes binds its value for what follows on the path; any other leaves
+/// the name's value unknown, unless the gate is certainly false.
+fn speculative_write(node: Node<'_, '_>, state: &mut State<'_>) {
+    let name = node.tag_name().name().to_owned();
+    // Decided without the file system: the speculative path probes nothing
+    // for itself, so an `Exists` leaves the gate undecided there.
+    let unknown = |name: &str| !directory_build::is_certain(state, name);
+    let taken = match attribute(node, "Condition") {
+        None => Some(true),
+        Some(condition) => match condition::decide_without(
+            &condition,
+            &state.lookup,
+            None,
+            state.condition_site(),
+            &unknown,
+        ) {
+            condition::Decision::Decided(value) => Some(value),
+            _ => None,
+        },
+    };
+    if taken == Some(false) {
+        return;
+    }
+    let value = (taken == Some(true))
+        .then(|| collect_element_text(node))
+        .flatten()
+        .and_then(|text| {
+            let (value, issues) = if state.follow_imports {
+                properties::substitute_with_fs(&text, &state.lookup, state.observer)
+            } else {
+                properties::substitute(&text, &state.lookup)
+            };
+            // A speculative value: its trust is the path's, which the
+            // judgement reads as never certain (`reached` is false there).
+            issues.is_empty().then(|| value.into_ignoring_trust())
+        });
+    let speculation = state.speculation.as_mut().expect("a speculation is open");
+    match value {
+        Some(value) => {
+            speculation.unheld.remove(&name.to_ascii_lowercase());
+            state.lookup.insert_expanded(name, value);
+        }
+        None => {
+            speculation.unheld.insert(name.to_ascii_lowercase());
+        }
+    }
 }
 
 /// Whether the walk names the `Project` of the import at `node` from certain
@@ -310,14 +408,27 @@ pub(super) fn judge_condition_rejection(
     // judging them would only probe the file system for nothing.
     let certainly = reached
         && outcome == condition::Outcome::Illegal
-        && condition::throws_whatever(condition, &state.lookup, probes, &uncertain);
+        && condition::throws_whatever(
+            condition,
+            &state.lookup,
+            probes,
+            state.condition_site(),
+            &uncertain,
+        );
     // Short of that, evaluation threw, or stopped at an operand we cannot
     // evaluate, which may throw, or return a value that lets MSBuild reach
     // one it throws on with the values the walk holds. What an operand past
     // it reads from the file system may decide whether it throws, so the
     // judgement probes as the evaluation would have.
     if certainly
-        || condition::may_throw_on_held(condition, &state.lookup, probes, &uncertain, &doubted)
+        || condition::may_throw_on_held(
+            condition,
+            &state.lookup,
+            probes,
+            state.condition_site(),
+            &uncertain,
+            &doubted,
+        )
     {
         state.note_rejection(
             certain_if(certainly),
@@ -564,9 +675,9 @@ fn judge_text(
             exists: &exists,
             observer,
         };
-        condition::evaluate_with_exists(text, &state.lookup, probes).outcome
+        condition::evaluate_at(text, &state.lookup, Some(probes), state.condition_site()).outcome
     } else {
-        condition::evaluate(text, &state.lookup).outcome
+        condition::evaluate_at(text, &state.lookup, None, state.condition_site()).outcome
     };
     judge_condition_rejection(state, text, outcome, exists_dir, reached, node.range());
     outcome
@@ -593,6 +704,17 @@ pub(super) fn judge_unwalked(node: Node<'_, '_>, dir: &Path, reached: bool, stat
             judge_condition(node, dir, reached, state);
         }
         "Choose" => judge_whens(node, 0, dir, reached, state),
+        // MSBuild evaluates these after every property write: from the
+        // property pass, judged in the item pass against the final table.
+        "ItemGroup" if !state.in_item_pass => {
+            state.defer_judgement(node, DeferredGroupKind::ItemGroup, reached);
+        }
+        "ItemDefinitionGroup" if !state.in_item_pass => {
+            state.defer_judgement(node, DeferredGroupKind::ItemDefinitionGroup, reached);
+        }
+        "UsingTask" if !state.in_item_pass => {
+            state.defer_judgement(node, DeferredGroupKind::UsingTask, reached);
+        }
         "ItemGroup" => judge_item_group(node, reached, state),
         "ItemDefinitionGroup" => judge_item_definition_group(node, reached, state),
         // A `<UsingTask>` resolves `Exists` against its own file's directory.
@@ -613,6 +735,9 @@ pub(super) fn judge_unwalked(node: Node<'_, '_>, dir: &Path, reached: bool, stat
 /// unevaluated, condition and all.
 pub(super) fn judge_properties(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
     let entry_dir = state.entry_project_dir.clone();
+    // Each write is judged on the path MSBuild takes: after the writes before
+    // it there.
+    state.open_speculation();
     for child in node.children().filter(Node::is_element) {
         if state
             .protected
@@ -623,7 +748,9 @@ pub(super) fn judge_properties(node: Node<'_, '_>, reached: bool, state: &mut St
         if let Some(body_reached) = judge_gate(child, &entry_dir, reached, state).inner(reached) {
             judge_unwalked_body(child, body_reached, state);
         }
+        speculative_write(child, state);
     }
+    state.close_speculation();
 }
 
 /// Judge the imports' own conditions in the `<ImportGroup>` at `node`, which
@@ -677,6 +804,13 @@ pub(super) fn judge_whens(
 /// Judge what the `<When>` or `<Otherwise>` at `branch` holds, which MSBuild
 /// evaluates as `reached` says.
 pub(super) fn judge_branch(branch: Node<'_, '_>, dir: &Path, reached: bool, state: &mut State<'_>) {
+    state.open_speculation();
+    judge_branch_children(branch, dir, reached, state);
+    state.close_speculation();
+}
+
+/// [`judge_branch`] within its speculative walk.
+fn judge_branch_children(branch: Node<'_, '_>, dir: &Path, reached: bool, state: &mut State<'_>) {
     for child in branch.children().filter(Node::is_element) {
         judge_unwalked(child, dir, reached, state);
     }
@@ -756,16 +890,28 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
                         Some(body) => {
                             judge_unwalked_text(state, &body, body_reached, child.range())
                         }
-                        // A body MSBuild reads as serialized XML, or text read
-                        // apart from MSBuild's reading (a CDATA section), is
-                        // judged as its source, comments and all, which is
-                        // close to what it reads but not it: perhaps reached,
-                        // so a throw there claims no more than that MSBuild
-                        // may reject.
-                        None => {
-                            let source = &child.document().input_text()[child.range()];
-                            judge_unwalked_text(state, source, false, child.range());
-                        }
+                        // A body holding an element MSBuild reads as serialized
+                        // XML (`InnerXml`), which the walk respells from the
+                        // source where it can ([`task_inner_xml`]); where it
+                        // cannot, an expression in it may throw on what the
+                        // walk does not see.
+                        None => match task_inner_xml(child) {
+                            Some(body) => {
+                                judge_unwalked_text(state, &body, body_reached, child.range());
+                            }
+                            None => {
+                                let source = &child.document().input_text()[child.range()];
+                                if let Some(expression) =
+                                    properties::expression_texts(source).next()
+                                {
+                                    let expression = expression.to_owned();
+                                    state.note_possible_rejection(
+                                        RejectionCause::ThrowingExpression { expression },
+                                        child.range(),
+                                    );
+                                }
+                            }
+                        },
                     }
                 }
             }
@@ -788,6 +934,56 @@ fn task_body(task: Node<'_, '_>) -> Option<String> {
         body.push_str(&crate::document::text(child)?);
     }
     Some(body)
+}
+
+/// The inline task body at `task`, which holds an element, as MSBuild
+/// expands it: its inner XML as `XmlDocument` serializes it. Respelt from the
+/// source: a comment or CDATA section as written; in text, `&apos;` and
+/// `&quot;` as the characters they name (serializing escapes neither in
+/// text) and `&amp;`, `&lt;` and `&gt;` kept; a tag as written. `None` where
+/// the source spells what this respelling does not reproduce: any other
+/// reference, or a tag that holds an expression beside a quote or a
+/// reference (serializing requotes attributes).
+fn task_inner_xml(task: Node<'_, '_>) -> Option<String> {
+    let source = &task.document().input_text()[task.range()];
+    let open_end = source.find('>')? + 1;
+    let close_start = source.rfind("</")?;
+    let inner = source.get(open_end..close_start)?;
+    let mut out = String::with_capacity(inner.len());
+    let mut rest = inner;
+    while !rest.is_empty() {
+        if let Some(after) = rest.strip_prefix("<!--") {
+            let end = after.find("-->")? + 3;
+            out.push_str(&rest[..4 + end]);
+            rest = &after[end..];
+        } else if let Some(after) = rest.strip_prefix("<![CDATA[") {
+            let end = after.find("]]>")? + 3;
+            out.push_str(&rest[..9 + end]);
+            rest = &after[end..];
+        } else if rest.starts_with('<') {
+            let end = rest.find('>')? + 1;
+            let tag = &rest[..end];
+            if tag.contains("$(") && tag.contains(['\'', '&']) {
+                return None;
+            }
+            out.push_str(tag);
+            rest = &rest[end..];
+        } else if rest.starts_with('&') {
+            let end = rest.find(';')? + 1;
+            match &rest[..end] {
+                "&apos;" => out.push('\''),
+                "&quot;" => out.push('"'),
+                kept @ ("&amp;" | "&lt;" | "&gt;") => out.push_str(kept),
+                _ => return None,
+            }
+            rest = &rest[end..];
+        } else {
+            let end = rest.find(['<', '&']).unwrap_or(rest.len());
+            out.push_str(&rest[..end]);
+            rest = &rest[end..];
+        }
+    }
+    Some(out)
 }
 
 /// Judge each metadatum of the item or item definition at `node` written as
@@ -997,7 +1193,13 @@ fn decision_but_for_opacity(
         observer,
     });
     let unknown = |name: &str| !certain_but_for_opacity(state, name);
-    condition::decide_without(condition, &state.lookup, probes, &unknown)
+    condition::decide_without(
+        condition,
+        &state.lookup,
+        probes,
+        state.condition_site(),
+        &unknown,
+    )
 }
 
 /// Whether the gate at `node` holds in no build but one hidden content steers.

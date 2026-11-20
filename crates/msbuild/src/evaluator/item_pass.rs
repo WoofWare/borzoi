@@ -149,6 +149,10 @@ pub(super) struct DeferredItemGroup {
     /// Whether MSBuild reaches the group for certain, as the property pass
     /// found it ([`rejection::reach_is_certain`]).
     reach_certain: bool,
+    /// A group the walk does not take (in a `<Choose>` branch it could not
+    /// decide) that MSBuild may: judged in the item pass, against the final
+    /// property table, and not evaluated ([`State::defer_judgement`]).
+    judge_only: bool,
 }
 
 impl<'r> State<'r> {
@@ -159,6 +163,32 @@ impl<'r> State<'r> {
     /// must not be resolved against the properties-so-far table the
     /// property pass is still building.
     pub(super) fn defer_item_group(&mut self, node: Node<'_, '_>, kind: DeferredGroupKind) {
+        let reach_certain = rejection::reach_is_certain(self);
+        self.defer_group(node, kind, reach_certain, false);
+    }
+
+    /// Record a group the walk does not take, which MSBuild reaches as
+    /// `reached` says, to be judged in the item pass
+    /// ([`rejection::judge_deferred`]) and not evaluated: MSBuild expands an
+    /// item group's text after every property write, so judging it against
+    /// the table as the property pass holds it now could see a value a later
+    /// write replaces.
+    pub(super) fn defer_judgement(
+        &mut self,
+        node: Node<'_, '_>,
+        kind: DeferredGroupKind,
+        reached: bool,
+    ) {
+        self.defer_group(node, kind, reached, true);
+    }
+
+    fn defer_group(
+        &mut self,
+        node: Node<'_, '_>,
+        kind: DeferredGroupKind,
+        reach_certain: bool,
+        judge_only: bool,
+    ) {
         if self.directory_build.fallback.is_some()
             && node.children().any(|child| {
                 child.is_element()
@@ -207,7 +237,8 @@ impl<'r> State<'r> {
             range: node.range(),
             import_site_span: self.import_site_span.clone(),
             in_sdk_subtree: self.in_sdk_subtree,
-            reach_certain: rejection::reach_is_certain(self),
+            reach_certain,
+            judge_only,
         });
     }
 }
@@ -253,7 +284,9 @@ pub(super) fn replay_deferred_item_groups(entry_doc: &Document<'_>, state: &mut 
                 let node = resolve_deferred_node(entry_doc, group);
                 let dir = state.entry_project_dir.clone();
                 judge(node, &dir, state);
-                evaluate(node, state);
+                if !group.judge_only {
+                    evaluate(node, state);
+                }
             }
             DeferredFileKey::Imported(index) => {
                 let file = &files[index];
@@ -270,7 +303,9 @@ pub(super) fn replay_deferred_item_groups(entry_doc: &Document<'_>, state: &mut 
                     .map(Path::to_path_buf)
                     .unwrap_or_default();
                 judge(node, &dir, state);
-                evaluate(node, state);
+                if !group.judge_only {
+                    evaluate(node, state);
+                }
                 state.exit_this_file(frame);
             }
         }
@@ -3772,16 +3807,17 @@ fn evaluate_item_condition_silent(node: Node<'_, '_>, state: &State<'_>) -> (Con
     };
     let eval = if state.follow_imports {
         let exists = |path: &str| condition_exists(state.observer, path, &state.entry_project_dir);
-        condition::evaluate_with_exists(
+        condition::evaluate_at(
             cond,
             &state.lookup,
-            condition::Probes {
+            Some(condition::Probes {
                 exists: &exists,
                 observer: state.observer,
-            },
+            }),
+            state.condition_site(),
         )
     } else {
-        condition::evaluate(cond, &state.lookup)
+        condition::evaluate_at(cond, &state.lookup, None, state.condition_site())
     };
     let tainted =
         matches!(

@@ -251,14 +251,9 @@ pub(crate) fn property_references(raw: &str) -> impl Iterator<Item = &str> {
     refs.into_iter()
 }
 
-/// The outermost `$(…)` expressions of `raw` whose text holds a metadata
-/// reference (`%(`), in order. In an item's text MSBuild expands metadata
-/// before properties (`Expander.ExpandIntoStringLeaveEscaped`: metadata, then
-/// properties, then item lists), so a property function there is handed the
-/// metadatum's value where the walk's expansion hands it the reference's
-/// characters: what it returns, or throws, is not MSBuild's. Each opener's
-/// close is found once, from the end of the last, so the scan is linear.
-pub(crate) fn expressions_reading_metadata(raw: &str) -> Vec<&str> {
+/// The outermost `$(…)` expressions of `raw`, in order. Each opener's close
+/// is found once, from the end of the last, so the scan is linear.
+pub(crate) fn expression_texts(raw: &str) -> impl Iterator<Item = &str> {
     let mut found = Vec::new();
     let mut rest = raw;
     while let Some(at) = rest.find("$(") {
@@ -268,13 +263,22 @@ pub(crate) fn expressions_reading_metadata(raw: &str) -> Vec<&str> {
         let Some(close) = find_close(after) else {
             break;
         };
-        let expression = &rest[at..at + 2 + close + 1];
-        if expression.contains("%(") {
-            found.push(expression);
-        }
+        found.push(&rest[at..at + 2 + close + 1]);
         rest = &after[close + 1..];
     }
-    found
+    found.into_iter()
+}
+
+/// The outermost `$(…)` expressions of `raw` whose text holds a metadata
+/// reference (`%(`), in order. In an item's text MSBuild expands metadata
+/// before properties (`Expander.ExpandIntoStringLeaveEscaped`: metadata, then
+/// properties, then item lists), so a property function there is handed the
+/// metadatum's value where the walk's expansion hands it the reference's
+/// characters: what it returns, or throws, is not MSBuild's.
+pub(crate) fn expressions_reading_metadata(raw: &str) -> Vec<&str> {
+    expression_texts(raw)
+        .filter(|expression| expression.contains("%("))
+        .collect()
 }
 
 /// The property a `$(…)` interior reads as its receiver: the maximal run of

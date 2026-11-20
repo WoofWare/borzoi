@@ -70,36 +70,22 @@ fn illegal_corners() -> Vec<Case> {
             Verdict::Unsupported,
         ),
         // Equality asks each side whether it is empty first, expanding only
-        // a side that is one reference whole: where one is empty, a build
-        // does not expand the other, so its throw is not reached; design-time
-        // evaluation of a property's condition expands it all the same (for
-        // its conditioned-properties table) and throws. Not knowing which
-        // evaluation it is, we decline.
-        (
-            "'a$(P[9])' == ''",
-            props(&[("P", "abc")]),
-            Verdict::Unsupported,
-        ),
-        (
-            "'' != 'a$(P[9])'",
-            props(&[("P", "abc")]),
-            Verdict::Unsupported,
-        ),
+        // a side that is one reference whole: where one is empty, this
+        // evaluation (a build's, an item's condition) does not expand the
+        // other, so its throw is not reached. Design-time evaluation of a
+        // property's condition expands it all the same, for its table of
+        // conditioned properties, and throws; `evaluator/rejection.rs` judges
+        // by the site (`an_empty_side_does_not_spare_the_other_from_design_
+        // time_expansion`).
+        ("'a$(P[9])' == ''", props(&[("P", "abc")]), Verdict::False),
+        ("'' != 'a$(P[9])'", props(&[("P", "abc")]), Verdict::True),
         (
             "'$(P[9])x' == '$(E)'",
             props(&[("P", "abc")]),
-            Verdict::Unsupported,
+            Verdict::False,
         ),
-        (
-            "'%41$(P[9])' == ''",
-            props(&[("P", "abc")]),
-            Verdict::Unsupported,
-        ),
-        (
-            "' $(P[9])' == ''",
-            props(&[("P", "abc")]),
-            Verdict::Unsupported,
-        ),
+        ("'%41$(P[9])' == ''", props(&[("P", "abc")]), Verdict::False),
+        ("' $(P[9])' == ''", props(&[("P", "abc")]), Verdict::False),
         // A side whose emptiness is unknown may be empty, and then the other
         // is not expanded.
         (
@@ -1489,6 +1475,11 @@ fn using_task_texts_are_judged_where_msbuild_expands_them() {
     rows.push(format!(
         "<UsingTask {INLINE}><Task><Code>x</Code><!-- {T} --></Task></UsingTask>"
     ));
+    // Serializing spells a quote in text as itself: split on `;` alone,
+    // `quiet` has no second element.
+    rows.push(format!(
+        "<UsingTask {INLINE}><Task><Code>$(Q.Split(&quot;;&quot;)[1])</Code></Task></UsingTask>"
+    ));
     // The flag compared as expanded, escapes and all.
     rows.push(format!(
         "<UsingTask {INLINE}><Task Evaluate=\"%66alse\">{T}</Task></UsingTask>"
@@ -1500,7 +1491,7 @@ fn using_task_texts_are_judged_where_msbuild_expands_them() {
     let (mut rejects, mut evaluates) = (0, 0);
     for row in rows {
         let xml = format!(
-            "<Project><PropertyGroup><P>abc</P><Fa>false</Fa></PropertyGroup>{}\
+            "<Project><PropertyGroup><P>abc</P><Q>quiet</Q><Fa>false</Fa></PropertyGroup>{}\
              <PropertyGroup><After>ok</After></PropertyGroup></Project>",
             row.replace('\'', "&apos;")
         );
