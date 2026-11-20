@@ -9,12 +9,23 @@
 pub struct WalkCosts {
     /// The `<When>` gates `rejection::arm_is_dead` decided.
     pub arm_gate_decisions: u64,
+    /// The writes on a speculative walk's paths the item pass examined,
+    /// judging the groups deferred from it: each name once, settling which
+    /// are not certain, and each write of a name a group's judgement reads
+    /// (`PathOf::reaches`).
+    pub path_writes_examined: u64,
+    /// The texts `condition::strike` built, each in one pass over its text.
+    pub strikes: u64,
 }
 
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static COSTS: std::cell::Cell<WalkCosts> = const {
-        std::cell::Cell::new(WalkCosts { arm_gate_decisions: 0 })
+        std::cell::Cell::new(WalkCosts {
+            arm_gate_decisions: 0,
+            path_writes_examined: 0,
+            strikes: 0,
+        })
     };
 }
 

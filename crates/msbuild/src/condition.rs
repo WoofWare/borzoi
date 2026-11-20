@@ -900,6 +900,7 @@ fn uncertain_spans(text: &str, uncertain: &dyn Fn(&str) -> bool) -> Vec<Range<us
 /// `text` with each of `spans` (disjoint, in order: those
 /// [`uncertain_spans`] finds) replaced by `value`, in one pass.
 fn strike(text: &str, spans: &[Range<usize>], value: &str) -> String {
+    crate::cost::count(|costs| costs.strikes += 1);
     let mut out = String::with_capacity(text.len());
     let mut from = 0;
     for span in spans {
