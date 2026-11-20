@@ -13,6 +13,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use borzoi::observed::held_still::hold_ancestors_still;
 use borzoi::sdk_discovery::SdkDiscoveryEnv;
 use borzoi::server::State;
 use borzoi::uri::UriExt as _;
@@ -251,12 +252,24 @@ fn a_watched_rebuild_rebuilds_only_the_env_that_reads_it() {
 /// `Other`'s is confirmed and kept. A generation with nothing changed builds
 /// no env; once the first has asked each read again and taken its witnesses,
 /// one confirms each env by `stat`s alone.
+///
+/// A witness is born wide, holding the stamp of every directory its read's
+/// path is resolved through, the temporary directory's ancestors among them
+/// (`borzoi::read_checks`), and some reads (MSBuild's `Directory.Build`
+/// probes, SDK discovery's `global.json` walk) look names up in those
+/// ancestors whatever their witness. Concurrent tests make and remove
+/// entries there, which asks those reads again, as it must; so the test
+/// holds the ancestors' stamps still, and makes an entry beside the fixture
+/// before every generation, so that the hold is what keeps the count still.
 #[test]
 fn an_unwatched_rebuild_rebuilds_only_the_env_that_reads_it() {
     let fixture = fixture();
     let mut state = state(&fixture);
     outwait_racy_stamps();
+    let _still = hold_ancestors_still(&fixture.root);
+    let parent = fixture.root.parent().expect("a temporary directory");
     let generation = |state: &mut State| {
+        let _sibling = TempDir::new_in(parent).unwrap();
         state.begin_generation();
         let app = env_of(state, &fixture.app);
         let other = env_of(state, &fixture.other);

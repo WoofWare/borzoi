@@ -29,7 +29,8 @@
 //! The crate's `clippy.toml` bans the `std::fs` and `std::path::Path` calls
 //! that observe the file system, so a new reader that skips this module is a
 //! lint error. The calls here are the only ones allowed outside test code,
-//! which reaches them through `host_fs` (and its integration-test twin).
+//! which reaches them through `host_fs` (and its integration-test twin) and
+//! `held_still`.
 
 use std::io::Read as _;
 use std::path::Path;
@@ -227,8 +228,8 @@ fn stamp_of(meta: &std::fs::Metadata) -> Stamp {
 #[allow(clippy::disallowed_methods)]
 impl Disk for HostDisk {
     fn stat(&self, path: &Path) -> std::io::Result<Stamp> {
-        #[cfg(test)]
-        if let Some(stamp) = host_fs::held_stamp(path) {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(stamp) = held_still::held_stamp(path) {
             return Ok(stamp);
         }
         std::fs::metadata(path).map(|meta| stamp_of(&meta))
@@ -255,8 +256,8 @@ impl crate::read_checks::Probe for HostDisk {
     fn lstat(&self, path: &Path) -> std::io::Result<crate::read_checks::Lstat> {
         use crate::read_checks::{Kind, Lstat};
         let meta = std::fs::symlink_metadata(path)?;
-        #[cfg(test)]
-        if let Some(stamp) = host_fs::held_stamp(path) {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(stamp) = held_still::held_stamp(path) {
             return Ok(Lstat {
                 stamp,
                 kind: Kind::Dir,
@@ -511,6 +512,15 @@ pub(crate) mod host_fs {
             self.is_dir()
         }
     }
+}
+
+/// Holding the stamps of a test fixture's ancestors still, for a test that
+/// counts what confirming its tree costs: the lib's own tests, and, under the
+/// `test-support` feature, the integration tests.
+#[cfg(any(test, feature = "test-support"))]
+#[allow(clippy::disallowed_methods)]
+pub mod held_still {
+    use std::path::{Path, PathBuf};
 
     std::thread_local! {
         /// The directories [`hold_ancestors_still`] holds on this thread,
