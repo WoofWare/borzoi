@@ -513,6 +513,15 @@ pub fn cells() -> Vec<Cell> {
             "self_named_generic_abbreviation",
             "namespace SelfGeneric\ntype Foo = { X: int }\n[<System.Runtime.CompilerServices.Extension>]\ntype Foo<'a> = Foo\n",
         ),
+        // Codex round 6: an active pattern inside a compound binding.
+        one(
+            "active_pattern_in_compound_binding",
+            "module ApCompound\n[<System.Runtime.CompilerServices.Extension>]\nlet ((|Foo|_|) as f) = fun (x: int) -> Some x\n",
+        ),
+        one(
+            "lender_under_suffixed_module",
+            "namespace SuffixLender\nmodule FooModule =\n    [<AutoOpen>]\n    type Alias = int\n",
+        ),
         // Codex round 5's shapes (the leaves certified in `LEAF_FORMS` are
         // graded in `source_existence_domain`).
         one(

@@ -337,6 +337,13 @@ pub const LEAF_FORMS: &[LeafForm] = &[
     },
     LeafForm {
         leaf: Leaf::AugmentationHead,
+        form: "module_alias",
+        source: "module rec D\nmodule Alias = D\ntype T() =\n    member _.X = 1\ntype Alias.T with\n    [<System.Runtime.CompilerServices.Extension>]\n    static member E(s: string) = s\n",
+        providers: ProviderReferences::None,
+        verdict: Verdict::Read,
+    },
+    LeafForm {
+        leaf: Leaf::AugmentationHead,
         form: "global",
         source: "namespace rec D\ntype C() = class end\ntype global.D.C with\n    static member E(s: string) = s\n",
         providers: ProviderReferences::None,
@@ -360,6 +367,27 @@ pub const LEAF_FORMS: &[LeafForm] = &[
         leaf: Leaf::ProvidedTarget,
         form: "array",
         source: "namespace D\ntype T = int[]\n",
+        providers: ProviderReferences::Possible,
+        verdict: Verdict::Read,
+    },
+    LeafForm {
+        leaf: Leaf::ProvidedTarget,
+        form: "variable",
+        source: "namespace D\ntype T<'a> = 'a\n",
+        providers: ProviderReferences::Possible,
+        verdict: Verdict::Read,
+    },
+    LeafForm {
+        leaf: Leaf::ProvidedTarget,
+        form: "anonymous_record",
+        source: "namespace D\ntype T = {| X: int |}\n",
+        providers: ProviderReferences::Possible,
+        verdict: Verdict::Read,
+    },
+    LeafForm {
+        leaf: Leaf::ProvidedTarget,
+        form: "wildcard",
+        source: "namespace D\ntype T<'a> = _\n",
         providers: ProviderReferences::Possible,
         verdict: Verdict::Read,
     },
@@ -675,6 +703,12 @@ fn walk_project(
         }
     }
     let partners = signature_partners(&files);
+    let module_abbreviations = files.iter().any(|pf| {
+        pf.file
+            .syntax()
+            .descendants()
+            .any(|n| n.kind() == SyntaxKind::MODULE_ABBREV_DECL)
+    });
     let mut out = Out::default();
     for (i, pf) in files.iter().enumerate() {
         if !matches!(&pf.recovery, SyntaxRecovery::Reported(errors) if errors.is_empty()) {
@@ -697,6 +731,7 @@ fn walk_project(
             index: i,
             routes,
             providers,
+            module_abbreviations,
             out: std::mem::take(&mut out),
             lines: Lines::of(root).map(std::rc::Rc::new),
         };
@@ -985,6 +1020,8 @@ struct FileWalk<'r> {
     index: usize,
     routes: &'r MarkerRoutes,
     providers: ProviderReferences,
+    /// Whether some file of the project declares a module abbreviation.
+    module_abbreviations: bool,
     out: Out,
     /// The file's lines, or `None` when a `#line` directive may move them.
     lines: Option<std::rc::Rc<Lines>>,
@@ -1456,7 +1493,15 @@ impl FileWalk<'_> {
                 }
                 self.abbreviation_kinds(&name, generic, target.as_ref(), &marks)
             }
-            _ => vec![PickledEntityKind::Type],
+            Some(
+                TypeDefnRepr::Record(_)
+                | TypeDefnRepr::Union(_)
+                | TypeDefnRepr::Enum(_)
+                | TypeDefnRepr::ObjectModel(_)
+                | TypeDefnRepr::Delegate(_)
+                | TypeDefnRepr::InlineIl(_),
+            )
+            | None => vec![PickledEntityKind::Type],
         };
         // The type's own members, which are C#-style extensions when marked.
         let mut members: Vec<MemberDefn> = defn.members().collect();
@@ -2004,13 +2049,18 @@ impl FileWalk<'_> {
         // the list's own container.
         let qualifier = &head[..head.len() - 1];
         let container: Vec<&String> = scope.namespace.iter().chain(&scope.enclosing).collect();
+        // A qualifier names this list's container through a suffix of its
+        // path, or through a module abbreviation (`module Alias = D`, then
+        // `type Alias.T with`), which the walk does not resolve: with one
+        // anywhere in the project, any qualifier may.
         let intrinsic = if qualifier.is_empty() {
             intrinsic_in(ctx, &last, arity, position)
-        } else if qualifier.len() <= container.len()
-            && container[container.len() - qualifier.len()..]
-                .iter()
-                .zip(qualifier)
-                .all(|(a, b)| *a == b)
+        } else if self.module_abbreviations
+            || (qualifier.len() <= container.len()
+                && container[container.len() - qualifier.len()..]
+                    .iter()
+                    .zip(qualifier)
+                    .all(|(a, b)| *a == b))
         {
             Maybe::Possibly
         } else {
@@ -2260,14 +2310,23 @@ impl Lines {
     }
 }
 
-/// Every identifier in `pat`, with its offset: a superset of its binders.
+/// Every identifier in `pat`, and every active pattern's name (`|Foo|_|`),
+/// with its offset: a superset of its binders.
 fn pattern_idents(pat: &Pat) -> Vec<(String, TextSize)> {
-    pat.syntax()
+    let mut names: Vec<(String, TextSize)> = pat
+        .syntax()
         .descendants_with_tokens()
         .filter_map(|el| el.into_token())
         .filter(|t| t.kind() == SyntaxKind::IDENT_TOK)
         .map(|t| (id_text(&t).into_owned(), t.fcs_range().start()))
-        .collect()
+        .collect();
+    names.extend(
+        pat.syntax()
+            .descendants()
+            .filter_map(borzoi_cst::syntax::ActivePatName::cast)
+            .map(|ap| (active_pattern_name(&ap), ap.syntax().text_range().start())),
+    );
+    names
 }
 
 /// A module `let` binding's single name: `let f …`, `let x`, `let (|A|_|) …`,

@@ -653,6 +653,9 @@ pub fn grade(cell: &Cell, fcs: &Fcs, ours: &SourceExistence) -> Result<String, S
         Approximation::UncertainAttribute,
         Approximation::AbbreviationOrUnion,
         Approximation::SignaturePair,
+        // A module's suffixed reading is a second path for every
+        // abbreviation under it.
+        Approximation::ModuleSuffix,
     ];
     if fcs.clean
         && !fcs.undecodable
