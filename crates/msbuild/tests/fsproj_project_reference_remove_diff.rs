@@ -31,15 +31,25 @@
 //! meaningful on either.
 //!
 //! Inputs are a fixed-seed sweep, so a failure reproduces exactly.
+//!
+//! ## References that read a name the walk doubts
+//!
+//! A missing edge is tolerated where the walk cannot say MSBuild has one. An
+//! `Include` that reads a name the walk doubts (a write it refused to compute,
+//! one under a gate it could not decide, a copy of either) is an edge MSBuild
+//! has at a path the walk does not know, so a list missing it is no certain
+//! list (#1098). [`doubted_read_sweep`] generates such writes and reads, with
+//! hostile literals, and holds every certain list to MSBuild's items.
 
 mod common;
 
 use crate::common::parse_fsproj_with_imports;
 use borzoi_msbuild::{
-    GlobResolver, ParsedProject, SdkResolver, glob_resolver, resolve_sdk, workloads,
+    GlobResolver, ParsedProject, PropertyRead, SdkResolver, glob_resolver, resolve_sdk, workloads,
 };
+use borzoi_oracle_harness::hostile::{self, Dimension, coverage, value};
 use common::{Oracle, SplitMix64};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Component, Path, PathBuf};
 
 /// `ProjectReference` include specs. Each names something in the layout, by a
@@ -866,4 +876,212 @@ fn generated_reference_lists_have_no_phantom_edges() {
 fn soak() {
     let (seed, cases) = common::soak_parameters("project-reference remove", 1000);
     sweep(&mut Oracle::spawn(), seed, cases);
+}
+
+/// The names the doubted-read sweep writes and reads.
+const READ_NAMES: [&str; 2] = ["P", "Q"];
+
+/// A write's body in the doubted-read sweep: a hostile or plain literal, a
+/// function the walk does not compute (so that it holds no value of the
+/// name, while MSBuild evaluates it to `w`), or a read of the other name.
+fn read_sweep_body(rng: &mut SplitMix64, other: &str) -> hostile::Drawn<String> {
+    match rng.below(4) {
+        0 => {
+            let plain = *rng.pick(&["a", "lib", "B1"]);
+            // A name's last write: nothing puts a value back. A NUL, raw or
+            // escaped, is in no path MSBuild gives a `FullPath`, which the
+            // oracle reads an item by.
+            let finals = value::alphabet().filtered(|entry| {
+                let text = entry.value.render(plain);
+                entry.value.write == value::Write::Final
+                    && !text.contains('\0')
+                    && !text.to_ascii_lowercase().contains("%00")
+            });
+            match hostile::sample(&finals, rng.next()) {
+                Some(entry) => hostile::Drawn::of(entry).map(|v| v.render(plain)),
+                None => hostile::Drawn::plain(plain.to_owned()),
+            }
+        }
+        1 => hostile::Drawn::plain("$([System.String]::Copy('w'))".to_owned()),
+        2 => hostile::Drawn::plain(format!("$({other})")),
+        _ => hostile::Drawn::plain(format!("$({other}.Length)")),
+    }
+}
+
+/// A write's condition in the doubted-read sweep: none, one reading the name
+/// itself or the other, and one the walk cannot decide either way.
+fn read_sweep_condition(rng: &mut SplitMix64, name: &str, other: &str) -> String {
+    match rng.below(5) {
+        0 => String::new(),
+        1 => format!(" Condition=\"'$({name})' == ''\""),
+        2 => format!(" Condition=\"'$({other})' == 'a'\""),
+        3 => UNSUPPORTED_TRUE.to_owned(),
+        _ => UNSUPPORTED_FALSE.to_owned(),
+    }
+}
+
+/// A generated document of the doubted-read sweep, the names each reference
+/// reads, and the hostile dimensions its literals carry.
+type ReadDocument = (String, Vec<Vec<&'static str>>, BTreeSet<Dimension>);
+
+/// One generated document of the doubted-read sweep: writes of `P` and `Q`,
+/// then unconditional `<ProjectReference>`s, the `i`th spelled `E{i}_…`
+/// around reads of them.
+fn read_sweep_document(rng: &mut SplitMix64) -> ReadDocument {
+    let mut xml = String::from("<Project>\n");
+    let mut hostile = BTreeSet::new();
+    for _ in 0..2 + rng.below(3) {
+        let at = rng.below(2);
+        let (name, other) = (READ_NAMES[at], READ_NAMES[1 - at]);
+        let condition = read_sweep_condition(rng, name, other);
+        let body = read_sweep_body(rng, other);
+        hostile.extend(body.hostile.iter().copied());
+        let text = body
+            .value
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;");
+        xml.push_str(&format!(
+            "  <PropertyGroup><{name}{condition}>{text}</{name}></PropertyGroup>\n"
+        ));
+    }
+    let mut reads = Vec::new();
+    for i in 0..1 + rng.below(3) {
+        let name = *rng.pick(&READ_NAMES);
+        let (include, read) = match rng.below(3) {
+            0 => (format!("E{i}_$({name}).fsproj"), vec![name]),
+            1 => (format!("E{i}_$({name}.Length).fsproj"), vec![name]),
+            _ => (format!("E{i}_$(P)_$(Q).fsproj"), vec!["P", "Q"]),
+        };
+        xml.push_str(&format!(
+            "  <ItemGroup><ProjectReference Include=\"{include}\" /></ItemGroup>\n"
+        ));
+        reads.push(read);
+    }
+    xml.push_str("</Project>\n");
+    (xml, reads, hostile)
+}
+
+/// What the doubted-read sweep saw.
+#[derive(Debug, Default)]
+struct ReadCensus {
+    cases: usize,
+    msbuild_rejects: usize,
+    committed: usize,
+    /// Cases where an `Include` read a name the walk doubts and MSBuild holds
+    /// its item: the walk owes a decline whether it kept the item or not.
+    owed: usize,
+}
+
+/// The hostile values the doubted-read sweep cannot carry.
+const READ_EXCLUDED: &[(Dimension, &str)] = &[(
+    Dimension::OverwrittenLater,
+    "a value an item reads is its name's last write here, which nothing puts back",
+)];
+
+/// #1098: a `<ProjectReference>` whose `Include` reads a name the walk
+/// doubts (a write it refused to compute, one under a gate it could not
+/// decide, a copy of either) is no edge a list published as certain may
+/// lack. Every case is held to no phantom edge as well. Graded against
+/// MSBuild's evaluated items, each reference found by its `E{i}_` prefix.
+fn doubted_read_sweep(oracle: &mut Oracle, seed: u64, cases: usize) -> ReadCensus {
+    let census = coverage::open(file!(), "reference_reads", READ_EXCLUDED);
+    let excluded: BTreeSet<Dimension> = READ_EXCLUDED.iter().map(|(d, _)| *d).collect();
+    let mut rng = SplitMix64(seed);
+    let mut tally = ReadCensus::default();
+    while tally.cases < cases {
+        let (xml, reads, hostile) = read_sweep_document(&mut rng);
+        if hostile.iter().any(|d| excluded.contains(d)) {
+            continue;
+        }
+        tally.cases += 1;
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let root =
+            borzoi_msbuild::observed::host_fs::canonicalize(dir.path()).expect("canonicalize");
+        let proj = layout(&root);
+        std::fs::write(&proj, &xml).unwrap();
+        let parsed = parse_fsproj_with_imports(
+            &borzoi_msbuild::ProjectFile::buffer(&proj, &xml)
+                .expect("a project path spelt as its full path"),
+            &HashMap::new(),
+            &common::oracle_environment(),
+            None,
+            None,
+        )
+        .expect("well-formed XML parses");
+        let Some(theirs) = oracle.items(&xml, &proj, "ProjectReference", &[]) else {
+            tally.msbuild_rejects += 1;
+            census.reached(&hostile, "msbuild-rejects");
+            continue;
+        };
+        let theirs: Vec<PathBuf> = theirs.iter().map(|p| lexical(p)).collect();
+        let ours: Vec<PathBuf> = parsed
+            .project_references
+            .iter()
+            .map(|item| lexical(&item.include.to_string_lossy()))
+            .collect();
+        let doubted = |name: &str| {
+            !matches!(
+                parsed.property(name),
+                PropertyRead::Value(_) | PropertyRead::Unset
+            )
+        };
+        let has = |list: &[PathBuf], i: usize| {
+            let prefix = format!("E{i}_");
+            list.iter().any(|path| {
+                path.file_name()
+                    .is_some_and(|f| f.to_string_lossy().starts_with(&prefix))
+            })
+        };
+        let owed = reads
+            .iter()
+            .enumerate()
+            .any(|(i, read)| read.iter().any(|name| doubted(name)) && has(&theirs, i));
+        tally.owed += usize::from(owed);
+        if parsed.project_references_uncertain {
+            census.reached(&hostile, "decline");
+            continue;
+        }
+        let mut unmatched = theirs.clone();
+        for path in &ours {
+            let Some(at) = unmatched.iter().position(|p| p == path) else {
+                panic!(
+                    "phantom edge {}:\n{xml}\nours: {ours:#?}\ntheirs: {theirs:#?}",
+                    path.display()
+                );
+            };
+            unmatched.remove(at);
+        }
+        for (i, read) in reads.iter().enumerate() {
+            assert!(
+                !(has(&theirs, i) && !has(&ours, i) && read.iter().any(|name| doubted(name))),
+                "#1098: the list is certain without reference E{i}_, whose `Include` reads a \
+                 name the walk doubts ({read:?}):\n{xml}\nours: {ours:#?}\ntheirs: {theirs:#?}"
+            );
+        }
+        tally.committed += 1;
+        census.reached(&hostile, "commit");
+    }
+    census.finish(
+        "BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-msbuild --test \
+         fsproj_project_reference_remove_diff doubted_reads",
+    );
+    tally
+}
+
+/// [`doubted_read_sweep`] at a fixed seed.
+#[test]
+fn doubted_reads_leave_no_certain_list_short() {
+    let tally = doubted_read_sweep(&mut Oracle::spawn(), 0x1098_0d0b_7ed, 1_500);
+    eprintln!("doubted-read sweep: {tally:?}");
+    assert!(tally.owed >= 40, "{tally:?}");
+    assert!(tally.committed >= 100, "{tally:?}");
+}
+
+/// The fresh-seed twin of [`doubted_reads_leave_no_certain_list_short`].
+#[test]
+#[ignore = "fresh-seed soak; run with --ignored"]
+fn doubted_reads_soak() {
+    let (seed, cases) = common::soak_parameters("doubted reads", 2000);
+    doubted_read_sweep(&mut Oracle::spawn(), seed, cases);
 }

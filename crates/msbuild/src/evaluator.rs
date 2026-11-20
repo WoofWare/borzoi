@@ -1183,8 +1183,10 @@ struct State<'r> {
     /// Whether a `<ProjectReference>` `Include` that may run in the real build
     /// went uncaptured — skipped on an untrusted gate, or one we could not
     /// evaluate. The list contract tolerates that (a missing edge never
-    /// fabricates one), so it does not raise
-    /// [`Self::project_references_uncertain`]; but a list *derived* from
+    /// fabricates one), so this alone does not raise
+    /// [`Self::project_references_uncertain`]; an `Include` whose value read a
+    /// name the walk doubts raises it as well, dropped or kept
+    /// (`item_pass::taint_reference_list_on_untrusted_value`). But a list *derived* from
     /// `@(ProjectReference)` is then incomplete, and a `Remove` driven by it can
     /// miss an item MSBuild removes. [`item_pass`]'s item-list view reads it.
     project_reference_includes_hidden: bool,

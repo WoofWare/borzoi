@@ -1119,18 +1119,21 @@ fn walk_item_child_inner(node: Node<'_, '_>, kind: ItemKind, state: &mut State<'
     // `Include="$(ExtraFiles)"` may expand into multiple items even
     // though the raw attribute looks like one.
     let expansion = state.expand(include, node.range());
+    // The Include VALUE can lean on an untrusted read the same way the
+    // gate can: a cleanly-expanded `$(RefPath)` whose source was written
+    // under a gate we couldn't pin may hold a different path — or none —
+    // in the real build, so the captured edge may be phantom. Flag rather
+    // than drop: the declared-structure walk keeps the element. A read of a
+    // name the walk holds no value of (a write it refused, an undefined
+    // read it cannot show exact) is such a read too, which the walk then
+    // drops below: MSBuild holds an item there that the list lacks (#1098).
+    taint_reference_list_on_untrusted_value(kind, include, &expansion, state);
     if expansion.had_issue() {
         // Substitution failure leaves a path with empty fragments or
         // residual `$(...)`. Either way the result is corrupt; we refuse
         // to emit a misleading item.
         return;
     }
-    // The Include VALUE can lean on an untrusted read the same way the
-    // gate can: a cleanly-expanded `$(RefPath)` whose source was written
-    // under a gate we couldn't pin may hold a different path — or none —
-    // in the real build, so the captured edge may be phantom. Flag rather
-    // than drop: the declared-structure walk keeps the element.
-    taint_reference_list_on_untrusted_value(kind, include, &expansion, state);
     let spelled = msbuild_spelling(include, expansion.value.ignoring_trust());
     match state.glob_resolver {
         None => {
@@ -4016,12 +4019,14 @@ pub(super) fn item_key(name: &str) -> String {
 /// Flag [`ParsedProject::project_references_uncertain`] when the expanded
 /// VALUE of a `<ProjectReference>` list attribute (`Include` or `Exclude`)
 /// leans on an untrusted read — an unpinned property (written under a gate
-/// we couldn't evaluate) or an SDK-package-tainted one. The expansion is
-/// clean, so without consulting the pin state the captured list would look
-/// trustworthy — but the real build's value may name a different target
-/// (Include) or strip one we kept (Exclude), either way a phantom edge for
-/// a reference-semantics consumer. Flag rather than drop: the
-/// declared-structure walk keeps the element.
+/// we couldn't evaluate), an SDK-package-tainted one, or a name the walk
+/// holds no value of and cannot show undefined (a write it refused). Where
+/// the expansion is clean, the captured list would look trustworthy without
+/// consulting the pin state — but the real build's value may name a
+/// different target (Include) or strip one we kept (Exclude), either way a
+/// phantom edge for a reference-semantics consumer. Where the walk then
+/// drops the element, MSBuild holds items there that the list lacks. Either
+/// way the list is flagged, whatever the walk does with the element.
 fn taint_reference_list_on_untrusted_value(
     kind: ItemKind,
     raw: &str,
@@ -4081,16 +4086,17 @@ fn route_item_through_resolver(
     let mut excludes: Vec<SpecFragment> = Vec::new();
     if let Some(raw) = exclude_attr.as_deref() {
         let expansion = state.expand(raw, node.range());
-        if expansion.had_issue() {
-            return;
-        }
         // The Exclude VALUE gets the same trust check as the Include's: an
         // untrusted `$(Skip)` that expanded (cleanly) to empty here may
         // exclude the target in the real build, leaving the captured list
         // claiming an edge the real build strips (a phantom edge for a
         // reference-semantics consumer). The best-effort exclusion below
-        // still applies whatever we did expand.
+        // still applies whatever we did expand; an Exclude reading a name
+        // the walk holds no value of drops the element, as an Include's does.
         taint_reference_list_on_untrusted_value(kind, raw, &expansion, state);
+        if expansion.had_issue() {
+            return;
+        }
         for entry in spec_fragments(expansion.value.ignoring_trust()) {
             if contains_item_reference(entry) {
                 state.push(

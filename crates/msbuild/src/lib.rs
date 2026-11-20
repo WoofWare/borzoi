@@ -476,8 +476,11 @@ pub struct ParsedProject {
     ///   `Remove`, really does strip the reference from `ReferencePath`).
     /// - A gate decided only by an *unpinned* property (one written under a
     ///   condition we couldn't evaluate) or an SDK-tainted read — or an
-    ///   `Include` **value** expanded from one (the captured path may hold a
-    ///   different target, or none, in the real build): the real build may
+    ///   `Include` or `Exclude` **value** expanded from one, or from a name
+    ///   the walk holds no value of and cannot show undefined (a write it
+    ///   refused to compute), whether the walk keeps the item or drops it
+    ///   (the captured path may hold a different target, or none, in the
+    ///   real build, and a dropped one is an item MSBuild has): the real build may
     ///   take the other branch, running a skipped mutation or dropping a
     ///   captured `Include` (a phantom edge). A cleanly-decided gate over
     ///   undefined-but-never-written properties is trusted: under the
