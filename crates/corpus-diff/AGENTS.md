@@ -46,14 +46,14 @@ whole-project gate skips it.
 
 `tests/project_resolution/fcs_dump_boundary.rs` holds `fcs-dump`'s resident
 ops to the hostile-value library (`crates/oracle-harness/AGENTS.md`): every
-wire mutation of a good request to `file-batch`, `uses-project-batch` and
-`xmldoc-batch`, through `BatchChild` and straight to the oracle
-(census `fcs_dump_wire`), and every file-system state, change, name,
-spelling and source mutation of a small project to `uses-project-batch`,
-where a resident child must answer as a fresh one does (census
-`fcs_dump_project`). `BORZOI_HOSTILE_CASES=<text>` narrows the project
-census to the cases whose description holds the text, for iterating; the
-census then fails.
+wire mutation of a good request to `file-batch`, `uses-project-batch`,
+`xmldoc-batch` and `uses-project-graph-batch`, through `BatchChild` and
+straight to the oracle (census `fcs_dump_wire`), and every file-system
+state, change, name, spelling and source mutation of a small project to
+`uses-project-batch`, where a resident child must answer as a fresh one
+does (census `fcs_dump_project`). `BORZOI_HOSTILE_CASES=<text>` narrows the
+project census to the cases whose description holds the text, for
+iterating; such a run fails once it is done, whatever it reached.
 
 ## Working here
 

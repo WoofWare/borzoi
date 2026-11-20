@@ -9,12 +9,12 @@
 //!
 //! - **`fcs_dump_wire`** sends every [`hostile::wire::mutations`] entry of a
 //!   good request to each op that reads JSON (`file-batch`,
-//!   `uses-project-batch`, `xmldoc-batch`). The driver
-//!   ([`BatchChild::try_request`]) must refuse, sending nothing, what cannot
-//!   be one request line; everything else it sends. The oracle must answer
-//!   each line it reads with one answer, never crash or hang, and stay in
-//!   step: the good request sent next gets exactly what a fresh child gives
-//!   it. What each line must get is [`expected_for_line`].
+//!   `uses-project-batch`, `xmldoc-batch`, `uses-project-graph-batch`). The
+//!   driver ([`BatchChild::try_request`]) must refuse, sending nothing, what
+//!   cannot be one request line; everything else it sends. The oracle must
+//!   answer each line it reads with one answer, never crash or hang, and stay
+//!   in step: the good request sent next gets exactly what a fresh child
+//!   gives it. What each line must get is [`expected_for_line`].
 //! - **`fcs_dump_project`** puts a small project (two sources and a
 //!   referenced assembly) to `uses-project-batch` with each file-system state
 //!   at a source's path and at the reference's, each change made to a source
@@ -26,9 +26,10 @@
 //!   resident child must answer the same request twice alike (a check it
 //!   made around a refusal is no answer the second time), and exactly as a
 //!   fresh child answers the same world, except that a reference rewritten
-//!   under a path the child has read is refused by the oracle's fixture
-//!   precondition (fcs-dump's module doc); and a successful project answer
-//!   must describe the files as they are ([`check_records`]). The requests
+//!   under a path the child has read, and named again by that full path, is
+//!   refused by the oracle's fixture precondition (fcs-dump's module doc);
+//!   and a successful project answer must describe the files as they are,
+//!   each record under its own source's path ([`check_records`]). The requests
 //!   are fixture requests: a request whose inputs may change
 //!   (`inputsMayChange`) is served only as a fresh child's first, so a warm
 //!   child refuses it by design.
@@ -43,7 +44,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::Mutex;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use borzoi_corpus_diff::fcs_dump_command;
 use borzoi_oracle_harness::hostile::fs::{Change, HostileFs, State, Unmakeable};
@@ -51,7 +52,7 @@ use borzoi_oracle_harness::hostile::name::{self, Name, Rendered};
 use borzoi_oracle_harness::hostile::source::{self, Mutation};
 use borzoi_oracle_harness::hostile::spelling::{self, Spelling};
 use borzoi_oracle_harness::hostile::{Dimension, Entry, coverage, wire};
-use borzoi_oracle_harness::{BatchChild, BatchFailure};
+use borzoi_oracle_harness::{BatchChild, BatchFailure, project_graph};
 use serde_json::{Value, json};
 
 /// The bound on one answer. A tiny project checks in a second or two; this
@@ -95,10 +96,19 @@ fn driver_within(op: &str, timeout: Duration) -> BatchChild {
     )
 }
 
+/// How long a child whose input is closed may take to exit before it is
+/// killed. A child that is killed leaves its runtime's debugger pipes in
+/// `TMPDIR` ([`BatchChild::finish`]), and the project census starts one per
+/// case.
+const EXIT_GRACE: Duration = Duration::from_secs(30);
+
 /// A fresh `op` child's answer to `request`: what no earlier request can
 /// have influenced.
 fn fresh_answer(op: &str, request: &str) -> Result<String, BatchFailure> {
-    driver(op).try_request(request)
+    let mut child = driver(op);
+    let answer = child.try_request(request);
+    child.finish(EXIT_GRACE);
+    answer
 }
 
 /// The message of a refusal (`{"BatchError": …}`), or `None` for an answer.
@@ -134,7 +144,8 @@ fn refusal(line: &str) -> Option<String> {
 /// send: what the oracle does with them is the oracle's half of the contract.
 struct RawChild {
     child: Child,
-    stdin: ChildStdin,
+    /// `None` only while the child is dropped.
+    stdin: Option<ChildStdin>,
     answers: Receiver<String>,
 }
 
@@ -165,17 +176,18 @@ impl RawChild {
         });
         RawChild {
             child,
-            stdin,
+            stdin: Some(stdin),
             answers,
         }
     }
 
     /// Write `bytes` and a line feed.
     fn send(&mut self, bytes: &[u8]) {
-        self.stdin
+        let stdin = self.stdin.as_mut().expect("a live child");
+        stdin
             .write_all(bytes)
-            .and_then(|()| self.stdin.write_all(b"\n"))
-            .and_then(|()| self.stdin.flush())
+            .and_then(|()| stdin.write_all(b"\n"))
+            .and_then(|()| stdin.flush())
             .expect("write to the oracle");
     }
 
@@ -195,7 +207,17 @@ impl RawChild {
 }
 
 impl Drop for RawChild {
+    /// Close the child's input and let it exit ([`EXIT_GRACE`]), killing it
+    /// only if it does not.
     fn drop(&mut self) {
+        drop(self.stdin.take());
+        let deadline = Instant::now() + EXIT_GRACE;
+        while Instant::now() < deadline {
+            if !matches!(self.child.try_wait(), Ok(None)) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
@@ -292,24 +314,47 @@ fn check_line(answer: &str, expect: Expect, good_answer: &str) -> Result<&'stati
     }
 }
 
-/// One op that reads a JSON request, and its good request over `files`.
+/// One op that reads a JSON request, its good request over `files`, and the
+/// fields an answer to it holds.
 struct JsonOp {
     name: &'static str,
     good: fn(&[String]) -> Value,
+    payload: &'static [&'static str],
 }
 
 const JSON_OPS: &[JsonOp] = &[
     JsonOp {
         name: "file-batch",
         good: |files| json!({"kind": "uses", "path": files[0], "refs": [], "langversion": null}),
+        payload: &["Uses"],
     },
     JsonOp {
         name: "uses-project-batch",
         good: |files| json!({"paths": files, "refs": [], "defines": [], "langversion": null, "exclusiveRefs": false}),
+        payload: &["Files", "Diagnostics"],
     },
     JsonOp {
         name: "xmldoc-batch",
         good: |files| json!({"paths": files, "refs": [], "defines": [], "langversion": null, "exclusiveRefs": false}),
+        payload: &["Files", "Diagnostics"],
+    },
+    JsonOp {
+        name: "uses-project-graph-batch",
+        good: |files| {
+            json!({
+                "op": "check",
+                "projects": [{
+                    "id": "a", "assemblyName": "A", "target": "library",
+                    "sources": files, "defines": [],
+                    "references": project_graph::framework_references()
+                        .iter()
+                        .map(|dll| json!({"dll": dll}))
+                        .collect::<Vec<_>>()
+                }],
+                "check": "a"
+            })
+        },
+        payload: &["Files", "Diagnostics", "Referenced"],
     },
 ];
 
@@ -351,6 +396,15 @@ fn every_hostile_request_line_is_refused_on_its_line_and_the_oracle_stays_in_ste
             "{}: the good request is answered",
             op.name
         );
+        // Every later answer is held to this one, so it must be an answer.
+        let answered: Value = serde_json::from_str(&good_answer).expect("an answer is JSON");
+        for field in op.payload {
+            assert!(
+                answered.get(field).is_some_and(Value::is_array),
+                "{}: the answer to the good request holds {field}: {good_answer}",
+                op.name
+            );
+        }
         // Each child's first line is the good request: a reader may treat
         // the first bytes of its input apart (a byte order mark there is no
         // part of any line).
@@ -403,6 +457,7 @@ fn every_hostile_request_line_is_refused_on_its_line_and_the_oracle_stays_in_ste
                 }
             }
         }
+        through_driver.finish(EXIT_GRACE);
     }
     assert!(
         failures.is_empty(),
@@ -693,12 +748,6 @@ impl Case {
         };
         cases.extend(varying().map(Case::SourceMutation));
         cases.extend(varying().map(Case::ScriptMutation));
-        // `BORZOI_HOSTILE_CASES=<text>` keeps the cases whose description
-        // holds the text, for iterating on one; the census then fails.
-        if let Some(filter) = std::env::var_os("BORZOI_HOSTILE_CASES") {
-            let filter = filter.to_string_lossy().into_owned();
-            cases.retain(|c| format!("{c:?}").contains(&filter));
-        }
         cases
     }
 }
@@ -714,7 +763,8 @@ struct World {
     /// The request both children are asked.
     request: String,
     /// What each source of `request` holds, or `None` where it holds no text
-    /// (missing, a FIFO, a directory): a successful answer then is wrong.
+    /// a source is read from (missing, a FIFO, a device, a directory): a
+    /// successful answer then is wrong.
     texts: Vec<Option<Vec<u8>>>,
 }
 
@@ -732,8 +782,9 @@ fn text_in(state: State, content: &[u8]) -> Option<Vec<u8>> {
         | State::SymlinkOutOfTree
         | State::Unreadable
         | State::ReadOnly => Some(content.to_vec()),
-        State::Empty | State::CharDevice => Some(Vec::new()),
-        State::Fifo
+        State::Empty => Some(Vec::new()),
+        State::CharDevice
+        | State::Fifo
         | State::Socket
         | State::DanglingSymlink
         | State::SymlinkLoop
@@ -1046,15 +1097,55 @@ fn declared_module(text: &[u8]) -> Option<String> {
     (!name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric())).then(|| name.to_owned())
 }
 
-/// Hold a successful answer to what the files hold: one record per source,
-/// each source's record holding the definition of the module it declares
-/// and, where the source ends in [`SENTINEL`], its error on the line it
-/// physically sits on, and no range in a record starting past its file's
-/// last line.
-fn check_records(answer: &Value, texts: &[Option<Vec<u8>>]) -> Result<(), String> {
+/// The text of each entry of the array `field` of `request`.
+fn strings_of(request: &str, field: &str) -> Vec<String> {
+    let request: Value = serde_json::from_str(request).expect("a request is JSON");
+    request[field]
+        .as_array()
+        .unwrap_or_else(|| panic!("the request holds {field}: {request}"))
+        .iter()
+        .map(|v| v.as_str().expect("text").to_owned())
+        .collect()
+}
+
+/// What .NET's `Path.GetFullPath` makes of `path` on Unix, which is the name
+/// a record gives its source and the oracle's fixture precondition gives a
+/// reference: the path read against the working directory
+/// (the children inherit this process's) unless it is rooted, each run of
+/// separators one separator, each `.` segment gone, and each `..` segment
+/// gone with the segment before it.
+fn full_path(path: &str) -> String {
+    let rooted = if path.starts_with('/') {
+        path.to_owned()
+    } else {
+        let cwd = std::env::current_dir().expect("the working directory");
+        format!("{}/{path}", text_of(cwd))
+    };
+    let mut segments: Vec<&str> = Vec::new();
+    for segment in rooted.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                segments.pop();
+            }
+            other => segments.push(other),
+        }
+    }
+    format!("/{}", segments.join("/"))
+}
+
+/// Hold a successful answer to `request` to what the files hold: one record
+/// per source, in the request's order and under the source's own path
+/// ([`full_path`]: the consumers look a record up by it), each source's
+/// record holding the definition of the module it declares and, where the
+/// source ends in [`SENTINEL`], its error on the line it physically sits on,
+/// and no range in a record starting past its file's last line.
+fn check_records(answer: &Value, request: &str, texts: &[Option<Vec<u8>>]) -> Result<(), String> {
     let files = answer["Files"]
         .as_array()
         .ok_or_else(|| format!("no Files: {answer}"))?;
+    let paths = strings_of(request, "paths");
+    assert_eq!(paths.len(), texts.len(), "a text for each source");
     if files.len() != texts.len() {
         return Err(format!(
             "{} records for {} sources",
@@ -1062,12 +1153,19 @@ fn check_records(answer: &Value, texts: &[Option<Vec<u8>>]) -> Result<(), String
             texts.len()
         ));
     }
-    for (i, (file, text)) in files.iter().zip(texts).enumerate() {
+    for (i, ((file, text), path)) in files.iter().zip(texts).zip(&paths).enumerate() {
         let Some(text) = text else {
             return Err(format!(
                 "source {i} holds no text, and the oracle answered: {file}"
             ));
         };
+        let named = full_path(path);
+        if file["Path"].as_str() != Some(named.as_str()) {
+            return Err(format!(
+                "source {i} is {named}, and its record names {}",
+                file["Path"]
+            ));
+        }
         let last = last_line(text);
         let uses = file["Uses"].as_array().cloned().unwrap_or_default();
         let diagnostics = file["Diagnostics"].as_array().cloned().unwrap_or_default();
@@ -1156,7 +1254,7 @@ fn run_case(residents: &mut Residents, case: Case) -> Result<Verdict, String> {
             (Some(_), true) => {}
             (None, false) => {
                 let value: Value = serde_json::from_str(&primed).expect("an answer is JSON");
-                check_records(&value, &plain_texts_owned())
+                check_records(&value, prime, &plain_texts_owned())
                     .map_err(|why| format!("the first request: {why}"))?;
             }
             (Some(why), false) => {
@@ -1196,24 +1294,55 @@ fn run_case(residents: &mut Residents, case: Case) -> Result<Verdict, String> {
     // The fixture precondition of the project-check oracles (fcs-dump's
     // module doc): a reference that holds other bytes under a path the child
     // has read is refused, naming the path, rather than answered from what
-    // FCS kept of the old bytes. Only the cases that rewrite the reference
-    // after the first request may meet it.
-    let reference_rewritten = matches!(
+    // FCS kept of the old bytes. The oracle keys what it has read by the
+    // full path of what the request spells ([`full_path`]), so only a case
+    // that rewrites the reference after the first request, and then spells a
+    // path with the full path the first request's had, may meet it.
+    let rewrites_reference = matches!(
         case,
         Case::ReferenceChange(
             Change::SameStampReplace | Change::SameStampRewrite | Change::SameStampResize
         ) | Case::ReferenceSpelling(_)
     );
-    let refused_by_precondition = refusal(&resident_answer).is_some_and(|why| {
-        why.contains("refs/Ref.dll holds other bytes than when this oracle last read it")
-    });
-    if resident_answer != fresh && !(reference_rewritten && refused_by_precondition) {
+    let precondition_refusal = world
+        .prime
+        .as_deref()
+        .filter(|_| rewrites_reference)
+        .and_then(|prime| {
+            let full = |request: &str| -> Vec<String> {
+                strings_of(request, "refs")
+                    .iter()
+                    .map(|reference| full_path(reference))
+                    .collect()
+            };
+            let primed = full(prime);
+            full(&world.request)
+                .into_iter()
+                .find(|reference| primed.contains(reference))
+        })
+        .map(|reference| {
+            format!("reference {reference} holds other bytes than when this oracle last read it")
+        });
+    let refused_by_precondition = match (&precondition_refusal, refusal(&resident_answer)) {
+        (Some(expected), Some(why)) => why.starts_with(expected.as_str()),
+        _ => false,
+    };
+    if resident_answer != fresh && !refused_by_precondition {
         return Err(format!(
             "the resident child answered\n    {}\n  and a fresh child\n    {}",
             resident_answer.trim_end(),
             fresh.trim_end()
         ));
     }
+    // The fresh child's answer is held to the files below either way; the
+    // outcome is the resident child's, which is the one the suites ask.
+    let outcome = |of_fresh: &'static str| {
+        if resident_answer == fresh {
+            of_fresh
+        } else {
+            "refused-by-precondition"
+        }
+    };
     // What must be answered: the plain project, and a spelling that names the
     // source or the reference to the file system.
     let names_the_file = match case {
@@ -1227,14 +1356,16 @@ fn run_case(residents: &mut Residents, case: Case) -> Result<Verdict, String> {
         },
         _ => false,
     };
-    // What must be refused: a reference that is no readable assembly, a file
-    // gone, and a script that names code the check does not read (an active
-    // `#r` or `#load`: one under `#if` is in no branch the build reads).
+    // What must be refused: a reference that is no readable assembly or is
+    // not spelt as an absolute path, a file gone, and a script that names
+    // code the check does not read (an active `#r` or `#load`: one under
+    // `#if` is in no branch the build reads).
     let must_refuse = match case {
         Case::ReferenceState(s) => !matches!(
             s,
             State::Regular | State::Symlink | State::SymlinkOutOfTree | State::ReadOnly
         ),
+        Case::ReferenceSpelling(e) => e.dimension == Dimension::Relative,
         Case::SourceChange(Change::Disappears) | Case::ReferenceChange(Change::Disappears) => true,
         // A script's `#r` of a file an open would wait on or read without end:
         // FCS checks the script as fsc would only if it opens the file, which
@@ -1259,13 +1390,22 @@ fn run_case(residents: &mut Residents, case: Case) -> Result<Verdict, String> {
                 "refused a project whose files are all there: {why}"
             ));
         }
-        return Ok(Verdict::Reached("refused"));
+        return Ok(Verdict::Reached(outcome("refused")));
     }
     if op == "file-batch" {
-        return Ok(Verdict::Reached("answered"));
+        return Ok(Verdict::Reached(outcome("answered")));
     }
     let value: Value = serde_json::from_str(&fresh).expect("an answer is JSON");
-    check_records(&value, &texts)?;
+    // A source spelling that leaves the fixture names a file of the
+    // machine's, if any: what it holds is not the fixture's to say, and the
+    // two children agreeing is all such an answer is held to.
+    let outside = matches!(
+        case,
+        Case::SourceSpelling(e) if e.value.means == spelling::Means::Outside
+    );
+    if !outside {
+        check_records(&value, &world.request, &texts)?;
+    }
     let errors = value["Files"]
         .as_array()
         .into_iter()
@@ -1276,11 +1416,11 @@ fn run_case(residents: &mut Residents, case: Case) -> Result<Verdict, String> {
     if matches!(case, Case::Plain) && errors {
         return Err(format!("the plain project checks cleanly: {fresh}"));
     }
-    Ok(Verdict::Reached(if errors {
+    Ok(Verdict::Reached(outcome(if errors {
         "answered-with-errors"
     } else {
         "answered"
-    }))
+    })))
 }
 
 /// One worker's resident children, one per op the cases are put to.
@@ -1295,6 +1435,12 @@ impl Residents {
             project: driver("uses-project-batch"),
             file: driver("file-batch"),
         }
+    }
+
+    /// Let both children exit ([`EXIT_GRACE`]).
+    fn finish(self) {
+        self.project.finish(EXIT_GRACE);
+        self.file.finish(EXIT_GRACE);
     }
 
     fn of(&mut self, op: &str) -> &mut BatchChild {
@@ -1330,7 +1476,16 @@ fn every_hostile_project_is_answered_as_a_fresh_oracle_answers_it() {
         renamed_padded_assembly().len(),
         "the resize changes the length"
     );
-    let cases = Case::all();
+    // `BORZOI_HOSTILE_CASES=<text>` keeps the cases whose description holds
+    // the text, for iterating on one. Such a run is not the census, though it
+    // may reach every dimension the census owes, and fails once it is done.
+    let narrowed =
+        std::env::var_os("BORZOI_HOSTILE_CASES").map(|f| f.to_string_lossy().into_owned());
+    let mut cases = Case::all();
+    let every = cases.len();
+    if let Some(filter) = &narrowed {
+        cases.retain(|c| format!("{c:?}").contains(filter));
+    }
     let failures = Mutex::new(Vec::new());
     std::thread::scope(|scope| {
         for worker in 0..RESIDENTS {
@@ -1351,6 +1506,7 @@ fn every_hostile_project_is_answered_as_a_fresh_oracle_answers_it() {
                         }
                     }
                 }
+                residents.finish();
             });
         }
     });
@@ -1361,5 +1517,12 @@ fn every_hostile_project_is_answered_as_a_fresh_oracle_answers_it() {
         failures.len(),
         failures.join("\n  ")
     );
+    if let Some(filter) = narrowed {
+        panic!(
+            "BORZOI_HOSTILE_CASES={filter} ran {} of the census's {every} cases, and none failed; \
+             unset it to run the census",
+            cases.len()
+        );
+    }
     census.finish(REGENERATE);
 }
