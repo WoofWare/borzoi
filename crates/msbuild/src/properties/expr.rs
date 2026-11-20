@@ -2985,7 +2985,7 @@ mod property_reference_tests {
                 Some(close) => &after[..close],
                 None => after,
             };
-            let trimmed = inner.trim_matches(|c: char| c.is_ascii_whitespace());
+            let trimmed = inner.trim_matches(char::is_whitespace);
             if let Some(expr) = parse(trimmed) {
                 if let Root::Property(name) = expr.root {
                     refs.push(name);
@@ -3018,6 +3018,8 @@ mod property_reference_tests {
         " ",
         "\t",
         "\n",
+        "\u{a0}",
+        "\u{2003}",
         "Foo",
         "A",
         "x-1",
@@ -3070,6 +3072,7 @@ mod property_reference_tests {
         // with the whitespace-trimming condition tokeniser.
         assert_eq!(refs("$( Foo )"), vec!["Foo"]);
         assert_eq!(refs("$(  Foo)"), vec!["Foo"]);
+        assert_eq!(refs("$(\u{a0}P.Length)"), vec!["P"]);
         assert_eq!(refs("$(P.Contains ('x'))"), vec!["P"]);
         assert_eq!(refs("$( P.Contains('x') )"), vec!["P"]);
     }

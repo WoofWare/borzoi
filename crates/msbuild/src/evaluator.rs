@@ -4290,6 +4290,16 @@ fn handle_choose(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State<
             }
             _ => None,
         };
+        // MSBuild may choose any of those branches, and evaluate the gates
+        // after this one: against the state before the `<Choose>`, as no
+        // branch has run when it does, so before the branches' writes are
+        // marked below. A later gate false whatever the uncertain names hold
+        // there rules its branch out, which a gate read after the marks would
+        // not.
+        for branch in &whens[first_unsure.unwrap_or(from)..=from] {
+            rejection::judge_branch(*branch, current_file_dir, false, state);
+        }
+        rejection::judge_whens(node, from + 1, current_file_dir, false, state);
         let mut items = item_pass::UndecidedChooseItems::default();
         for branch in whens[from..].iter().copied().chain(otherwise) {
             scan_undecided_choose_branch(branch, unpinned_root.as_ref(), state, &mut items);
@@ -4300,12 +4310,6 @@ fn handle_choose(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State<
                 state.mark_skipped_write_stale(&name, &cause);
             }
         }
-        // MSBuild may choose any of those branches, and evaluate the gates
-        // after this one.
-        for branch in &whens[first_unsure.unwrap_or(from)..=from] {
-            rejection::judge_branch(*branch, current_file_dir, false, state);
-        }
-        rejection::judge_whens(node, from + 1, current_file_dir, false, state);
         state.reach_doubted -= usize::from(first_unsure.is_some());
         return;
     }

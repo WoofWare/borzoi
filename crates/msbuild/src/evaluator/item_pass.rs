@@ -709,9 +709,17 @@ fn evaluate_item_group(node: Node<'_, '_>, state: &mut State<'_>) {
 /// reference decides whether its read is checked.
 fn taint_group_references_on_doubted_reads(node: Node<'_, '_>, state: &mut State<'_>) {
     let dir = state.entry_project_dir.clone();
+    // False on the values the walk holds, which decide it whatever the names
+    // it doubts hold (a bound value a clean write fixed decides it, as a
+    // refusal before that write does not reach it).
     let dead = |element: Node<'_, '_>, state: &State<'_>| {
         attribute(element, "Condition").is_some_and(|condition| {
-            directory_build::decision_from_certain_inputs(state, &condition, &dir) == Some(false)
+            matches!(
+                evaluate_item_condition_silent(element, state).0,
+                CondGate::Skip
+            ) && state.condition_is_decided_exactly(&condition, Some(&dir), &|name| {
+                state.undefined_read_is_exact(name)
+            })
         })
     };
     if dead(node, state) {

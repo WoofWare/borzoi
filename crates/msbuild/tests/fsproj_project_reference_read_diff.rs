@@ -386,6 +386,14 @@ fn grade_read_document(oracle: &mut Oracle, document: &ReadDocument) -> (ReadOut
     if parsed.project_references_uncertain {
         return (ReadOutcome::Declined { owed }, evaluated);
     }
+    // A reference MSBuild made reading a name the walk doubts may hold
+    // another path in another world, even where this one's agrees.
+    assert!(
+        !owed,
+        "#1098: the list is certain, and a reference MSBuild made reads a name the walk \
+         doubts:\n{xml}\nours: {:#?}",
+        parsed.project_references
+    );
     assert_eq!(
         parsed.project_references.len(),
         (0..document.references.len())
@@ -594,12 +602,41 @@ fn a_reference_reading_a_refused_name_is_no_certain_omission() {
 /// certain, and MSBuild agrees with each.
 #[test]
 fn a_dead_reference_reading_a_refused_name_costs_no_certainty() {
+    let rows = [
+        // False gates, on a reference beside a live sibling in a group the
+        // walk cannot decide, and on a group.
+        format!(
+            "<ItemGroup{UNSUPPORTED_TRUE}><ProjectReference Include=\"B.fsproj\" />\
+             <ProjectReference Include=\"$(P).fsproj\" Condition=\"false\" /></ItemGroup>\
+             <ItemGroup Condition=\"false\"><ProjectReference Include=\"$(P).fsproj\" /></ItemGroup>"
+        ),
+        // A gate on a name a refused write and then a clean one wrote: the
+        // clean write decides it.
+        format!(
+            "<PropertyGroup><Gate>{REFUSED_BODY}</Gate></PropertyGroup>\
+             <PropertyGroup><Gate>false</Gate></PropertyGroup>\
+             <ItemGroup><ProjectReference Include=\"$(P).fsproj\" Condition=\"$(Gate)\" /></ItemGroup>"
+        ),
+        // A `<When>` after one the walk cannot decide, false on the state
+        // before the `<Choose>`, which is the state MSBuild evaluates it in
+        // (the undecided branch's write to `Off` never precedes it).
+        format!(
+            "<PropertyGroup><Off>false</Off></PropertyGroup>\
+             <Choose><When{UNSUPPORTED_TRUE}><PropertyGroup><Off>true</Off></PropertyGroup></When>\
+             <When Condition=\"$(Off)\"><ItemGroup><ProjectReference Include=\"$(P).fsproj\" /></ItemGroup></When></Choose>"
+        ),
+    ];
+    for row in rows {
+        dead_reference_row(&row);
+    }
+}
+
+/// One row of [`a_dead_reference_reading_a_refused_name_costs_no_certainty`],
+/// beside a refused `P` and a live reference.
+fn dead_reference_row(row: &str) {
     let xml = format!(
         "<Project><PropertyGroup><P>{REFUSED_BODY}</P></PropertyGroup>\
-         <ItemGroup><ProjectReference Include=\"A.fsproj\" /></ItemGroup>\
-         <ItemGroup{UNSUPPORTED_TRUE}><ProjectReference Include=\"B.fsproj\" />\
-         <ProjectReference Include=\"$(P).fsproj\" Condition=\"false\" /></ItemGroup>\
-         <ItemGroup Condition=\"false\"><ProjectReference Include=\"$(P).fsproj\" /></ItemGroup></Project>"
+         <ItemGroup><ProjectReference Include=\"A.fsproj\" /></ItemGroup>{row}</Project>"
     );
     let dir = tempfile::TempDir::new().expect("tempdir");
     let root = borzoi_msbuild::observed::host_fs::canonicalize(dir.path()).expect("canonicalize");
