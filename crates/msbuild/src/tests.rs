@@ -5039,27 +5039,39 @@ fn an_update_leaving_batched_entries_marks_the_set_uncertain() {
     // `Update` named) removes its earlier fragments by text, not by the
     // batch's full-path key, so they stay and are applied at the next
     // flush, after the `Include`. Probed (dotnet 10): `Beta` gets the
-    // override. The leaving `Update` need not write a package metadatum,
-    // and need not run: a condition-false one is batched too.
-    for first in [
-        r#"<PackageReference Update="Alpha;Alpha" />"#,
-        r#"<PackageReference Update="Alpha;Alpha" Condition="'$(NeverSet)' == 'true'" />"#,
-    ] {
-        let src = format!(
-            r#"<Project>
+    // override. The leaving `Update` need not write a package metadatum.
+    let p = parse(
+        r#"<Project>
   <ItemGroup>
-    {first}
+    <PackageReference Update="Alpha;Alpha" />
     <PackageReference Update="Beta;Alpha" VersionOverride="1.0" />
     <PackageReference Include="Alpha;Beta" Version="1.0" />
   </ItemGroup>
-</Project>"#
-        );
-        let p = parse(&src);
-        assert!(
-            p.package_references_uncertain,
-            "{first}: the second Update leaves Beta's override in the batch"
-        );
-    }
+</Project>"#,
+    );
+    assert!(
+        p.package_references_uncertain,
+        "the second Update leaves Beta's override in the batch"
+    );
+    // A condition-false `Update` is none of the batch's: with a false
+    // `Alpha;Alpha` first, `Beta` gets no override (probed, dotnet 10), and
+    // the walk is certain of that.
+    let p = parse(
+        r#"<Project>
+  <ItemGroup>
+    <PackageReference Update="Alpha;Alpha" Condition="'$(NeverSet)' == 'true'" />
+    <PackageReference Update="Beta;Alpha" VersionOverride="1.0" />
+    <PackageReference Include="Alpha;Beta" Version="1.0" />
+  </ItemGroup>
+</Project>"#,
+    );
+    assert!(!p.package_references_uncertain);
+    let beta = p
+        .package_references
+        .iter()
+        .find(|r| r.id == "Beta")
+        .expect("Beta captured");
+    assert_eq!(beta.version_override, None);
     // Two single-fragment Updates of one identity leave nothing: the second
     // fails at its first fragment, before adding any.
     let src = r#"<Project>
@@ -12616,6 +12628,96 @@ fn an_empty_group_under_a_startup_gate_skips_no_write() {
         ));
         assert!(p.rejection.is_none(), "{gated}: {:#?}", p.rejection);
     }
+}
+
+/// A condition-false `Update` is none of MSBuild's batch: first, a false
+/// `B.fs` leaves `B.fs` the stranded `CompileFirst`, as its absence does and
+/// unlike a true one (probed, `dotnet msbuild`, SDK 10).
+#[test]
+fn a_condition_false_update_joins_no_batch() {
+    let p = parse(
+        r#"<Project><ItemGroup>
+    <Compile Update="B.fs" Condition="false" Link="b" />
+    <Compile Update="A.fs;A.fs" Link="a" />
+    <Compile Update="B.fs;A.fs" CompileOrder="CompileFirst" />
+    <Compile Include="A.fs;B.fs" />
+  </ItemGroup></Project>"#,
+    );
+    assert!(p.items_uncertain || p.rejection.is_some(), "{:#?}", p.items);
+}
+
+/// An `Update` in a group the walk takes on an untrusted true may not run:
+/// where MSBuild skips the group (`F` is `off`), nothing is pending, and
+/// `B.fs` takes the stranded `CompileFirst`.
+#[test]
+fn an_update_in_a_group_taken_on_an_untrusted_true_may_not_run() {
+    let p = parse(
+        r#"<Project><PropertyGroup><F>on</F><F Condition="'É' == 'é'">off</F></PropertyGroup>
+  <ItemGroup><Compile Update="A.fs;A.fs" Link="a" /></ItemGroup>
+  <ItemGroup Condition="'$(F)' == 'on'"><Compile Update="Z.fs" Link="z" /></ItemGroup>
+  <ItemGroup>
+    <Compile Update="B.fs;A.fs" CompileOrder="CompileFirst" />
+    <Compile Include="A.fs;B.fs" />
+  </ItemGroup></Project>"#,
+    );
+    assert!(p.items_uncertain || p.rejection.is_some(), "{:#?}", p.items);
+}
+
+/// An `Exclude` that is certainly empty matches nothing: the `Include` is
+/// read as one without it, whose kept `\` names one file in every world.
+#[test]
+#[cfg(not(windows))]
+fn a_certainly_empty_exclude_is_no_exclude() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src").join("Program.fs"), "").unwrap();
+    let source = r#"<Project><ItemGroup><Compile Include="src\Program.fs" Exclude="$(ExtraExcludes)" /></ItemGroup></Project>"#;
+    let p = crate::parse_fsproj_with_imports(
+        &crate::ProjectFile::buffer(&root.join("Demo.fsproj"), source).unwrap(),
+        &HashMap::new(),
+        &HashMap::new(),
+        None,
+        Some(&crate::glob_resolver::resolve as &crate::GlobResolver<'_>),
+    )
+    .unwrap();
+    assert!(!p.items_uncertain, "{:#?}", p.diagnostics);
+    assert_eq!(p.items.len(), 1, "{:#?}", p.items);
+}
+
+/// A write no build runs is none a startup gate skips: a property whose own
+/// gate is certainly false, alone in a group that turns on the startup
+/// directory, leaves a later item condition on an unmodelled value judged as
+/// without it.
+#[test]
+#[cfg(not(windows))]
+fn a_dead_write_under_a_startup_gate_skips_nothing() {
+    let p = parse(
+        r#"<Project><PropertyGroup>
+    <S>seg\a</S>
+    <U>$([System.IO.Path]::GetFileName('file'))</U>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(S)' == 'seg/a'"><Dead Condition="false">x</Dead></PropertyGroup>
+  <ItemGroup><Foo Include="y" Condition="'$(U)' == 'file'" /></ItemGroup>
+  <PropertyGroup><After>ok</After></PropertyGroup></Project>"#,
+    );
+    assert!(p.rejection.is_none(), "{:#?}", p.rejection);
+}
+
+/// An absolute path the pure walker cannot probe does not turn on the
+/// startup directory, and declines no write for it.
+#[test]
+#[cfg(not(windows))]
+fn an_unprobed_absolute_path_is_no_startup_decline() {
+    let p = parse(
+        r#"<Project><PropertyGroup>
+    <Absolute>/tmp/foo\bar</Absolute>
+    <U>$([System.IO.Path]::GetFileName('file'))</U>
+  </PropertyGroup>
+  <ItemGroup><Foo Include="y" Condition="'$(U)' == 'file'" /></ItemGroup>
+  <PropertyGroup><After>ok</After></PropertyGroup></Project>"#,
+    );
+    assert!(p.rejection.is_none(), "{:#?}", p.rejection);
 }
 
 /// `Q` is `./seg/a//` where `seg` is a directory under MSBuild's startup

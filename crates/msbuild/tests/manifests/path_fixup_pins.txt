@@ -3,6 +3,7 @@
 #   BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-msbuild --test \
 #          path_fixup_expansion_diff fixed_seed_sweep_regresses_nothing_main_answers
 case0021 pu	Global/Gate
+case0065 pu	Environment/Index
 case0099 pu	Global/Index
 case0099 rd	Global/Index
 case0099 s:cwd-empty	Global/Index
@@ -11,6 +12,7 @@ case0099 s:cwd-obj	Global/Index
 case0099 s:cwd-seg	Global/Index
 case0099 s:proj-full	Global/Index
 case0099 wi	Global/Index
+case0127 pu	Written/Gate
 case0130 pu	Environment/Gate
 case0137 pu	Environment/Index
 case0137 rd	Environment/Index
@@ -38,6 +40,7 @@ case0271 s:cwd-obj	Written/Index
 case0271 s:cwd-seg	Written/Index
 case0271 s:proj-full	Written/Index
 case0271 wi	Written/Index
+case0287 pu	Environment/Index
 case0287 rd	Environment/Index
 case0287 s:cwd-empty	Environment/Index
 case0287 s:cwd-full	Environment/Index
@@ -94,6 +97,7 @@ case0458 s:proj-empty	Copied/Index
 case0458 wi	Copied/Index
 case0459 pu	Global/Gate
 case0460 pu	Environment/Gate
+case0461 pu	Environment/Index
 case0461 rd	Environment/Index
 case0461 s:cwd-empty	Environment/Index
 case0461 s:cwd-full	Environment/Index
@@ -109,6 +113,7 @@ case0481 s:cwd-obj	Written/Index
 case0481 s:cwd-seg	Written/Index
 case0481 s:proj-full	Written/Index
 case0481 wi	Written/Index
+case0487 pu	Written/Gate
 case0500 rd	Copied/Index
 case0500 s:cwd-empty	Copied/Index
 case0500 s:cwd-full	Copied/Index
@@ -166,6 +171,7 @@ case0674 s:cwd-obj	Copied/Index
 case0674 s:cwd-seg	Copied/Index
 case0674 s:proj-full	Copied/Index
 case0674 wi	Copied/Index
+case0686 pu	Copied/Gate
 case0700 pu	Environment/Index
 case0700 rd	Environment/Index
 case0700 s:cwd-empty	Environment/Index
@@ -201,6 +207,7 @@ case0732 s:cwd-obj	Literal/Index
 case0732 s:cwd-seg	Literal/Index
 case0732 s:proj-full	Literal/Index
 case0732 wi	Literal/Index
+case0739 pu	Written/Gate
 case0749 pu	Environment/Gate
 case0751 pu	Written/Gate
 case0759 pu	Global/Gate

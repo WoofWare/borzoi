@@ -660,9 +660,11 @@ fn evaluate_item_group(node: Node<'_, '_>, state: &mut State<'_>) {
                 state.project_references_uncertain = true;
             }
             restore(state);
+            state.reach_doubted += usize::from(group_reads_untrusted);
             for child in node.children().filter(Node::is_element) {
                 walk_item_child(child, state);
             }
+            state.reach_doubted -= usize::from(group_reads_untrusted);
         }
         CondGate::Skip => {
             if group_reads_untrusted {
@@ -1143,8 +1145,17 @@ fn walk_item_child_inner(node: Node<'_, '_>, kind: ItemKind, state: &mut State<'
     // allowed to be semicolon-delimited lists in MSBuild, so
     // `Include="$(ExtraFiles)"` may expand into multiple items even
     // though the raw attribute looks like one.
-    let (expansion, spelling_known) =
-        state.expand_include(include, node.range(), attribute(node, "Exclude").is_some());
+    // An `Exclude` that is certainly empty matches nothing, and is read as
+    // its absence.
+    let has_exclude = attribute(node, "Exclude").is_some_and(|exclude| {
+        let expansion = expand_silent(&exclude, state);
+        expansion.had_issue()
+            || !expansion.value.trust().is_certain()
+            || spec_fragments(expansion.value.ignoring_trust())
+                .next()
+                .is_some()
+    });
+    let (expansion, spelling_known) = state.expand_include(include, node.range(), has_exclude);
     if expansion.had_issue() {
         // Substitution failure leaves a path with empty fragments or
         // residual `$(...)`, or one of several spellings. Either way the
@@ -2559,8 +2570,10 @@ pub(super) struct UpdateBatchRun {
 /// Whether `node`, an element of an item type whose `Update`s the walk models
 /// (`Compile`, `PackageReference`), leaves entries in MSBuild's batch of
 /// updates that it applies late, out of document order; feeding the batch as
-/// it goes. Run for every such element, before its condition: MSBuild batches
-/// a condition-false `Update` too (probed).
+/// it goes. Run for every such element, before it is walked: one MSBuild
+/// certainly skips is none of the batch's, one the walk cannot tell runs
+/// takes both outcomes, and only one it certainly runs moves the batch as
+/// modelled.
 ///
 /// The mechanism is `LazyItemList.ComputeItems`. Consecutive `Update`s of one
 /// type join a batch keyed by full path (`NormalizePathForComparisonNoThrow`,
@@ -2592,30 +2605,40 @@ pub(super) struct UpdateBatchRun {
 fn update_strands_late(node: Node<'_, '_>, item_type: &str, state: &mut State<'_>) -> bool {
     let key = item_key(item_type);
     let (include, update) = (attribute(node, "Include"), attribute(node, "Update"));
+    // An operation MSBuild certainly skips is none of the batch's: a
+    // condition-false `Update` leaves every later strand as its absence does
+    // (probed, SDK 10: a false `Alpha;Alpha` strands nothing, where a true one
+    // strands `Beta;Alpha`'s `Beta`). One the walk cannot tell runs, by its
+    // own gate or one around it ([`State::reach_doubted`]), takes both
+    // outcomes.
+    let own = evaluate_item_condition_silent(node, state);
+    if matches!(own, (CondGate::Skip, false)) {
+        return false;
+    }
+    let certainly_runs = matches!(own, (CondGate::Run, false)) && state.reach_doubted == 0;
     let update = match (include.as_deref(), update.as_deref()) {
         (None, Some(update)) => update,
         _ => {
-            // Another operation flushes a pending batch, if it runs.
-            let runs = matches!(
-                evaluate_item_condition_silent(node, state),
-                (CondGate::Run, false)
-            );
-            if runs
-                && let Some(run) = state.update_batches.get_mut(&key)
+            // Another operation flushes a pending batch where it runs; where
+            // it may not, the batch may still be pending, or not.
+            if let Some(run) = state.update_batches.get_mut(&key)
                 && run.pending
             {
-                *run = UpdateBatchRun::default();
+                if certainly_runs {
+                    *run = UpdateBatchRun::default();
+                } else {
+                    run.pending = false;
+                }
             }
             return false;
         }
     };
-    // An `Update` the walk cannot tell runs neither sets the batch pending
-    // nor flushes it: MSBuild gives a later strand its metadata past a
-    // condition-false one as without it (probed, SDK 10).
-    let certainly_runs = matches!(
-        evaluate_item_condition_silent(node, state),
-        (CondGate::Run, false)
-    );
+    if !certainly_runs {
+        let run = state.update_batches.entry(key).or_default();
+        run.unknown = true;
+        run.pending = false;
+        return true;
+    }
     let (worlds, startup_undecided) = expand_silent_worlds_noting(update, state);
     // As in `resolve_compile_update_targets`: no two worlds' spellings are
     // read as one.
@@ -2687,15 +2710,13 @@ fn update_strands_late(node: Node<'_, '_>, item_type: &str, state: &mut State<'_
     }
     match left_at {
         None => {
-            run.pending = certainly_runs;
+            run.pending = true;
             false
         }
         Some(i) => {
             let strands_late = i > 0 && strandable && !run.pending;
-            if run.pending && certainly_runs {
+            if run.pending {
                 *run = UpdateBatchRun::default();
-            } else if !certainly_runs {
-                run.pending = false;
             } else {
                 for key in &removed_on_leaving {
                     run.keys.remove(key);

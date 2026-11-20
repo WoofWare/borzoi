@@ -97,7 +97,9 @@ const PROJECTS: [(&str, [usize; 5]); 2] = [
 
 impl World {
     fn new(seed: u64) -> World {
-        let tmp = TempDir::new().unwrap();
+        let tmp = tempfile::Builder::new()
+            .tempdir_in(fixture_parent())
+            .unwrap();
         // The root sits one level inside the temporary directory, so that a
         // value climbing out of it names a directory unique to this run, not
         // the host's temporary directory, whose spelling a generated literal
@@ -1092,6 +1094,20 @@ fn expansions_hold_msbuilds_path_fixup() {
             ),
         }
     }
+}
+
+/// Where the fixture's temporary directory goes: the host's, where its
+/// spelling is plain, else `/tmp`. Its path is written into generated
+/// documents (a `'` would end a condition's operand, a `&` begin an entity),
+/// so a spelling that changed their grammar would change the points, and the
+/// manifests would measure the host rather than the walk.
+fn fixture_parent() -> PathBuf {
+    let host = std::env::temp_dir();
+    let plain = host.to_str().is_some_and(|text| {
+        text.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "/._-".contains(c))
+    });
+    if plain { host } else { PathBuf::from("/tmp") }
 }
 
 /// The seed and size of the sweep held to `main`'s walk

@@ -50,7 +50,9 @@ fn record_baseline() {
     let dump = PathBuf::from(
         std::env::var("BORZOI_PATH_FIXUP_DUMP").expect("BORZOI_PATH_FIXUP_DUMP names the dump"),
     );
-    let tmp = tempfile::TempDir::new().unwrap();
+    let tmp = tempfile::Builder::new()
+        .tempdir_in(fixture_parent())
+        .unwrap();
     // One level inside the temporary directory, as the sweep lays it out.
     let root = host_fs::canonicalize(tmp.path()).unwrap().join("fixture");
     std::fs::create_dir(&root).unwrap();
@@ -186,6 +188,20 @@ fn record_baseline() {
         out.push('\n');
     }
     std::fs::write(dump.join("baseline.txt"), out).unwrap();
+}
+
+/// Where the fixture's temporary directory goes, as the sweep puts it: the host's, where its
+/// spelling is plain, else `/tmp`. Its path is written into generated
+/// documents (a `'` would end a condition's operand, a `&` begin an entity),
+/// so a spelling that changed their grammar would change the points, and the
+/// manifests would measure the host rather than the walk.
+fn fixture_parent() -> PathBuf {
+    let host = std::env::temp_dir();
+    let plain = host.to_str().is_some_and(|text| {
+        text.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "/._-".contains(c))
+    });
+    if plain { host } else { PathBuf::from("/tmp") }
 }
 
 /// What one evaluation claims about the point, as the sweep reads it.

@@ -134,6 +134,12 @@ enum Cond {
     SwitchEq(bool),
     UndefEmpty,
     UndefEqTrue,
+    /// A gate the walk cannot decide and MSBuild can: `'É' == 'é'` is true
+    /// under MSBuild's ordinal case folding, and the walk models none.
+    Undecided(bool),
+    /// A gate the walk takes on an untrusted true: `Flip` is `on` unless an
+    /// undecided write (true in MSBuild) made it `off` ([`Group::Flip`]).
+    Flipped,
 }
 
 impl Cond {
@@ -143,6 +149,9 @@ impl Cond {
             Cond::SwitchEq(want) => format!(" Condition=\"'$(Switch)' == '{want}'\""),
             Cond::UndefEmpty => " Condition=\"'$(NeverSet)' == ''\"".to_string(),
             Cond::UndefEqTrue => " Condition=\"'$(NeverSet)' == 'true'\"".to_string(),
+            Cond::Undecided(true) => " Condition=\"'É' == 'é'\"".to_string(),
+            Cond::Undecided(false) => " Condition=\"'É' != 'é'\"".to_string(),
+            Cond::Flipped => " Condition=\"'$(Flip)' == 'on'\"".to_string(),
         }
     }
 }
@@ -315,6 +324,9 @@ enum Boundary {
     /// `<Compile Update="…" Visible="false">`: an `Update` that writes no
     /// `CompileOrder`, so it cannot move anything.
     OtherMetadataUpdate(UpdateSpec),
+    /// [`Boundary::OtherMetadataUpdate`] under a gate: it moves nothing
+    /// itself, but takes part in MSBuild's batch of `Update`s, or not.
+    GatedMetadataUpdate(UpdateSpec, Cond),
     /// `<Compile Include="a" Exclude="b">`.
     Exclude(IncludeSpec, usize),
     /// `<Compile Include="@(Compile)">`: duplicates every item so far.
@@ -330,6 +342,11 @@ impl ItemDecl {
                     Boundary::OtherMetadataUpdate(spec) => {
                         format!("<Compile Update=\"{}\" Visible=\"false\" />", spec.render())
                     }
+                    Boundary::GatedMetadataUpdate(spec, cond) => format!(
+                        "<Compile Update=\"{}\" Visible=\"false\"{} />",
+                        spec.render(),
+                        cond.render()
+                    ),
                     Boundary::Exclude(spec, file) => format!(
                         "<Compile Include=\"{}\" Exclude=\"{}\" />",
                         spec.render(),
@@ -387,6 +404,9 @@ enum Group {
     CompileOrderDefault(OrderValue),
     /// An `<ItemGroup>` body written out verbatim: the hand-picked corners.
     Raw(&'static str),
+    /// `Flip`, `on` unless an undecided write (true in MSBuild) makes it
+    /// `off`: what [`Cond::Flipped`] reads.
+    Flip,
 }
 
 impl Group {
@@ -394,6 +414,12 @@ impl Group {
         match self {
             Group::Raw(body) => {
                 let _ = writeln!(out, "  <ItemGroup>\n{body}\n  </ItemGroup>");
+            }
+            Group::Flip => {
+                let _ = writeln!(
+                    out,
+                    "  <PropertyGroup>\n    <Flip>on</Flip>\n    <Flip Condition=\"'É' == 'é'\">off</Flip>\n  </PropertyGroup>"
+                );
             }
             Group::CompileOrderDefault(value) => {
                 let _ = writeln!(
@@ -849,22 +875,38 @@ fn batch_update_spec_strategy() -> impl Strategy<Value = UpdateSpec> {
     proptest::collection::vec((0..3usize, spelling), 2..5).prop_map(UpdateSpec::Files)
 }
 
+/// A gate in the batch sweep: mostly none, else one MSBuild certainly skips,
+/// one the walk cannot decide either way, or one it takes on an untrusted
+/// true that MSBuild skips.
+fn batch_cond_strategy() -> impl Strategy<Value = Cond> {
+    prop_oneof![
+        40 => Just(Cond::None),
+        1 => Just(Cond::SwitchEq(false)),
+        1 => Just(Cond::Undecided(true)),
+        1 => Just(Cond::Undecided(false)),
+        1 => Just(Cond::Flipped),
+    ]
+}
+
 /// A run of consecutive `Update`s (each writing `CompileOrder` or only other
 /// metadata) between `Include`s: MSBuild's batch of `Update`s, its strands
-/// and what removing a fragment by its text leaves, are what this sweeps.
+/// and what removing a fragment by its text leaves, are what this sweeps,
+/// with each `Update`, and each run's group, perhaps under a gate
+/// ([`batch_cond_strategy`]): an operation that does not run, or may not,
+/// takes part in the batch otherwise.
 fn batch_fixture_strategy() -> impl Strategy<Value = Fixture> {
     let update = prop_oneof![
-        1 => (batch_update_spec_strategy(), (0..5usize))
-            .prop_map(|(spec, order)| ItemDecl::OrderUpdate {
+        1 => (batch_update_spec_strategy(), (0..5usize), batch_cond_strategy())
+            .prop_map(|(spec, order, cond)| ItemDecl::OrderUpdate {
                 spec,
                 order: OrderMeta {
                     attr: Some(OrderValue::Lit(order)),
                     children: Vec::new(),
                 },
-                cond: Cond::None,
+                cond,
             }),
-        1 => batch_update_spec_strategy()
-            .prop_map(|spec| ItemDecl::Boundary(Boundary::OtherMetadataUpdate(spec))),
+        1 => (batch_update_spec_strategy(), batch_cond_strategy())
+            .prop_map(|(spec, cond)| ItemDecl::Boundary(Boundary::GatedMetadataUpdate(spec, cond))),
     ];
     let include = (0..3usize).prop_map(|file| ItemDecl::Include {
         item_type: ItemType::Compile,
@@ -884,12 +926,14 @@ fn batch_fixture_strategy() -> impl Strategy<Value = Fixture> {
                 .chain(after)
                 .collect::<Vec<_>>()
         });
-    proptest::collection::vec(run, 1..3).prop_map(|runs| Fixture {
+    proptest::collection::vec((run, batch_cond_strategy()), 1..4).prop_map(|runs| Fixture {
         sdk_props: Vec::new(),
-        project: vec![Group::Items {
-            cond: Cond::None,
-            items: runs.into_iter().flatten().collect(),
-        }],
+        project: std::iter::once(Group::Flip)
+            .chain(
+                runs.into_iter()
+                    .map(|(items, cond)| Group::Items { cond, items }),
+            )
+            .collect(),
         sdk_targets: Vec::new(),
     })
 }
@@ -919,7 +963,8 @@ fn update_batches_match_msbuild() {
         })
         .unwrap_or_else(|e| panic!("{e}"));
     eprintln!("{} batch cases reached the oracle", oracle_hits.get());
-    // About a quarter of the cases commit; a tenth is the floor.
+    // About a seventh of the cases commit (gated operations decline more);
+    // a tenth is the floor.
     assert!(
         oracle_hits.get() >= cases / 10,
         "only {} of {cases} batch cases reached the MSBuild oracle",

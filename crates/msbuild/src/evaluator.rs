@@ -1309,9 +1309,9 @@ struct State<'r> {
     /// when it is set.
     rejection: Option<crate::Rejection>,
     /// How many constructs the walk is inside whose gate it did not decide
-    /// from certain inputs and took: a `<PropertyGroup>`, a `<Choose>` past a
-    /// `<When>` so decided, or an import whose path it did not compute from
-    /// certain values. Import gates count in
+    /// from certain inputs and took: a `<PropertyGroup>`, an `<ItemGroup>` of
+    /// the item pass, a `<Choose>` past a `<When>` so decided, or an import
+    /// whose path it did not compute from certain values. Import gates count in
     /// [`directory_build::Bookkeeping`] instead. A construct reached inside
     /// one is not reached for certain ([`rejection::reach_is_certain`]).
     reach_doubted: usize,
@@ -5112,8 +5112,9 @@ fn walk_property_child_inner(
         rejection::judge_throwing_expression(state, expressions, reached, node.range());
     }
     rejection::judge_text_after_startup_decline_and_unheld(state, &raw, node.range());
-    // A value refused because it asks past the segment cap is one the walk
-    // declines for the startup directory.
+    // A value refused because it turns on the startup directory (past the
+    // segment cap, or refused in some world only) is one the walk declines
+    // for it; an absolute path the walk cannot probe is not.
     if state.diagnostics[diagnostics_before_value..]
         .iter()
         .any(|diagnostic| {
@@ -5122,6 +5123,11 @@ fn walk_property_child_inner(
                 DiagnosticKind::PathAdjustmentUndecided { .. }
             )
         })
+        && properties::expansion_turns_on_startup_directory(
+            &raw,
+            &state.lookup,
+            state.follow_imports.then_some(state.observer),
+        )
     {
         state.startup_directory_declined = true;
     }
@@ -5310,24 +5316,40 @@ fn walk_property_child_inner(
 /// Whether the gate at `node` may skip a property write: one over a property,
 /// an import, or a `<PropertyGroup>`, `<ImportGroup>` or
 /// `<When>`/`<Otherwise>` arm holding one. An item group's or an item's skips
-/// none, nor does a group that holds no write.
-fn gate_may_skip_property_writes(node: Node<'_, '_>) -> bool {
+/// none, nor does a group that holds no write, nor a write under a gate
+/// `dead` says no build takes.
+fn gate_may_skip_property_writes(node: Node<'_, '_>, dead: &dyn Fn(Node<'_, '_>) -> bool) -> bool {
     let is_write = |element: Node<'_, '_>| {
-        element.is_element()
-            && (element.tag_name().name().eq_ignore_ascii_case("Import")
-                || element.parent_element().is_some_and(|parent| {
-                    parent
-                        .tag_name()
-                        .name()
-                        .eq_ignore_ascii_case("PropertyGroup")
-                }))
+        element.tag_name().name().eq_ignore_ascii_case("Import")
+            || element.parent_element().is_some_and(|parent| {
+                parent
+                    .tag_name()
+                    .name()
+                    .eq_ignore_ascii_case("PropertyGroup")
+            })
+    };
+    // Whether `scope` holds a write no dead gate encloses: an explicit walk,
+    // so that no depth of nesting costs stack.
+    let holds_a_write = |scope: Node<'_, '_>| {
+        let mut pending: Vec<Node<'_, '_>> = scope.children().filter(Node::is_element).collect();
+        while let Some(element) = pending.pop() {
+            if dead(element) {
+                continue;
+            }
+            if is_write(element) {
+                return true;
+            }
+            pending.extend(element.children().filter(Node::is_element));
+        }
+        false
     };
     let name = node.tag_name().name();
-    let holds_a_write = |scope: Node<'_, '_>| scope.descendants().any(is_write);
-    if ["PropertyGroup", "ImportGroup", "Import"]
+    if is_write(node) {
+        return true;
+    }
+    if ["PropertyGroup", "ImportGroup"]
         .iter()
         .any(|tag| name.eq_ignore_ascii_case(tag))
-        || is_write(node)
     {
         return holds_a_write(node);
     }
@@ -5600,7 +5622,12 @@ fn evaluate_condition_with_exemptions(
             ),
             current_file_dir,
         )
-        && gate_may_skip_property_writes(node)
+        && gate_may_skip_property_writes(node, &|element| {
+            attribute(element, "Condition").is_some_and(|condition| {
+                directory_build::decision_from_certain_inputs(state, &condition, current_file_dir)
+                    == Some(false)
+            })
+        })
     {
         state.startup_directory_declined = true;
     }
