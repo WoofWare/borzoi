@@ -261,6 +261,7 @@ impl State<'_> {
             None => {
                 self.speculation = Some(Speculation {
                     unheld: HashSet::new(),
+                    gained: Vec::new(),
                     walk_written: std::rc::Rc::default(),
                     inherited: None,
                     depth: 1,
@@ -295,7 +296,9 @@ impl State<'_> {
             let mut walk_written = speculation.walk_written.borrow_mut();
             for name in names {
                 walk_written.names.insert(name.clone());
-                speculation.unheld.insert(name);
+                if speculation.unheld.insert(name.clone()) {
+                    speculation.gained.push(name);
+                }
             }
         }
     }
@@ -332,6 +335,7 @@ impl State<'_> {
         };
         let saved = self.speculation.replace(Speculation {
             unheld: HashSet::new(),
+            gained: Vec::new(),
             walk_written: std::rc::Rc::default(),
             inherited: Some(settled),
             depth: 1,
@@ -841,16 +845,17 @@ pub(super) fn judge_branch(
     state: &mut State<'_>,
 ) -> HashSet<String> {
     state.open_speculation();
-    let before = state
+    let mark = state
         .speculation
         .as_ref()
-        .map(|speculation| speculation.unheld.clone())
-        .unwrap_or_default();
+        .map_or(0, |speculation| speculation.gained.len());
     judge_branch_children(branch, dir, reached, state);
     let mut written = HashSet::new();
     if let Some(speculation) = state.speculation.as_mut() {
-        written = speculation.unheld.difference(&before).cloned().collect();
-        speculation.unheld = before;
+        for name in speculation.gained.drain(mark..) {
+            speculation.unheld.remove(&name);
+            written.insert(name);
+        }
     }
     state.close_speculation();
     written
@@ -960,14 +965,17 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
                                 judge_unwalked_text(state, &body, body_reached, child.range());
                             }
                             // An expression may be spelt with a reference
-                            // (`&#36;(…)`), so any `$` or character reference
-                            // in the source may be one.
+                            // (`&#36;(…)`), may stand in an attribute, which
+                            // serialized XML keeps, or may form across the
+                            // markup an inner text drops: any of those in the
+                            // source may be one.
                             None => {
                                 let source = &child.document().input_text()[child.range()];
-                                // Across CDATA markup, as an inner text would
-                                // join it.
-                                let joined = source.replace("<![CDATA[", "").replace("]]>", "");
-                                if joined.contains("$(") || joined.contains("&#") {
+                                let joined = without_markup(source);
+                                if source.contains("$(")
+                                    || source.contains("&#")
+                                    || joined.contains("$(")
+                                {
                                     let expression = properties::expression_texts(source)
                                         .next()
                                         .unwrap_or(source)
@@ -1004,11 +1012,13 @@ fn task_body(task: Node<'_, '_>) -> Option<String> {
 /// whitespace, else its inner XML as `XmlDocument` serializes it
 /// ([`serialize_inner_xml`]). `None` where the walk does not reproduce that
 /// reading: a carriage return in it (whose line-end reading `roxmltree`
-/// folds), a CDATA section past the first child, a namespace, or a value
-/// serializing would spell as a reference.
+/// folds), an `xml:space` scope, a CDATA section past the first child, a
+/// namespace declared or a prefix spelt, or a value serializing would spell
+/// as a reference.
 fn task_inner_xml(task: Node<'_, '_>) -> Option<String> {
     let source = task.document().input_text();
-    if source[task.range()].contains('\r') {
+    let body = &source[task.range()];
+    if body.contains('\r') || body.contains("xml:space") || under_xml_space(task) {
         return None;
     }
     let first = task
@@ -1043,10 +1053,43 @@ fn task_inner_xml(task: Node<'_, '_>) -> Option<String> {
 /// deeper than any task holds would otherwise take the stack.
 const MAX_TASK_BODY_DEPTH: usize = 64;
 
+/// `source` without its markup (every `<…>`, CDATA delimiters included), so
+/// that text an element's tags separate is joined as an inner text joins it.
+fn without_markup(source: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    let mut rest = source;
+    while let Some(open) = rest.find('<') {
+        out.push_str(&rest[..open]);
+        rest = &rest[open..];
+        if let Some(after) = rest.strip_prefix("<![CDATA[") {
+            let end = after.find("]]>").unwrap_or(after.len());
+            out.push_str(&after[..end]);
+            rest = after.get(end + 3..).unwrap_or("");
+        } else {
+            let end = rest.find('>').map_or(rest.len(), |end| end + 1);
+            rest = &rest[end..];
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Whether `node` is in the scope of an `xml:space` attribute, under which
+/// MSBuild's reader keeps whitespace the walk would drop: the walk declines
+/// such a reading.
+fn under_xml_space(node: Node<'_, '_>) -> bool {
+    let source = node.document().input_text();
+    node.ancestors().filter(Node::is_element).any(|element| {
+        let raw = &source[element.range()];
+        raw[..raw.find('>').unwrap_or(raw.len())].contains("xml:space")
+    })
+}
+
 /// Whether the text node `node` is a whitespace node MSBuild's reader drops:
 /// XML whitespace alone, no decimal reference spelling any of it.
 fn is_whitespace_node(node: Node<'_, '_>) -> bool {
-    let raw = &node.document().input_text()[node.range()];
+    let source = node.document().input_text();
+    let raw = &source[node.range()];
     let is_xml_whitespace =
         |text: &str| text.chars().all(|c| matches!(c, ' ' | '\t' | '\n' | '\r'));
     crate::document::text(node).is_some_and(|value| is_xml_whitespace(&value))
@@ -1097,10 +1140,17 @@ fn serialize_inner_xml(node: Node<'_, '_>, out: &mut String, depth: usize) -> Op
         let declares = node
             .parent_element()
             .is_none_or(|parent| in_scope(parent) != in_scope(node));
-        if node.tag_name().namespace().is_some() || declares {
+        // An element in a namespace it inherits (the project's own, as most
+        // `.targets` declare) is serialized with the declaration, which
+        // holds no expression; one that declares a namespace or spells a
+        // prefix declines.
+        let name = node.tag_name().name();
+        let unprefixed = raw[1..].starts_with(name)
+            && raw[1 + name.len()..]
+                .starts_with(|c: char| c.is_whitespace() || c == '>' || c == '/');
+        if declares || !unprefixed {
             return None;
         }
-        let name = node.tag_name().name();
         out.push('<');
         out.push_str(name);
         for attr in node.attributes() {
@@ -1241,6 +1291,10 @@ fn judge_metadata_text(state: &mut State<'_>, text: &str, reached: bool, span: R
         .into_iter()
         .filter(|thrown| !thrown.expression.contains("%("))
         .collect();
+    // A metadatum's value substituted into the text may move where an
+    // expression starts or ends (`%(M)` holding `$(`), so a throw the walk
+    // finds in such text is MSBuild's perhaps.
+    let reached = reached && !text.contains("%(");
     if !expressions.is_empty() {
         judge_throwing_expression(state, expressions, reached, span);
     }

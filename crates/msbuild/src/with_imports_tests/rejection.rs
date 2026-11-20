@@ -1783,3 +1783,70 @@ fn a_task_bodys_inner_text_drops_whitespace_nodes() {
         assert_rejected(&parsed, &["Before", "After"]);
     }
 }
+
+/// An inline task's body in the project's own namespace, as most `.targets`
+/// declare it, is serialized with the declaration, which holds no
+/// expression: a plain reference in an attribute is no throw.
+#[test]
+fn an_inline_task_in_the_msbuild_namespace_is_serialized() {
+    let tmp = TempDir::new().unwrap();
+    let project_path = write_at(
+        tmp.path(),
+        "proj/p.fsproj",
+        "<Project xmlns=\"http://schemas.microsoft.com/developer/msbuild/2003\">\
+         <PropertyGroup><Lib>a.dll</Lib></PropertyGroup>\
+         <UsingTask TaskName=\"X\" TaskFactory=\"RoslynCodeTaskFactory\" AssemblyFile=\"y.dll\">\
+         <Task><Reference Include=\"$(Lib)\" /><Code Type=\"Fragment\" Language=\"cs\">x</Code></Task></UsingTask>\
+         <PropertyGroup><After>1</After></PropertyGroup></Project>",
+    );
+    let parsed = parse_file(&project_path);
+    assert_eq!(parsed.rejection, None, "{:#?}", parsed.diagnostics);
+}
+
+/// A metadatum's value substituted into another's text may move where an
+/// expression starts (`%(M)` holding `$(`), so a throw in such text is no
+/// certain rejection.
+#[test]
+fn a_throw_beside_a_metadata_reference_is_no_certain_rejection() {
+    let body = "<PropertyGroup><P>abc</P></PropertyGroup>\
+                <ItemDefinitionGroup><I><M>$(</M><N>%(M)abc$(P[9])</N></I></ItemDefinitionGroup>";
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_ne!(
+            parsed.rejection.as_ref().map(|r| r.certainty),
+            Some(RejectionCertainty::Certain),
+            "{body}: {:#?}",
+            parsed.rejection
+        );
+    }
+}
+
+/// An inline task's body the walk cannot read as MSBuild does (a carriage
+/// return in it) is checked for an expression across its markup, as its
+/// inner text joins it: `$` and `(P[9])` in separate pieces still form one.
+#[test]
+fn a_task_body_read_apart_is_checked_across_its_markup() {
+    let body = "<PropertyGroup><P>abc</P></PropertyGroup>\
+                <UsingTask TaskName=\"X\" TaskFactory=\"RoslynCodeTaskFactory\" AssemblyFile=\"y.dll\">\
+                <Task><![CDATA[$]]><Code>(P[9])</Code>\r</Task></UsingTask>";
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_withdrawn(&parsed, &["Before", "After"]);
+    }
+}
+
+/// Under `xml:space="preserve"` MSBuild keeps the whitespace the walk would
+/// drop from an inline task's inner text, so the walk declines that reading
+/// rather than claim a throw it would form without the space.
+#[test]
+fn a_task_body_under_xml_space_is_no_certain_rejection() {
+    let body = "<PropertyGroup><P>abc</P></PropertyGroup>\
+                <UsingTask TaskName=\"X\" TaskFactory=\"RoslynCodeTaskFactory\" AssemblyFile=\"y.dll\">\
+                <Task><![CDATA[$]]><Code xml:space=\"preserve\"> </Code><![CDATA[(P[9])]]></Task></UsingTask>";
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_ne!(
+            parsed.rejection.as_ref().map(|r| r.certainty),
+            Some(RejectionCertainty::Certain),
+            "{body}: {:#?}",
+            parsed.rejection
+        );
+    }
+}

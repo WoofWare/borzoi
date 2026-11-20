@@ -1425,6 +1425,9 @@ struct Expansion {
 struct Speculation {
     /// Lower-cased names written on the path, whose value there is unknown.
     unheld: HashSet<String>,
+    /// The names [`Self::unheld`] gained, in order, so that a branch can undo
+    /// its own on leaving ([`rejection::judge_branch`]).
+    gained: Vec<String>,
     /// Every name written anywhere in the outermost walk, which the item
     /// groups deferred from it share ([`State::defer_judgement`]): MSBuild
     /// evaluates an item group after every property write on its path,
