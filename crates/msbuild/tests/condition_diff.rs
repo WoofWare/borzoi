@@ -1528,6 +1528,28 @@ fn using_task_texts_are_judged_where_msbuild_expands_them() {
     rows.push(format!(
         "<UsingTask {INLINE}><Task><Reference Include=\"$(Q)\" /><Code>x</Code></Task></UsingTask>"
     ));
+    // A CDATA section in an element of the body is kept as one: C#'s `$"…"`
+    // is no expression.
+    rows.push(format!(
+        "<UsingTask {INLINE}><Task><Code><![CDATA[Log.LogMessage($\"Built {{name}}\");]]></Code></Task></UsingTask>"
+    ));
+    // A body's inner text drops a whitespace node between its sections.
+    rows.push(format!(
+        "<UsingTask {INLINE}><Task><![CDATA[$([MSBuild]::VersionEquals('1]]><Code> </Code><![CDATA[.2','1.2'))]]></Task></UsingTask>"
+    ));
+    // The whitespace node dropped from that inner text is no separator:
+    // `a b` split on `;` alone has no second element.
+    rows.push(format!(
+        "<UsingTask {INLINE}><Task><![CDATA[$(S.Split(']]><Code> </Code><![CDATA[;')[1])]]></Task></UsingTask>"
+    ));
+    // An expression in a CDATA section of an element of the body.
+    rows.push(format!(
+        "<UsingTask {INLINE}><Task><Code><![CDATA[{T}]]></Code></Task></UsingTask>"
+    ));
+    // A namespace declaration serializing writes back.
+    rows.push(format!(
+        "<UsingTask {INLINE}><Task><Code xmlns:u=\"urn:{T}\" /></Task></UsingTask>"
+    ));
     // The flag compared as expanded, escapes and all.
     rows.push(format!(
         "<UsingTask {INLINE}><Task Evaluate=\"%66alse\">{T}</Task></UsingTask>"
@@ -1539,7 +1561,7 @@ fn using_task_texts_are_judged_where_msbuild_expands_them() {
     let (mut rejects, mut evaluates) = (0, 0);
     for row in rows {
         let xml = format!(
-            "<Project><PropertyGroup><P>abc</P><Q>quiet</Q><G>x&gt;y</G><Fa>false</Fa></PropertyGroup>{}\
+            "<Project><PropertyGroup><P>abc</P><Q>quiet</Q><G>x&gt;y</G><S>a b</S><Fa>false</Fa></PropertyGroup>{}\
              <PropertyGroup><After>ok</After></PropertyGroup></Project>",
             row.replace('\'', "&apos;")
         );

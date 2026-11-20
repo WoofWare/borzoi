@@ -467,6 +467,19 @@ fn deep_project_text_evaluates_without_aborting() {
     ));
 }
 
+/// An inline task's body nested deep: the rejection judgement serializes it
+/// as MSBuild reads it, descending no deeper than a bound, so it never takes
+/// the stack.
+#[test]
+fn a_deep_inline_task_body_evaluates_without_aborting() {
+    let body = nest("<a>", "$(P[9])", "</a>", DEEP);
+    evaluate_project(format!(
+        "<PropertyGroup><P>abc</P></PropertyGroup>\
+         <UsingTask TaskName=\"X\" TaskFactory=\"RoslynCodeTaskFactory\" AssemblyFile=\"y.dll\">\
+         <Task>{body}</Task></UsingTask>"
+    ));
+}
+
 /// A name the walk holds no value of (`X`, a write it refuses), read `width`
 /// times over in the argument of a function that throws whatever it returns
 /// (no repetition of a value is a version): half as itself, half in

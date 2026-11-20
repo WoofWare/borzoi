@@ -964,7 +964,10 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
                             // in the source may be one.
                             None => {
                                 let source = &child.document().input_text()[child.range()];
-                                if source.contains('$') || source.contains("&#") {
+                                // Across CDATA markup, as an inner text would
+                                // join it.
+                                let joined = source.replace("<![CDATA[", "").replace("]]>", "");
+                                if joined.contains("$(") || joined.contains("&#") {
                                     let expression = properties::expression_texts(source)
                                         .next()
                                         .unwrap_or(source)
@@ -1017,8 +1020,12 @@ fn task_inner_xml(task: Node<'_, '_>) -> Option<String> {
     {
         // The inner text: every text and CDATA section beneath it, joined.
         // With no carriage return in it, `roxmltree`'s reading is MSBuild's.
+        // A whitespace node MSBuild's reader drops.
         let mut text = String::new();
         for descendant in task.descendants().filter(Node::is_text) {
+            if is_whitespace_node(descendant) {
+                continue;
+            }
             #[allow(clippy::disallowed_methods)]
             text.push_str(descendant.text()?);
         }
@@ -1026,10 +1033,15 @@ fn task_inner_xml(task: Node<'_, '_>) -> Option<String> {
     }
     let mut out = String::new();
     for child in task.children() {
-        serialize_inner_xml(child, &mut out)?;
+        serialize_inner_xml(child, &mut out, 0)?;
     }
     Some(out)
 }
+
+/// How deeply [`serialize_inner_xml`] descends into an inline task's body
+/// before it declines: it recurses once per element, and a body nested
+/// deeper than any task holds would otherwise take the stack.
+const MAX_TASK_BODY_DEPTH: usize = 64;
 
 /// Whether the text node `node` is a whitespace node MSBuild's reader drops:
 /// XML whitespace alone, no decimal reference spelling any of it.
@@ -1049,7 +1061,10 @@ fn is_whitespace_node(node: Node<'_, '_>) -> bool {
 /// its `&`, `<` and `>` as entities, a whitespace node not at all, a comment
 /// or processing instruction as written. `None` where that is not certain
 /// (see [`task_inner_xml`]).
-fn serialize_inner_xml(node: Node<'_, '_>, out: &mut String) -> Option<()> {
+fn serialize_inner_xml(node: Node<'_, '_>, out: &mut String, depth: usize) -> Option<()> {
+    if depth >= MAX_TASK_BODY_DEPTH {
+        return None;
+    }
     let source = node.document().input_text();
     let raw = &source[node.range()];
     let escape = |text: &str, attribute: bool| {
@@ -1067,7 +1082,22 @@ fn serialize_inner_xml(node: Node<'_, '_>, out: &mut String) -> Option<()> {
         Some(escaped)
     };
     if node.is_element() {
-        if node.tag_name().namespace().is_some() {
+        // A namespace declaration, which `roxmltree` keeps out of the
+        // attributes and serializing writes back.
+        let in_scope = |node: Node<'_, '_>| {
+            node.namespaces()
+                .map(|namespace| {
+                    (
+                        namespace.name().map(str::to_owned),
+                        namespace.uri().to_owned(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let declares = node
+            .parent_element()
+            .is_none_or(|parent| in_scope(parent) != in_scope(node));
+        if node.tag_name().namespace().is_some() || declares {
             return None;
         }
         let name = node.tag_name().name();
@@ -1088,8 +1118,36 @@ fn serialize_inner_xml(node: Node<'_, '_>, out: &mut String) -> Option<()> {
             out.push_str(" />");
         } else {
             out.push('>');
-            for child in node.children() {
-                serialize_inner_xml(child, out)?;
+            // An element of text, CDATA sections and comments alone is read
+            // piece by piece, a CDATA section kept as one.
+            match crate::document::element_content(node) {
+                Some(contents) => {
+                    for content in contents {
+                        match content {
+                            crate::document::Content::Text {
+                                whitespace: true, ..
+                            } => {}
+                            crate::document::Content::Text { value, .. } => {
+                                out.push_str(&escape(&value, false)?);
+                            }
+                            crate::document::Content::CData(text) => {
+                                out.push_str("<![CDATA[");
+                                out.push_str(text);
+                                out.push_str("]]>");
+                            }
+                            crate::document::Content::Comment(text) => {
+                                out.push_str("<!--");
+                                out.push_str(text);
+                                out.push_str("-->");
+                            }
+                        }
+                    }
+                }
+                None => {
+                    for child in node.children() {
+                        serialize_inner_xml(child, out, depth + 1)?;
+                    }
+                }
             }
             out.push_str("</");
             out.push_str(name);

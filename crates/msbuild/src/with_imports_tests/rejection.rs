@@ -1740,3 +1740,46 @@ fn a_task_body_leading_with_cdata_is_its_inner_text() {
         assert_rejected(&parsed, &["Before", "After"]);
     }
 }
+
+/// An inline task's body nested past the bound the serialization descends
+/// to (so that a deep body cannot take the stack) declines: a throw in it is
+/// a possible rejection, not a certain one.
+#[test]
+fn a_task_body_nested_past_the_bound_declines() {
+    let body = format!(
+        "<PropertyGroup><P>abc</P></PropertyGroup>\
+         <UsingTask TaskName=\"X\" TaskFactory=\"RoslynCodeTaskFactory\" AssemblyFile=\"y.dll\">\
+         <Task>{}$(P[9]){}</Task></UsingTask>",
+        "<a>".repeat(100),
+        "</a>".repeat(100)
+    );
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_withdrawn(&parsed, &["Before", "After"]);
+    }
+}
+
+/// A CDATA section in an element of an inline task's body is serialized as
+/// one, so an expression in it is judged, for certain where it is reached
+/// for certain.
+#[test]
+fn an_expression_in_a_task_bodys_cdata_section_is_judged() {
+    let body = "<PropertyGroup><P>abc</P></PropertyGroup>\
+                <UsingTask TaskName=\"X\" TaskFactory=\"RoslynCodeTaskFactory\" AssemblyFile=\"y.dll\">\
+                <Task><Code><![CDATA[$(P[9])]]></Code></Task></UsingTask>";
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_rejected(&parsed, &["Before", "After"]);
+    }
+}
+
+/// The inner text of a body that starts with a CDATA section drops a
+/// whitespace node between its sections, as MSBuild's reader does: the
+/// separator set here is `;` alone, and `a b` has no second element.
+#[test]
+fn a_task_bodys_inner_text_drops_whitespace_nodes() {
+    let body = "<PropertyGroup><S>a b</S></PropertyGroup>\
+                <UsingTask TaskName=\"X\" TaskFactory=\"RoslynCodeTaskFactory\" AssemblyFile=\"y.dll\">\
+                <Task><![CDATA[$(S.Split(']]><Code> </Code><![CDATA[;')[1])]]></Task></UsingTask>";
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_rejected(&parsed, &["Before", "After"]);
+    }
+}
