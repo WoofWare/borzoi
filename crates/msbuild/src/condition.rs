@@ -86,7 +86,7 @@ pub(crate) struct Probes<'a> {
 /// condition of the item pass (an item, a metadatum, an item group or item
 /// definition) records none, and expands no further (`Evaluator`'s
 /// `EvaluateConditionCollectingConditionedProperties`); nor does a build, nor
-/// the oracle's `eval` op, which [`evaluate`] is held to.
+/// the oracle's `eval` op, which `evaluate` is held to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Site {
     /// A condition of the property pass, in design-time evaluation.
@@ -253,6 +253,7 @@ pub struct Eval {
 /// diagnostic the caller will emit subsumes any per-property concerns, and
 /// reporting both would double up. For `True` / `False`, the list is
 /// populated.
+#[cfg(any(test, feature = "test-support"))]
 pub fn evaluate(source: &str, props: &PropertyMap) -> Eval {
     evaluate_inner(
         source,
@@ -267,6 +268,7 @@ pub fn evaluate(source: &str, props: &PropertyMap) -> Eval {
 /// Evaluate a condition with support for MSBuild's filesystem-backed
 /// `Exists('...')` predicate and the property functions that probe the file
 /// system (see [`Probes`]).
+#[cfg(any(test, feature = "test-support"))]
 pub fn evaluate_with_exists(source: &str, props: &PropertyMap, probes: Probes<'_>) -> Eval {
     evaluate_inner(
         source,
@@ -278,7 +280,7 @@ pub fn evaluate_with_exists(source: &str, props: &PropertyMap, probes: Probes<'_
     )
 }
 
-/// [`evaluate`] of a condition at `site`, with the file system where
+/// A condition evaluated at `site`, with the file system where
 /// `probes` gives one.
 pub(crate) fn evaluate_at(
     source: &str,
