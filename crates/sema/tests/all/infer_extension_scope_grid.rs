@@ -1426,3 +1426,40 @@ fn a_referenced_project_binds_extensions_by_logical_name_only() {
         );
     }
 }
+
+/// A referenced project's signature can declare an augmentation member its
+/// implementation lacks: FCS reports the missing member (FS0193) and still
+/// binds a dependant's call to the signature's extension. A signature's
+/// augmentation puts `with` directly on the definition, so its members are
+/// the project's extension names all the same, and the gate declines.
+#[test]
+fn a_referenced_signature_augmentation_names_its_members() {
+    const CALL: Call = Call {
+        binder: "c1",
+        text: "(asTable x).ContainsValue(1)",
+    };
+    let signature = "namespace ExtNs\n[<AutoOpen>]\nmodule M =\n    type System.Collections.Hashtable with\n        member ContainsValue: key: int -> int64\n";
+    let implementation = "namespace ExtNs\n[<AutoOpen>]\nmodule M =\n    let x = 1\n";
+    let consumer = format!(
+        "module ExtNs.Use\n{PREAMBLE}\nlet {} x = {}\n",
+        CALL.binder, CALL.text
+    );
+    let checked = check_referenced(
+        &[
+            ("Ext.fsi", signature.to_owned()),
+            ("Ext.fs", implementation.to_owned()),
+        ],
+        &[("Use.fs", consumer)],
+        &[CALL],
+        &declared_by_producer,
+    );
+    assert!(checked.unsound.is_empty(), "{:?}", checked.unsound);
+    let call = &checked.calls[0];
+    assert_eq!(
+        call.fcs.as_deref(),
+        Some("System.Int64"),
+        "FCS binds the signature's extension, or this pins nothing"
+    );
+    assert_eq!(call.gate, Some(GateInput::ReferencedProjectName));
+    assert_eq!(call.ours, None);
+}

@@ -3,8 +3,10 @@
 //! under names of `MAX_NAME_BYTES`) is walked and then built into the
 //! existence set, as the consumer builds it, in a child process whose
 //! allocator refuses more than a small multiple of what those rows' paths
-//! can take. Inside the bound there is no metering: the rows are one per
-//! declaration, so this corner is the most any input inside it can hold.
+//! can take. Inside the bound there is no metering: the count charges each
+//! declaration for every row it may emit, so this corner, and the corner of
+//! the row multipliers (`…Module` readings, an abbreviation that may be a
+//! union, a compiled name), are the most any input inside it can hold.
 
 use std::time::Duration;
 
@@ -46,8 +48,47 @@ fn corner() -> String {
         ));
     }
     let indent = "    ".repeat(MAX_DEPTH - 2);
-    for k in 0..MAX_DECLARATIONS - (MAX_DEPTH - 1) {
+    for k in 0..corner_types() {
         src.push_str(&format!("{indent}type {} = int\n", long(&format!("T{k}"))));
+    }
+    src
+}
+
+/// How many types fill [`corner`]: each counts two (an abbreviation that
+/// may be a union), beside a namespace segment and `MAX_DEPTH - 2` modules.
+fn corner_types() -> usize {
+    (MAX_DECLARATIONS - (MAX_DEPTH - 1)) / 2
+}
+
+/// The corner of the row multipliers: under a module named `…Module` (two
+/// readings), types that may be abbreviations or unions (two kinds), each
+/// with a long compiled name (a row more per row), as many as fill
+/// `MAX_DECLARATIONS`, every name `MAX_NAME_BYTES` long and every path
+/// `MAX_DEPTH` deep.
+fn multiplied() -> String {
+    let mut src = format!("namespace {}\n", long("N"));
+    for depth in 0..MAX_DEPTH - 3 {
+        src.push_str(&format!(
+            "{}module {} =\n",
+            "    ".repeat(depth),
+            long(&format!("M{depth}"))
+        ));
+    }
+    let suffixed = format!("{}Module", &long("S")[..MAX_NAME_BYTES - "Module".len()]);
+    src.push_str(&format!(
+        "{}module {suffixed} =\n",
+        "    ".repeat(MAX_DEPTH - 3)
+    ));
+    let indent = "    ".repeat(MAX_DEPTH - 2);
+    // A namespace segment, `MAX_DEPTH - 3` modules, the suffixed one (two),
+    // and eight a type.
+    let types = (MAX_DECLARATIONS - (MAX_DEPTH - 2) - 2) / 8;
+    for k in 0..types {
+        src.push_str(&format!(
+            "{indent}[<CompiledName(\"{}\")>]\n{indent}type {} = Other\n",
+            long(&format!("R{k}")),
+            long(&format!("T{k}"))
+        ));
     }
     src
 }
@@ -57,10 +98,14 @@ fn corner() -> String {
 #[test]
 #[ignore = "child-process entry for source_existence_budget"]
 fn budget_child() {
-    let Some(_) = stack_probe::requested_case(CASE_VAR) else {
+    let Some(case) = stack_probe::requested_case(CASE_VAR) else {
         return;
     };
-    let src = corner();
+    let src = match case.as_str() {
+        "corner" => corner(),
+        "multiplied" => multiplied(),
+        other => panic!("no budget case {other}"),
+    };
     let cell = Cell::new("corner", &[("Lib.fs", &src)]);
     let base = alloc_limit::live_bytes();
     alloc_limit::limit_live_bytes(base + MEMORY_ALLOWANCE);
@@ -81,10 +126,20 @@ fn budget_child() {
 fn the_bound_corner_is_read_within_the_allowance() {
     match stack_probe::run_case_limited(CHILD, CASE_VAR, "corner", CASE_TIMEOUT) {
         Limited::Survived(verdict) => {
-            // Every declaration but the namespace's is an entity.
-            let expected = format!("read {}", MAX_DECLARATIONS - 1);
+            // Every module and type is an entity.
+            let expected = format!("read {}", MAX_DEPTH - 2 + corner_types());
             assert_eq!(verdict, expected, "the corner is inside the bound");
         }
         other => panic!("the bound corner: {other:?}"),
+    }
+}
+
+#[test]
+fn the_row_multipliers_corner_is_read_within_the_allowance() {
+    match stack_probe::run_case_limited(CHILD, CASE_VAR, "multiplied", CASE_TIMEOUT) {
+        Limited::Survived(verdict) => {
+            assert!(verdict.starts_with("read "), "inside the bound: {verdict}")
+        }
+        other => panic!("the row multipliers' corner: {other:?}"),
     }
 }

@@ -39,7 +39,7 @@ use borzoi_cst::syntax::{
     TypeDefnRepr,
 };
 
-use super::{id_text, is_type_augmentation};
+use super::{id_text, is_any_augmentation};
 use crate::hash::HashSet;
 use crate::recovery::SyntaxRecovery;
 
@@ -218,7 +218,7 @@ pub(crate) fn file_extension_names(
         }
     }
     for defn in root.descendants_of::<TypeDefn>() {
-        if !is_type_augmentation(&defn) {
+        if !is_any_augmentation(&defn) {
             continue;
         }
         let mut members: Vec<MemberDefn> = defn.members().collect();
@@ -594,6 +594,18 @@ mod tests {
             }
             ExtensionNames::Unknowable(why) => panic!("unknowable: {why:?}"),
         }
+    }
+
+    /// A signature's augmentation puts `with` directly on the definition,
+    /// with no representation; its members are extensions all the same.
+    #[test]
+    fn a_signature_augmentation_names_its_members() {
+        let parsed = borzoi_cst::parser::parse_sig(
+            "namespace N\ntype System.Collections.Hashtable with\n    member ContainsValue: key: int -> int64\n",
+        );
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+        let n = file_extension_names(&parsed.root, false, &|_, _: &str, _: MarkerQuestion| false);
+        assert!(n.may_have("ContainsValue", false), "{n:?}");
     }
 
     #[test]

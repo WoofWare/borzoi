@@ -38,13 +38,22 @@ fn every_form_is_read_or_declined_as_its_verdict_says() {
     );
     let mut wrong = Vec::new();
     for (form, cell) in Form::ALL.iter().zip(&cells) {
-        let verdict = entries
+        let Some(verdict) = entries
             .iter()
             .find(|(name, _)| *name == cell.name)
             .map(|(_, v)| v.as_str())
-            .unwrap_or("");
-        let read = !verdict.starts_with("certified: unread");
-        if read != (form.verdict() == Verdict::Read) {
+        else {
+            wrong.push(format!("{}: no verdict", cell.name));
+            continue;
+        };
+        // A read witness must be graded against FCS (`exact` or `covers`),
+        // not merely not declined: an ungraded verdict tests no containment.
+        let read = verdict.starts_with("certified: exact")
+            || verdict.starts_with("certified: covers");
+        let declined = verdict.starts_with("certified: unread");
+        if (form.verdict() == Verdict::Read && !read)
+            || (form.verdict() != Verdict::Read && !declined)
+        {
             wrong.push(format!(
                 "{}: the form says {:?}, the walk gave {verdict}",
                 cell.name,

@@ -98,13 +98,14 @@
 //!
 //! Before it walks, the walk bounds its input ([`MAX_NAME_BYTES`],
 //! [`MAX_DEPTH`], [`MAX_DECLARATIONS`]) and declines past it
-//! ([`ExistenceUnread::TooManyReadings`]). A declaration is a namespace
-//! segment, a module, a type, an exception, or a literal an attribute that
-//! may be `[<CompiledName>]` or `[<AutoOpen>]` passes, and one under a module
-//! named `…Module` counts twice. Inside the bound every row is one
-//! declaration's, and its path at most [`MAX_DEPTH`] names of at most
-//! [`MAX_NAME_BYTES`]: the memory the rows take is bounded by the input, with
-//! no metering to forget.
+//! ([`ExistenceUnread::TooManyReadings`]). The count charges each declaration
+//! for every row it can emit: a namespace segment, module or exception one,
+//! a type two (an abbreviation that may be a union), each doubled under a
+//! module named `…Module`; and a literal an attribute that may be
+//! `[<CompiledName>]` or `[<AutoOpen>]` passes four, a row for every row its
+//! declaration may emit. Inside the bound every row is counted, and its path
+//! is at most [`MAX_DEPTH`] names of at most [`MAX_NAME_BYTES`]: the memory
+//! the rows take is bounded by the input, with no metering to forget.
 //!
 //! # The input inventory
 //!
@@ -890,8 +891,11 @@ fn preflight(files: &[ProjectFile], routes: &MarkerRoutes) -> Result<(), Existen
                 };
                 let named = routes.may_be(&name, Marker::CompiledName) != Maybe::No
                     || routes.may_be(&name, Marker::AutoOpen) != Maybe::No;
+                // A compiled name is one more row for every row of its
+                // declaration: at most two readings (`…Module`) of two kinds
+                // (an abbreviation that may be a union).
                 if let (true, (_, Arg::Literal(literal))) = (named, argument(&arg)) {
-                    count(&[literal], 0, 1)?;
+                    count(&[literal], 0, ROWS_PER_DECLARATION)?;
                 }
             }
         }
@@ -926,6 +930,11 @@ fn preflight(files: &[ProjectFile], routes: &MarkerRoutes) -> Result<(), Existen
     }
     Ok(())
 }
+
+/// The most rows one written name of a declaration emits: two readings under
+/// a module named `…Module`, each of two kinds for an abbreviation that may
+/// be a union ([`Approximation::AbbreviationOrUnion`]).
+const ROWS_PER_DECLARATION: usize = 4;
 
 /// Whether a module named `name` may take FCS's `Module` suffix to a path
 /// canonical spelling does not strip: its name already ends in `Module`.
@@ -969,7 +978,10 @@ fn preflight_decls(
                         let names = m.long_id().map(|li| names_of(&li)).unwrap_or_default();
                         module(names, &Decls::Impl(m.decls().collect()), count)?;
                     }
-                    ModuleDecl::Types(t) => count(&type_names(&mut t.defns()), depth + 1, weight)?,
+                    // A type may be read as both an abbreviation and a union.
+                    ModuleDecl::Types(t) => {
+                        count(&type_names(&mut t.defns()), depth + 1, 2 * weight)?
+                    }
                     ModuleDecl::Exception(e) => count(&exception_names(e), depth + 1, weight)?,
                     ModuleDecl::Let(_)
                     | ModuleDecl::Extern(_)
@@ -988,7 +1000,7 @@ fn preflight_decls(
                         let names = m.long_id().map(|li| names_of(&li)).unwrap_or_default();
                         module(names, &Decls::Sig(m.sig_decls().collect()), count)?;
                     }
-                    SigDecl::Types(t) => count(&type_names(&mut t.defns()), depth + 1, weight)?,
+                    SigDecl::Types(t) => count(&type_names(&mut t.defns()), depth + 1, 2 * weight)?,
                     SigDecl::Exception(e) => count(&exception_names(e), depth + 1, weight)?,
                     SigDecl::Val(_)
                     | SigDecl::Open(_)
@@ -1778,7 +1790,7 @@ impl FileWalk<'_> {
             self.forms.insert(Form::TupleAugmentation);
             return Ok(());
         }
-        if is_augmentation(defn) {
+        if crate::resolve::is_any_augmentation(defn) {
             self.forms.insert(Form::Augmentation);
             return Ok(());
         }
@@ -1913,19 +1925,6 @@ impl FileWalk<'_> {
             is_rec,
         )
     }
-}
-
-fn is_augmentation(defn: &TypeDefn) -> bool {
-    matches!(defn.repr(), Some(TypeDefnRepr::ObjectModel(om)) if om.is_augmentation())
-        || defn.tuple_type_head().is_some()
-        // A signature's augmentation (`type T with member …`) has no
-        // representation, just the `with` directly on the definition.
-        || (defn.repr().is_none()
-            && defn
-                .syntax()
-                .children_with_tokens()
-                .filter_map(|el| el.into_token())
-                .any(|t| t.kind() == SyntaxKind::WITH_TOK))
 }
 
 /// The type abbreviations and types FSharp.Core declares under a name with

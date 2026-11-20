@@ -755,7 +755,8 @@ fn the_input_bound_declines_past_each_limit() {
     };
     assert!(matches!(nested(MAX_DEPTH - 1), SourceExistence::Read(_)));
     assert!(bound(&nested(MAX_DEPTH)), "{:?}", nested(MAX_DEPTH));
-    // The declarations.
+    // The declarations: a type counts two (it may be read as an
+    // abbreviation and as a union), beside the namespace's one.
     let many = |n: usize| {
         let mut src = String::from("namespace N\n");
         for k in 0..n {
@@ -763,11 +764,31 @@ fn the_input_bound_declines_past_each_limit() {
         }
         read(&[("Lib.fs", &src)])
     };
-    assert!(matches!(
-        many(MAX_DECLARATIONS - 1),
-        SourceExistence::Read(_)
-    ));
-    assert!(bound(&many(MAX_DECLARATIONS)), "past the declarations");
+    let fits = (MAX_DECLARATIONS - 1) / 2;
+    assert!(matches!(many(fits), SourceExistence::Read(_)));
+    assert!(bound(&many(fits + 1)), "past the declarations");
+    // Every row a declaration may emit is counted: under `FooModule` (two
+    // readings) a `type T = Other` (two kinds) with a compiled name (one more
+    // row per row) emits eight rows, and is charged eight.
+    let multiplied = |n: usize| {
+        let mut src = String::from("namespace N\nmodule FooModule =\n");
+        for k in 0..n {
+            src.push_str(&format!(
+                "    [<CompiledName(\"R{k}\")>]\n    type T{k} = Other\n"
+            ));
+        }
+        read(&[("Lib.fs", &src)])
+    };
+    let fits = (MAX_DECLARATIONS - 3) / 8;
+    match multiplied(fits) {
+        SourceExistence::Read(s) => assert!(
+            s.entities.len() <= MAX_DECLARATIONS,
+            "{} rows inside the bound",
+            s.entities.len()
+        ),
+        other => panic!("inside the bound: {other:?}"),
+    }
+    assert!(bound(&multiplied(fits + 1)), "past the rows");
     // A literal that may become a compiled name, or an assembly auto-open
     // path, is a name.
     for src in [

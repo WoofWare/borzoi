@@ -292,22 +292,31 @@ pub const PRODUCER: &str = "ExtProducer";
 /// The assembly name of [`check_referenced`]'s consumer.
 pub const CONSUMER: &str = "ExtConsumer";
 
-/// `sources` (Compile order; implementation files only) as one project's
-/// files, parsed as the graph oracle's check parses them.
+/// `sources` (Compile order; a `.fsi` name is a signature) as one
+/// project's files, parsed as the graph oracle's check parses them.
 fn graph_project_files(sources: &[(&str, String)]) -> Vec<ProjectFile> {
-    let parsed: Vec<(ImplFile, SyntaxRecovery)> = sources
+    use borzoi_cst::parser::FileKind;
+    let parsed: Vec<(SourceFile, SyntaxRecovery)> = sources
         .iter()
-        .map(|(_, s)| {
-            let p = super::parse_as_graph_checks(s, borzoi_cst::parser::FileKind::Impl, &[]);
+        .map(|(name, s)| {
+            let kind = if name.ends_with(".fsi") {
+                FileKind::Sig
+            } else {
+                FileKind::Impl
+            };
+            let p = super::parse_as_graph_checks(s, kind, &[]);
             let recovery = SyntaxRecovery::of(&p);
-            (ImplFile::cast(p.root).expect("impl file"), recovery)
+            let file = match kind {
+                FileKind::Sig => SourceFile::Sig(
+                    borzoi_cst::syntax::SigFile::cast(p.root).expect("a signature file"),
+                ),
+                _ => SourceFile::Impl(ImplFile::cast(p.root).expect("an implementation file")),
+            };
+            (file, recovery)
         })
         .collect();
     let paths: Vec<PathBuf> = sources.iter().map(|(p, _)| (*p).into()).collect();
-    let files: Vec<SourceFile> = parsed
-        .iter()
-        .map(|(f, _)| SourceFile::Impl(f.clone()))
-        .collect();
+    let files: Vec<SourceFile> = parsed.iter().map(|(f, _)| f.clone()).collect();
     files
         .iter()
         .cloned()

@@ -4361,6 +4361,10 @@ pub struct ResolvedFile {
     /// may alias `ExtensionAttribute`, so [`Self::attribute_may_be`] treats it
     /// as possibly any attribute.
     pub(super) own_abbrev_type_simple_names: HashSet<String>,
+    /// Each placed type's position in [`FileSurface::placed_types`], by its
+    /// def: how [`Self::attribute_may_be`] finds a local attribute type's
+    /// path without a scan per use.
+    pub(super) placed_type_of_def: HashMap<DefId, usize>,
     /// The file-wide unknowables the walk raised ([`Unknowables`]), read
     /// through [`Self::opens_unenumerated`] and [`Self::opens_project`].
     pub(super) unknowables: Unknowables,
@@ -4580,6 +4584,7 @@ impl ResolvedFile {
             attribute_resolutions: HashMap::default(),
             field_labels: HashMap::default(),
             own_abbrev_type_simple_names: HashSet::default(),
+            placed_type_of_def: HashMap::default(),
             unknowables: Unknowables::default(),
             preceding_extension_names: ExtensionNames::default(),
             namespace_paths: Vec::new(),
@@ -4822,11 +4827,9 @@ impl ResolvedFile {
                 let candidate = if self.own_abbrev_type_simple_names.contains(name) {
                     Some(MarkerCandidate::Abbreviation)
                 } else {
-                    self.surface
-                        .placed_types
-                        .iter()
-                        .find(|t| t.def == *id)
-                        .and_then(|t| t.path.split_last())
+                    self.placed_type_of_def
+                        .get(id)
+                        .and_then(|&index| self.surface.placed_types[index].path.split_last())
                         .map(|(name, container)| MarkerCandidate::Type { container, name })
                 };
                 // An unplaced type's path is unknown: it may be anything.
