@@ -51,13 +51,29 @@ struct Graded {
     v_unheld: bool,
 }
 
+/// What `V` holds where a document writes it under a gate the walk cannot
+/// decide.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Doubt {
+    /// No such write, or one of the value the unconditional write puts.
+    None,
+    /// A value other than the unconditional write's, which is MSBuild's: the
+    /// walk judges the value it holds, not the one MSBuild may (#1051).
+    Differs,
+}
+
 /// Grade `body` (the `<UsingTask>` and what it needs), after `writes` (a
 /// property group's content), against design-time evaluation: certain-
 /// implies-exact. A rejection resting on a value the walk holds none of (`V`
 /// written by a write it refused) is the judgement over the values a name may
 /// hold, which the walk does not make yet (#1051): not graded here, and shown
-/// by the caller to rest there.
-fn grade(oracle: &mut Oracle, writes: &str, body: &str) -> Graded {
+/// by the caller to rest there; so is one resting on a doubted write of a
+/// value other than the one the walk holds ([`Doubt::Differs`]).
+///
+/// MSBuild's registry failing on two parameters whose names fold to one is
+/// an internal error (MSB1025) rather than an invalid project, which the
+/// oracle reports as the exception: graded as that rejection.
+fn grade(oracle: &mut Oracle, writes: &str, body: &str, doubt: Doubt) -> Graded {
     let tmp = tempfile::TempDir::new().unwrap();
     let dir = borzoi_msbuild::observed::host_fs::canonicalize(tmp.path()).unwrap();
     let project_path = dir.join("Demo.fsproj");
@@ -66,9 +82,11 @@ fn grade(oracle: &mut Oracle, writes: &str, body: &str) -> Graded {
          <PropertyGroup><After>ok</After></PropertyGroup></Project>"
     );
     std::fs::write(&project_path, &xml).unwrap();
-    let code = oracle
-        .design_time_rejection_code(&xml, &project_path)
-        .unwrap_or_else(|error| panic!("MSBuild fails by another exception, {error}: {xml}"));
+    let code = match oracle.design_time_rejection_code(&xml, &project_path) {
+        Ok(code) => code,
+        Err(error) if error.contains("same key") => Some("MSB1025".to_owned()),
+        Err(error) => panic!("MSBuild fails by another exception, {error}: {xml}"),
+    };
     let msbuild_rejects = code.is_some();
     let parsed = common::parse_fsproj_with_imports(
         &borzoi_msbuild::ProjectFile::buffer(&project_path, &xml)
@@ -83,7 +101,7 @@ fn grade(oracle: &mut Oracle, writes: &str, body: &str) -> Graded {
     let v_unheld = writes.contains("<V>") && !parsed.properties.contains_key("V");
     if let Some(code) = &code {
         assert!(
-            walk.is_some() || v_unheld,
+            walk.is_some() || v_unheld || doubt == Doubt::Differs,
             "MSBuild rejects, and the walk claims nothing: {xml}"
         );
         // A certain rejection names the refusal MSBuild rejects with.
@@ -133,6 +151,7 @@ fn code_of(cause: &borzoi_msbuild::RejectionCause) -> String {
     use borzoi_msbuild::{LoadTimeError, RejectionCause};
     match cause {
         RejectionCause::ThrowingExpression { .. } => "MSB4184".to_owned(),
+        RejectionCause::UsingTaskParameterCollision { .. } => "MSB1025".to_owned(),
         RejectionCause::UsingTaskRegistration {
             attribute, value, ..
         } => match attribute.as_str() {
@@ -153,6 +172,11 @@ fn code_of(cause: &borzoi_msbuild::RejectionCause) -> String {
                 }
             }
             .to_owned()
+        }
+        RejectionCause::LoadTime(LoadTimeError::UnrecognizedChild { parent, .. })
+            if parent == "UsingTask" =>
+        {
+            "MSB4067".to_owned()
         }
         other => panic!("a refusal the registration differential does not expect: {other:?}"),
     }
@@ -202,8 +226,9 @@ enum Source {
     Literal,
     /// Through a property the walk is certain of.
     Certain,
-    /// Through a property written under a gate the walk cannot decide (the
-    /// same value either way, so MSBuild's is the one it holds).
+    /// Through a property written under a gate the walk cannot decide, over
+    /// an unconditional write of another value (or the same one): MSBuild
+    /// holds the value.
     Doubted,
     /// Through a write the walk refuses to compute (MSBuild holds the value).
     Refused,
@@ -216,19 +241,27 @@ const SOURCES: &[Source] = &[
     Source::Refused,
 ];
 
-/// A document putting `value` in `place` through `source`: its writes and
-/// its body.
-fn document(place: &str, value: &str, source: Source) -> (String, String) {
-    let text = value
+/// `value` as an element's text.
+fn element_text(value: &str) -> String {
+    value
         .replace('&', "&amp;")
         .replace('<', "&lt;")
-        .replace('>', "&gt;");
+        .replace('>', "&gt;")
+}
+
+/// A document putting `value` in `place` through `source`: its writes and
+/// its body. `other` is what a [`Source::Doubted`] write puts first.
+fn document(place: &str, value: &str, source: Source, other: &str) -> (String, String) {
+    let text = element_text(value);
     let attribute = text.replace('"', "&quot;");
     let (writes, spliced) = match source {
         Source::Literal => (String::new(), attribute),
         Source::Certain => (format!("<V>{text}</V>"), "$(V)".to_owned()),
         Source::Doubted => (
-            format!("<V>{text}</V><V Condition=\"{UNDECIDED_TRUE}\">{text}</V>"),
+            format!(
+                "<V>{}</V><V Condition=\"{UNDECIDED_TRUE}\">{text}</V>",
+                element_text(other)
+            ),
             "$(V)".to_owned(),
         ),
         Source::Refused => (
@@ -386,10 +419,41 @@ fn hand_picked_registrations() {
             false,
             Some(Possible),
         ),
+        // The body is the last child and the parameters the first: a body
+        // before the parameters is neither, and nothing of either is read.
+        (
+            inline_task("", "<Task Evaluate=\"off\">x</Task><ParameterGroup><A Required=\"no\" /></ParameterGroup>"),
+            false,
+            None,
+        ),
+        (
+            inline_task("", "<ParameterGroup /><Task Evaluate=\"off\">x</Task>"),
+            true,
+            Some(Certain),
+        ),
+        // A parameter MSBuild may stop at (a type the walk does not know)
+        // before one it refuses: a rejection whose cause the walk cannot
+        // name.
+        (
+            inline_task(
+                "",
+                "<ParameterGroup><A ParameterType=\"System.Object\" Required=\"bad\" /></ParameterGroup><Task>x</Task>",
+            ),
+            true,
+            Some(Possible),
+        ),
+        // A child the loader does not take, where no parse configuration can
+        // have it skipped
+        // ([`a_child_a_parse_configuration_may_skip_needs_no_certain_factory`]).
+        (
+            "<UsingTask TaskName=\"X\" AssemblyFile=\"y.dll\"><Extension /></UsingTask>".to_owned(),
+            true,
+            Some(Certain),
+        ),
     ];
     let mut oracle = Oracle::spawn();
     for (body, rejects, claim) in rows {
-        let graded = grade(&mut oracle, "", &body);
+        let graded = grade(&mut oracle, "", &body, Doubt::None);
         assert_eq!(
             graded,
             Graded {
@@ -456,6 +520,41 @@ fn the_first_refusal_in_msbuild_order_is_the_cause() {
             &rejection.cause,
             RejectionCause::UsingTaskRegistration { attribute, .. } if attribute == "TaskName"
         ),
+        "{rejection:#?}"
+    );
+}
+
+/// A `<UsingTask>` whose only child is one the loader does not take, beside a
+/// `Directory.Parse.config`, which a newer MSBuild may read and skip the
+/// child by: the task then has no child, and needs no task factory, so the
+/// walk claims neither the loader's refusal nor the registration's for
+/// certain. SDK 10 reads no such file, and rejects.
+#[test]
+fn a_child_a_parse_configuration_may_skip_needs_no_certain_factory() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let dir = borzoi_msbuild::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    std::fs::write(dir.join("Directory.Parse.config"), "<Configuration />").unwrap();
+    let project_path = dir.join("Demo.fsproj");
+    let xml = "<Project><UsingTask TaskName=\"X\" AssemblyFile=\"y.dll\"><Extension /></UsingTask>\
+               <PropertyGroup><After>ok</After></PropertyGroup></Project>";
+    std::fs::write(&project_path, xml).unwrap();
+    let code = Oracle::spawn()
+        .design_time_rejection_code(xml, &project_path)
+        .expect("MSBuild's evaluation fails by no other exception");
+    assert_eq!(code.as_deref(), Some("MSB4067"));
+    let parsed = common::parse_fsproj_with_imports(
+        &borzoi_msbuild::ProjectFile::buffer(&project_path, xml)
+            .expect("a project path spelt as its full path"),
+        &HashMap::new(),
+        &common::oracle_environment(),
+        None,
+        None,
+    )
+    .expect("well-formed");
+    let rejection = parsed.rejection.expect("the walk claims the rejection");
+    assert_eq!(
+        rejection.certainty,
+        RejectionCertainty::Possible,
         "{rejection:#?}"
     );
 }
@@ -529,7 +628,8 @@ struct Census {
     msbuild_rejects: usize,
     certain: usize,
     possible: usize,
-    /// Rejections resting on a value the walk holds none of (#1051).
+    /// Rejections resting on a value the walk holds none of, or on a doubted
+    /// write's (#1051).
     unheld_value: usize,
 }
 
@@ -546,6 +646,12 @@ fn registration_sweep(seed: u64, cases: usize) -> Census {
         let place = *rng.pick(PLACES);
         let source = *rng.pick(SOURCES);
         let plain = *rng.pick(PLAIN);
+        // What a doubted write puts first: half the time the value itself.
+        let other = if rng.next().is_multiple_of(2) {
+            None
+        } else {
+            Some(*rng.pick(PLAIN))
+        };
         let entry = witnesses
             .next()
             .or_else(|| value::alphabet().sample(rng.next()));
@@ -560,23 +666,36 @@ fn registration_sweep(seed: u64, cases: usize) -> Census {
         }
         // A literal `TaskName`, `AssemblyFile` or `AssemblyName` written
         // empty is the loader's to refuse, at load time.
-        let (writes, body) = document(place, &drawn.value, source);
+        let other = other.unwrap_or(&drawn.value);
+        let doubt = if matches!(source, Source::Doubted) && other != drawn.value {
+            Doubt::Differs
+        } else {
+            Doubt::None
+        };
+        let (writes, body) = document(place, &drawn.value, source, other);
         tally.cases += 1;
-        let graded = grade(&mut oracle, &writes, &body);
+        let graded = grade(&mut oracle, &writes, &body, doubt);
         tally.msbuild_rejects += usize::from(graded.msbuild_rejects);
         if graded.msbuild_rejects && graded.walk.is_none() {
-            // `grade` let this pass only on a value the walk holds none of.
-            // Shown to rest on that value: through a property the walk holds
-            // it in, where it does, MSBuild rejects and the walk claims.
-            let (writes, body) = document(place, &drawn.value, Source::Certain);
-            let certain = grade(&mut oracle, &writes, &body);
+            // `grade` let this pass only on a value the walk holds none of,
+            // or a doubted write's. Shown to rest on that value: through a
+            // property the walk holds it in, where it does, MSBuild rejects
+            // and the walk claims.
+            let (writes, body) = document(place, &drawn.value, Source::Certain, "");
+            let certain = grade(&mut oracle, &writes, &body, Doubt::None);
             assert!(
                 certain.v_unheld || (certain.msbuild_rejects && certain.walk.is_some()),
-                "MSBuild rejects a value the walk refused to compute, and not the value through a \
+                "MSBuild rejects a value the walk does not hold, and not the value through a \
                  certain property: {body}"
             );
             tally.unheld_value += 1;
-            census.reached(&drawn.hostile, "rejects-on-an-unheld-value");
+            census.reached(
+                &drawn.hostile,
+                match doubt {
+                    Doubt::Differs => "rejects-on-a-doubted-value",
+                    Doubt::None => "rejects-on-an-unheld-value",
+                },
+            );
             continue;
         }
         match graded.walk {
@@ -617,4 +736,173 @@ fn registration_sweep_fixed_seed() {
 fn registration_sweep_soak() {
     let (seed, cases) = common::soak_parameters("using-task registration", 3000);
     registration_sweep(seed, cases);
+}
+
+/// Values a whole `<UsingTask>` draws besides [`PLAIN`]'s: an expression
+/// MSBuild throws on (`P` is `a`), one it computes and the walk does not, a
+/// name that expands to empty, and a metadatum it leaves as written.
+const SPECIAL: &[&str] = &[
+    "$(P[9])",
+    "$([System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture)",
+    "$(Empty)",
+    "%(M)",
+];
+
+/// The `ParameterType`s a parameter draws besides any value.
+const TYPES: &[&str] = &[
+    "System.String",
+    "System.Boolean[]",
+    "Microsoft.Build.Framework.ITaskItem",
+    "System.Object",
+    "Nope.Type",
+];
+
+/// The `Runtime` and `Architecture` values a task draws besides any value.
+const HOSTS: &[&str] = &[
+    "CLR4",
+    "NET",
+    "CurrentRuntime",
+    "*",
+    "x64",
+    "arm64",
+    "CurrentArchitecture",
+];
+
+/// One value of an attribute, escaped for one.
+fn composite_value(rng: &mut SplitMix64) -> String {
+    let value = if rng.below(5) == 0 {
+        *rng.pick(SPECIAL)
+    } else {
+        *rng.pick(PLAIN)
+    };
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('"', "&quot;")
+}
+
+/// `value` most of the time, else a drawn one.
+fn mostly(rng: &mut SplitMix64, value: &str) -> String {
+    if rng.below(4) == 0 {
+        composite_value(rng)
+    } else {
+        value.to_owned()
+    }
+}
+
+/// A whole `<UsingTask>` from `rng`: every attribute MSBuild registers, and
+/// its children in either order, each value drawn, so that the steps of the
+/// registration meet in every order and combination: a refusal after one
+/// MSBuild may stop at, a body that is not the last child, parameters that
+/// are not the first, names that fold to one.
+fn composite_document(rng: &mut SplitMix64) -> String {
+    let mut children = Vec::new();
+    if rng.below(3) != 0 {
+        let mut names = vec!["A", "B", "a"];
+        let count = 1 + rng.below(3);
+        let mut parameters = String::new();
+        for _ in 0..count {
+            let name = names.remove(rng.below(names.len()));
+            let mut attributes = String::new();
+            if rng.below(2) == 0 {
+                let ty = if rng.below(2) == 0 {
+                    (*rng.pick(TYPES)).to_owned()
+                } else {
+                    composite_value(rng)
+                };
+                attributes += &format!(" ParameterType=\"{ty}\"");
+            }
+            for flag in ["Output", "Required"] {
+                if rng.below(2) == 0 {
+                    attributes += &format!(" {flag}=\"{}\"", mostly(rng, "true"));
+                }
+            }
+            parameters += &format!("<{name}{attributes} />");
+        }
+        children.push(format!("<ParameterGroup>{parameters}</ParameterGroup>"));
+    }
+    if rng.below(3) != 0 {
+        let evaluate = if rng.below(2) == 0 {
+            format!(" Evaluate=\"{}\"", composite_value(rng))
+        } else {
+            String::new()
+        };
+        let text = if rng.below(4) == 0 {
+            composite_value(rng)
+        } else {
+            "x".to_owned()
+        };
+        children.push(format!("<Task{evaluate}>{text}</Task>"));
+    }
+    if rng.below(3) == 0 {
+        children.reverse();
+    }
+    let mut attributes = format!(" TaskName=\"{}\"", mostly(rng, "X"));
+    let factory = if children.is_empty() {
+        (rng.below(3) == 0).then(|| composite_value(rng))
+    } else {
+        Some(mostly(rng, "RoslynCodeTaskFactory"))
+    };
+    if let Some(factory) = factory {
+        attributes += &format!(" TaskFactory=\"{factory}\"");
+    }
+    let assembly = if rng.below(2) == 0 {
+        "AssemblyFile"
+    } else {
+        "AssemblyName"
+    };
+    attributes += &format!(" {assembly}=\"{}\"", mostly(rng, "y.dll"));
+    for name in ["Runtime", "Architecture"] {
+        if rng.below(6) == 0 {
+            let value = if rng.below(2) == 0 {
+                (*rng.pick(HOSTS)).to_owned()
+            } else {
+                composite_value(rng)
+            };
+            attributes += &format!(" {name}=\"{value}\"");
+        }
+    }
+    if rng.below(6) == 0 {
+        attributes += &format!(" Override=\"{}\"", composite_value(rng));
+    }
+    format!("<UsingTask{attributes}>{}</UsingTask>", children.concat())
+}
+
+/// `cases` whole `<UsingTask>`s from `seed` ([`composite_document`]), each
+/// graded ([`grade`]): a certain rejection must be MSBuild's, by the cause
+/// MSBuild reports.
+fn composite_sweep(seed: u64, cases: usize) -> Census {
+    let mut oracle = Oracle::spawn();
+    let mut rng = SplitMix64(seed);
+    let mut tally = Census::default();
+    for _ in 0..cases {
+        let body = composite_document(&mut rng);
+        tally.cases += 1;
+        let graded = grade(&mut oracle, "<P>a</P>", &body, Doubt::None);
+        tally.msbuild_rejects += usize::from(graded.msbuild_rejects);
+        match graded.walk {
+            Some(RejectionCertainty::Certain) => tally.certain += 1,
+            Some(RejectionCertainty::Possible) => tally.possible += 1,
+            None => {}
+        }
+    }
+    tally
+}
+
+/// [`composite_sweep`] at a fixed seed.
+#[test]
+fn composite_sweep_fixed_seed() {
+    let tally = composite_sweep(0x1099_c0de, 600);
+    eprintln!("composite sweep: {tally:?}");
+    assert!(tally.msbuild_rejects >= 100, "{tally:?}");
+    assert!(tally.certain >= 50, "{tally:?}");
+    assert!(tally.cases - tally.msbuild_rejects >= 50, "{tally:?}");
+}
+
+/// The fresh-seed twin of [`composite_sweep_fixed_seed`].
+#[test]
+#[ignore = "fresh-seed soak; run with --ignored"]
+fn composite_sweep_soak() {
+    let (seed, cases) = common::soak_parameters("using-task composite", 3000);
+    composite_sweep(seed, cases);
 }

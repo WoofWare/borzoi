@@ -644,10 +644,10 @@ impl Loader {
         for name in attribute_names(group) {
             self.unrecognized_attribute(group, name)?;
         }
-        let mut seen: Vec<&str> = Vec::new();
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for parameter in self.children(group)? {
             let name = qname(parameter);
-            if seen.contains(&name) {
+            if seen.contains(name) {
                 return Err(malformed(parameter, "a second parameter of one name"));
             }
             self.attributes(parameter, PARAMETER_ATTRIBUTES)?;
@@ -659,7 +659,7 @@ impl Loader {
                     parameter,
                 ));
             }
-            seen.push(name);
+            seen.insert(name);
         }
         Ok(())
     }
