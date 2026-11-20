@@ -176,27 +176,7 @@ pub fn invoke_fcs_dump_types_project(paths: &[&Path]) -> Vec<(String, String)> {
     invoke_fcs_dump_types_project_with_refs(paths, &[])
 }
 
-/// One member FCS reads as an extension in a referenced assembly
-/// (`fcs-dump`'s `extension-members` kind).
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct FcsExtensionMember {
-    /// The namespace holding the member's top-level type, dotted.
-    #[serde(rename = "Namespace")]
-    pub namespace: String,
-    #[serde(rename = "Entity")]
-    pub entity: String,
-    /// The name a call spells.
-    #[serde(rename = "Name")]
-    pub name: String,
-    #[serde(rename = "CompiledName")]
-    pub compiled_name: String,
-    /// `fsharp` (an optional extension) or `csharp`.
-    #[serde(rename = "Style")]
-    pub style: String,
-    /// Whether a value receiver calls it (else a type-qualified call).
-    #[serde(rename = "IsInstance")]
-    pub is_instance: bool,
-}
+pub use borzoi_oracle_harness::assembly_entities::ExtensionMemberRead as FcsExtensionMember;
 
 /// Every member FCS reads as an extension in `dll`, checked with `dll`
 /// referenced beside the SDK's references (`anchor` is any source file to
@@ -300,25 +280,35 @@ pub fn try_invoke_fcs_dump_with_refs(
 
 /// The number of resident `fcs-dump` pools in this test binary; the child budget
 /// (`BORZOI_FCS_CHILDREN`, default three a pool) is split evenly between them,
-/// mirroring `cst`'s harness. Three: the single-file `file-batch` pool
+/// mirroring `cst`'s harness. Four: the single-file `file-batch` pool
 /// ([`fcs_file_batch_pool`]), the multi-file `uses-project` pool
-/// ([`fcs_project_batch_pool`]), and the legacy oracle's `file-batch` pool
+/// ([`fcs_project_batch_pool`]), the legacy oracle's `file-batch` pool
 /// ([`legacy_file_batch_pool`]), which spawns only for a check below the
-/// support floor.
-const FCS_POOLS: usize = 3;
+/// support floor, and the project-graph pool ([`fcs_graph_batch_pool`]).
+const FCS_POOLS: usize = 4;
 
 /// Process-wide cap on resident `fcs-dump` children, split evenly across the
 /// [`FCS_POOLS`] pools. Each child is a warm FCS/.NET process holding hundreds of
 /// MB and lives until the test binary exits, so the default is deliberately
 /// modest (and, like `cst`, a machine with sibling worktrees running their own
 /// suites should not be crowded out); override with `BORZOI_FCS_CHILDREN`.
+///
+/// # Panics
+///
+/// On a `BORZOI_FCS_CHILDREN` below [`FCS_POOLS`]: each pool keeps one child,
+/// so the cap could not hold, and exceeding it silently is no cap.
 fn fcs_children_budget() -> usize {
-    std::env::var("BORZOI_FCS_CHILDREN")
+    let budget = std::env::var("BORZOI_FCS_CHILDREN")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
         .filter(|n| *n > 0)
-        .unwrap_or(3 * FCS_POOLS)
-        .max(FCS_POOLS)
+        .unwrap_or(3 * FCS_POOLS);
+    assert!(
+        budget >= FCS_POOLS,
+        "BORZOI_FCS_CHILDREN={budget} is below the {FCS_POOLS} oracle pools this binary \
+         keeps a child each in; set it to at least {FCS_POOLS}"
+    );
+    budget
 }
 
 /// The lowest language version the current oracle's compiler supports
@@ -545,6 +535,21 @@ pub fn try_invoke_fcs_dump_project_with_refs(
 fn fcs_project_batch_pool() -> &'static BatchPool {
     static P: OnceLock<BatchPool> = OnceLock::new();
     P.get_or_init(|| BatchPool::new(Oracle::Current, "uses-project-batch", PROJECT_TIMEOUT))
+}
+
+/// The resident project-graph oracle pool (`fcs-dump uses-project-graph-batch`,
+/// `borzoi_oracle_harness::project_graph`): each request checks or compiles
+/// a graph of projects, so it keeps [`PROJECT_TIMEOUT`].
+fn fcs_graph_batch_pool() -> &'static BatchPool {
+    static P: OnceLock<BatchPool> = OnceLock::new();
+    P.get_or_init(|| BatchPool::new(Oracle::Current, "uses-project-graph-batch", PROJECT_TIMEOUT))
+}
+
+/// One request line to the project-graph oracle, and its response line,
+/// which may be a `BatchError` (the caller parses it with
+/// `borzoi_oracle_harness::project_graph::parse_response`).
+pub fn invoke_fcs_dump_graph(line: &str) -> String {
+    fcs_graph_batch_pool().request(line)
 }
 
 /// Run `fcs-dump uses-census-batch` over `paths` (any order; **each file is

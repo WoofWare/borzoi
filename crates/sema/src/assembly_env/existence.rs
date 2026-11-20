@@ -105,8 +105,16 @@ fn canonical(name: &str) -> String {
     }
 }
 
-fn canonical_path(path: &[String]) -> Vec<String> {
+pub(crate) fn canonical_path(path: &[String]) -> Vec<String> {
     path.iter().map(|s| canonical(s)).collect()
+}
+
+/// The path an assembly-level `[<AutoOpen("…")>]` argument names: FCS's
+/// `splitNamespace`, a plain dotted path (no quoted-identifier escaping at
+/// this level), or `None` with an empty segment.
+pub(crate) fn auto_open_segments(path: &str) -> Option<Vec<String>> {
+    let segments: Vec<String> = path.split('.').map(str::to_string).collect();
+    (!segments.iter().any(String::is_empty)).then_some(segments)
 }
 
 impl ExistenceSet {
@@ -377,6 +385,58 @@ impl ExistenceSet {
             || !self.sites(name, is_static).is_empty()
     }
 
+    /// Every fact the set holds, in a comparable form: what its questions
+    /// read, and nothing else.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn facts(&self) -> ExistenceFacts {
+        let mut facts = ExistenceFacts {
+            unknowable: self.unknowable,
+            prefixes: self.prefixes.iter().cloned().collect(),
+            entities: self.entities.iter().cloned().collect(),
+            abbreviation_lenders: self.abbreviation_lenders.iter().cloned().collect(),
+            auto_open_bases: self.auto_open_bases.iter().cloned().collect(),
+            ..ExistenceFacts::default()
+        };
+        for (parent, children) in &self.children {
+            for child in children {
+                let mut path = parent.clone();
+                path.push(child.name.clone());
+                if child.lends_children {
+                    facts.lends_children.insert(path.clone());
+                }
+                if child.lends_anything {
+                    facts.lends_anything.insert(path);
+                }
+            }
+        }
+        for (name, sites) in &self.extensions {
+            // The query names a stored name answers ([`Self::sites`]): its
+            // own, and its accessor-stripped stem.
+            let mut keys = vec![name.clone()];
+            if let Some(bare) = ACCESSOR_PREFIXES.iter().find_map(|p| name.strip_prefix(p)) {
+                keys.push(bare.to_owned());
+            }
+            for site in sites {
+                for key in &keys {
+                    for (is_static, answers) in [
+                        (true, site.instance != Some(true)),
+                        (false, site.instance != Some(false)),
+                    ] {
+                        if answers {
+                            facts.extensions.insert(ExtensionFact {
+                                key: key.clone(),
+                                namespace: site.namespace.clone(),
+                                container: site.container.clone(),
+                                is_static,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        facts
+    }
+
     /// Whether the container at `namespace` (a namespace, or a module's path)
     /// holds, anywhere in its entity tree, an abbreviation marked
     /// `[<Extension>]` or `[<AutoOpen>]` at any accessibility, which brings
@@ -387,6 +447,44 @@ impl ExistenceSet {
                 .abbreviation_lenders
                 .contains(&canonical_path(namespace))
     }
+}
+
+/// The facts an `ExistenceSet` holds (`ExistenceSet::facts`), each a set
+/// whose every element only ever makes a question answer "something may be
+/// there": one set's facts holding another's means it answers every question
+/// at least as permissively.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ExistenceFacts {
+    pub unknowable: bool,
+    /// Every prefix of every namespace and entity path, canonical.
+    pub prefixes: std::collections::BTreeSet<Vec<String>>,
+    /// Every entity path, canonical.
+    pub entities: std::collections::BTreeSet<Vec<String>>,
+    /// The entities whose children answer to short names where their
+    /// container is opened (an `[<AutoOpen>]` module or type).
+    pub lends_children: std::collections::BTreeSet<Vec<String>>,
+    /// The entities that may lend any short name (an `[<AutoOpen>]`
+    /// abbreviation).
+    pub lends_anything: std::collections::BTreeSet<Vec<String>>,
+    /// The containers holding an abbreviation marked `[<Extension>]` or
+    /// `[<AutoOpen>]`. One alone makes every name a possible extension
+    /// wherever no `open` is enumerated.
+    pub abbreviation_lenders: std::collections::BTreeSet<Vec<String>>,
+    pub auto_open_bases: std::collections::BTreeSet<Vec<String>>,
+    pub extensions: std::collections::BTreeSet<ExtensionFact>,
+}
+
+/// One answer the extension query gives: a call whose accessor-stripped
+/// name is `key`, static or not, may reach an extension declared in
+/// `container` (whose namespace is `namespace`).
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ExtensionFact {
+    pub key: String,
+    pub namespace: Vec<String>,
+    pub container: Vec<String>,
+    pub is_static: bool,
 }
 
 #[cfg(test)]

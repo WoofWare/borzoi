@@ -1,0 +1,12 @@
+# Generated; do not edit by hand. One line per graded item, sorted.
+# Regenerate with:
+#   BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-sema --test all source_existence_gen::source_rows_are_fcs_rows_over_generated_projects
+plain	owed
+source.byte-order-mark	owed
+source.directive-lookalike	owed
+source.line-directive	owed
+source.line-ends	owed
+source.long-run	owed
+source.not-text	excluded: a cell's files are text: a Compile item that is not UTF-8 is one the caller cannot read, the `UnreadableItem` channel, which the walk's inventory witnesses
+source.script-directive	owed
+source.tool-define	owed

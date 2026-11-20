@@ -81,7 +81,7 @@ use unknowables::Unknowable;
 use windows::Windows;
 mod decls;
 mod exprs;
-mod extension_names;
+pub(crate) mod extension_names;
 mod indexes;
 mod labels;
 mod lexical;

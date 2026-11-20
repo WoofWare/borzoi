@@ -303,6 +303,31 @@ impl GraphRequest {
         serde_json::json!({ "op": "check", "projects": projects, "check": self.check.as_str() })
             .to_string()
     }
+
+    /// The `referenced` request asking what crosses the `FSharpReference`
+    /// boundary from `target`, a project the checked project references,
+    /// as one line of JSON ([`ReferencedResponse`]).
+    pub fn referenced_line(&self, target: &PlainName) -> Result<String, String> {
+        let checked = self
+            .projects
+            .iter()
+            .find(|p| p.id == self.check)
+            .expect("`new` checked that the checked project is one of the request");
+        if !checked.project_refs().any(|q| q == target) {
+            return Err(format!(
+                "{target} is no project reference of {}",
+                self.check
+            ));
+        }
+        let projects: Vec<Value> = self.projects.iter().map(GraphProject::to_json).collect();
+        Ok(serde_json::json!({
+            "op": "referenced",
+            "projects": projects,
+            "check": self.check.as_str(),
+            "target": target.as_str(),
+        })
+        .to_string())
+    }
 }
 
 /// A project on a cycle of `edges`, if there is one.
@@ -438,6 +463,82 @@ impl CompileResponse {
     pub fn errors(&self) -> impl Iterator<Item = &Value> {
         errors_of(&self.diagnostics)
     }
+}
+
+/// A `referenced` response ([`GraphRequest::referenced_line`]): what crosses
+/// the `FSharpReference` boundary from the target project, as the checked
+/// project reads it from source.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "PascalCase", deny_unknown_fields)]
+pub struct ReferencedResponse {
+    /// Whether the checked project imported the target. FCS imports nothing
+    /// of a target whose check fails, and the rows below are then empty.
+    pub imported: bool,
+    /// The `assembly-entities` kind's entity rows of the target.
+    pub entities: Vec<crate::assembly_entities::FcsEntity>,
+    /// The `assembly-entities` kind's extension universe of the target.
+    pub extension_members: Vec<crate::assembly_entities::FcsExtensionMember>,
+    /// A property read that threw while walking the target.
+    pub read_errors: Vec<String>,
+    /// The `extension-members` kind's rows of the target.
+    pub fcs_extension_members: Vec<crate::assembly_entities::ExtensionMemberRead>,
+    pub signature: RawSignature,
+    /// The target's own whole-project diagnostics.
+    pub diagnostics: Vec<Value>,
+}
+
+impl ReferencedResponse {
+    pub fn errors(&self) -> impl Iterator<Item = &Value> {
+        errors_of(&self.diagnostics)
+    }
+}
+
+/// The target's raw signature data (FCS's `IRawFSharpAssemblyData`): each
+/// CCU's streams, uncompressed, and the assembly-level strings that travel
+/// beside them.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "PascalCase", deny_unknown_fields)]
+pub struct RawSignature {
+    pub streams: Vec<SignatureStreams>,
+    /// `GetInternalsVisibleToAttributes`.
+    pub internals_visible_to: Vec<String>,
+    /// `GetAutoOpenAttributes`: the assembly-level `AutoOpen` paths.
+    pub auto_opens: Vec<String>,
+}
+
+/// One CCU's signature streams, in hex.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "PascalCase", deny_unknown_fields)]
+pub struct SignatureStreams {
+    pub ccu: String,
+    pub primary: String,
+    pub b: Option<String>,
+}
+
+impl SignatureStreams {
+    /// The primary stream's bytes.
+    pub fn primary_bytes(&self) -> Result<Vec<u8>, String> {
+        from_hex(&self.primary)
+    }
+
+    /// The B stream's bytes, if there is one.
+    pub fn b_bytes(&self) -> Result<Option<Vec<u8>>, String> {
+        self.b.as_deref().map(from_hex).transpose()
+    }
+}
+
+fn from_hex(text: &str) -> Result<Vec<u8>, String> {
+    if !text.len().is_multiple_of(2) {
+        return Err("a hex stream of odd length".to_owned());
+    }
+    (0..text.len())
+        .step_by(2)
+        .map(|i| {
+            text.get(i..i + 2)
+                .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+                .ok_or_else(|| format!("not hex at {i}"))
+        })
+        .collect()
 }
 
 fn errors_of(diagnostics: &[Value]) -> impl Iterator<Item = &Value> {

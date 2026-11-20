@@ -14,6 +14,48 @@
 
 use crate::{AssemblyEnv, EntityHandle, GateInput, Resolution, ResolvedFile};
 
+/// The names `source_existence` takes, as an abbreviation's target, to name
+/// a type FSharp.Core declares in a namespace every file has open, so a test
+/// can hold them to FSharp.Core's own pickle.
+pub fn fsharp_core_type_names() -> &'static [&'static str] {
+    crate::source_existence::FSHARP_CORE_TYPE_NAMES
+}
+
+pub use crate::assembly_env::existence::{ExistenceFacts, ExtensionFact};
+
+/// What the existence questions hold of one assembly whose index is `index`
+/// and whose assembly-level `[<AutoOpen("…")>]` arguments are
+/// `auto_opens`: the facts of the `assembly_env::existence` set
+/// built from them alone, by the code every question reads.
+pub fn existence_facts(
+    index: &borzoi_assembly::ExistenceIndex,
+    auto_opens: &[String],
+) -> ExistenceFacts {
+    use crate::assembly_env::existence::{ExistenceSet, auto_open_segments};
+    let mut set = ExistenceSet::default();
+    set.add(&crate::ExistenceInput::Read(index.clone()), &[]);
+    for path in auto_opens {
+        if let Some(segments) = auto_open_segments(path) {
+            set.add_auto_open_base(segments);
+        }
+    }
+    set.facts()
+}
+
+/// The module and placed-type paths the Compile-order fold of `files`
+/// (against an empty environment) exports, each spelt canonically as the
+/// existence set spells a path: what the existence surface of the same files
+/// must hold as entities.
+pub fn fold_entity_paths(files: &[crate::ProjectFile]) -> std::collections::BTreeSet<Vec<String>> {
+    let env = AssemblyEnv::default();
+    let project = crate::resolve::resolve_project_files(files, &env);
+    project
+        .module_and_placed_type_paths(env.names())
+        .iter()
+        .map(|p| crate::assembly_env::existence::canonical_path(p))
+        .collect()
+}
+
 /// Which input of the extension-scope gate declines a call of a method named
 /// `name` in the file `resolved` (`is_static`: a type-qualified call), or
 /// `None` when the gate lets the

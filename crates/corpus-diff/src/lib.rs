@@ -76,6 +76,10 @@ pub struct LoadedProject {
     pub fcs_extra_refs: Vec<PathBuf>,
     pub define_constants: Vec<String>,
     pub lang_version: Option<String>,
+    /// The evaluation's Compile items, in Compile order: every file the
+    /// project compiles, including any `parses` omits (one that could not be
+    /// read or parsed).
+    pub compile_items: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -331,6 +335,7 @@ pub fn load_lsp_project_with_options(
     }
 
     let define_constants = parsed.define_constants.clone();
+    let compile_items: Vec<PathBuf> = parsed.items.iter().map(|i| i.include.clone()).collect();
     let lang_version = parsed.lang_version.clone();
     let (fcs_extra_refs, project_assets) = fcs_extra_refs(project, &mut workspace, &mut semantic)?;
     let parses = semantic
@@ -358,6 +363,7 @@ pub fn load_lsp_project_with_options(
         fcs_extra_refs,
         define_constants,
         lang_version,
+        compile_items,
     })
 }
 
@@ -958,6 +964,22 @@ impl ProjectGraphOracle {
             ));
         }
         let response = self.round_trip(&request.to_string())?;
+        parse_response(&response).map_err(FcsInvokeError::from)
+    }
+
+    /// FCS's answer to `request`'s `referenced` op for `target`, a project
+    /// reference of its checked project
+    /// ([`GraphRequest::referenced_line`](borzoi_oracle_harness::project_graph::GraphRequest::referenced_line)):
+    /// built here, so no other op crosses this call.
+    pub fn referenced(
+        &mut self,
+        request: &borzoi_oracle_harness::project_graph::GraphRequest,
+        target: &borzoi_oracle_harness::project_graph::PlainName,
+    ) -> Result<borzoi_oracle_harness::project_graph::ReferencedResponse, FcsInvokeError> {
+        let line = request
+            .referenced_line(target)
+            .map_err(FcsInvokeError::Refused)?;
+        let response = self.round_trip(&line)?;
         parse_response(&response).map_err(FcsInvokeError::from)
     }
 

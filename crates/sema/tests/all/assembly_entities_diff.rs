@@ -158,8 +158,14 @@ type RowNames<'a> = (&'a [String], Option<bool>);
 /// and FCS's extension members, both ways: each member FCS reads must be a
 /// row of the index at its place answering to its logical and compiled
 /// names (and, for an F# extension, of its instance-ness), and each row must
-/// answer to a member FCS reads there.
-fn pickle_extension_failures(index: &ExistenceIndex, entities: &AssemblyEntities) -> Vec<String> {
+/// answer to a member FCS reads there (when `every_row_read`: FCS's
+/// `MembersFunctionsAndValues` lists no class `let`, whose val the pickle
+/// holds, so a producer with a marked one has rows FCS's view lacks).
+pub(crate) fn pickle_extension_failures(
+    index: &ExistenceIndex,
+    members: &[crate::common::assembly_entities::FcsExtensionMember],
+    every_row_read: bool,
+) -> Vec<String> {
     let place = |ns: &str, enclosing: &[String]| format!("{ns} | {}", enclosing.join("+"));
     let mut ours: BTreeMap<String, Vec<RowNames<'_>>> = BTreeMap::new();
     for row in index
@@ -172,13 +178,26 @@ fn pickle_extension_failures(index: &ExistenceIndex, entities: &AssemblyEntities
             .push((&row.names, row.instance));
     }
     let mut failures = Vec::new();
-    for m in &entities.fcs.extension_members {
+    for m in members {
         let at = place(&m.namespace, &m.enclosing);
+        // FCS's view reads a property as marked when any one of its
+        // accessors is, and then lists every accessor; the pickle marks only
+        // the accessor that carries the attribute. Where every row need not be
+        // read (a project from source), a marked sibling accessor stands for
+        // an accessor FCS lists under its property.
+        let property = (!every_row_read && m.style == ExtensionStyle::Csharp)
+            .then(|| {
+                ["get_", "set_"]
+                    .iter()
+                    .find_map(|p| m.logical_name.strip_prefix(p))
+            })
+            .flatten();
         let found = ours.get(&at).is_some_and(|rows| {
             rows.iter().any(|(names, instance)| {
-                names.contains(&m.logical_name)
+                (names.contains(&m.logical_name)
                     && names.contains(&m.compiled_name)
-                    && (m.style != ExtensionStyle::Fsharp || *instance == Some(m.is_instance))
+                    && (m.style != ExtensionStyle::Fsharp || *instance == Some(m.is_instance)))
+                    || property.is_some_and(|p| names.iter().any(|n| n == p))
             })
         });
         if !found {
@@ -189,12 +208,12 @@ fn pickle_extension_failures(index: &ExistenceIndex, entities: &AssemblyEntities
         }
     }
     let mut theirs: BTreeMap<String, BTreeSet<&str>> = BTreeMap::new();
-    for m in &entities.fcs.extension_members {
+    for m in members {
         let names = theirs.entry(place(&m.namespace, &m.enclosing)).or_default();
         names.insert(&m.logical_name);
         names.insert(&m.compiled_name);
     }
-    for (at, rows) in &ours {
+    for (at, rows) in ours.iter().filter(|_| every_row_read) {
         for (names, _) in rows {
             let read = theirs
                 .get(at)
@@ -312,7 +331,8 @@ fn compare(graded: &[PathBuf], support: &[PathBuf]) -> (Vec<String>, usize, usiz
                 let theirs = pickle_theirs(entities);
                 pickle_rows += theirs.len();
                 extension_rows += entities.fcs.extension_members.len();
-                let moved = pickle_extension_failures(&index, entities);
+                let moved =
+                    pickle_extension_failures(&index, &entities.fcs.extension_members, true);
                 if !moved.is_empty() {
                     failures.push(format!(
                         "{file}: the pickle layer's extension members differ\n{}",

@@ -35,6 +35,8 @@ use tempfile::TempDir;
 
 // Under this binary's own directory, so Cargo does not take them for test
 // targets of their own.
+#[path = "project_resolution/source_existence_corpus.rs"]
+mod source_existence_corpus;
 #[path = "project_resolution/source_reference_gen.rs"]
 mod source_reference_gen;
 #[path = "project_resolution/source_references.rs"]
@@ -178,7 +180,7 @@ fn synthetic_loaded_project(src: &str, env: AssemblyEnv) -> LoadedProject {
         project: PathBuf::from("/tmp/corpus-diff-synthetic/Synthetic.fsproj"),
         parses: ProjectParses {
             files,
-            paths,
+            paths: paths.clone(),
             texts: vec![Arc::<str>::from(src)],
         },
         resolved,
@@ -187,6 +189,7 @@ fn synthetic_loaded_project(src: &str, env: AssemblyEnv) -> LoadedProject {
         fcs_extra_refs: Vec::new(),
         define_constants: Vec::new(),
         lang_version: None,
+        compile_items: paths,
     }
 }
 
@@ -231,7 +234,7 @@ fn synthetic_multi_file_project(items: &[(&str, &str)]) -> LoadedProject {
         project: root.join("Synthetic.fsproj"),
         parses: ProjectParses {
             files,
-            paths,
+            paths: paths.clone(),
             texts: items
                 .iter()
                 .map(|(_, src)| Arc::<str>::from(*src))
@@ -243,6 +246,7 @@ fn synthetic_multi_file_project(items: &[(&str, &str)]) -> LoadedProject {
         fcs_extra_refs: Vec::new(),
         define_constants: Vec::new(),
         lang_version: None,
+        compile_items: paths,
     }
 }
 

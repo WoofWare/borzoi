@@ -985,6 +985,26 @@ fn chained_open_prefers_prior_open_namespace_over_enclosing_module() {
     });
 }
 
+/// A `global.`-rooted augmentation head names the type from the root, not
+/// from its container: a later file's uses of the augmented type's member
+/// must agree with FCS.
+#[test]
+fn global_rooted_augmentation_head() {
+    assert_matches_fcs(&Project {
+        files: vec![
+            (
+                "global_aug_lib",
+                "namespace rec GlobalAug\ntype C() =\n    member _.X = 1\ntype global.GlobalAug.C with\n    static member E = 2\n",
+            ),
+            (
+                "global_aug_use",
+                "module GlobalAugUse\nopen GlobalAug\nlet a = C.E\nlet b = GlobalAug.C.E\n",
+            ),
+        ],
+        expected_cross_file: 0,
+    });
+}
+
 #[test]
 fn literal_constant_patterns_shadow_cases_like_fcs() {
     // `[<Literal>]` values are constant patterns: unlike plain values they
