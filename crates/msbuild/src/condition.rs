@@ -85,9 +85,10 @@ pub enum Outcome {
     /// of it MSBuild evaluates is ill typed: a relational comparison on an
     /// operand that is neither a number nor a version (`1 < abc`), a scalar
     /// standing as a boolean outside the boolean vocabulary (`foo`,
-    /// `$(Unset)`), `HasTrailingSlash` given more than one item. An ill-typed
-    /// operand behind a deciding `And`/`Or` operand is never evaluated, by
-    /// MSBuild or by us.
+    /// `$(Unset)`), `HasTrailingSlash` given more than one item, a property
+    /// function that fails on its input (an indexer out of range, a version
+    /// function given no version: MSB4184). An ill-typed operand behind a
+    /// deciding `And`/`Or` operand is never evaluated, by MSBuild or by us.
     ///
     /// A claim about the values given, not about the build: a consumer that
     /// concludes MSBuild rejects the project must hold every property the
@@ -106,16 +107,69 @@ pub enum Outcome {
     Unsupported,
 }
 
-/// Why a condition, or a part of it, has no boolean.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Why a condition, or a part of it, has no boolean: what MSBuild does there,
+/// classified three ways.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Reject {
-    /// MSBuild throws on it ([`Outcome::Illegal`]).
-    Illegal,
-    /// Outside what we model ([`Outcome::Unsupported`]).
+    /// MSBuild returns a boolean we cannot compute, and does not throw: a
+    /// string equality whose case folding we do not model, an `Exists` we
+    /// cannot ask, an operand whose value turns on the Unix path adjustment
+    /// read where no value throws ([`Outcome::Unsupported`]).
+    Undecided,
+    /// Outside what we model: MSBuild may return either boolean, or throw
+    /// ([`Outcome::Unsupported`]).
     Unmodelled,
+    /// MSBuild throws on it, in a function the operand calls on these values:
+    /// a property function (an indexer out of range), or a version function
+    /// given no version ([`Outcome::Illegal`]).
+    Throws,
+    /// MSBuild throws on it: a syntax error, or an operand of a type the
+    /// leaf does not take, a relational comparison's non-number, a coerced
+    /// non-boolean ([`Outcome::Illegal`]).
+    Illegal,
 }
 
-/// A helper's `Err(())` claims nothing about MSBuild.
+impl Reject {
+    /// This rejection of an operand, read by a leaf that throws on some value
+    /// of it (a relational comparison, a boolean coercion, `HasTrailingSlash`,
+    /// a version function): an operand whose value we do not know may be one
+    /// it throws on.
+    fn read_by_throwing_leaf(self) -> Self {
+        match self {
+            Reject::Undecided => Reject::Unmodelled,
+            other => other,
+        }
+    }
+
+    /// What `judge` makes of a leaf that has no boolean on certain values.
+    fn judged(self) -> Judgement {
+        let throws = match self {
+            Reject::Undecided => Throws::Never,
+            Reject::Unmodelled => Throws::Maybe,
+            Reject::Throws | Reject::Illegal => Throws::Certainly,
+        };
+        Judgement::of(None, throws, true)
+    }
+
+    /// What the walk's rejection judgement ([`may_throw_on_held`]) makes of a
+    /// leaf that fails on a value the walk holds and MSBuild need not hold
+    /// (`""` for a write the walk refused to compute, or a reserved name it
+    /// does not seed). A leaf of a type that rejects that value (a relational
+    /// comparison, a coerced scalar) is still a site: an unset name is `""`,
+    /// and MSBuild may leave it unset. Whether a function the leaf calls
+    /// throws on MSBuild's value, or one we do not model does, is the
+    /// judgement over the values a name may hold (#1009's second stage), not
+    /// made here.
+    fn judged_on_doubted_values(self) -> Judgement {
+        let throws = match self {
+            Reject::Illegal => Throws::Certainly,
+            Reject::Undecided | Reject::Unmodelled | Reject::Throws => Throws::Never,
+        };
+        Judgement::of(None, throws, true)
+    }
+}
+
+/// A helper's `Err(())` claims nothing about MSBuild: it may throw there.
 impl From<()> for Reject {
     fn from((): ()) -> Self {
         Reject::Unmodelled
@@ -289,10 +343,12 @@ fn parse_modelled(source: &str) -> Result<Option<BoolExpr>, ()> {
 pub enum Throws {
     /// It throws on no value of the properties the caller is not certain of
     /// (in an item's condition, on none whose substitution forms no item or
-    /// metadata expression; see `leaf_may_throw_on_some_value`). A part of the
-    /// condition outside the grammar we model, reached on certain values,
-    /// claims nothing either way, as for [`Outcome::Unsupported`]
-    /// ([`Judgement::unevaluated`]).
+    /// metadata expression; see `leaf_may_throw_on_some_value`). An operand
+    /// reached on certain values whose boolean we cannot compute
+    /// ([`Judgement::unevaluated`]) is no exception: one we do not model is
+    /// [`Throws::Maybe`], and only one MSBuild evaluates without throwing (a
+    /// string equality whose case folding we do not model, an `Exists` we
+    /// cannot ask) leaves this.
     Never,
     /// A throw cannot be ruled out: it may throw on some value of those
     /// properties, though leaves judged one at a time (contradictory guards,
@@ -312,8 +368,10 @@ pub struct Judgement {
     /// Whether MSBuild may throw evaluating it.
     pub throws: Throws,
     /// Whether an operand MSBuild may reach, on certain values, is one we
-    /// cannot evaluate: outside the grammar we model, or one MSBuild throws
-    /// on. A value beside it holds only where that operand returns.
+    /// cannot evaluate: outside the grammar we model (which MSBuild may
+    /// throw on), one MSBuild throws on, or one it returns a boolean we
+    /// cannot compute for. A value beside it holds only where that operand
+    /// returns.
     pub unevaluated: bool,
 }
 
@@ -335,8 +393,12 @@ impl Judgement {
 /// comparison, a coerced scalar, a function call) that mentions an uncertain
 /// property anywhere in its operands has no known value, and may throw when its
 /// kind can throw on some value ([`leaf_may_throw_on_some_value`]); every other
-/// leaf evaluates exactly as [`evaluate`] does against `props`. Evaluation goes
-/// on past a leaf of unknown value, which may have stopped it, so what comes
+/// leaf evaluates exactly as [`evaluate`] does against `props`. One with no
+/// boolean there is classified by what MSBuild does instead: it throws
+/// ([`Throws::Certainly`]: an ill-typed operand, a property function out of
+/// range), it may throw because we do not model it, a property function
+/// included ([`Throws::Maybe`]), or it returns a boolean we cannot compute
+/// ([`Throws::Never`]). Evaluation goes on past a leaf of unknown value, which may have stopped it, so what comes
 /// after one is reached only perhaps: a throw there is [`Throws::Maybe`]. An
 /// operand MSBuild never reaches, after one that decides the chain, is not
 /// judged at all.
@@ -347,9 +409,10 @@ impl Judgement {
 /// Leaves are judged one at a time, so a contradiction spread across leaves
 /// (`'$(U)' == 'a' And '$(U)' != 'a'`) is unknown. That only ever declines.
 ///
-/// The walk calls [`decide_without`], [`throws_whatever`] and [`may_throw`],
-/// which answer one question each and walk no further than it needs; this,
-/// the whole judgement they are held to, is for tests.
+/// The walk calls [`decide_without`], [`throws_whatever`] and
+/// [`may_throw_on_held`], which answer one question each and walk no further
+/// than it needs; this, the whole judgement the first two and `may_throw`
+/// are held to, is for tests.
 #[cfg(any(test, feature = "test-support"))]
 pub fn judge(
     source: &str,
@@ -360,8 +423,7 @@ pub fn judge(
     match parse_condition(source) {
         Ok(Some(expr)) => judge_expr(&expr, props, fs, uncertain, Walk::Judge),
         Ok(None) => Judgement::of(Some(true), Throws::Never, false),
-        Err(Reject::Illegal) => Judgement::of(None, Throws::Certainly, true),
-        Err(Reject::Unmodelled) => Judgement::of(None, Throws::Never, true),
+        Err(reject) => reject.judged(),
     }
 }
 
@@ -380,11 +442,14 @@ enum Walk {
     /// ([`throws_whatever`]) settles for no further.
     Certainty,
     /// To the first operand MSBuild may throw on: a caller that only asks
-    /// whether it may throw ([`may_throw`]) need go no further. Nor need it
-    /// evaluate an operand that cannot throw and gates no later one that can
-    /// (`later` says whether any operand after this subtree, in the chains
-    /// around it, can throw).
-    Possibility { later: bool },
+    /// whether it may throw (`may_throw`, [`may_throw_on_held`]) need go no
+    /// further. Nor need it evaluate an operand that cannot throw and gates no
+    /// later one that can (`later` says whether any operand after this
+    /// subtree, in the chains around it, can throw). `on_held`: a leaf that
+    /// reads a name the caller is not certain of is evaluated on the value
+    /// held and judged as [`Reject::judged_on_doubted_values`] says, rather
+    /// than by its kind.
+    Possibility { later: bool, on_held: bool },
 }
 
 /// Whether MSBuild throws evaluating `source` whatever the properties
@@ -403,8 +468,8 @@ pub fn throws_whatever(
         Ok(Some(expr)) => {
             judge_expr(&expr, props, fs, uncertain, Walk::Certainty).throws == Throws::Certainly
         }
-        Ok(None) | Err(Reject::Unmodelled) => false,
-        Err(Reject::Illegal) => true,
+        Ok(None) | Err(Reject::Unmodelled | Reject::Undecided) => false,
+        Err(Reject::Throws | Reject::Illegal) => true,
     }
 }
 
@@ -412,11 +477,42 @@ pub fn throws_whatever(
 /// names unknown: `judge`'s throw verdict other than [`Throws::Never`],
 /// found without evaluating (or probing the file system for) any operand past
 /// the first that may throw.
+#[cfg(test)]
 pub fn may_throw(
     source: &str,
     props: &PropertyMap,
     fs: Option<Probes<'_>>,
     uncertain: &dyn Fn(&str) -> bool,
+) -> bool {
+    may_throw_walked(source, props, fs, uncertain, false)
+}
+
+/// Whether MSBuild may throw evaluating `source` on the values `props`
+/// holds, where `doubted` names the names whose value held MSBuild need not
+/// hold at all: the rejection judgement's Possible site. MSBuild may hold
+/// every other value held, so a leaf that throws on those, or that calls what
+/// we do not model on them, may throw. A leaf whose failing operand reads a
+/// doubted name throws on what it holds only by type
+/// ([`Reject::judged_on_doubted_values`], `failing_operand_is_doubted`):
+/// whether a function it calls throws on MSBuild's value is the judgement
+/// over the values a name may hold (#1009's second stage). A condition wholly
+/// outside the grammar we parse claims nothing (#1095).
+pub fn may_throw_on_held(
+    source: &str,
+    props: &PropertyMap,
+    fs: Option<Probes<'_>>,
+    doubted: &dyn Fn(&str) -> bool,
+) -> bool {
+    may_throw_walked(source, props, fs, doubted, true)
+}
+
+/// `may_throw` or [`may_throw_on_held`], as `on_held` says.
+fn may_throw_walked(
+    source: &str,
+    props: &PropertyMap,
+    fs: Option<Probes<'_>>,
+    uncertain: &dyn Fn(&str) -> bool,
+    on_held: bool,
 ) -> bool {
     match parse_condition(source) {
         Ok(Some(expr)) => {
@@ -425,13 +521,25 @@ pub fn may_throw(
                 props,
                 fs,
                 uncertain,
-                Walk::Possibility { later: false },
+                Walk::Possibility {
+                    later: false,
+                    on_held,
+                },
             )
             .throws
                 != Throws::Never
         }
-        Ok(None) | Err(Reject::Unmodelled) => false,
-        Err(Reject::Illegal) => true,
+        Ok(None) | Err(Reject::Undecided) => false,
+        // A condition outside the grammar we parse, whole: an item list or
+        // metadata reference, an item function, syntax MSBuild takes that we
+        // do not. The rejection judgement claims nothing of it, as of a
+        // condition legal on the values held: the SDK's own item-pass
+        // conditions are of it (`Regex::IsMatch(%(Identity), …)` on a
+        // metadatum, `'@(…)' == ''` on a group), MSBuild evaluates them
+        // without throwing, and a model of what they expand to is what tells
+        // the two apart (#1095).
+        Err(Reject::Unmodelled) => !on_held,
+        Err(Reject::Throws | Reject::Illegal) => true,
     }
 }
 
@@ -462,32 +570,99 @@ fn judge_expr(
         | BoolExpr::Compare { .. } => {
             let mut references = Vec::new();
             leaf_references(expr, &mut references);
-            if references.iter().any(|name| uncertain(name)) {
-                let throws = if leaf_may_throw_on_some_value(expr) {
-                    Throws::Maybe
-                } else {
-                    Throws::Never
-                };
-                return Judgement::of(None, throws, false);
-            }
-            // One that reads an uncertain name it does not name, we neither
-            // evaluate nor decide past: it may throw, as the walk would have
-            // found had the name been named.
             let mut implicit = Vec::new();
             leaf_implicit_references(expr, &mut implicit);
-            if implicit.iter().any(|name| uncertain(name)) {
-                return Judgement::of(None, Throws::Maybe, true);
+            let explicit_doubt = references.iter().any(|name| uncertain(name));
+            let implicit_doubt = implicit.iter().any(|name| uncertain(name));
+            let on_held = matches!(walk, Walk::Possibility { on_held: true, .. });
+            if !on_held {
+                if explicit_doubt {
+                    // A certain value that may complete an item or metadata
+                    // expression beside an uncertain one (`$(U)$(V)` with
+                    // `V` holding `@(I)`) may make a leaf of any kind throw
+                    // in an item's condition. Whether the value is certain
+                    // is `uncertain`'s to say, asked first.
+                    let completes = references.iter().any(|name| {
+                        !uncertain(name)
+                            && props
+                                .get_ignoring_trust(name)
+                                .is_some_and(|value| value.as_escaped().contains(['@', '%']))
+                    });
+                    let throws = if leaf_may_throw_on_some_value(expr) || completes {
+                        Throws::Maybe
+                    } else {
+                        Throws::Never
+                    };
+                    return Judgement::of(None, throws, false);
+                }
+                // One that reads an uncertain name it does not name, we
+                // neither evaluate nor decide past: it may throw, as the walk
+                // would have found had the name been named.
+                if implicit_doubt {
+                    return Judgement::of(None, Throws::Maybe, true);
+                }
             }
             // The undefined names are the caller's to report from its own
             // `evaluate`; this evaluation only judges.
             let mut undefined = Vec::new();
             match eval_bool(expr, props, fs, &mut undefined) {
                 Ok(value) => Judgement::of(Some(value), Throws::Never, false),
-                Err(Reject::Illegal) => Judgement::of(None, Throws::Certainly, true),
-                Err(Reject::Unmodelled) => Judgement::of(None, Throws::Never, true),
+                Err(reject)
+                    if (explicit_doubt || implicit_doubt)
+                        && failing_operand_is_doubted(expr, props, fs, uncertain) =>
+                {
+                    reject.judged_on_doubted_values()
+                }
+                Err(reject) => reject.judged(),
             }
         }
     }
+}
+
+/// Whether what made the leaf `expr` fail on the values `props` holds reads a
+/// name `uncertain` names. An operand whose expansion fails (a property
+/// function that throws, or one we do not model) is the first that does, in
+/// MSBuild's order, and fails on its own text whatever the operands after it
+/// read. One that fails after its operands expand (a comparison of their
+/// values, a version function's) fails on all of them.
+fn failing_operand_is_doubted(
+    expr: &BoolExpr,
+    props: &PropertyMap,
+    fs: Option<Probes<'_>>,
+    uncertain: &dyn Fn(&str) -> bool,
+) -> bool {
+    let reads_doubted = |raw: &str| {
+        let mut names = Vec::new();
+        explicit_references(raw, &mut names);
+        implicit_references(raw, &mut names);
+        names.iter().any(|name| uncertain(name))
+    };
+    let observer = fs.map(|fs| fs.observer);
+    let operands: Vec<&ScalarExpr> = match expr {
+        BoolExpr::Compare { lhs, rhs, .. } => vec![lhs, rhs],
+        BoolExpr::CoerceBool(scalar) => vec![scalar],
+        // One text, expanded whole.
+        BoolExpr::Exists(raw)
+        | BoolExpr::HasTrailingSlash(raw)
+        | BoolExpr::MsbuildVersionFunction(raw) => return reads_doubted(raw),
+        BoolExpr::True | BoolExpr::False => return false,
+        BoolExpr::Not(_) | BoolExpr::And(_) | BoolExpr::Or(_) => return true,
+    };
+    let raw = |scalar: &ScalarExpr| -> String {
+        match scalar {
+            ScalarExpr::Bare(text) | ScalarExpr::String(text) | ScalarExpr::Property(text) => {
+                text.clone()
+            }
+            ScalarExpr::SystemVersionPart { arg, .. } => arg.clone(),
+        }
+    };
+    let mut undefined = Vec::new();
+    for operand in &operands {
+        if expand_scalar_for_condition(operand, props, observer, &mut undefined).is_err() {
+            return reads_doubted(&raw(operand));
+        }
+    }
+    operands.iter().any(|operand| reads_doubted(&raw(operand)))
 }
 
 /// `judge` of an `And` chain (`absorbing` false) or an `Or` chain
@@ -519,14 +694,14 @@ fn judge_chain(
     };
     for (index, operand) in operands.iter().enumerate() {
         let walk = match walk {
-            Walk::Possibility { later } => {
+            Walk::Possibility { later, on_held } => {
                 let later = later || last_throwing.is_some_and(|last| last > index);
                 if !later && last_throwing != Some(index) {
                     // Nothing from here on can throw, nor be reached by
                     // anything that can.
                     return Judgement::of(None, throws, unevaluated);
                 }
-                Walk::Possibility { later }
+                Walk::Possibility { later, on_held }
             }
             other => other,
         };
@@ -574,9 +749,11 @@ fn judge_chain(
 /// MSBuild expands one the substituted text forms, from one value or across
 /// adjacent references (`$(U)$(V)` with `@` and `(I)x`), and may throw on it,
 /// so there the claim holds only of values that form none.
-/// Whether any leaf of `expr` is of a kind that can throw on some value
-/// ([`leaf_may_throw_on_some_value`]); on certain values too, since a leaf
-/// throws on those only when its kind can throw on some.
+/// Whether any leaf of `expr` may throw on certain values: one of a kind that
+/// can throw on some value ([`leaf_may_throw_on_some_value`]), or one that
+/// substitutes a property, whose text may form an item or metadata
+/// expression MSBuild expands in an item's condition, and which we do not
+/// model ([`Reject::Unmodelled`]).
 fn may_throw_somewhere(expr: &BoolExpr) -> bool {
     match expr {
         BoolExpr::Not(inner) => may_throw_somewhere(inner),
@@ -587,7 +764,27 @@ fn may_throw_somewhere(expr: &BoolExpr) -> bool {
         // one that can throw, though it may not, since some (a path the Unix
         // adjustment rewrites) need the file system to tell. That only costs
         // a probe the verdict might not need.
-        leaf => leaf_may_throw_on_some_value(leaf),
+        leaf => leaf_may_throw_on_some_value(leaf) || leaf_substitutes(leaf),
+    }
+}
+
+/// Whether an operand of the leaf `expr` substitutes a property (`$(`).
+fn leaf_substitutes(expr: &BoolExpr) -> bool {
+    let raw = |raw: &str| raw.contains("$(");
+    let scalar = |scalar: &ScalarExpr| match scalar {
+        ScalarExpr::Bare(_) => false,
+        ScalarExpr::String(text)
+        | ScalarExpr::Property(text)
+        | ScalarExpr::SystemVersionPart { arg: text, .. } => raw(text),
+    };
+    match expr {
+        BoolExpr::True | BoolExpr::False => false,
+        BoolExpr::Exists(text)
+        | BoolExpr::HasTrailingSlash(text)
+        | BoolExpr::MsbuildVersionFunction(text) => raw(text),
+        BoolExpr::CoerceBool(value) => scalar(value),
+        BoolExpr::Compare { lhs, rhs, .. } => scalar(lhs) || scalar(rhs),
+        BoolExpr::Not(_) | BoolExpr::And(_) | BoolExpr::Or(_) => true,
     }
 }
 
@@ -876,8 +1073,8 @@ impl ScalarExpr {
 fn rejected(reject: Reject) -> Eval {
     Eval {
         outcome: match reject {
-            Reject::Illegal => Outcome::Illegal,
-            Reject::Unmodelled => Outcome::Unsupported,
+            Reject::Throws | Reject::Illegal => Outcome::Illegal,
+            Reject::Unmodelled | Reject::Undecided => Outcome::Unsupported,
         },
         undefined_properties: Vec::new(),
         undefined_outside_empty_comparison: Vec::new(),
@@ -1635,8 +1832,11 @@ fn eval_bool(
             Ok(false)
         }
         BoolExpr::Exists(raw) => {
+            // MSBuild expands the argument, which may throw, and then asks
+            // the file system, which does not (`FileOrDirectoryExistsNoThrow`).
             let Some(fs) = fs else {
-                return Err(Reject::Unmodelled);
+                expand_for_condition(raw, props, None, undefined)?;
+                return Err(Reject::Undecided);
             };
             let value = expand_for_condition(raw, props, Some(fs.observer), undefined)?;
             // MSBuild expands the argument into an item list and asks about
@@ -1658,12 +1858,13 @@ fn eval_bool(
                 .iter()
                 .any(|entry| entry.as_escaped().to_ascii_lowercase().contains("%5c"))
             {
-                return Err(Reject::Unmodelled);
+                return Err(Reject::Undecided);
             }
             Ok(!entries.is_empty() && entries.iter().all(|entry| (fs.exists)(&entry.unescape())))
         }
         BoolExpr::HasTrailingSlash(raw) => {
-            let value = expand_for_condition(raw, props, fs.map(|fs| fs.observer), undefined)?;
+            let value = expand_for_condition(raw, props, fs.map(|fs| fs.observer), undefined)
+                .map_err(Reject::read_by_throwing_leaf)?;
             // MSBuild expands the argument into an item list: each entry is
             // whitespace-trimmed and empty entries are dropped
             // (`'a/;'` and `';/'` are the single item `a/` / `/`). A single
@@ -1693,11 +1894,12 @@ fn eval_bool(
         }
         BoolExpr::MsbuildVersionFunction(inner) => {
             eval_msbuild_version_function(inner, props, fs.map(|fs| fs.observer), undefined)
-                .map_err(Reject::from)
+                .map_err(Reject::read_by_throwing_leaf)
         }
         BoolExpr::CoerceBool(scalar) => {
             let value =
-                expand_scalar_for_condition(scalar, props, fs.map(|fs| fs.observer), undefined)?;
+                expand_scalar_for_condition(scalar, props, fs.map(|fs| fs.observer), undefined)
+                    .map_err(Reject::read_by_throwing_leaf)?;
             // A standalone scalar is coerced through MSBuild's boolean
             // vocabulary; a value outside it (`1`, `foo`, an unset
             // property's "") is a project error. The vocabulary matches
@@ -1720,16 +1922,27 @@ fn eval_bool(
                 scalar_reads_toolset_version(lhs),
                 scalar_reads_toolset_version(rhs),
             );
-            let lhs = expand_scalar_for_condition(lhs, props, fs.map(|fs| fs.observer), undefined)?;
-            let rhs = expand_scalar_for_condition(rhs, props, fs.map(|fs| fs.observer), undefined)?;
+            // Equality throws on no value; an order on many.
+            let relational = !matches!(op, CompareOp::Eq | CompareOp::Neq);
+            let operand = |reject: Reject| {
+                if relational {
+                    reject.read_by_throwing_leaf()
+                } else {
+                    reject
+                }
+            };
+            let lhs = expand_scalar_for_condition(lhs, props, fs.map(|fs| fs.observer), undefined)
+                .map_err(operand)?;
+            let rhs = expand_scalar_for_condition(rhs, props, fs.map(|fs| fs.observer), undefined)
+                .map_err(operand)?;
             // As equality reads a number, or may (it compares no versions).
             let numeric = |value: &str| !matches!(equality_number(value), Ok(None));
             if matches!(op, CompareOp::Eq | CompareOp::Neq)
                 && ((lhs_toolset && numeric(&rhs)) || (rhs_toolset && numeric(&lhs)))
             {
-                return Err(Reject::Unmodelled);
+                return Err(Reject::Undecided);
             }
-            if !matches!(op, CompareOp::Eq | CompareOp::Neq) {
+            if relational {
                 let ordering = compare_relational_values(&lhs, &rhs).map_err(|()| {
                     // MSBuild throws when either side is neither a number nor
                     // a version, whatever the other side holds.
@@ -1749,7 +1962,8 @@ fn eval_bool(
                     CompareOp::Eq | CompareOp::Neq => unreachable!(),
                 });
             }
-            let equal = compare_equality_values(&lhs, &rhs)?;
+            // Equality throws on no value.
+            let equal = compare_equality_values(&lhs, &rhs).map_err(|()| Reject::Undecided)?;
             Ok(match op {
                 CompareOp::Eq => equal,
                 CompareOp::Neq => !equal,
@@ -1764,7 +1978,7 @@ fn expand_scalar_for_condition(
     props: &PropertyMap,
     fs_observer: Option<&Observer>,
     undefined: &mut Vec<String>,
-) -> Result<String, ()> {
+) -> Result<String, Reject> {
     match scalar {
         // MSBuild expands a quoted operand only when its scanner saw something
         // to expand in it (`Scanner.ParseQuotedString`: a `$(`, `@(`, `%(` or
@@ -1776,7 +1990,7 @@ fn expand_scalar_for_condition(
         ScalarExpr::Property(raw) => expand_operand(raw, props, fs_observer, undefined),
         ScalarExpr::SystemVersionPart { arg, part } => {
             let version = expand_system_version_parse_arg(arg, props, fs_observer, undefined)?;
-            let version = parse_system_version(&version)?;
+            let version = parse_system_version(&version).map_err(Reject::from)?;
             let idx = match part {
                 VersionPart::Build => 2,
                 VersionPart::Revision => 3,
@@ -1807,7 +2021,7 @@ fn expand_system_version_parse_arg(
     props: &PropertyMap,
     fs_observer: Option<&Observer>,
     undefined: &mut Vec<String>,
-) -> Result<String, ()> {
+) -> Result<String, Reject> {
     if let Some(property) = split_dash_zero_property(raw) {
         // A condition's trust is the whole-tree scan, not its operands' (see
         // [`expand_for_condition`]).
@@ -1833,15 +2047,23 @@ fn eval_msbuild_version_function(
     props: &PropertyMap,
     fs_observer: Option<&Observer>,
     undefined: &mut Vec<String>,
-) -> Result<bool, ()> {
-    let (function, raw_args) = parse_msbuild_version_function_call(inner).ok_or(())?;
-    let args = split_function_args(raw_args)?;
+) -> Result<bool, Reject> {
+    let (function, raw_args) =
+        parse_msbuild_version_function_call(inner).ok_or(Reject::Unmodelled)?;
+    let args = split_function_args(raw_args).map_err(Reject::from)?;
     if args.len() != 2 {
-        return Err(());
+        return Err(Reject::Unmodelled);
     }
     let lhs = expand_function_arg_for_condition(args[0], props, fs_observer, undefined)?;
     let rhs = expand_function_arg_for_condition(args[1], props, fs_observer, undefined)?;
-    let ordering = crate::properties::compare_msbuild_versions(&lhs, &rhs)?;
+    // A malformed operand is MSB4184, where we read it as MSBuild does.
+    let ordering = crate::properties::compare_msbuild_versions(&lhs, &rhs).map_err(|()| {
+        if crate::properties::msbuild_version_failure_throws(&lhs, &rhs) {
+            Reject::Throws
+        } else {
+            Reject::Unmodelled
+        }
+    })?;
     Ok(match function {
         CompareOp::Gt => ordering.is_gt(),
         CompareOp::Gte => !ordering.is_lt(),
@@ -1887,7 +2109,7 @@ fn expand_function_arg_for_condition(
     props: &PropertyMap,
     fs_observer: Option<&Observer>,
     undefined: &mut Vec<String>,
-) -> Result<String, ()> {
+) -> Result<String, Reject> {
     let raw = raw.trim();
     let unquoted = raw.strip_prefix('\'').and_then(|s| s.strip_suffix('\''));
     expand_operand(unquoted.unwrap_or(raw), props, fs_observer, undefined)
@@ -2162,7 +2384,7 @@ fn expand_for_condition(
     props: &PropertyMap,
     fs_observer: Option<&Observer>,
     undefined: &mut Vec<String>,
-) -> Result<Escaped, ()> {
+) -> Result<Escaped, Reject> {
     // FS-probing property functions follow the same split as `Exists()`:
     // available exactly when the caller supplied a filesystem oracle.
     let (value, issues) = if let Some(observer) = fs_observer {
@@ -2177,16 +2399,33 @@ fn expand_for_condition(
     // the scan of its whole tree instead (`State::condition_trust`, Bucket B of
     // `docs/msbuild-value-carried-provenance-plan.md`).
     let value = value.into_ignoring_trust();
+    // MSBuild expands the operand left to right and throws at the first
+    // expression it throws on; whatever came before, it throws or rejects.
+    // So the worst issue classifies the operand: a throw, then an expression
+    // we do not model (which MSBuild may throw on), then a value the Unix
+    // path adjustment leaves unknown (which it does not throw on).
+    let mut worst: Option<Reject> = None;
     for issue in issues {
-        match issue {
-            Issue::Undefined { name } => undefined.push(name),
-            Issue::Unsupported { .. } | Issue::PathAdjustmentUndecided { .. } => return Err(()),
-        }
+        let reject = match issue {
+            Issue::Undefined { name } => {
+                undefined.push(name);
+                continue;
+            }
+            Issue::Throws { .. } => Reject::Throws,
+            Issue::Unsupported { .. } => Reject::Unmodelled,
+            Issue::Returns { .. } | Issue::PathAdjustmentUndecided { .. } => Reject::Undecided,
+        };
+        worst = worst.max(Some(reject));
+    }
+    if let Some(reject) = worst {
+        return Err(reject);
     }
     // Item and metadata references are scanned on the **escaped** text, exactly
-    // as MSBuild scans them: an escaped `%25(` is not a metadata reference.
+    // as MSBuild scans them: an escaped `%25(` is not a metadata reference. In
+    // an item's condition MSBuild expands one the substituted text forms, and
+    // may throw on it (an item function it does not know, MSB4184).
     if value.as_escaped().contains("@(") || value.as_escaped().contains("%(") {
-        return Err(());
+        return Err(Reject::Unmodelled);
     }
     // The value stays **in the domain**. Most operands are compared as text and
     // decode immediately ([`expand_operand`]) — but a built-in that splits or
@@ -2205,7 +2444,7 @@ fn expand_operand(
     props: &PropertyMap,
     fs_observer: Option<&Observer>,
     undefined: &mut Vec<String>,
-) -> Result<String, ()> {
+) -> Result<String, Reject> {
     Ok(expand_for_condition(raw, props, fs_observer, undefined)?.unescape())
 }
 
@@ -2271,7 +2510,7 @@ mod tests {
             Decision::Unsupported
         );
         assert!(!decided_conjunctwise(
-            "$([System.String]::IsNullOrWhiteSpace('')) Or true",
+            "$([System.String]::Copy('')) Or true",
             &props,
             None,
             &never,
@@ -3128,9 +3367,11 @@ mod tests {
             evaluate("$([msbuild]::versionequals('1.0','1'))", &p),
             Outcome::True
         );
+        // A malformed operand throws (MSB4184; probed, msbuild-condition-oracle,
+        // SDK 10.0.401).
         assert_eq!(
             evaluate("$([MSBuild]::VersionEquals('abc', '1.0'))", &p),
-            Outcome::Unsupported
+            Outcome::Illegal
         );
     }
 
@@ -3182,26 +3423,27 @@ mod tests {
 
     #[test]
     fn msbuild_version_comparison_functions_reject_invalid_version_operands() {
+        // Each throws (MSB4184; probed, msbuild-condition-oracle, SDK 10.0.401).
         assert_eq!(
             evaluate(
                 "$([MSBuild]::VersionGreaterThan('1.2.3.4.5', '1.0'))",
                 &PropertyMap::new(),
             ),
-            Outcome::Unsupported
+            Outcome::Illegal
         );
         assert_eq!(
             evaluate(
                 "$([MSBuild]::VersionGreaterThan('2147483648.0', '1.0'))",
                 &PropertyMap::new(),
             ),
-            Outcome::Unsupported
+            Outcome::Illegal
         );
         assert_eq!(
             evaluate(
                 "$([MSBuild]::VersionGreaterThanOrEquals('vv1.2', '1.0'))",
                 &PropertyMap::new(),
             ),
-            Outcome::Unsupported
+            Outcome::Illegal
         );
     }
 
@@ -4316,7 +4558,9 @@ mod prop_tests {
 
         /// The MSBuild version helper functions compare missing Build/Revision
         /// components as zero, but their operands still have to fit
-        /// System.Version's shape and component range.
+        /// System.Version's shape and component range: MSBuild throws on one
+        /// that does not (each family probed, msbuild-condition-oracle, SDK
+        /// 10.0.401; `rejection_generative_diff` grades the claim).
         #[test]
         fn msbuild_version_functions_reject_generated_invalid_operands(
             invalid in arb_invalid_msbuild_version_operand(),
@@ -4326,7 +4570,7 @@ mod prop_tests {
                 format!("$([MSBuild]::VersionGreaterThan('{invalid}', '{valid}'))");
             prop_assert_eq!(
                 evaluate(&invalid_lhs, &PropertyMap::new()),
-                Outcome::Unsupported,
+                Outcome::Illegal,
                 "invalid lhs operand was accepted in {:?}",
                 invalid_lhs,
             );
@@ -4335,7 +4579,7 @@ mod prop_tests {
                 format!("$([MSBuild]::VersionLessThan('{valid}', '{invalid}'))");
             prop_assert_eq!(
                 evaluate(&invalid_rhs, &PropertyMap::new()),
-                Outcome::Unsupported,
+                Outcome::Illegal,
                 "invalid rhs operand was accepted in {:?}",
                 invalid_rhs,
             );

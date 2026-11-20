@@ -345,6 +345,18 @@ dimensions! {
             "A hostile value a later write replaces: what read it in between has already used it.",
         LongValue = "long-value":
             "A value of tens of thousands of characters.",
+        NumberSpelling = "number-spelling":
+            "A spelling at the edge of what .NET reads as a number: NaN, an infinity, hex, a sign, a trailing NUL.",
+        VersionSpelling = "version-spelling":
+            "A spelling at the edge of what .NET or MSBuild reads as a version: a `-0` component, five components, a `v`, a suffix.",
+        BooleanSpelling = "boolean-spelling":
+            "A spelling at the edge of MSBuild's boolean vocabulary: a negation, another case, padding.",
+        ItemSeparator = "item-separator":
+            "A `;` that splits the value into items, or into the pieces an indexer counts.",
+        ItemExpression = "item-expression":
+            "Text that forms an item list, transform or metadata reference where it is spliced, which MSBuild expands in an item's condition.",
+        CaseFolding = "case-folding":
+            "A letter whose case folds outside ASCII, which ordinal-ignore-case comparison folds and ASCII folding does not.",
     }
     XmlSpelling {
         CharRef = "char-ref":

@@ -1408,6 +1408,10 @@ struct Expansion {
     /// property that is itself unpinned. Recorded when the value is stored
     /// as a property ([`Trust::unpinned`]).
     unpinned_root: Option<UnpinnedRoot>,
+    /// The first `$(…)` MSBuild throws on, on the values the expansion read
+    /// ([`rejection::first_throw`]); `had_unsupported` is set with it. A
+    /// rejection wherever MSBuild evaluates the text: the caller judges where.
+    throws: Option<String>,
 }
 
 impl Expansion {
@@ -3392,6 +3396,7 @@ impl<'r> State<'r> {
         };
         let mut had_undefined = false;
         let mut had_unsupported = false;
+        let throws = rejection::first_throw(&issues);
         let mut direct_undefined: Vec<String> = Vec::new();
         // The direct reads whose diagnostic doubted on every axis: the self-
         // append's own read did not doubt the define axis, so a root naming
@@ -3414,7 +3419,9 @@ impl<'r> State<'r> {
                     }
                     continue;
                 }
-                Issue::Unsupported { expression } => {
+                Issue::Unsupported { expression }
+                | Issue::Returns { expression }
+                | Issue::Throws { expression } => {
                     had_unsupported = true;
                     DiagnosticKind::UnsupportedPropertyExpression { expression }
                 }
@@ -3491,6 +3498,7 @@ impl<'r> State<'r> {
             had_undefined,
             had_unsupported,
             unpinned_root,
+            throws,
         }
     }
 
@@ -4474,10 +4482,22 @@ fn walk_property_child_inner(
         state.trust_for_raw(&condition).stale().is_none()
             || directory_build::decided_from_certain_inputs(state, &condition, &entry_dir)
     });
+    // Whether MSBuild evaluates the body exactly when the walk does
+    // ([`rejection`]), asked of the values the gate reads: only for a body
+    // that throws, or one the walk skips.
+    let own_gate_certain = |state: &State<'_>| {
+        attribute(node, "Condition").is_none_or(|condition| {
+            directory_build::decided_from_certain_inputs(state, &condition, &entry_dir)
+        })
+    };
     let diagnostics_before_condition = state.diagnostics.len();
     let gate = evaluate_property_condition(node, state);
     let own_condition_maybe_wrong = state.diagnostics.len() != diagnostics_before_condition
         || matches!(&gate, CondGate::Unsupported);
+    // MSBuild may take a write the walk skips, and evaluate its body.
+    if !matches!(gate, CondGate::Run) && !own_gate_certain(state) {
+        rejection::judge_unwalked_body(node, false, state);
+    }
     let write_condition_maybe_wrong = inherited_condition_maybe_wrong || own_condition_maybe_wrong;
     let condition_taints_property = inherited_sdk_package_taint
         || condition_uses_sdk_taint
@@ -4603,6 +4623,10 @@ fn walk_property_child_inner(
     let value_uses_sdk_taint = state.raw_uses_sdk_package_taint(&raw);
     let expansion = state.expand_property_pass_value(&raw, node.range(), &name);
     state.in_define_value = prev_in_value;
+    if let Some(expression) = expansion.throws.clone() {
+        let reached = rejection::reach_is_certain(state) && own_gate_certain(state);
+        rejection::judge_throwing_expression(state, expression, reached, node.range());
+    }
     let value_taints_property = condition_taints_property
         || value_uses_sdk_taint
         || (state.in_sdk_subtree && expansion.had_issue());

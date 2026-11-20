@@ -397,7 +397,7 @@ fn compile_update_compile_order_scales_with_items_and_targets() {
 #[test]
 fn judging_a_long_condition_chain_is_linear() {
     const N: usize = 40_000;
-    let mut condition = String::from("$([System.String]::IsNullOrWhiteSpace(''))");
+    let mut condition = String::from("'É' == 'é'");
     for _ in 0..N {
         condition.push_str(" And 'a' == 'a'");
     }
@@ -431,7 +431,7 @@ fn judging_an_operand_of_many_references_is_linear() {
     let references = "$(P)".repeat(N);
     let src = format!(
         "<Project><PropertyGroup><P>p</P></PropertyGroup>\
-         <PropertyGroup Condition=\"$([System.String]::IsNullOrWhiteSpace('')) And \
+         <PropertyGroup Condition=\"'É' == 'é' And \
          '{references}' != '' And 1 &lt; abc\"><R>x</R></PropertyGroup></Project>"
     );
     let start = std::time::Instant::now();
@@ -1204,7 +1204,7 @@ fn undecided_choose_then(branch: &str, tail: &str) -> String {
     format!(
         r#"<Project>
   <Choose>
-    <When Condition="'$([System.Guid]::NewGuid())' == ''">
+    <When Condition="'É' == 'Ê'">
       {branch}
     </When>
   </Choose>

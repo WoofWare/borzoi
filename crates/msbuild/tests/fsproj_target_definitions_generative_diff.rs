@@ -35,7 +35,7 @@ const CONDITIONS: [&str; 4] = [
     "",
     " Condition=\"'$(Name)' == 'n'\"",
     " Condition=\"'$(Name)' == 'other'\"",
-    " Condition=\"$([System.String]::IsNullOrWhiteSpace(''))\"",
+    " Condition=\"'É' == 'é'\"",
 ];
 
 fn name(rng: &mut SplitMix64) -> &'static str {

@@ -27,13 +27,26 @@
 //! that path. `Exists` is true of a directory and of a dangling link, neither
 //! of which an import loads, so either is still a rejection.
 //!
-//! A condition the walk evaluates to [`condition::Outcome::Illegal`] is a
-//! site too ([`judge_condition_rejection`]), and so is one MSBuild may evaluate
-//! where the walk does not: under a gate the walk could not decide from
-//! certain inputs ([`judge_unwalked`]), and every condition of the item pass,
-//! judged group by group ([`judge_deferred`]) because MSBuild evaluates an
-//! item's condition, and an `Include` item's metadata conditions, whatever
-//! its group's or its own gate holds.
+//! A condition is a site too ([`judge_condition_rejection`]): one the walk
+//! evaluates to [`condition::Outcome::Illegal`], or one whose evaluation stops
+//! at an operand MSBuild may throw on (a property function the walk does not
+//! model, reached on values it holds). So is one MSBuild may evaluate where
+//! the walk does not: under a gate the walk could not decide from certain
+//! inputs ([`judge_unwalked`]), and every condition of the item pass, judged
+//! group by group ([`judge_deferred`]) because MSBuild evaluates an item's
+//! condition, and an `Include` item's metadata conditions, whatever its
+//! group's or its own gate holds.
+//!
+//! So is a property function MSBuild throws on (an indexer out of range, a
+//! malformed `[MSBuild]::Version*` operand: [`properties::Issue::Throws`]) in
+//! text it evaluates: a property body, walked or not ([`judge_unwalked_body`]),
+//! an item's attributes and metadata, an item definition's
+//! ([`judge_throwing_expression`]). One the walk does not model in such text
+//! is no site yet (#1094): the SDK's own bodies call several on certain
+//! values. Nor is a throw on a value the walk holds none of (a write it
+//! refused to compute, a reserved name it does not seed), in a condition or a
+//! text: whether MSBuild's own value throws is the judgement over the values a
+//! name may hold, #1009's second stage.
 //!
 //! **Certain.** A [`RejectionCertainty::Certain`] site is a claim the
 //! differentials grade, so it needs MSBuild to reach the construct for
@@ -55,9 +68,11 @@
 //! - an illegal condition must throw whatever the names it reaches that the
 //!   walk is not certain of hold, the stale channel included
 //!   ([`judge_condition_rejection`]): a syntax error, or an ill-typed operand
-//!   (MSB4086, a non-boolean scalar) reached, left to right, through operands
-//!   of certain value. What an operand MSBuild never reaches reads does not
-//!   matter.
+//!   (MSB4086, a non-boolean scalar) or a property function MSBuild throws on,
+//!   reached, left to right, through operands of certain value. What an
+//!   operand MSBuild never reaches reads does not matter;
+//! - a property function MSBuild throws on in text must read only names the
+//!   walk is certain of ([`judge_throwing_expression`]).
 //!
 //! Short of that, the same construct is a Possible site.
 //!
@@ -104,9 +119,9 @@ use crate::{Rejection, RejectionCause, RejectionCertainty, UnloadableImport};
 use super::item_pass::expand_silent;
 use super::observed::{self, EntryKind};
 use super::{
-    SdkResolution, State, condition, condition_exists, directory_build, import_dedup_key, loader,
-    properties, sdk_import_path, sdk_project_in_alphabet, sdk_project_under_root,
-    sdk_project_written_rooted, sdk_root_is_reparsed,
+    SdkResolution, State, collect_element_text, condition, condition_exists, directory_build,
+    import_dedup_key, loader, properties, sdk_import_path, sdk_project_in_alphabet,
+    sdk_project_under_root, sdk_project_written_rooted, sdk_root_is_reparsed,
 };
 
 impl State<'_> {
@@ -192,6 +207,19 @@ pub(super) fn operands_are_certain(state: &State<'_>, text: &str) -> bool {
     properties::property_references(text).all(|name| directory_build::is_certain(state, name))
 }
 
+/// Whether the walk holds a value of `name` MSBuild may hold, as a Possible
+/// site asks: one it computed (bound), however it doubts it, or an undefined
+/// read it shows exact. A value the walk doubts is one MSBuild may hold among
+/// others: a write it skipped under a gate it could not decide adds one, and
+/// hidden content may have rewritten it, or not. A name the walk holds no
+/// value of and cannot show undefined is otherwise: `""` for a write it
+/// refused to compute, or for a reserved name it does not seed, is a value
+/// MSBuild need not hold at all, so what a function does on it says nothing of
+/// the build.
+pub(super) fn holds_a_value_msbuild_may(state: &State<'_>, name: &str) -> bool {
+    state.lookup.is_bound(name) || state.undefined_read_is_exact(name)
+}
+
 /// Whether the walk names the `Project` of the import at `node` from certain
 /// values ([`operands_are_certain`]), with nothing it leaves as text.
 pub(super) fn import_path_is_certain(node: Node<'_, '_>, state: &State<'_>) -> bool {
@@ -236,8 +264,11 @@ pub(super) fn import_failure_certainty(
 ///
 /// One whose evaluation stopped at an operand we cannot evaluate
 /// ([`condition::Outcome::Unsupported`]) is a Possible site where, on the
-/// values the walk holds, that operand may let MSBuild reach one it throws
-/// on.
+/// values the walk holds, that operand may throw itself (one we do not model,
+/// a property function included), or may let MSBuild reach one it throws on.
+/// An operand MSBuild evaluates without throwing, to a boolean we cannot
+/// compute (a string equality whose case folding we do not model), is no
+/// site of its own ([`condition::Throws::Never`]).
 ///
 /// A condition legal on the values the walk holds is no site, though one it
 /// reaches may throw on another value of a name the walk is not certain of
@@ -258,41 +289,103 @@ pub(super) fn judge_condition_rejection(
         exists: &exists,
         observer,
     });
-    match outcome {
-        condition::Outcome::True | condition::Outcome::False => return,
-        condition::Outcome::Unsupported => {
-            // Evaluation stopped at an operand we cannot evaluate, which may
-            // return a value that lets MSBuild reach one it throws on with
-            // the values the walk holds. What an operand past it reads from
-            // the file system may decide whether it throws, so the judgement
-            // probes as the evaluation would have.
-            if condition::may_throw(condition, &state.lookup, probes, &|_| false) {
-                state.note_rejection(
-                    RejectionCertainty::Possible,
-                    RejectionCause::IllegalCondition {
-                        condition: condition.to_owned(),
-                    },
-                    span,
-                );
-            }
-            return;
-        }
-        condition::Outcome::Illegal => {}
+    if matches!(
+        outcome,
+        condition::Outcome::True | condition::Outcome::False
+    ) {
+        return;
     }
+    let uncertain = |name: &str| !directory_build::is_certain(state, name);
     // Reached only perhaps, it is Possible however its operands stand, and
     // judging them would only probe the file system for nothing.
-    let certainly = reached && {
-        let uncertain = |name: &str| !directory_build::is_certain(state, name);
-        condition::throws_whatever(condition, &state.lookup, probes, &uncertain)
-    };
-    let certainty = certain_if(certainly);
+    let certainly = reached
+        && outcome == condition::Outcome::Illegal
+        && condition::throws_whatever(condition, &state.lookup, probes, &uncertain);
+    // Short of that, evaluation threw, or stopped at an operand we cannot
+    // evaluate, which may throw, or return a value that lets MSBuild reach
+    // one it throws on with the values the walk holds. What an operand past
+    // it reads from the file system may decide whether it throws, so the
+    // judgement probes as the evaluation would have.
+    let doubted = |name: &str| !holds_a_value_msbuild_may(state, name);
+    if certainly || condition::may_throw_on_held(condition, &state.lookup, probes, &doubted) {
+        state.note_rejection(
+            certain_if(certainly),
+            RejectionCause::IllegalCondition {
+                condition: condition.to_owned(),
+            },
+            span,
+        );
+    }
+}
+
+/// The first `$(…)` of `text` MSBuild throws on, on the values the walk holds
+/// ([`properties::Issue::Throws`]): for text MSBuild may evaluate where the
+/// walk does not. Expanded without the file system, so it probes nothing: an
+/// expression that would need a probe claims nothing.
+pub(super) fn throwing_expression(text: &str, state: &State<'_>) -> Option<String> {
+    let (_, issues) = properties::substitute(text, &state.lookup);
+    first_throw(&issues)
+}
+
+/// The first expression of an expansion's `issues` MSBuild throws on
+/// ([`properties::Issue::Throws`]). MSBuild expands the whole text and throws
+/// at the first expression it throws on, so a throw anywhere is the text's,
+/// whatever came before it: one the walk does not model either throws too or
+/// returns.
+pub(super) fn first_throw(issues: &[properties::Issue]) -> Option<String> {
+    issues.iter().find_map(|issue| match issue {
+        properties::Issue::Throws { expression } => Some(expression.clone()),
+        _ => None,
+    })
+}
+
+/// Note the rejection MSBuild makes evaluating a text, at `span`, whose
+/// `$(…)` `expression` throws on the values the walk holds. `reached`:
+/// whether MSBuild evaluates the text for certain. MSBuild expands the whole
+/// text, and a throw anywhere in it rejects the project, so what an
+/// expression before the throwing one does is moot: it is certain where it is
+/// reached for certain and every name `expression` reads is certain
+/// ([`operands_are_certain`]).
+///
+/// Short of that it is Possible, where every name `expression` reads holds a
+/// value MSBuild may hold ([`holds_a_value_msbuild_may`]). A throw on one
+/// that does not is no site: the value held is none MSBuild need hold, and
+/// whether the function throws on MSBuild's own value is the judgement over
+/// the values a name may hold (#1009's second stage), as for a condition
+/// ([`condition::may_throw_on_held`]).
+pub(super) fn judge_throwing_expression(
+    state: &mut State<'_>,
+    expression: String,
+    reached: bool,
+    span: Range<usize>,
+) {
+    if !properties::property_references(&expression)
+        .all(|name| holds_a_value_msbuild_may(state, name))
+    {
+        return;
+    }
+    let certainty = certain_if(reached && operands_are_certain(state, &expression));
     state.note_rejection(
         certainty,
-        RejectionCause::IllegalCondition {
-            condition: condition.to_owned(),
-        },
+        RejectionCause::ThrowingExpression { expression },
         span,
     );
+}
+
+/// Judge `text`, at `span`, which MSBuild evaluates as `reached` says and the
+/// walk does not, for an expression MSBuild throws on.
+fn judge_unwalked_text(state: &mut State<'_>, text: &str, reached: bool, span: Range<usize>) {
+    if let Some(expression) = throwing_expression(text, state) {
+        judge_throwing_expression(state, expression, reached, span);
+    }
+}
+
+/// Judge the body of the property write at `node`, which MSBuild evaluates
+/// as `reached` says and the walk does not ([`judge_unwalked_text`]).
+pub(super) fn judge_unwalked_body(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
+    if let Some(text) = collect_element_text(node) {
+        judge_unwalked_text(state, &text, reached, node.range());
+    }
 }
 
 /// Judge the file whose root element is `root`, which the walk is entering,
@@ -438,16 +531,21 @@ pub(super) fn judge_unwalked(node: Node<'_, '_>, dir: &Path, reached: bool, stat
         "ItemGroup" => judge_item_group(node, reached, state),
         "ItemDefinitionGroup" => judge_item_definition_group(node, reached, state),
         // A `<UsingTask>` resolves `Exists` against its own file's directory.
+        // MSBuild expands its attributes where it takes it.
         "UsingTask" => {
-            judge_condition(node, dir, reached, state);
+            let gate = judge_gate(node, dir, reached, state);
+            if let Some(inner) = gate.inner(reached) {
+                judge_unwalked_attributes(node, inner, state);
+            }
         }
         _ => {}
     }
 }
 
 /// Judge the property writes of the `<PropertyGroup>` at `node`, which
-/// MSBuild evaluates as `reached` says. A write of a global property is
-/// discarded unevaluated, condition and all.
+/// MSBuild evaluates as `reached` says: each one's condition, and its body
+/// where the condition may hold. A write of a global property is discarded
+/// unevaluated, condition and all.
 pub(super) fn judge_properties(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
     let entry_dir = state.entry_project_dir.clone();
     for child in node.children().filter(Node::is_element) {
@@ -457,7 +555,9 @@ pub(super) fn judge_properties(node: Node<'_, '_>, reached: bool, state: &mut St
         {
             continue;
         }
-        judge_condition(child, &entry_dir, reached, state);
+        if let Some(body_reached) = judge_gate(child, &entry_dir, reached, state).inner(reached) {
+            judge_unwalked_body(child, body_reached, state);
+        }
     }
 }
 
@@ -525,6 +625,16 @@ pub(super) fn judge_deferred(node: Node<'_, '_>, dir: &Path, reached: bool, stat
     judge_unwalked(node, dir, reached, state);
 }
 
+/// Judge each attribute of `node` but its `Condition`, which MSBuild expands
+/// as `reached` says, for an expression it throws on.
+fn judge_unwalked_attributes(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
+    for attr in node.attributes() {
+        if attr.name() != "Condition" {
+            judge_unwalked_text(state, attr.value(), reached, node.range());
+        }
+    }
+}
+
 /// Judge the `<ItemGroup>` at `node`, which MSBuild reaches as `reached` says.
 /// MSBuild evaluates each item's condition whatever the group's holds, and an
 /// `Include` item's metadata conditions whatever the item's holds; an
@@ -532,11 +642,28 @@ pub(super) fn judge_deferred(node: Node<'_, '_>, dir: &Path, reached: bool, stat
 /// item metadata (`%(…)`) or an item list (`@(…)`) is evaluated item by item,
 /// so not at all when the `Include` names no item: then its conditions are
 /// only possibly evaluated.
+///
+/// It expands an `Include` whatever the group's and the item's conditions
+/// hold, and each metadatum's value whatever the item's holds but not under a
+/// false condition of its own (`tests/condition_diff.rs`'s
+/// `where_msbuild_evaluates_a_text`). The rest of the item (its other
+/// attributes, an `Update`'s metadata, which MSBuild expands only where the
+/// update applies) is claimed reached only under gates decided true from
+/// certain inputs.
 fn judge_item_group(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
     let entry_dir = state.entry_project_dir.clone();
-    judge_condition(node, &entry_dir, reached, state);
+    let group = judge_gate(node, &entry_dir, reached, state);
     for item in node.children().filter(Node::is_element) {
-        judge_condition(item, &entry_dir, reached, state);
+        let gated = judge_gate(item, &entry_dir, reached, state);
+        let strictly = reached && group == Judged::Decided(true) && gated == Judged::Decided(true);
+        for attr in item.attributes() {
+            let attr_reached = match attr.name() {
+                "Condition" => continue,
+                "Include" => reached,
+                _ => strictly,
+            };
+            judge_unwalked_text(state, attr.value(), attr_reached, item.range());
+        }
         if let Some(sure) = loader::remove_matching_more_than_items(item) {
             state.note_rejection(
                 certain_if(reached && sure),
@@ -560,7 +687,11 @@ fn judge_item_group(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
             });
         let metadata_reached = reached && attribute(item, "Include").is_some() && !per_item;
         for metadata in item.children().filter(Node::is_element) {
-            judge_condition(metadata, &entry_dir, metadata_reached, state);
+            if let Some(value_reached) =
+                judge_gate(metadata, &entry_dir, metadata_reached, state).inner(metadata_reached)
+            {
+                judge_unwalked_body(metadata, value_reached, state);
+            }
         }
     }
 }
@@ -579,8 +710,13 @@ fn judge_item_definition_group(node: Node<'_, '_>, reached: bool, state: &mut St
         else {
             continue;
         };
+        judge_unwalked_attributes(definition, metadata_reached, state);
         for metadata in definition.children().filter(Node::is_element) {
-            judge_condition(metadata, &entry_dir, metadata_reached, state);
+            if let Some(value_reached) =
+                judge_gate(metadata, &entry_dir, metadata_reached, state).inner(metadata_reached)
+            {
+                judge_unwalked_body(metadata, value_reached, state);
+            }
         }
     }
 }

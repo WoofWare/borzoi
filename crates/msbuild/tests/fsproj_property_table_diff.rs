@@ -1444,8 +1444,8 @@ fn gen_spaced_condition(rng: &mut SplitMix64) -> String {
 
 /// How many documents [`conditions_with_raw_whitespace_are_exact_or_declined`]
 /// generates that MSBuild rejects for a condition the walk reads as
-/// unmodelled rather than illegal (#783).
-const RAW_WHITESPACE_REJECTED_UNMODELLED: usize = 121;
+/// unmodelled rather than illegal, and does not show may throw (#783, #1009).
+const RAW_WHITESPACE_REJECTED_UNMODELLED: usize = 100;
 
 /// The whitespace axis at the XML layer (#750): conditions, generated and
 /// built around quoted strings holding spaces, with their spaces respelt as
@@ -1957,7 +1957,7 @@ fn an_undecided_choose_hides_only_the_names_its_branches_write() {
     for (branch, writes_gamma) in rows {
         for gate in ["==", "!="] {
             let xml = format!(
-                "<Project>\n  <Choose>\n    <When Condition=\"'$([System.Guid]::NewGuid())' {gate} ''\">\n      \
+                "<Project>\n  <Choose>\n    <When Condition=\"'É' {gate} 'Ê'\">\n      \
                  {branch}\n    </When>\n  </Choose>\n  <PropertyGroup>\n    \
                  <Alpha Condition=\"'$(Gamma)' == ''\">a</Alpha>\n    \
                  <Beta Condition=\"'$(Delta)' == ''\">b</Beta>\n  </PropertyGroup>\n</Project>\n"
@@ -1985,8 +1985,8 @@ fn an_undecided_choose_hides_only_the_names_its_branches_write() {
 /// the undecided gates meet every target.
 #[test]
 fn import_failures_commit_nothing_for_a_project_msbuild_rejects() {
-    const UNDECIDED_TRUE: &str = "$([System.String]::IsNullOrWhiteSpace(''))";
-    const UNDECIDED_FALSE: &str = "$([System.String]::IsNullOrWhiteSpace('no'))";
+    const UNDECIDED_TRUE: &str = "'É' == 'é'";
+    const UNDECIDED_FALSE: &str = "'É' == 'Ê'";
     // `{p}` is the import's own `Project` text.
     const PROBES_ITS_OWN_FILE_OR_IS_FALSE: &[&str] = &[
         "'a' == 'b'",
@@ -2162,8 +2162,8 @@ fn import_failures_commit_nothing_for_a_project_msbuild_rejects() {
 /// printed.
 #[test]
 fn illegal_conditions_reject_exactly_where_msbuild_evaluates_them() {
-    const UNDECIDED_TRUE: &str = "$([System.String]::IsNullOrWhiteSpace(''))";
-    const UNDECIDED_FALSE: &str = "$([System.String]::IsNullOrWhiteSpace('no'))";
+    const UNDECIDED_TRUE: &str = "'É' == 'é'";
+    const UNDECIDED_FALSE: &str = "'É' == 'Ê'";
     // MSBuild's parser rejects each, whatever the values.
     let by_syntax = [
         "tr ue",
@@ -2192,6 +2192,17 @@ fn illegal_conditions_reject_exactly_where_msbuild_evaluates_them() {
         "$([System.String]::Unknown()) == '' And 1 &lt; abc",
         "'$(MSBuildToolsVersion)' == '18' And 1 &lt; abc",
         "'Current' != '18' And $([MSBuild]::GetDirectoryNameOfFileAbove('$(MSBuildProjectDirectory)', 'flag')) &gt; 1",
+        // A property function MSBuild throws on, on certain values: an indexer
+        // out of range, a malformed version (MSB4184), wherever it sits in the
+        // chain MSBuild evaluates (#1009).
+        "'$(Word.Split(`;`)[3])' == ''",
+        "'$(Word[5])' == '' And false",
+        "$([MSBuild]::VersionGreaterThan('$(Word)', '1.0'))",
+        "'a' == 'a' And $([MSBuild]::VersionLessThan('$(Word)', '1.0'))",
+        // One the walk does not model, on certain values, which MSBuild throws
+        // on: a Possible site, before the operand that decides the condition.
+        "'$(Word.Substring(5))' == '' And false",
+        "!('$(Word.Substring(5))' == '') Or true",
     ];
     // Ill typed exactly where `Exists` resolves against the project's
     // directory, which holds `flag`, or exactly where it resolves against the
@@ -2249,6 +2260,9 @@ fn illegal_conditions_reject_exactly_where_msbuild_evaluates_them() {
         "('a' == 'b' And $(Shaky)) Or 'a' == 'a'",
         "!(true Or $(Shaky) &gt; 2) Or 'a' == 'a'",
         "false And $(Maybe.Substring(5)) == ''",
+        "false And '$(Word.Split(`;`)[3])' == ''",
+        "true Or $([MSBuild]::VersionGreaterThan('$(Word)', '1.0'))",
+        "false And '$(Word.Substring(5))' == ''",
     ];
     // `(template, never)`: `{c}` is the condition, and `never` says MSBuild
     // evaluates it in no build, the walk deciding every gate that says so.
@@ -2509,7 +2523,7 @@ fn illegal_conditions_reject_exactly_where_msbuild_evaluates_them() {
             let decided = context != Context::AfterHiddenContent
                 && !condition.contains("Maybe")
                 && !condition.contains("Shaky")
-                && !condition.contains("IsNullOrWhiteSpace");
+                && !condition.contains('É');
             if never && decided {
                 assert_eq!(
                     parsed.rejection,
@@ -2555,6 +2569,179 @@ fn illegal_conditions_reject_exactly_where_msbuild_evaluates_them() {
     assert!(committed >= 400, "only {committed} committed");
 }
 
+/// Property functions MSBuild throws on (MSB4184) in text it evaluates: a
+/// property body, an item's `Include`, Exclude and metadata, a condition, on
+/// the values the walk is certain of (#1009). Each row pins the walk's verdict
+/// (`None` for no rejection) and is graded against design-time evaluation:
+/// where MSBuild rejects, the walk commits nothing; where it evaluates, every
+/// value the walk commits is MSBuild's, and it claims no rejection.
+///
+/// The first two rows are #993's first route on `main`'s single world: a
+/// write that throws (`Len` holds no `8`, so the indexer is out of range), and
+/// the write that does not, whose value a later condition coerces and throws
+/// on. The third is its second route: a condition whose substitution forms
+/// an item function MSBuild cannot run, in an item's condition.
+#[test]
+fn property_functions_msbuild_throws_on_reject_where_it_evaluates_them() {
+    use RejectionCertainty::{Certain, Possible};
+    let coerced = "<PropertyGroup Condition=\"'$(P)' == '' Or $(P)\"><Mid>m</Mid></PropertyGroup>";
+    let rows: &[(String, Option<RejectionCertainty>)] = &[
+        (
+            format!("<PropertyGroup><Len>10x</Len><P>$(Len.Split('8')[1])</P></PropertyGroup>{coerced}"),
+            Some(Certain),
+        ),
+        (
+            format!("<PropertyGroup><Len>8x</Len><P>$(Len.Split('8')[1])</P></PropertyGroup>{coerced}"),
+            Some(Certain),
+        ),
+        (
+            "<PropertyGroup><A>@</A><B>(Foo-&gt;NoSuchFunction())</B></PropertyGroup>\
+             <ItemGroup><Foo Include=\"f\" /><I Include=\"i\" Condition=\"'$(A)$(B)' == 'x'\" /></ItemGroup>"
+                .to_owned(),
+            Some(Possible),
+        ),
+        (
+            "<PropertyGroup><P>a;b</P><Q>$([MSBuild]::VersionLessThan('$(P)', '1.0'))</Q></PropertyGroup>"
+                .to_owned(),
+            Some(Certain),
+        ),
+        // Under a gate the walk cannot decide, MSBuild may take the write.
+        (
+            "<PropertyGroup><P>a;b</P><Q Condition=\"'É' == 'é'\">$(P[9])</Q></PropertyGroup>"
+                .to_owned(),
+            Some(Possible),
+        ),
+        (
+            "<PropertyGroup><P>a;b</P><Q Condition=\"'É' == 'Ê'\">$(P[9])</Q></PropertyGroup>"
+                .to_owned(),
+            Some(Possible),
+        ),
+        // Under a false gate, MSBuild never evaluates the body.
+        (
+            "<PropertyGroup><P>a;b</P><Q Condition=\"false\">$(P[9])</Q></PropertyGroup>"
+                .to_owned(),
+            None,
+        ),
+        (
+            "<PropertyGroup Condition=\"false\"><P>a;b</P><Q>$(P[9])</Q></PropertyGroup>".to_owned(),
+            None,
+        ),
+        // In range, it is a value.
+        (
+            "<PropertyGroup><P>a;b</P><Q>$(P.Split(';')[1])</Q></PropertyGroup>".to_owned(),
+            None,
+        ),
+        (
+            "<PropertyGroup><P>a;b</P></PropertyGroup><ItemGroup><I Include=\"$(P.Split(';')[3])\" /></ItemGroup>"
+                .to_owned(),
+            Some(Certain),
+        ),
+        (
+            "<PropertyGroup><P>a;b</P></PropertyGroup>\
+             <ItemGroup><I Include=\"x\" Exclude=\"$(P.Split(';')[3])\" /></ItemGroup>"
+                .to_owned(),
+            Some(Certain),
+        ),
+        (
+            "<PropertyGroup><P>a;b</P></PropertyGroup>\
+             <ItemGroup><I Include=\"x\"><M>$(P.Split(';')[3])</M></I></ItemGroup>"
+                .to_owned(),
+            Some(Certain),
+        ),
+        (
+            "<PropertyGroup><P>a;b</P></PropertyGroup>\
+             <ItemGroup><I Include=\"x\"><M Condition=\"false\">$(P.Split(';')[3])</M></I></ItemGroup>"
+                .to_owned(),
+            None,
+        ),
+        // A function the walk does not model, which MSBuild throws on, in a
+        // condition: a Possible site.
+        (
+            "<PropertyGroup><P>abc</P><Q Condition=\"'$(P.Substring(5))' == ''\">q</Q></PropertyGroup>"
+                .to_owned(),
+            Some(Possible),
+        ),
+    ];
+    let mut oracle = Oracle::spawn();
+    let tmp = TempDir::new().unwrap();
+    let dir = borzoi_msbuild::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    let project_path = dir.join("Demo.fsproj");
+    let names: Vec<String> = ["Len", "P", "Q", "A", "B", "Mid", "After"]
+        .map(String::from)
+        .to_vec();
+    for (body, expected) in rows {
+        let xml = format!(
+            "<Project>\n  {body}\n  <PropertyGroup><After>ok</After></PropertyGroup>\n</Project>\n"
+        );
+        std::fs::write(&project_path, &xml).unwrap();
+        let parsed = parse_fsproj_with_imports(
+            &borzoi_msbuild::ProjectFile::buffer(&project_path, &xml)
+                .expect("a project path spelt as its full path"),
+            &HashMap::new(),
+            &common::oracle_environment(),
+            None,
+            None,
+        )
+        .expect("well-formed");
+        let describe = || format!("--- xml ---\n{xml}\n{:#?}", parsed.rejection);
+        assert_eq!(
+            parsed.rejection.as_ref().map(|r| r.certainty),
+            *expected,
+            "{}",
+            describe()
+        );
+        let ours: Vec<(&String, String)> = names
+            .iter()
+            .filter_map(|name| match parsed.property(name) {
+                PropertyRead::Unset => Some((name, String::new())),
+                read => read.value().map(|v| (name, v.to_owned())),
+            })
+            .collect();
+        let both = oracle.project_both(&xml, &names, Some(&project_path), &[]);
+        match both.design_time {
+            None => assert!(
+                ours.is_empty(),
+                "MSBuild rejects this project, and the walk committed {ours:?}\n{}",
+                describe()
+            ),
+            Some(theirs) => {
+                assert_ne!(
+                    *expected,
+                    Some(Certain),
+                    "the walk claims MSBuild rejects this project, and it evaluates it\n{}",
+                    describe()
+                );
+                for (name, value) in &ours {
+                    assert_eq!(Some(value), theirs.get(*name), "{name}\n{}", describe());
+                }
+            }
+        }
+    }
+    // The same function in a body is a refused write, and no site yet:
+    // MSBuild rejects the project, and the walk commits (#1094). Pinned, so
+    // that judging it shows here.
+    let body = "<PropertyGroup><P>abc</P><Q>$(P.Substring(5))</Q></PropertyGroup>";
+    let xml = format!(
+        "<Project>\n  {body}\n  <PropertyGroup><After>ok</After></PropertyGroup>\n</Project>\n"
+    );
+    std::fs::write(&project_path, &xml).unwrap();
+    let parsed = parse_fsproj_with_imports(
+        &borzoi_msbuild::ProjectFile::buffer(&project_path, &xml)
+            .expect("a project path spelt as its full path"),
+        &HashMap::new(),
+        &common::oracle_environment(),
+        None,
+        None,
+    )
+    .expect("well-formed");
+    let both = oracle.project_both(&xml, &names, Some(&project_path), &[]);
+    assert!(both.design_time.is_none(), "MSBuild evaluates\n{xml}");
+    assert_eq!(
+        parsed.rejection, None,
+        "an unmodelled body is judged now: update the pin (#1094)\n{xml}"
+    );
+}
+
 /// Constructs MSBuild refuses when it loads the file holding them (#888): a
 /// reserved property name, an item without a usable `Include`, `Update` or
 /// `Remove`, an `<Import>` with no `Project`, a malformed `<Choose>`, beside
@@ -2569,7 +2756,7 @@ fn illegal_conditions_reject_exactly_where_msbuild_evaluates_them() {
 /// play and MSBuild evaluates the project, the walk must not withdraw.
 #[test]
 fn load_time_errors_reject_exactly_where_msbuild_loads_them() {
-    const UNDECIDED_TRUE: &str = "$([System.String]::IsNullOrWhiteSpace(''))";
+    const UNDECIDED_TRUE: &str = "'É' == 'é'";
     let properties = [
         "MSBuildProjectDirectory",
         "msbuildthisfile",
@@ -2785,7 +2972,7 @@ fn load_time_errors_reject_exactly_where_msbuild_loads_them() {
                     describe()
                 );
             }
-            if context != Context::AfterHiddenContent && !site.contains("IsNullOrWhiteSpace") {
+            if context != Context::AfterHiddenContent && !site.contains('É') {
                 assert_eq!(
                     parsed.rejection,
                     None,

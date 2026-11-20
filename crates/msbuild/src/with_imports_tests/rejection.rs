@@ -11,7 +11,7 @@ use super::*;
 use tempfile::TempDir;
 
 /// A condition conjunct MSBuild finds true and the walk cannot evaluate.
-const UNDECIDED_TRUE: &str = "$([System.String]::IsNullOrWhiteSpace(''))";
+const UNDECIDED_TRUE: &str = "'É' == 'é'";
 
 /// Whether the walk published nothing as the build's, for a rejection it may
 /// make: the facets and reads a rejected evaluation withdraws.
@@ -594,6 +594,77 @@ fn an_illegal_condition_msbuild_evaluates_is_rejected() {
     }
 }
 
+/// A property function MSBuild throws on (MSB4184) on values the walk is
+/// certain of, wherever MSBuild evaluates it: a condition, a property body,
+/// an item's `Include` or metadata (#1009). Each pinned in
+/// `tests/fsproj_property_table_diff.rs`'s
+/// `property_functions_msbuild_throws_on_reject_where_it_evaluates_them` or
+/// `tests/condition_diff.rs`'s corners.
+#[test]
+fn a_property_function_msbuild_throws_on_is_rejected() {
+    for body in [
+        "<PropertyGroup><P>a;b</P><R Condition=\"'$(P.Split(`;`)[3])' == ''\">x</R></PropertyGroup>",
+        "<PropertyGroup><P>abc</P><R Condition=\"'$(P[5])' == '' And false\">x</R></PropertyGroup>",
+        "<PropertyGroup><R Condition=\"$([MSBuild]::VersionGreaterThan('abc', '1.0'))\">x</R></PropertyGroup>",
+        "<PropertyGroup><P>a;b</P><R>$(P.Split(';')[3])</R></PropertyGroup>",
+        "<PropertyGroup><Len>10x</Len><R>$(Len.Split('8')[1])</R></PropertyGroup>",
+        "<PropertyGroup><P>a;b</P><R>$([MSBuild]::VersionLessThan('$(P)', '1.0'))</R></PropertyGroup>",
+        "<PropertyGroup><P>a;b</P></PropertyGroup><ItemGroup><I Include=\"$(P.Split(';')[3])\" /></ItemGroup>",
+        "<PropertyGroup><P>a;b</P></PropertyGroup><ItemGroup><I Include=\"x\"><M>$(P[9])</M></I></ItemGroup>",
+    ] {
+        for parsed in both_walkers(&format!("  {body}")) {
+            assert_rejected(&parsed, &["Before", "After"]);
+        }
+    }
+}
+
+/// An operand the walk does not model, reached on values it is certain of,
+/// may throw (`'abc'.Substring(5)` does, MSB4184): a Possible site, before
+/// the operand that decides the condition and not after it. One MSBuild
+/// evaluates without throwing, to a boolean the walk cannot compute, is none.
+#[test]
+fn an_unmodelled_operand_reached_on_certain_values_may_reject() {
+    for c in [
+        "'$(P.Substring(5))' == '' And false",
+        "!('$(P.Substring(5))' == '') Or true",
+        "'$(P.Substring(5))' == '' Or true",
+    ] {
+        let body = format!("<PropertyGroup><P>abc</P><R Condition=\"{c}\">x</R></PropertyGroup>");
+        for parsed in both_walkers(&format!("  {body}")) {
+            assert_withdrawn(&parsed, &["Before", "After"]);
+        }
+    }
+    for c in [
+        "false And '$(P.Substring(5))' == ''",
+        "true Or '$(P.Substring(5))' == ''",
+        "'É' == 'é'",
+        "'É' == 'é' And '$(P)' == 'abc'",
+    ] {
+        let body = format!("<PropertyGroup><P>abc</P><R Condition=\"{c}\">x</R></PropertyGroup>");
+        for parsed in both_walkers(&format!("  {body}")) {
+            assert_eq!(parsed.rejection, None, "{body}: {:#?}", parsed.diagnostics);
+        }
+    }
+}
+
+/// A property function that fails on a value the walk holds none of, and
+/// MSBuild may hold another of (a write the walk refused to compute, a
+/// reserved name it does not seed), is no site: the judgement over the values
+/// a name may hold (#1009's second stage). The SDK's own
+/// `VersionGreaterThanOrEquals($(MSBuildVersion), '17.0')` is of it.
+#[test]
+fn a_throw_on_a_value_the_walk_holds_none_of_is_not_yet_judged() {
+    for body in [
+        "<PropertyGroup><R Condition=\"$([MSBuild]::VersionGreaterThanOrEquals($(MSBuildVersion), '17.0'))\">x</R></PropertyGroup>",
+        "<PropertyGroup><Q>$(Configuration.Substring(0,1))</Q><R>$([MSBuild]::VersionLessThan('$(Q)', '18.9'))</R></PropertyGroup>",
+        "<PropertyGroup><Q>$(Configuration.Substring(0,1))</Q><R Condition=\"'$(Q.Split(`;`)[3])' == ''\">x</R></PropertyGroup>",
+    ] {
+        for parsed in both_walkers(&format!("  {body}")) {
+            assert_eq!(parsed.rejection, None, "{body}: {:#?}", parsed.diagnostics);
+        }
+    }
+}
+
 #[test]
 fn an_operand_msbuild_never_reaches_is_no_cause_to_withdraw() {
     // MSBuild stops at the operand that decides the condition, so it never
@@ -689,7 +760,7 @@ fn a_literal_needing_the_file_system_past_an_unevaluable_operand_may_reject() {
     let tmp = TempDir::new().unwrap();
     let project_path = project(
         &tmp,
-        "  <PropertyGroup Condition=\"$([System.String]::IsNullOrWhiteSpace('')) And \
+        "  <PropertyGroup Condition=\"'É' == 'é' And \
          HasTrailingSlash('/tmp\\a;b')\"><R>x</R></PropertyGroup>",
         &[],
     );
@@ -718,19 +789,19 @@ fn an_operand_past_the_one_that_settles_the_question_is_not_probed() {
         ),
         // Evaluation stops at an operand it cannot evaluate; `Exists` cannot
         // throw, nor gates an operand that can.
-        "<PropertyGroup Condition=\"$([System.String]::IsNullOrWhiteSpace('')) And Exists('tail')\">\
+        "<PropertyGroup Condition=\"'É' == 'é' And Exists('tail')\">\
          <R>x</R></PropertyGroup>"
             .to_owned(),
         // ... nor a boolean literal after it, quoted or not.
-        "<PropertyGroup Condition=\"$([System.String]::IsNullOrWhiteSpace('')) And Exists('tail') \
+        "<PropertyGroup Condition=\"'É' == 'é' And Exists('tail') \
          And true\"><R>x</R></PropertyGroup>"
             .to_owned(),
-        "<PropertyGroup Condition=\"$([System.String]::IsNullOrWhiteSpace('')) And Exists('tail') \
+        "<PropertyGroup Condition=\"'É' == 'é' And Exists('tail') \
          And 'true'\"><R>x</R></PropertyGroup>"
             .to_owned(),
         // Evaluation stops at an operand it cannot evaluate; whether MSBuild
         // may throw is settled in the `Or`, before `Exists`.
-        "<PropertyGroup Condition=\"($([System.String]::IsNullOrWhiteSpace('')) Or 1 &lt; abc) \
+        "<PropertyGroup Condition=\"('É' == 'é' Or 1 &lt; abc) \
          And Exists('tail')\"><R>x</R></PropertyGroup>"
             .to_owned(),
         // Reached for certain, throwing on the value the walk holds (unset)
@@ -924,7 +995,7 @@ fn an_import_a_group_may_not_make_does_not_make_a_later_one_a_duplicate() {
             &tmp,
             &format!(
                 "  <ImportGroup Condition=\"{UNDECIDED_TRUE}\">\n    <Import Project=\"{first}\" \
-                 Condition=\"$([System.String]::IsNullOrWhiteSpace('x'))\" />\n    \
+                 Condition=\"'É' == 'Ê'\" />\n    \
                  <Import Project=\"CS/a.props\" />\n  </ImportGroup>"
             ),
             &[

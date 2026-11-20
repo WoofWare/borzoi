@@ -55,7 +55,7 @@ const BODIES: &[Body] = &[
     Body {
         name: "written under an undecided gate",
         property_group: "<TargetFrameworks>net8.0;net10.0</TargetFrameworks>\
-                         <TargetFramework Condition=\"'$([MSBuild]::Nope())' == ''\">net10.0</TargetFramework>",
+                         <TargetFramework Condition=\"'É' == 'é'\">net10.0</TargetFramework>",
         globals: &[],
     },
     Body {
@@ -146,7 +146,7 @@ fn a_pre_body_target_framework_read_after_hidden_content_is_not_trusted() {
         "MySdk",
         r#"<Project>
   <PropertyGroup><UndecidedX>abc</UndecidedX></PropertyGroup>
-  <Import Project="hidden.props" Condition="'$(UndecidedX.Substring(0,1))' == 'a'" />
+  <Import Project="hidden.props" Condition="'$(UndecidedX)É' == '$(UndecidedX)é'" />
   <Import Project="server.props" Condition="'$(TargetFramework)' != 'net8.0'" />
 </Project>"#,
         "<Project/>",

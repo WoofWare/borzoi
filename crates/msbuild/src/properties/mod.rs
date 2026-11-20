@@ -55,6 +55,15 @@ pub enum Issue {
     /// example `$([System.IO.Path]::Combine(...))`. Left literal in the
     /// output.
     Unsupported { expression: String },
+    /// `$(...)` MSBuild throws evaluating (MSB4184), on exactly the values the
+    /// substitution read (`expr::Failure::Throws`). Left literal in the output,
+    /// as an unsupported one is. MSBuild rejects the project wherever it
+    /// evaluates the text.
+    Throws { expression: String },
+    /// `$(...)` MSBuild evaluates without throwing, to a value we do not
+    /// compute (`expr::Failure::Returns`). Left literal in the output, as an
+    /// unsupported one is.
+    Returns { expression: String },
     /// MSBuild's Unix path adjustment of `value` (escaped text: one piece of
     /// the expansion, or the whole of it) turns on something the evaluation
     /// does not know: a directory relative to MSBuild's working directory, or
@@ -859,24 +868,31 @@ fn substitute_impl(
             Some(close) => {
                 let inner = &after[..close];
                 rest = &after[close + 1..];
-                if let Some(evaluated) = expr::evaluate(inner, props, fs_observer) {
-                    issues.extend(evaluated.issues);
-                    // The evaluator hands back an `Escaped`: a function result
-                    // is escaped (so its `%` cannot compose an escape with what
-                    // follows), while a string indexer's `Char` went in raw —
-                    // MSBuild's own hole, modelled in `expr::evaluate`.
-                    // A result holding a live backslash has declined (see
-                    // `expr::has_unix_backslash`), so its origin is moot.
-                    out.push(&evaluated.value, Origin::Expansion, &mut issues);
-                } else {
-                    issues.push(Issue::Unsupported {
-                        expression: format!("$({inner})"),
-                    });
-                    out.push(
-                        &Escaped::from_xml(format!("$({inner})")),
-                        Origin::Expansion,
-                        &mut issues,
-                    );
+                match expr::evaluate(inner, props, fs_observer) {
+                    Ok(evaluated) => {
+                        issues.extend(evaluated.issues);
+                        // The evaluator hands back an `Escaped`: a function
+                        // result is escaped (so its `%` cannot compose an
+                        // escape with what follows), while a string indexer's
+                        // `Char` went in raw — MSBuild's own hole, modelled in
+                        // `expr::evaluate`. A result holding a live backslash
+                        // has declined (see `expr::has_unix_backslash`), so its
+                        // origin is moot.
+                        out.push(&evaluated.value, Origin::Expansion, &mut issues);
+                    }
+                    Err(failure) => {
+                        let expression = format!("$({inner})");
+                        issues.push(match failure {
+                            expr::Failure::Unsupported => Issue::Unsupported { expression },
+                            expr::Failure::Throws => Issue::Throws { expression },
+                            expr::Failure::Returns => Issue::Returns { expression },
+                        });
+                        out.push(
+                            &Escaped::from_xml(format!("$({inner})")),
+                            Origin::Expansion,
+                            &mut issues,
+                        );
+                    }
                 }
             }
             None => {
@@ -1342,6 +1358,17 @@ fn infer_target_framework_version(tfm: &str, min_parts: usize) -> Option<String>
 /// [`parse_msbuild_version`].
 pub(crate) fn compare_msbuild_versions(lhs: &str, rhs: &str) -> Result<std::cmp::Ordering, ()> {
     Ok(parse_msbuild_version(lhs)?.cmp(&parse_msbuild_version(rhs)?))
+}
+
+/// Whether [`compare_msbuild_versions`] failing on `lhs` and `rhs` means
+/// MSBuild throws on them (MSB4184). So for printable ASCII alone:
+/// [`parse_msbuild_version`] trims Rust's whitespace, which outside ASCII is
+/// not .NET's, and .NET's parse reads a trailing NUL as no part of the
+/// version (`VersionGreaterThan('1.2.3%00', '1.0')` is true; probed,
+/// msbuild-condition-oracle, SDK 10.0.401), where we refuse it.
+pub(crate) fn msbuild_version_failure_throws(lhs: &str, rhs: &str) -> bool {
+    let printable = |s: &str| s.bytes().all(|b| b.is_ascii() && !b.is_ascii_control());
+    printable(lhs) && printable(rhs)
 }
 
 /// Parse a version operand as the `[MSBuild]::Version*` intrinsics do

@@ -5777,7 +5777,7 @@ mod tests {
         write_file(
             &b,
             r#"<Project>
-              <Import Project="tfm.props" Condition="$([System.String]::IsNullOrWhiteSpace(''))" />
+              <Import Project="tfm.props" Condition="'É' == 'é'" />
             </Project>"#,
         );
         write_file(

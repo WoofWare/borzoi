@@ -208,6 +208,7 @@ crates/msbuild/tests/path_fixup_expansion_diff.rs	pending	2
 crates/msbuild/tests/path_spelling_generative_diff.rs	pending	2
 crates/msbuild/tests/property_expr_diff.rs	pending	2
 crates/msbuild/tests/property_reference_scan.rs	pending	2
+crates/msbuild/tests/rejection_generative_diff.rs	draws	judge_operands=value;rejection_projects=value
 crates/msbuild/tests/reserved_global_diff.rs	pending	2
 crates/msbuild/tests/sdk_directory_probe_diff.rs	pending	2
 crates/msbuild/tests/sdk_import_project_path_diff.rs	pending	2

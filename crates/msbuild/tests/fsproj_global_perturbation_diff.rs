@@ -1575,7 +1575,7 @@ fn unset_reads_in_import_gates_are_exact_or_declined() {
                     );
                     if *hidden != "none" {
                         xml.push_str(
-                            "  <Import Project=\"hidden.props\" Condition=\"'$(UndecidedX.Substring(0,1))' == 'a'\" />\n",
+                            "  <Import Project=\"hidden.props\" Condition=\"'$(UndecidedX)É' == '$(UndecidedX)é'\" />\n",
                         );
                     }
                     let condition = match *gate {

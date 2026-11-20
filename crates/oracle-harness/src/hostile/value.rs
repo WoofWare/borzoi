@@ -357,6 +357,122 @@ const TABLE: &[(Dimension, Value, &str)] = &[
         reset("{}$(_MSBUILDTLENABLED)"),
         "a self-set property read into a value that is reset later",
     ),
+    // Spellings .NET's number parse reads at its edge.
+    (
+        Dimension::NumberSpelling,
+        last("NaN"),
+        "a number every comparison is false on",
+    ),
+    (
+        Dimension::NumberSpelling,
+        last("-Infinity"),
+        "an infinity, which MSBuild refuses as a number",
+    ),
+    (
+        Dimension::NumberSpelling,
+        last("0x{}"),
+        "hex, read as a 32-bit signed number",
+    ),
+    (
+        Dimension::NumberSpelling,
+        last("{}%00"),
+        "a trailing NUL, escaped, which .NET reads as part of the number",
+    ),
+    (Dimension::NumberSpelling, last("+{}"), "a leading sign"),
+    (Dimension::NumberSpelling, last("-0"), "negative zero"),
+    (
+        Dimension::NumberSpelling,
+        last("1e3"),
+        "an exponent, which MSBuild does not read",
+    ),
+    // Spellings at the edge of a version.
+    (
+        Dimension::VersionSpelling,
+        last("{}.-0"),
+        "a `-0` component, which .NET's version parse takes",
+    ),
+    (
+        Dimension::VersionSpelling,
+        last("1.2.3.4.5"),
+        "five components",
+    ),
+    (
+        Dimension::VersionSpelling,
+        last("v{}.2"),
+        "a leading `v`, which MSBuild's version functions strip",
+    ),
+    (
+        Dimension::VersionSpelling,
+        last("{}.0-beta"),
+        "a prerelease suffix, which MSBuild's version functions drop",
+    ),
+    (
+        Dimension::VersionSpelling,
+        last("2147483648.0"),
+        "a component past `int`",
+    ),
+    (
+        Dimension::VersionSpelling,
+        last(" {} . 2 "),
+        "padded components",
+    ),
+    // Spellings at the edge of MSBuild's boolean vocabulary.
+    (
+        Dimension::BooleanSpelling,
+        last("!false"),
+        "a negated boolean",
+    ),
+    (
+        Dimension::BooleanSpelling,
+        last("ON"),
+        "a boolean in another case",
+    ),
+    (
+        Dimension::BooleanSpelling,
+        last(" true"),
+        "a padded boolean, which MSBuild does not trim",
+    ),
+    (
+        Dimension::BooleanSpelling,
+        last("yeſ"),
+        "a boolean only ordinal-ignore-case folds",
+    ),
+    // List separators.
+    (Dimension::ItemSeparator, last("{};{}"), "two items"),
+    (Dimension::ItemSeparator, last(";"), "a separator alone"),
+    (
+        Dimension::ItemSeparator,
+        last("{};;"),
+        "empty items after the value",
+    ),
+    // Text that forms an item or metadata expression.
+    (
+        Dimension::ItemExpression,
+        last("@"),
+        "the start of an item list, completed by what follows",
+    ),
+    (
+        Dimension::ItemExpression,
+        last("(I->NoSuchFunction())"),
+        "the rest of an item transform, after an `@` spliced before it",
+    ),
+    (Dimension::ItemExpression, last("@(I)"), "a whole item list"),
+    (
+        Dimension::ItemExpression,
+        last("%(M)"),
+        "a whole metadata reference",
+    ),
+    // Case folding outside ASCII.
+    (
+        Dimension::CaseFolding,
+        last("É"),
+        "an accented capital, which folds to its small letter",
+    ),
+    (
+        Dimension::CaseFolding,
+        last("{}ſ"),
+        "a long s, which folds to `S`",
+    ),
     // Long values.
     (
         Dimension::LongValue,

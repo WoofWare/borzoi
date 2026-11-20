@@ -140,6 +140,46 @@ fn illegal_corners() -> Vec<Case> {
             props(&[]),
             Verdict::False,
         ),
+        // A version function given no version (MSB4184), and a property
+        // function out of range, on the evaluated path only (#1009).
+        (
+            "$([MSBuild]::VersionGreaterThan('abc', '1.0'))",
+            props(&[]),
+            Verdict::Illegal,
+        ),
+        (
+            "$([MSBuild]::VersionLessThan('$(V)', '1.0'))",
+            props(&[("V", "1.2.3.4.5")]),
+            Verdict::Illegal,
+        ),
+        (
+            "false and $([MSBuild]::VersionGreaterThan('abc', '1.0'))",
+            props(&[]),
+            Verdict::False,
+        ),
+        // .NET reads a trailing NUL as no part of the version: no claim.
+        (
+            "$([MSBuild]::VersionGreaterThan('1.2.3%00', '1.0'))",
+            props(&[]),
+            Verdict::Unsupported,
+        ),
+        (
+            "'$(P.Split(`;`)[3])' == ''",
+            props(&[("P", "a;b")]),
+            Verdict::Illegal,
+        ),
+        ("'$(P[5])' == ''", props(&[("P", "abc")]), Verdict::Illegal),
+        (
+            "'a' == 'b' and '$(P[5])' == ''",
+            props(&[("P", "abc")]),
+            Verdict::False,
+        ),
+        (
+            "'$([MSBuild]::VersionLessThan(\"x\", \"18.9\"))' == ''",
+            props(&[]),
+            Verdict::Illegal,
+        ),
+        ("'$(P[2])' == 'c'", props(&[("P", "abc")]), Verdict::True),
     ]
 }
 
@@ -1047,6 +1087,164 @@ fn where_msbuild_evaluates_a_condition() {
         assert_eq!(rejects(&mut oracle, &xml, &globals), rejected, "{xml}");
     }
 }
+
+/// Where MSBuild expands a text holding a property function it throws on
+/// (`$(P.Split(';')[3])` with `P` holding `a;b`: MSB4184), each row pinned
+/// against both evaluations (#1009). A property's body is expanded only under
+/// true gates, in a build and design-time evaluation alike. In design-time
+/// evaluation, an item's `Include`, `Exclude`, `Remove` and metadata (child or
+/// attribute) are expanded whatever its group's or its own condition holds,
+/// and a build expands none of them under a false gate; a metadatum under a
+/// false condition of its own, and an `Update` that applies to nothing, are
+/// expanded by neither. A `<UsingTask>`'s attributes are all expanded, and an
+/// item definition's metadata under true gates. `evaluator/rejection.rs`
+/// judges these texts by design-time evaluation's facts, as it does
+/// conditions.
+#[test]
+fn where_msbuild_evaluates_a_text() {
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Rejects {
+        Neither,
+        Both,
+        DesignTimeOnly,
+    }
+    let mut oracle = Oracle::spawn();
+    const T: &str = "$(P.Split(';')[3])";
+    for (body, rejected) in [
+        ("<PropertyGroup><R>{t}</R></PropertyGroup>", Rejects::Both),
+        (
+            "<PropertyGroup><R Condition=\"false\">{t}</R></PropertyGroup>",
+            Rejects::Neither,
+        ),
+        (
+            "<PropertyGroup Condition=\"false\"><R>{t}</R></PropertyGroup>",
+            Rejects::Neither,
+        ),
+        (
+            "<Target Name=\"T\"><PropertyGroup><R>{t}</R></PropertyGroup></Target>",
+            Rejects::Neither,
+        ),
+        ("<ItemGroup><I Include=\"{t}\" /></ItemGroup>", Rejects::Both),
+        (
+            "<ItemGroup><I Include=\"{t}\" Condition=\"false\" /></ItemGroup>",
+            Rejects::DesignTimeOnly,
+        ),
+        (
+            "<ItemGroup Condition=\"false\"><I Include=\"{t}\" /></ItemGroup>",
+            Rejects::DesignTimeOnly,
+        ),
+        (
+            "<ItemGroup><I Include=\"x\" Exclude=\"{t}\" /></ItemGroup>",
+            Rejects::Both,
+        ),
+        (
+            "<ItemGroup><I Include=\"x\" Condition=\"false\" Exclude=\"{t}\" /></ItemGroup>",
+            Rejects::DesignTimeOnly,
+        ),
+        (
+            "<ItemGroup Condition=\"false\"><I Include=\"x\" Exclude=\"{t}\" /></ItemGroup>",
+            Rejects::DesignTimeOnly,
+        ),
+        (
+            "<ItemGroup><I Include=\"x\"><M>{t}</M></I></ItemGroup>",
+            Rejects::Both,
+        ),
+        (
+            "<ItemGroup><I Include=\"x\" Condition=\"false\"><M>{t}</M></I></ItemGroup>",
+            Rejects::DesignTimeOnly,
+        ),
+        (
+            "<ItemGroup Condition=\"false\"><I Include=\"x\"><M>{t}</M></I></ItemGroup>",
+            Rejects::DesignTimeOnly,
+        ),
+        (
+            "<ItemGroup><I Include=\"x\"><M Condition=\"false\">{t}</M></I></ItemGroup>",
+            Rejects::Neither,
+        ),
+        (
+            "<ItemGroup><I Include=\"$(Missing)\"><M>{t}</M></I></ItemGroup>",
+            Rejects::Both,
+        ),
+        (
+            "<ItemGroup><I Include=\"x\" M=\"{t}\" /></ItemGroup>",
+            Rejects::Both,
+        ),
+        (
+            "<ItemGroup><I Include=\"x\" Condition=\"false\" M=\"{t}\" /></ItemGroup>",
+            Rejects::DesignTimeOnly,
+        ),
+        (
+            "<ItemGroup><I Include=\"x\" /><I Update=\"x\" M=\"{t}\" /></ItemGroup>",
+            Rejects::Both,
+        ),
+        (
+            "<ItemGroup><I Update=\"nothere\" M=\"{t}\" /></ItemGroup>",
+            Rejects::Neither,
+        ),
+        ("<ItemGroup><I Remove=\"{t}\" /></ItemGroup>", Rejects::Both),
+        (
+            "<ItemGroup><I Include=\"x\" /><I Remove=\"{t}\" Condition=\"false\" /></ItemGroup>",
+            Rejects::DesignTimeOnly,
+        ),
+        (
+            "<ItemDefinitionGroup><I><M>{t}</M></I></ItemDefinitionGroup>",
+            Rejects::Both,
+        ),
+        (
+            "<ItemDefinitionGroup><I M=\"{t}\" /></ItemDefinitionGroup>",
+            Rejects::Both,
+        ),
+        (
+            "<ItemDefinitionGroup Condition=\"false\"><I><M>{t}</M></I></ItemDefinitionGroup>",
+            Rejects::Neither,
+        ),
+        (
+            "<ItemDefinitionGroup><I><M Condition=\"false\">{t}</M></I></ItemDefinitionGroup>",
+            Rejects::Neither,
+        ),
+        (
+            "<UsingTask TaskName=\"{t}\" AssemblyFile=\"y.dll\" />",
+            Rejects::Both,
+        ),
+        (
+            "<UsingTask TaskName=\"X\" AssemblyFile=\"{t}\" />",
+            Rejects::Both,
+        ),
+        (
+            "<UsingTask TaskName=\"X\" AssemblyName=\"{t}\" />",
+            Rejects::Both,
+        ),
+        (
+            "<UsingTask TaskName=\"X\" AssemblyFile=\"y.dll\" TaskFactory=\"{t}\" />",
+            Rejects::Both,
+        ),
+        (
+            "<UsingTask TaskName=\"X\" AssemblyFile=\"y.dll\" Runtime=\"{t}\" />",
+            Rejects::Both,
+        ),
+        (
+            "<UsingTask TaskName=\"X\" AssemblyFile=\"y.dll\" Architecture=\"{t}\" />",
+            Rejects::Both,
+        ),
+        (
+            "<UsingTask TaskName=\"X\" AssemblyFile=\"y.dll\" Condition=\"false\" Runtime=\"{t}\" />",
+            Rejects::Neither,
+        ),
+    ] {
+        let xml = format!(
+            "<Project><PropertyGroup><P>a;b</P></PropertyGroup>{}</Project>",
+            body.replace("{t}", T)
+        );
+        let both = oracle.project_both(&xml, &["P".to_string()], None, &[]);
+        let got = match (both.design_time.is_none(), both.build.is_none()) {
+            (false, _) => Rejects::Neither,
+            (true, true) => Rejects::Both,
+            (true, false) => Rejects::DesignTimeOnly,
+        };
+        assert_eq!(got, rejected, "{xml}");
+    }
+}
+
 /// Fresh-seed twin of [`whitespace_variant_sweep_fixed_seed`].
 #[test]
 #[ignore = "fresh-seed soak; run it when touching condition.rs"]

@@ -9,10 +9,13 @@
 //! shape. Evaluation is where the never-over-resolve invariant lives: only the
 //! members in the dispatch tables below reduce to a [`Value`]; a chain that
 //! reaches any member (or receiver type) we don't model aborts with
-//! [`Unsupported`], which the caller surfaces as
-//! [`Issue::Unsupported`] with the expression left literal — exactly today's
-//! contract. Undefined *property* references stay [`Issue::Undefined`]
-//! (substituted empty), not an abort.
+//! [`Failure::Unsupported`], which the caller surfaces as
+//! [`Issue::Unsupported`] with the expression left literal. A chain MSBuild
+//! certainly throws on, on exactly the values it read, aborts with
+//! [`Failure::Throws`] instead, which the caller surfaces as [`Issue::Throws`]:
+//! a rejection of the project wherever MSBuild evaluates the expression.
+//! Undefined *property* references stay [`Issue::Undefined`] (substituted
+//! empty), not an abort.
 //!
 //! The scanners ([`scan_paren`]/[`scan_quote`]/[`split_args`]) are the one
 //! place the grammar's extents are decided, and they are MSBuild's own
@@ -383,7 +386,7 @@ impl Value {
     /// `Err(Unsupported)` for a terminal [`Value::StrArray`]: rather than
     /// commit to .NET's `"System.String[]"` array `ToString()` (host/runtime
     /// dependent), leave the whole expression unsupported.
-    fn render(self) -> Result<String, Unsupported> {
+    fn render(self) -> Result<String, Failure> {
         Ok(match self {
             Value::Str(s) => s,
             // MSBuild renders a `bool` via `bool.ToString()`: capital-T/F.
@@ -406,12 +409,31 @@ fn render_version(components: &[i64]) -> String {
         .join(".")
 }
 
-/// Evaluation aborts to `Unsupported` for any shape outside the pinned
-/// dispatch tables (unknown member, unmodelled receiver type, wrong arity, an
-/// argument we can't reduce, a collation we can't reproduce). It is *not* used
-/// for undefined property references — those stay `Issue::Undefined` and
-/// evaluation continues on `""`.
-struct Unsupported;
+/// Why evaluation aborted.
+///
+/// It is *not* used for undefined property references — those stay
+/// `Issue::Undefined` and evaluation continues on `""`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Failure {
+    /// Any shape outside the pinned dispatch tables (unknown member,
+    /// unmodelled receiver type, wrong arity, an argument we can't reduce, a
+    /// collation we can't reproduce). MSBuild may return a value, or throw.
+    Unsupported,
+    /// MSBuild throws evaluating the expression (MSB4184), on exactly the
+    /// values it read: every input of the failing step was computed exactly,
+    /// and the step is one whose failure is pinned against the oracle (an
+    /// indexer out of range, a malformed `[MSBuild]::Version*` operand).
+    /// Only the outermost chain of a `$(…)` claims it: a nested argument's
+    /// throw is [`Failure::Unsupported`], since where the argument scanner
+    /// puts a nested expression is a claim of its own.
+    Throws,
+    /// MSBuild returns a value we do not compute, and does not throw: a
+    /// function that returns for every argument, whose arguments evaluated.
+    /// Outermost only, as [`Failure::Throws`].
+    Returns,
+}
+
+use Failure::Unsupported;
 
 // ============================================================================
 // Public entry
@@ -501,11 +523,13 @@ fn has_culture_sensitive_control(decoded: &str) -> bool {
     decoded.chars().any(|c| c.is_control())
 }
 
+/// `Err(Failure::Unsupported)` when the shape is unparseable or reaches an
+/// unmodelled member or type, `Err(Failure::Throws)` when MSBuild throws on it.
 pub(super) fn evaluate(
     inner: &str,
     props: &Reads<'_>,
     fs_observer: Option<&Observer>,
-) -> Option<Evaluated> {
+) -> Result<Evaluated, Failure> {
     // Stage E3 of `docs/completed/msbuild-escaped-value-plan.md`. The evaluator runs
     // *inside* the escaped domain, mirroring MSBuild's `Expander`
     // (`Expander.cs:3982/4010/4129`): a property splice contributes its escaped
@@ -513,15 +537,15 @@ pub(super) fn evaluate(
     // argument exactly once at the call, and the method's result is re-escaped.
     // So a [`Value::Str`] always holds **escaped** text — see [`eval_string_member`]
     // — and this used to be a wholesale decline of any escape-bearing expression.
-    let expr = parse(inner)?;
+    let expr = parse(inner).ok_or(Unsupported)?;
     let mut issues = Vec::new();
-    let value = eval(&expr, props, fs_observer, &mut issues, 0).ok()?;
+    let value = eval(&expr, props, fs_observer, &mut issues, 0)?;
     // A `Char` (from a string indexer) is the one result MSBuild hands back
     // *raw*; every other result is already escaped (a re-escaped function return,
     // a spliced property value, or an escape-neutral number/version render), so
     // it re-enters the domain verbatim.
     let is_char = matches!(value, Value::Char(_));
-    let rendered = value.render().ok()?;
+    let rendered = value.render()?;
     // A backslash in the result reaches MSBuild's unix-only `MaybeAdjustFilePath`
     // (`docs/msbuild-unix-path-fixup-plan.md`): on a non-Windows host it rewrites
     // `\`→`/` when the value's first segment exists as a directory relative to
@@ -535,7 +559,7 @@ pub(super) fn evaluate(
     // The result crosses a `$(…)` expansion boundary; a decoded backslash in it
     // meets the unix path fixup (`docs/msbuild-unix-path-fixup-plan.md`).
     if has_unix_backslash(&rendered) {
-        return None;
+        return Err(Unsupported);
     }
     let value = if is_char {
         let mut out = Escaped::default();
@@ -544,7 +568,7 @@ pub(super) fn evaluate(
     } else {
         Escaped::from_xml(rendered)
     };
-    Some(Evaluated { value, issues })
+    Ok(Evaluated { value, issues })
 }
 
 /// How many `$(…)` expressions may nest inside one another's arguments before
@@ -570,13 +594,21 @@ fn eval(
     fs: Option<&Observer>,
     issues: &mut Vec<Issue>,
     depth: usize,
-) -> Result<Value, Unsupported> {
+) -> Result<Value, Failure> {
     if depth >= MAX_EXPRESSION_NESTING {
         return Err(Unsupported);
     }
-    let mut value = eval_root(&expr.root, props, fs, issues, depth)?;
-    for link in &expr.links {
-        value = eval_link(value, link, props, issues, depth)?;
+    // A step that returns a value we do not compute says nothing of a step
+    // after it, which may throw on that value.
+    let then = |failure: Failure, last: bool| match failure {
+        Failure::Returns if !last => Unsupported,
+        other => other,
+    };
+    let mut value = eval_root(&expr.root, props, fs, issues, depth)
+        .map_err(|f| then(f, expr.links.is_empty()))?;
+    for (i, link) in expr.links.iter().enumerate() {
+        value = eval_link(value, link, props, issues, depth)
+            .map_err(|f| then(f, i + 1 == expr.links.len()))?;
     }
     Ok(value)
 }
@@ -587,7 +619,7 @@ fn eval_root(
     fs: Option<&Observer>,
     issues: &mut Vec<Issue>,
     depth: usize,
-) -> Result<Value, Unsupported> {
+) -> Result<Value, Failure> {
     match root {
         Root::Property(name) => {
             // An undefined property is the empty string, reported (matching
@@ -620,7 +652,7 @@ fn eval_link(
     props: &Reads<'_>,
     issues: &mut Vec<Issue>,
     depth: usize,
-) -> Result<Value, Unsupported> {
+) -> Result<Value, Failure> {
     match link {
         Link::Member(member) => eval_member(receiver, member, props, issues, depth),
         Link::Index(index) => eval_index(receiver, index),
@@ -629,17 +661,20 @@ fn eval_link(
 
 /// `receiver[index]`: element on a `Split` array, character on a string.
 /// The index must be a bare non-negative integer literal; an out-of-range
-/// index is [`Unsupported`] (MSBuild errors the build there — the fail-safe
-/// direction). A string is indexed only when ASCII, since .NET indexes UTF-16
-/// code units where Rust indexes bytes/scalars; the two agree only for ASCII.
-fn eval_index(receiver: Value, index: &str) -> Result<Value, Unsupported> {
+/// index is [`Failure::Throws`]: MSBuild throws there (MSB4184; probed,
+/// `msbuild-condition-oracle`, SDK 10.0.401, for `$(P.Split(';')[3])` with
+/// `P=a;b`, `$(P[5])` with `P=abc`, and an empty receiver). An index spelling
+/// we do not read is [`Failure::Unsupported`]. A string is indexed only when
+/// ASCII, since .NET indexes UTF-16 code units where Rust indexes
+/// bytes/scalars; the two agree only for ASCII.
+fn eval_index(receiver: Value, index: &str) -> Result<Value, Failure> {
     let idx: usize = index.trim().parse().map_err(|_| Unsupported)?;
     match receiver {
         Value::StrArray(parts) => parts
             .into_iter()
             .nth(idx)
             .map(Value::Str)
-            .ok_or(Unsupported),
+            .ok_or(Failure::Throws),
         Value::Str(s) => {
             // MSBuild indexes the *unescaped* string (`$(P[3])` with `P=a%20b`
             // indexes `a b`, which has no index 3 — an error we decline). The
@@ -652,7 +687,7 @@ fn eval_index(receiver: Value, index: &str) -> Result<Value, Unsupported> {
             s.as_bytes()
                 .get(idx)
                 .map(|&b| Value::Char(b as char))
-                .ok_or(Unsupported)
+                .ok_or(Failure::Throws)
         }
         _ => Err(Unsupported),
     }
@@ -667,7 +702,7 @@ fn eval_member(
     props: &Reads<'_>,
     issues: &mut Vec<Issue>,
     depth: usize,
-) -> Result<Value, Unsupported> {
+) -> Result<Value, Failure> {
     // `.ToString()` — a no-arg call rendering the scalar as a string. Pinned
     // for `Str`/`Int`/`Version`; `StrArray.ToString()` is the unstable
     // `"System.String[]"` (declined), and `Bool`/`Char` aren't a real consumer
@@ -709,7 +744,7 @@ fn eval_string_member(
     props: &Reads<'_>,
     issues: &mut Vec<Issue>,
     depth: usize,
-) -> Result<Value, Unsupported> {
+) -> Result<Value, Failure> {
     // The receiver arrives escaped and leaves the domain here, once
     // (`Expander.cs:3982`) — `$(P.Length)` with `P=a%20b` is 3, the length of
     // the decoded `a b`. String *arguments* likewise arrive unescaped from
@@ -799,7 +834,7 @@ fn eval_string_member(
 /// `System.Version` instance members: the paren-less `.Major`/`.Minor`/
 /// `.Build` components. An absent `Build` (a 2-component version) is `-1`,
 /// matching .NET. `.Revision` and any other member are declined.
-fn eval_version_member(components: &[i64], member: &Member<'_>) -> Result<Value, Unsupported> {
+fn eval_version_member(components: &[i64], member: &Member<'_>) -> Result<Value, Failure> {
     // These are properties, not methods — a parenthesised form is not the
     // shape MSBuild binds, so decline it.
     if member.args.is_some() {
@@ -819,7 +854,7 @@ fn eval_version_member(components: &[i64], member: &Member<'_>) -> Result<Value,
 }
 
 /// The one array member we pin: the paren-less `.Length` (element count).
-fn eval_array_member(parts: &[String], member: &Member<'_>) -> Result<Value, Unsupported> {
+fn eval_array_member(parts: &[String], member: &Member<'_>) -> Result<Value, Failure> {
     if member.args.is_none() && member.name.eq_ignore_ascii_case("Length") {
         return Ok(Value::Int(parts.len() as i64));
     }
@@ -837,7 +872,7 @@ fn eval_static(
     fs: Option<&Observer>,
     issues: &mut Vec<Issue>,
     depth: usize,
-) -> Result<Value, Unsupported> {
+) -> Result<Value, Failure> {
     let args = member.args.as_deref().ok_or(Unsupported)?;
     let member_name = member.name;
     // MSBuild resolves the type name case-insensitively, exactly as it does the
@@ -920,6 +955,25 @@ fn eval_static(
             let s = eval_string_arg(arg, props, issues, depth)?;
             Ok(Value::Bool(s.is_empty()))
         }
+        "System.String" if member_name.eq_ignore_ascii_case("IsNullOrWhiteSpace") => {
+            let [arg] = args else { return Err(Unsupported) };
+            // As `IsNullOrEmpty`, on the decoded argument, with .NET's
+            // `Char.IsWhiteSpace`: in ASCII, the tab, line feed, vertical tab,
+            // form feed, carriage return and space. Whether a character
+            // outside ASCII is whitespace is Unicode's table, which we do not
+            // hold, so a string whose every ASCII character is whitespace and
+            // that holds one outside ASCII has no value we compute; but
+            // `String.IsNullOrWhiteSpace` returns for every string.
+            let s = eval_string_arg(arg, props, issues, depth)?;
+            let ascii_space = |c: char| matches!(c, '\t'..='\r' | ' ');
+            if s.chars().any(|c| c.is_ascii() && !ascii_space(c)) {
+                Ok(Value::Bool(false))
+            } else if s.is_ascii() {
+                Ok(Value::Bool(true))
+            } else {
+                Err(Failure::Returns)
+            }
+        }
         _ => Err(Unsupported),
     }
 }
@@ -957,7 +1011,7 @@ fn eval_msbuild_static(
     fs: Option<&Observer>,
     issues: &mut Vec<Issue>,
     depth: usize,
-) -> Result<Value, Unsupported> {
+) -> Result<Value, Failure> {
     if member_name.eq_ignore_ascii_case("GetTargetFrameworkIdentifier") {
         let [tfm] = args else { return Err(Unsupported) };
         let tfm = eval_string_arg(tfm, props, issues, depth)?;
@@ -1017,6 +1071,16 @@ fn eval_msbuild_static(
         let [arg] = args else { return Err(Unsupported) };
         let name = eval_string_arg(arg, props, issues, depth)?;
         return is_os_platform(&name).map(Value::Bool).ok_or(Unsupported);
+    }
+    if member_name.eq_ignore_ascii_case("IsOSUnixLike") {
+        // Whether the machine the build runs on, which is the one we run on,
+        // is a Unix: true on macOS and Linux (probed, `msbuild-condition-oracle`,
+        // SDK 10.0.401, macOS). Hosts outside that pin decline.
+        return match (args, std::env::consts::OS) {
+            ([], "macos" | "linux") => Ok(Value::Bool(true)),
+            ([], "windows") => Ok(Value::Bool(false)),
+            _ => Err(Unsupported),
+        };
     }
     if member_name.eq_ignore_ascii_case("AreFeaturesEnabled") {
         // ChangeWaves: a wave is enabled iff it is *strictly below* the
@@ -1079,7 +1143,14 @@ fn eval_msbuild_static(
         };
         let a = eval_version_arg(a, props, issues, depth)?;
         let b = eval_version_arg(b, props, issues, depth)?;
-        let ordering = super::compare_msbuild_versions(&a, &b).map_err(|()| Unsupported)?;
+        // A malformed operand is MSB4184, where we read it as MSBuild does.
+        let ordering = super::compare_msbuild_versions(&a, &b).map_err(|()| {
+            if super::msbuild_version_failure_throws(&a, &b) {
+                Failure::Throws
+            } else {
+                Unsupported
+            }
+        })?;
         return Ok(Value::Bool(op(ordering)));
     }
     if member_name.eq_ignore_ascii_case("EnsureTrailingSlash") {
@@ -1199,7 +1270,7 @@ fn eval_version_arg(
     props: &Reads<'_>,
     issues: &mut Vec<Issue>,
     depth: usize,
-) -> Result<String, Unsupported> {
+) -> Result<String, Failure> {
     let arg = arg.trim();
     if arg.starts_with(['\'', '`', '"']) || arg.starts_with("$(") {
         return eval_string_arg(arg, props, issues, depth);
@@ -1387,7 +1458,7 @@ fn eval_string_arg(
     props: &Reads<'_>,
     issues: &mut Vec<Issue>,
     depth: usize,
-) -> Result<String, Unsupported> {
+) -> Result<String, Failure> {
     eval_string_arg_inner(arg, props, issues, false, depth)
 }
 
@@ -1403,7 +1474,7 @@ fn eval_string_arg_allowing_boundary_backslash(
     props: &Reads<'_>,
     issues: &mut Vec<Issue>,
     depth: usize,
-) -> Result<String, Unsupported> {
+) -> Result<String, Failure> {
     eval_string_arg_inner(arg, props, issues, true, depth)
 }
 
@@ -1413,7 +1484,7 @@ fn eval_string_arg_inner(
     issues: &mut Vec<Issue>,
     allow_boundary_backslash: bool,
     depth: usize,
-) -> Result<String, Unsupported> {
+) -> Result<String, Failure> {
     let arg = arg.trim();
     // Any of MSBuild's three string delimiters opens a literal; only the
     // same delimiter closes it (the other two are ordinary text inside).
@@ -1431,7 +1502,8 @@ fn eval_string_arg_inner(
         && after[close + 1..].is_empty()
     {
         let expr = parse(&after[..close]).ok_or(Unsupported)?;
-        return match eval(&expr, props, None, issues, depth + 1)? {
+        // A nested throw claims nothing ([`Failure::Throws`]).
+        return match eval(&expr, props, None, issues, depth + 1).map_err(|_| Unsupported)? {
             // The evaluated value is escaped; an argument leaves the domain once
             // at binding (`Expander.cs:4010`). A backslash in this nested `$()`
             // result meets the unix path fixup before the outer function sees it
@@ -1446,6 +1518,18 @@ fn eval_string_arg_inner(
             }
             _ => Err(Unsupported),
         };
+    }
+    // An unquoted literal (`TrimStart(vV)`, as the SDK writes it) is the
+    // string it spells, trimmed (probed, `msbuild-condition-oracle`, SDK
+    // 10.0.401: `TrimStart( vV )` trims `v` and `V`). Only text that can be
+    // nothing else is read so: ASCII, no escape (whether MSBuild trims before
+    // or after decoding one is not pinned), no delimiter, parenthesis,
+    // separator or expression marker.
+    if !arg.is_empty()
+        && arg.is_ascii()
+        && !arg.contains(['$', '@', '%', '\'', '`', '"', '(', ')', ',', '\\'])
+    {
+        return Ok(arg.to_owned());
     }
     Err(Unsupported)
 }
@@ -1464,7 +1548,7 @@ fn eval_str_template(
     issues: &mut Vec<Issue>,
     allow_boundary_backslash: bool,
     depth: usize,
-) -> Result<String, Unsupported> {
+) -> Result<String, Failure> {
     let mut out = String::new();
     let mut rest = body;
     while let Some(idx) = rest.find("$(") {
@@ -1481,7 +1565,8 @@ fn eval_str_template(
                 // No filesystem access from a string argument; the fs
                 // capability rides with the outer call only where the pinned
                 // function needs it.
-                match eval(&expr, props, None, issues, depth + 1)? {
+                // A nested throw claims nothing ([`Failure::Throws`]).
+                match eval(&expr, props, None, issues, depth + 1).map_err(|_| Unsupported)? {
                     // A backslash in this nested `$()` result meets the unix path
                     // fixup before binding (a literal backslash in the arg *text*
                     // does not — the path normalisers handle it, so it is not
@@ -1581,7 +1666,9 @@ mod tests {
     /// [`Escaped`]; a function result re-enters the domain escaped, so this
     /// unescapes it back to the text MSBuild would show).
     fn ev(inner: &str, props: &PropertyMap) -> Option<(String, Vec<Issue>)> {
-        evaluate(inner, &Reads::of(props), None).map(|e| (e.value.unescape(), e.issues))
+        evaluate(inner, &Reads::of(props), None)
+            .ok()
+            .map(|e| (e.value.unescape(), e.issues))
     }
 
     /// Stage E3 of `docs/completed/msbuild-escaped-value-plan.md`: the evaluator runs

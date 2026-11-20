@@ -178,10 +178,10 @@ enum Gate {
 }
 
 /// The condition the walk cannot decide and MSBuild takes.
-const UNDECIDED: &str = "$([System.String]::IsNullOrWhiteSpace(''))";
+const UNDECIDED: &str = "'É' == 'é'";
 
 /// A condition the walk cannot decide and MSBuild does not take.
-const UNDECIDED_FALSE: &str = "$([System.String]::IsNullOrWhiteSpace('x'))";
+const UNDECIDED_FALSE: &str = "'É' == 'Ê'";
 
 #[derive(Debug, Clone)]
 enum Import {

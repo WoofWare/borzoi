@@ -638,6 +638,73 @@ fn hand_picked_corners() {
             props(&[]),
             ExpandVerdict::Partial,
         ),
+        // --- `IsNullOrWhiteSpace`, `IsOSUnixLike` and unquoted literals ------
+        // .NET's `Char.IsWhiteSpace` in ASCII; a string holding a character
+        // outside it decides nothing unless an ASCII one does.
+        (
+            "$([System.String]::IsNullOrWhiteSpace(''))",
+            props(&[]),
+            ExpandVerdict::Exact,
+        ),
+        (
+            "$([System.String]::IsNullOrWhiteSpace($(P)))",
+            props(&[("P", "%09%0B%0C%0D%0A ")]),
+            ExpandVerdict::Exact,
+        ),
+        (
+            "$([System.String]::IsNullOrWhiteSpace('$(P)'))",
+            props(&[("P", " x ")]),
+            ExpandVerdict::Exact,
+        ),
+        (
+            "$([System.String]::IsNullOrWhiteSpace('\u{a0}'))",
+            props(&[]),
+            ExpandVerdict::Partial,
+        ),
+        (
+            "$([System.String]::IsNullOrWhiteSpace('\u{a0}x'))",
+            props(&[]),
+            ExpandVerdict::Exact,
+        ),
+        ("$([MSBuild]::IsOSUnixLike())", props(&[]), osp),
+        (
+            "$(P.TrimStart(vV))",
+            props(&[("P", "Vv4.7.2")]),
+            ExpandVerdict::Exact,
+        ),
+        (
+            "$(P.TrimStart( vV ))",
+            props(&[("P", "v4.7.2")]),
+            ExpandVerdict::Exact,
+        ),
+        (
+            "$(P.Contains(ab))",
+            props(&[("P", "xaby")]),
+            ExpandVerdict::Exact,
+        ),
+        (
+            "$(P.Split(-)[0])",
+            props(&[("P", "a-b")]),
+            ExpandVerdict::Exact,
+        ),
+        // Escaped, a literal we do not read.
+        (
+            "$(P.TrimStart(v%56))",
+            props(&[("P", "Vv4")]),
+            ExpandVerdict::Partial,
+        ),
+        // --- Throws (MSB4184): an indexer out of range, a malformed version ---
+        (
+            "$(P.Split(';')[3])",
+            props(&[("P", "a;b")]),
+            ExpandVerdict::Partial,
+        ),
+        ("$(P[9])x", props(&[("P", "abc")]), ExpandVerdict::Partial),
+        (
+            "$([MSBuild]::VersionLessThan('$(P)', '18.9'))",
+            props(&[("P", "")]),
+            ExpandVerdict::Partial,
+        ),
     ];
 
     let mut exact = 0;

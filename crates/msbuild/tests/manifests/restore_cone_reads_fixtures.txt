@@ -390,7 +390,7 @@
 10.0.401 resolved hooked/App.fsproj reads property SuppressObsoleteDotNetCliToolWarning	unset agrees
 10.0.401 resolved hooked/App.fsproj reads property TargetFramework	value agrees
 10.0.401 resolved hooked/App.fsproj reads property TargetFrameworkIdentifier	value agrees
-10.0.401 resolved hooked/App.fsproj reads property TargetFrameworkMoniker	untrusted (unmodelled text); set in MSBuild
+10.0.401 resolved hooked/App.fsproj reads property TargetFrameworkMoniker	value agrees
 10.0.401 resolved hooked/App.fsproj reads property TargetFrameworkProfile	unset agrees
 10.0.401 resolved hooked/App.fsproj reads property TargetFrameworkVersion	value agrees
 10.0.401 resolved hooked/App.fsproj reads property TargetFrameworks	unset agrees
@@ -618,7 +618,7 @@
 10.0.401 resolved net10/App.fsproj reads property SuppressObsoleteDotNetCliToolWarning	unset agrees
 10.0.401 resolved net10/App.fsproj reads property TargetFramework	value agrees
 10.0.401 resolved net10/App.fsproj reads property TargetFrameworkIdentifier	value agrees
-10.0.401 resolved net10/App.fsproj reads property TargetFrameworkMoniker	untrusted (unmodelled text); set in MSBuild
+10.0.401 resolved net10/App.fsproj reads property TargetFrameworkMoniker	value agrees
 10.0.401 resolved net10/App.fsproj reads property TargetFrameworkProfile	unset agrees
 10.0.401 resolved net10/App.fsproj reads property TargetFrameworkVersion	value agrees
 10.0.401 resolved net10/App.fsproj reads property TargetFrameworks	unset agrees

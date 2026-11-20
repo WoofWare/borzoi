@@ -47,7 +47,7 @@ use common::{
 };
 
 /// A condition MSBuild evaluates to `true` and the walker cannot evaluate.
-const UNDECIDABLE: &str = "$([System.String]::IsNullOrWhiteSpace(''))";
+const UNDECIDABLE: &str = "'É' == 'é'";
 /// A property body MSBuild evaluates and the walker refuses (`Substring` is
 /// outside the modelled members), so it stores no value.
 const REFUSED_BODY: &str = "$(Configuration.Substring(0,1))";

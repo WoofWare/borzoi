@@ -94,15 +94,15 @@ fn parse_at_with_real_sdk(body: &str, project_path: &std::path::Path) -> ParsedP
 /// (and seeds) before the body is ever walked, and the ordering this test is
 /// about cannot arise.
 ///
-/// `'$(X.Substring(0,1))' == 'a'` is ordinary MSBuild that this crate does not
-/// model, and the oracle says it is **true** — so the real build performs the
-/// write.
+/// `'$(X)É' == '$(X)é'` is ordinary MSBuild that this crate does not
+/// model (case folding outside ASCII), and MSBuild evaluates it **true**,
+/// throwing on nothing — so the real build performs the write.
 fn refused_write_before_the_sdk(name: &str) -> String {
     format!(
         r#"<Project>
   <PropertyGroup>
     <X>abc</X>
-    <{name} Condition="'$(X.Substring(0,1))' == 'a'">/SPOOFED</{name}>
+    <{name} Condition="'$(X)É' == '$(X)é'">/SPOOFED</{name}>
   </PropertyGroup>
   <Import Sdk="Microsoft.NET.Sdk" Project="Sdk.props" />
 </Project>"#
@@ -201,7 +201,7 @@ fn an_overridable_toolset_seed_is_withheld_behind_an_undecided_import() {
     <X>abc</X>
     <TargetFramework>net10.0</TargetFramework>
   </PropertyGroup>
-  <Import Project="hidden.props" Condition="'$(X.Substring(0,1))' == 'a'" />
+  <Import Project="hidden.props" Condition="'$(X)É' == '$(X)é'" />
   <Import Sdk="Microsoft.NET.Sdk" Project="Sdk.props" />
   <PropertyGroup>
     {fill}

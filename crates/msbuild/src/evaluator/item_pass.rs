@@ -3824,6 +3824,7 @@ pub(super) fn expand_silent(raw: &str, state: &State<'_>) -> Expansion {
     };
     let mut had_undefined = false;
     let mut had_unsupported = false;
+    let throws = super::rejection::first_throw(&issues);
     let mut unpinned_root = None;
     for issue in issues {
         match issue {
@@ -3838,7 +3839,10 @@ pub(super) fn expand_silent(raw: &str, state: &State<'_>) -> Expansion {
                     unpinned_root = Some(state.root_for_undefined_read(&name));
                 }
             }
-            Issue::Unsupported { .. } | Issue::PathAdjustmentUndecided { .. } => {
+            Issue::Unsupported { .. }
+            | Issue::Returns { .. }
+            | Issue::Throws { .. }
+            | Issue::PathAdjustmentUndecided { .. } => {
                 had_unsupported = true;
             }
         }
@@ -3859,6 +3863,7 @@ pub(super) fn expand_silent(raw: &str, state: &State<'_>) -> Expansion {
         had_undefined,
         had_unsupported,
         unpinned_root,
+        throws,
     }
 }
 

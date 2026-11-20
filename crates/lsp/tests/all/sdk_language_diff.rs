@@ -808,9 +808,7 @@ fn project_defining(
             format!("<PropertyGroup>{write}</PropertyGroup>"),
         ),
         Site::Undecidable => (
-            format!(
-                r#"<PropertyGroup Condition="'$([System.Guid]::NewGuid())' == ''">{write}</PropertyGroup>"#
-            ),
+            format!(r#"<PropertyGroup Condition="'É' == 'Ê'">{write}</PropertyGroup>"#),
             String::new(),
         ),
         Site::TargetBody => (
@@ -1147,7 +1145,7 @@ fn an_untrusted_langversion_reports_no_refusal() {
     let text = host_fs::read_to_string(&fsproj).unwrap();
     let text = text.replace(
         "</PropertyGroup>",
-        r#"</PropertyGroup><PropertyGroup Condition="'$([System.Guid]::NewGuid())' == ''"><LangVersion>8.0</LangVersion></PropertyGroup>"#,
+        r#"</PropertyGroup><PropertyGroup Condition="'É' == 'Ê'"><LangVersion>8.0</LangVersion></PropertyGroup>"#,
     );
     std::fs::write(&fsproj, &text).unwrap();
     let (_, env, _) = environments().remove(0);
@@ -1325,7 +1323,7 @@ fn a_guessed_version_is_held_to_the_versions_its_compiler_checks_at() {
                 let text = host_fs::read_to_string(&fsproj).unwrap().replace(
                     "</PropertyGroup>",
                     &format!(
-                        r#"{flags}</PropertyGroup><PropertyGroup Condition="'$([System.Guid]::NewGuid())' == ''"><LangVersion>9.0</LangVersion></PropertyGroup>"#
+                        r#"{flags}</PropertyGroup><PropertyGroup Condition="'É' == 'Ê'"><LangVersion>9.0</LangVersion></PropertyGroup>"#
                     ),
                 );
                 std::fs::write(&fsproj, &text).unwrap();
