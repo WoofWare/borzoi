@@ -1040,6 +1040,9 @@ fn walk_item_child_inner(node: Node<'_, '_>, kind: ItemKind, state: &mut State<'
             return;
         }
     }
+    if kind == ItemKind::ProjectReference && node.has_attribute("Include") {
+        taint_reference_list_on_doubted_reads(node, state);
+    }
     if is_compile_item_kind(kind) && is_metadata_only_item_update(node) {
         if kind == ItemKind::Compile && compile_item_sets_compile_order(node) {
             apply_compile_order_update(node, state);
@@ -1119,15 +1122,6 @@ fn walk_item_child_inner(node: Node<'_, '_>, kind: ItemKind, state: &mut State<'
     // `Include="$(ExtraFiles)"` may expand into multiple items even
     // though the raw attribute looks like one.
     let expansion = state.expand(include, node.range());
-    // The Include VALUE can lean on an untrusted read the same way the
-    // gate can: a cleanly-expanded `$(RefPath)` whose source was written
-    // under a gate we couldn't pin may hold a different path — or none —
-    // in the real build, so the captured edge may be phantom. Flag rather
-    // than drop: the declared-structure walk keeps the element. A read of a
-    // name the walk holds no value of (a write it refused, an undefined
-    // read it cannot show exact) is such a read too, which the walk then
-    // drops below: MSBuild holds an item there that the list lacks (#1098).
-    taint_reference_list_on_untrusted_value(kind, include, &expansion, state);
     if expansion.had_issue() {
         // Substitution failure leaves a path with empty fragments or
         // residual `$(...)`. Either way the result is corrupt; we refuse
@@ -4006,6 +4000,25 @@ pub(super) fn item_key(name: &str) -> String {
     name.to_ascii_lowercase()
 }
 
+/// Flag [`ParsedProject::project_references_uncertain`] when the `Include` or
+/// `Exclude` of the `<ProjectReference>` at `node`, which MSBuild evaluates,
+/// reads a name the walk doubts ([`State::raw_reads_a_doubted_name`]), or an
+/// SDK-package-tainted one. A value the walk computes from one may name a
+/// different target (`Include`) or strip one it kept (`Exclude`): a phantom
+/// edge for a reference-semantics consumer. One it does not compute, it drops
+/// with the element, though MSBuild holds items there that the list then
+/// lacks (#1098). So the list is flagged before the element is walked,
+/// whatever the walk then does with it.
+fn taint_reference_list_on_doubted_reads(node: Node<'_, '_>, state: &mut State<'_>) {
+    for name in ["Include", "Exclude"] {
+        if let Some(raw) = attribute(node, name)
+            && (state.raw_reads_a_doubted_name(&raw) || state.raw_uses_sdk_package_taint(&raw))
+        {
+            state.project_references_uncertain = true;
+        }
+    }
+}
+
 /// Handle one item element when a [`GlobResolver`] is present.
 ///
 /// Splits the (already `$(...)`-expanded) `Include` into fragments,
@@ -4016,30 +4029,6 @@ pub(super) fn item_key(name: &str) -> String {
 /// spliced verbatim, each path as an item of `kind`. An unresolved
 /// `@()`/`%()` in the exclude list means we cannot know what to remove,
 /// so the whole element is skipped rather than risk over-inclusion.
-/// Flag [`ParsedProject::project_references_uncertain`] when the expanded
-/// VALUE of a `<ProjectReference>` list attribute (`Include` or `Exclude`)
-/// leans on an untrusted read — an unpinned property (written under a gate
-/// we couldn't evaluate), an SDK-package-tainted one, or a name the walk
-/// holds no value of and cannot show undefined (a write it refused). Where
-/// the expansion is clean, the captured list would look trustworthy without
-/// consulting the pin state — but the real build's value may name a
-/// different target (Include) or strip one we kept (Exclude), either way a
-/// phantom edge for a reference-semantics consumer. Where the walk then
-/// drops the element, MSBuild holds items there that the list lacks. Either
-/// way the list is flagged, whatever the walk does with the element.
-fn taint_reference_list_on_untrusted_value(
-    kind: ItemKind,
-    raw: &str,
-    expansion: &Expansion,
-    state: &mut State<'_>,
-) {
-    if kind == ItemKind::ProjectReference
-        && (expansion.unpinned_root.is_some() || state.raw_uses_sdk_package_taint(raw))
-    {
-        state.project_references_uncertain = true;
-    }
-}
-
 fn route_item_through_resolver(
     node: Node<'_, '_>,
     kind: ItemKind,
@@ -4085,15 +4074,10 @@ fn route_item_through_resolver(
     }
     let mut excludes: Vec<SpecFragment> = Vec::new();
     if let Some(raw) = exclude_attr.as_deref() {
+        // The Exclude VALUE's trust was checked with the Include's
+        // ([`taint_reference_list_on_doubted_reads`]); the best-effort
+        // exclusion below applies whatever we did expand.
         let expansion = state.expand(raw, node.range());
-        // The Exclude VALUE gets the same trust check as the Include's: an
-        // untrusted `$(Skip)` that expanded (cleanly) to empty here may
-        // exclude the target in the real build, leaving the captured list
-        // claiming an edge the real build strips (a phantom edge for a
-        // reference-semantics consumer). The best-effort exclusion below
-        // still applies whatever we did expand; an Exclude reading a name
-        // the walk holds no value of drops the element, as an Include's does.
-        taint_reference_list_on_untrusted_value(kind, raw, &expansion, state);
         if expansion.had_issue() {
             return;
         }

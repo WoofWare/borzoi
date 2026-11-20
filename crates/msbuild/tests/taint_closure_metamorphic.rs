@@ -1146,7 +1146,10 @@ fn a_project_reference_gated_on_a_refused_name_is_not_certain() {
 
 /// #1098: a `ProjectReference` reading a name refused twice (a refused write,
 /// then a refused write under a gate reading it) is not dropped from a list
-/// published as certain.
+/// published as certain. Every expression is one MSBuild evaluates and the
+/// walk does not; `fsproj_project_reference_remove_diff`'s
+/// `a_reference_reading_a_refused_name_is_no_certain_omission` holds the shape
+/// to MSBuild's items.
 #[test]
 fn a_project_reference_reading_a_twice_refused_name_is_not_dropped() {
     let project = pure_evaluate(
@@ -1155,10 +1158,10 @@ fn a_project_reference_reading_a_twice_refused_name_is_not_dropped() {
     <TargetFramework>$(Configuration)</TargetFramework>
   </PropertyGroup>
   <PropertyGroup>
-    <TargetFramework>$(Platform.Nope('x'))</TargetFramework>
+    <TargetFramework>$([System.String]::Copy('net8.0'))</TargetFramework>
   </PropertyGroup>
   <PropertyGroup>
-    <TargetFramework Condition="'$(TargetFramework)' == ''">$(Configuration.Substring(0,1))</TargetFramework>
+    <TargetFramework Condition="'$(TargetFramework)' == ''">$([System.String]::Copy('x'))</TargetFramework>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="$(TargetFramework.Length).fsproj" />
@@ -1179,29 +1182,29 @@ fn a_project_reference_reading_a_twice_refused_name_is_not_dropped() {
         (
             "single",
             r#"<Project>
-  <PropertyGroup><TF>$(Platform.Nope('x'))</TF></PropertyGroup>
+  <PropertyGroup><TF>$([System.String]::Copy('net8.0'))</TF></PropertyGroup>
   <ItemGroup><ProjectReference Include="$(TF.Length).fsproj" /></ItemGroup>
 </Project>"#,
         ),
         (
             "single-cond",
             r#"<Project>
-  <PropertyGroup><TF Condition="'É' == 'é'">$(Platform.Nope('x'))</TF></PropertyGroup>
+  <PropertyGroup><TF Condition="'É' == 'é'">$([System.String]::Copy('net8.0'))</TF></PropertyGroup>
   <ItemGroup><ProjectReference Include="$(TF.Length).fsproj" /></ItemGroup>
 </Project>"#,
         ),
         (
             "twice-uncond",
             r#"<Project>
-  <PropertyGroup><TF>$(Platform.Nope('x'))</TF></PropertyGroup>
-  <PropertyGroup><TF>$(Configuration.Substring(0,1))</TF></PropertyGroup>
+  <PropertyGroup><TF>$([System.String]::Copy('net8.0'))</TF></PropertyGroup>
+  <PropertyGroup><TF>$([System.String]::Copy('x'))</TF></PropertyGroup>
   <ItemGroup><ProjectReference Include="$(TF.Length).fsproj" /></ItemGroup>
 </Project>"#,
         ),
         (
             "twice-cond-a",
             r#"<Project>
-  <PropertyGroup><TF>$(Platform.Nope('x'))</TF></PropertyGroup>
+  <PropertyGroup><TF>$([System.String]::Copy('net8.0'))</TF></PropertyGroup>
   <PropertyGroup><TF Condition="'$(TF)' == ''">a</TF></PropertyGroup>
   <ItemGroup><ProjectReference Include="$(TF.Length).fsproj" /></ItemGroup>
 </Project>"#,
@@ -1209,8 +1212,8 @@ fn a_project_reference_reading_a_twice_refused_name_is_not_dropped() {
         (
             "twice-cond-refused",
             r#"<Project>
-  <PropertyGroup><TF>$(Platform.Nope('x'))</TF></PropertyGroup>
-  <PropertyGroup><TF Condition="'$(TF)' == ''">$(Configuration.Substring(0,1))</TF></PropertyGroup>
+  <PropertyGroup><TF>$([System.String]::Copy('net8.0'))</TF></PropertyGroup>
+  <PropertyGroup><TF Condition="'$(TF)' == ''">$([System.String]::Copy('x'))</TF></PropertyGroup>
   <ItemGroup><ProjectReference Include="$(TF.Length).fsproj" /></ItemGroup>
 </Project>"#,
         ),

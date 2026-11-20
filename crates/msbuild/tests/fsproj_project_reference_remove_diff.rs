@@ -881,28 +881,36 @@ fn soak() {
 /// The names the doubted-read sweep writes and reads.
 const READ_NAMES: [&str; 2] = ["P", "Q"];
 
+/// A function the walk does not compute, which MSBuild evaluates to `w`: a
+/// write of it is one the walk refuses, so that it holds no value of the
+/// name.
+const REFUSED_BODY: &str = "$([System.String]::Copy('w'))";
+
+/// The hostile values a literal of the doubted-read sweep is drawn from: a
+/// name's last write, as nothing puts a value back, and none holding a NUL,
+/// raw or escaped, which is in no path MSBuild gives a `FullPath`, the
+/// metadatum the oracle reads an item by.
+fn read_sweep_values(plain: &str) -> Vec<hostile::Entry<value::Value>> {
+    value::alphabet().filtered(|entry| {
+        let text = entry.value.render(plain);
+        entry.value.write == value::Write::Final
+            && !text.contains('\0')
+            && !text.to_ascii_lowercase().contains("%00")
+    })
+}
+
 /// A write's body in the doubted-read sweep: a hostile or plain literal, a
-/// function the walk does not compute (so that it holds no value of the
-/// name, while MSBuild evaluates it to `w`), or a read of the other name.
+/// function the walk does not compute, or a read of the other name.
 fn read_sweep_body(rng: &mut SplitMix64, other: &str) -> hostile::Drawn<String> {
     match rng.below(4) {
         0 => {
             let plain = *rng.pick(&["a", "lib", "B1"]);
-            // A name's last write: nothing puts a value back. A NUL, raw or
-            // escaped, is in no path MSBuild gives a `FullPath`, which the
-            // oracle reads an item by.
-            let finals = value::alphabet().filtered(|entry| {
-                let text = entry.value.render(plain);
-                entry.value.write == value::Write::Final
-                    && !text.contains('\0')
-                    && !text.to_ascii_lowercase().contains("%00")
-            });
-            match hostile::sample(&finals, rng.next()) {
+            match hostile::sample(&read_sweep_values(plain), rng.next()) {
                 Some(entry) => hostile::Drawn::of(entry).map(|v| v.render(plain)),
                 None => hostile::Drawn::plain(plain.to_owned()),
             }
         }
-        1 => hostile::Drawn::plain("$([System.String]::Copy('w'))".to_owned()),
+        1 => hostile::Drawn::plain(REFUSED_BODY.to_owned()),
         2 => hostile::Drawn::plain(format!("$({other})")),
         _ => hostile::Drawn::plain(format!("$({other}.Length)")),
     }
@@ -920,46 +928,122 @@ fn read_sweep_condition(rng: &mut SplitMix64, name: &str, other: &str) -> String
     }
 }
 
-/// A generated document of the doubted-read sweep, the names each reference
-/// reads, and the hostile dimensions its literals carry.
-type ReadDocument = (String, Vec<Vec<&'static str>>, BTreeSet<Dimension>);
+/// One write of a doubted-read document.
+struct ReadWrite {
+    name: &'static str,
+    condition: String,
+    body: hostile::Drawn<String>,
+}
 
-/// One generated document of the doubted-read sweep: writes of `P` and `Q`,
-/// then unconditional `<ProjectReference>`s, the `i`th spelled `E{i}_…`
-/// around reads of them.
-fn read_sweep_document(rng: &mut SplitMix64) -> ReadDocument {
-    let mut xml = String::from("<Project>\n");
-    let mut hostile = BTreeSet::new();
-    for _ in 0..2 + rng.below(3) {
-        let at = rng.below(2);
-        let (name, other) = (READ_NAMES[at], READ_NAMES[1 - at]);
-        let condition = read_sweep_condition(rng, name, other);
-        let body = read_sweep_body(rng, other);
-        hostile.extend(body.hostile.iter().copied());
-        let text = body
-            .value
-            .replace('&', "&amp;")
-            .replace('<', "&lt;")
-            .replace('>', "&gt;");
-        xml.push_str(&format!(
-            "  <PropertyGroup><{name}{condition}>{text}</{name}></PropertyGroup>\n"
-        ));
+/// One document of the doubted-read sweep: writes of `P` and `Q`, then
+/// unconditional `<ProjectReference>`s, each with an `Origin` metadatum
+/// naming it and an `Include` of the names it reads.
+struct ReadDocument {
+    writes: Vec<ReadWrite>,
+    /// Each reference's `Include`, and the names it reads.
+    references: Vec<(String, Vec<&'static str>)>,
+}
+
+impl ReadDocument {
+    fn generate(rng: &mut SplitMix64) -> Self {
+        let writes = (0..2 + rng.below(3))
+            .map(|_| {
+                let at = rng.below(2);
+                let (name, other) = (READ_NAMES[at], READ_NAMES[1 - at]);
+                let condition = read_sweep_condition(rng, name, other);
+                let body = read_sweep_body(rng, other);
+                ReadWrite {
+                    name,
+                    condition,
+                    body,
+                }
+            })
+            .collect();
+        let references = (0..1 + rng.below(3))
+            .map(|i| {
+                let name = *rng.pick(&READ_NAMES);
+                match rng.below(3) {
+                    0 => (format!("E{i}_$({name}).fsproj"), vec![name]),
+                    1 => (format!("E{i}_$({name}.Length).fsproj"), vec![name]),
+                    _ => (format!("E{i}_$(P)_$(Q).fsproj"), vec!["P", "Q"]),
+                }
+            })
+            .collect();
+        ReadDocument { writes, references }
     }
-    let mut reads = Vec::new();
-    for i in 0..1 + rng.below(3) {
-        let name = *rng.pick(&READ_NAMES);
-        let (include, read) = match rng.below(3) {
-            0 => (format!("E{i}_$({name}).fsproj"), vec![name]),
-            1 => (format!("E{i}_$({name}.Length).fsproj"), vec![name]),
-            _ => (format!("E{i}_$(P)_$(Q).fsproj"), vec!["P", "Q"]),
-        };
-        xml.push_str(&format!(
-            "  <ItemGroup><ProjectReference Include=\"{include}\" /></ItemGroup>\n"
-        ));
-        reads.push(read);
+
+    /// A document whose one reference reads `value`, the last write of `P`,
+    /// beside a name the walk refused: the witness of `value`'s dimension.
+    fn witness(value: hostile::Drawn<String>) -> Self {
+        ReadDocument {
+            writes: vec![
+                ReadWrite {
+                    name: "Q",
+                    condition: String::new(),
+                    body: hostile::Drawn::plain(REFUSED_BODY.to_owned()),
+                },
+                ReadWrite {
+                    name: "P",
+                    condition: String::new(),
+                    body: value,
+                },
+            ],
+            references: vec![("E0_$(P)_$(Q).fsproj".to_owned(), vec!["P", "Q"])],
+        }
     }
-    xml.push_str("</Project>\n");
-    (xml, reads, hostile)
+
+    fn xml(&self) -> String {
+        let mut xml = String::from("<Project>\n");
+        for write in &self.writes {
+            let text = write
+                .body
+                .value
+                .replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;");
+            xml.push_str(&format!(
+                "  <PropertyGroup><{name}{condition}>{text}</{name}></PropertyGroup>\n",
+                name = write.name,
+                condition = write.condition
+            ));
+        }
+        for (i, (include, _)) in self.references.iter().enumerate() {
+            xml.push_str(&format!(
+                "  <ItemGroup><ProjectReference Include=\"{include}\" Origin=\"E{i}\" /></ItemGroup>\n"
+            ));
+        }
+        xml.push_str("</Project>\n");
+        xml
+    }
+
+    /// The hostile dimensions a reference reads: those of each name's last
+    /// write, where that write is unconditional (so MSBuild makes it) and a
+    /// reference reads its name. A write a later one replaces, or one under
+    /// a gate, may reach no reference.
+    fn read_dimensions(&self) -> BTreeSet<Dimension> {
+        let mut dimensions = BTreeSet::new();
+        for name in READ_NAMES {
+            let read = self
+                .references
+                .iter()
+                .any(|(_, reads)| reads.contains(&name));
+            if let Some(last) = self.writes.iter().rev().find(|w| w.name == name)
+                && read
+                && last.condition.is_empty()
+            {
+                dimensions.extend(last.body.hostile.iter().copied());
+            }
+        }
+        dimensions
+    }
+
+    /// Every dimension any write carries.
+    fn drawn_dimensions(&self) -> BTreeSet<Dimension> {
+        self.writes
+            .iter()
+            .flat_map(|w| w.body.hostile.iter().copied())
+            .collect()
+    }
 }
 
 /// What the doubted-read sweep saw.
@@ -968,99 +1052,162 @@ struct ReadCensus {
     cases: usize,
     msbuild_rejects: usize,
     committed: usize,
-    /// Cases where an `Include` read a name the walk doubts and MSBuild holds
-    /// its item: the walk owes a decline whether it kept the item or not.
+    /// Cases where a reference read a name the walk doubts and MSBuild holds
+    /// an item of it: the walk owes a decline, whether it kept the item or
+    /// not.
     owed: usize,
 }
 
 /// The hostile values the doubted-read sweep cannot carry.
 const READ_EXCLUDED: &[(Dimension, &str)] = &[(
     Dimension::OverwrittenLater,
-    "a value an item reads is its name's last write here, which nothing puts back",
+    "a value a reference reads is its name's last write here, which nothing puts back",
 )];
 
-/// #1098: a `<ProjectReference>` whose `Include` reads a name the walk
-/// doubts (a write it refused to compute, one under a gate it could not
-/// decide, a copy of either) is no edge a list published as certain may
-/// lack. Every case is held to no phantom edge as well. Graded against
-/// MSBuild's evaluated items, each reference found by its `E{i}_` prefix.
-fn doubted_read_sweep(oracle: &mut Oracle, seed: u64, cases: usize) -> ReadCensus {
-    let census = coverage::open(file!(), "reference_reads", READ_EXCLUDED);
-    let excluded: BTreeSet<Dimension> = READ_EXCLUDED.iter().map(|(d, _)| *d).collect();
-    let mut rng = SplitMix64(seed);
-    let mut tally = ReadCensus::default();
-    while tally.cases < cases {
-        let (xml, reads, hostile) = read_sweep_document(&mut rng);
-        if hostile.iter().any(|d| excluded.contains(d)) {
-            continue;
-        }
-        tally.cases += 1;
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        let root =
-            borzoi_msbuild::observed::host_fs::canonicalize(dir.path()).expect("canonicalize");
-        let proj = layout(&root);
-        std::fs::write(&proj, &xml).unwrap();
-        let parsed = parse_fsproj_with_imports(
-            &borzoi_msbuild::ProjectFile::buffer(&proj, &xml)
-                .expect("a project path spelt as its full path"),
-            &HashMap::new(),
-            &common::oracle_environment(),
-            None,
-            None,
-        )
-        .expect("well-formed XML parses");
-        let Some(theirs) = oracle.items(&xml, &proj, "ProjectReference", &[]) else {
-            tally.msbuild_rejects += 1;
-            census.reached(&hostile, "msbuild-rejects");
-            continue;
-        };
-        let theirs: Vec<PathBuf> = theirs.iter().map(|p| lexical(p)).collect();
-        let ours: Vec<PathBuf> = parsed
+/// How one doubted-read document went.
+enum ReadOutcome {
+    MsbuildRejects,
+    Declined { owed: bool },
+    Committed,
+}
+
+/// Grade `document` against MSBuild's items: a certain list holds no phantom
+/// edge, and lacks no item of a reference that reads a name the walk doubts
+/// (#1098). Each item is matched to its reference by its `Origin`
+/// metadatum on MSBuild's side and by its element on the walk's, so a value
+/// that splits into several items or moves the marker out of the file name
+/// is graded all the same.
+fn grade_read_document(oracle: &mut Oracle, document: &ReadDocument) -> ReadOutcome {
+    let xml = document.xml();
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let root = borzoi_msbuild::observed::host_fs::canonicalize(dir.path()).expect("canonicalize");
+    let proj = layout(&root);
+    std::fs::write(&proj, &xml).unwrap();
+    let parsed = parse_fsproj_with_imports(
+        &borzoi_msbuild::ProjectFile::buffer(&proj, &xml)
+            .expect("a project path spelt as its full path"),
+        &HashMap::new(),
+        &common::oracle_environment(),
+        None,
+        None,
+    )
+    .expect("well-formed XML parses");
+    let Some(theirs) = oracle.items_meta(&xml, &proj, "ProjectReference", &["FullPath", "Origin"])
+    else {
+        return ReadOutcome::MsbuildRejects;
+    };
+    // MSBuild's items of reference `i`, and the walk's, by full path.
+    let theirs_of = |i: usize| -> Vec<PathBuf> {
+        let origin = format!("E{i}");
+        theirs
+            .iter()
+            .filter(|(_, meta)| meta.get("Origin") == Some(&origin))
+            .map(|(_, meta)| lexical(&meta["FullPath"]))
+            .collect()
+    };
+    let starts: Vec<usize> = xml
+        .match_indices("<ProjectReference ")
+        .map(|(at, _)| at)
+        .collect();
+    let ours_of = |i: usize| -> Vec<PathBuf> {
+        parsed
             .project_references
             .iter()
+            .filter(|item| starts.iter().position(|s| *s == item.span.start) == Some(i))
             .map(|item| lexical(&item.include.to_string_lossy()))
-            .collect();
-        let doubted = |name: &str| {
-            !matches!(
-                parsed.property(name),
-                PropertyRead::Value(_) | PropertyRead::Unset
-            )
-        };
-        let has = |list: &[PathBuf], i: usize| {
-            let prefix = format!("E{i}_");
-            list.iter().any(|path| {
-                path.file_name()
-                    .is_some_and(|f| f.to_string_lossy().starts_with(&prefix))
-            })
-        };
-        let owed = reads
-            .iter()
-            .enumerate()
-            .any(|(i, read)| read.iter().any(|name| doubted(name)) && has(&theirs, i));
-        tally.owed += usize::from(owed);
-        if parsed.project_references_uncertain {
-            census.reached(&hostile, "decline");
-            continue;
-        }
-        let mut unmatched = theirs.clone();
+            .collect()
+    };
+    let doubted = |name: &str| {
+        !matches!(
+            parsed.property(name),
+            PropertyRead::Value(_) | PropertyRead::Unset
+        )
+    };
+    let owed = document
+        .references
+        .iter()
+        .enumerate()
+        .any(|(i, (_, reads))| reads.iter().any(|name| doubted(name)) && !theirs_of(i).is_empty());
+    if parsed.project_references_uncertain {
+        return ReadOutcome::Declined { owed };
+    }
+    assert_eq!(
+        parsed.project_references.len(),
+        (0..document.references.len())
+            .map(|i| ours_of(i).len())
+            .sum::<usize>(),
+        "every item the walk captured is of one reference:\n{xml}"
+    );
+    for (i, (_, reads)) in document.references.iter().enumerate() {
+        let (ours, mut unmatched) = (ours_of(i), theirs_of(i));
         for path in &ours {
             let Some(at) = unmatched.iter().position(|p| p == path) else {
                 panic!(
-                    "phantom edge {}:\n{xml}\nours: {ours:#?}\ntheirs: {theirs:#?}",
-                    path.display()
+                    "phantom edge {} of reference E{i}:\n{xml}\nours: {ours:#?}\ntheirs: {:#?}",
+                    path.display(),
+                    theirs_of(i)
                 );
             };
             unmatched.remove(at);
         }
-        for (i, read) in reads.iter().enumerate() {
-            assert!(
-                !(has(&theirs, i) && !has(&ours, i) && read.iter().any(|name| doubted(name))),
-                "#1098: the list is certain without reference E{i}_, whose `Include` reads a \
-                 name the walk doubts ({read:?}):\n{xml}\nours: {ours:#?}\ntheirs: {theirs:#?}"
-            );
+        assert!(
+            unmatched.is_empty() || !reads.iter().any(|name| doubted(name)),
+            "#1098: the list is certain without {unmatched:?} of reference E{i}, whose `Include` \
+             reads a name the walk doubts ({reads:?}):\n{xml}\nours: {ours:#?}"
+        );
+    }
+    ReadOutcome::Committed
+}
+
+/// #1098: a `<ProjectReference>` whose `Include` reads a name the walk
+/// doubts (a write it refused to compute, one under a gate it could not
+/// decide, a copy of either) is no edge a list published as certain may
+/// lack. Every case is held to no phantom edge as well. Each hostile
+/// dimension's witness runs first, so that every one is graded whatever the
+/// seed draws.
+fn doubted_read_sweep(oracle: &mut Oracle, seed: u64, cases: usize) -> ReadCensus {
+    let census = coverage::open(file!(), "reference_reads", READ_EXCLUDED);
+    let excluded: BTreeSet<Dimension> = READ_EXCLUDED.iter().map(|(d, _)| *d).collect();
+    let witnesses: Vec<ReadDocument> = read_sweep_values("lib")
+        .iter()
+        .filter(|entry| !excluded.contains(&entry.dimension))
+        .map(|entry| ReadDocument::witness(hostile::Drawn::of(entry).map(|v| v.render("lib"))))
+        .collect();
+    let mut rng = SplitMix64(seed);
+    let mut tally = ReadCensus::default();
+    let mut witnesses = witnesses.into_iter();
+    loop {
+        let (document, witness) = match witnesses.next() {
+            Some(document) => (document, true),
+            None if tally.cases < cases => (ReadDocument::generate(&mut rng), false),
+            None => break,
+        };
+        if document
+            .drawn_dimensions()
+            .iter()
+            .any(|d| excluded.contains(d))
+        {
+            continue;
         }
-        tally.committed += 1;
-        census.reached(&hostile, "commit");
+        let read = document.read_dimensions();
+        let outcome = grade_read_document(oracle, &document);
+        census.reached(
+            &read,
+            match outcome {
+                ReadOutcome::MsbuildRejects => "msbuild-rejects",
+                ReadOutcome::Declined { .. } => "decline",
+                ReadOutcome::Committed => "commit",
+            },
+        );
+        if witness {
+            continue;
+        }
+        tally.cases += 1;
+        match outcome {
+            ReadOutcome::MsbuildRejects => tally.msbuild_rejects += 1,
+            ReadOutcome::Declined { owed } => tally.owed += usize::from(owed),
+            ReadOutcome::Committed => tally.committed += 1,
+        }
     }
     census.finish(
         "BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-msbuild --test \
@@ -1072,7 +1219,7 @@ fn doubted_read_sweep(oracle: &mut Oracle, seed: u64, cases: usize) -> ReadCensu
 /// [`doubted_read_sweep`] at a fixed seed.
 #[test]
 fn doubted_reads_leave_no_certain_list_short() {
-    let tally = doubted_read_sweep(&mut Oracle::spawn(), 0x1098_0d0b_7ed, 1_500);
+    let tally = doubted_read_sweep(&mut Oracle::spawn(), 0x0109_80d0_b7ed, 1_500);
     eprintln!("doubted-read sweep: {tally:?}");
     assert!(tally.owed >= 40, "{tally:?}");
     assert!(tally.committed >= 100, "{tally:?}");
@@ -1084,4 +1231,64 @@ fn doubted_reads_leave_no_certain_list_short() {
 fn doubted_reads_soak() {
     let (seed, cases) = common::soak_parameters("doubted reads", 2000);
     doubted_read_sweep(&mut Oracle::spawn(), seed, cases);
+}
+
+/// #1098's documents, and the routes review found around its first fix, each
+/// pinned against MSBuild's items: MSBuild holds the reference, and the walk,
+/// which cannot compute it, publishes no certain list without it.
+#[test]
+fn a_reference_reading_a_refused_name_is_no_certain_omission() {
+    let refused = REFUSED_BODY;
+    let rows = [
+        // The issue's: a refused write, then a refused write under a gate
+        // reading it.
+        format!(
+            "<PropertyGroup><TF>{refused}</TF></PropertyGroup>\
+             <PropertyGroup><TF Condition=\"'$(TF)' == ''\">{refused}</TF></PropertyGroup>\
+             <ItemGroup><ProjectReference Include=\"$(TF.Length).fsproj\" /></ItemGroup>\
+             <ItemGroup><ProjectReference Include=\"A.fsproj\" /></ItemGroup>"
+        ),
+        // A function the walk does not model on the refused name: the
+        // expansion stops at it before it reports the read.
+        format!(
+            "<PropertyGroup><P>{refused}</P></PropertyGroup>\
+             <ItemGroup><ProjectReference Include=\"$(P.Substring(1)).fsproj\" /></ItemGroup>\
+             <ItemGroup><ProjectReference Include=\"A.fsproj\" /></ItemGroup>"
+        ),
+        // An `Exclude` reading it, which the walk drops the element for.
+        format!(
+            "<PropertyGroup><P>{refused}</P></PropertyGroup>\
+             <ItemGroup><ProjectReference Include=\"A.fsproj\" Exclude=\"$(P)\" /></ItemGroup>"
+        ),
+    ];
+    let mut oracle = Oracle::spawn();
+    for row in rows {
+        let xml = format!("<Project>{row}</Project>");
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let root =
+            borzoi_msbuild::observed::host_fs::canonicalize(dir.path()).expect("canonicalize");
+        let proj = layout(&root);
+        std::fs::write(&proj, &xml).unwrap();
+        let theirs = oracle
+            .items(&xml, &proj, "ProjectReference", &[])
+            .expect("MSBuild evaluates these documents");
+        let parsed = parse_fsproj_with_imports(
+            &borzoi_msbuild::ProjectFile::buffer(&proj, &xml)
+                .expect("a project path spelt as its full path"),
+            &HashMap::new(),
+            &common::oracle_environment(),
+            None,
+            None,
+        )
+        .expect("well-formed XML parses");
+        assert!(
+            theirs.len() > parsed.project_references.len(),
+            "MSBuild's list is not longer, so the row tests nothing: {xml}\n{theirs:?}"
+        );
+        assert!(
+            parsed.project_references_uncertain,
+            "MSBuild holds {theirs:?}, and the walk published {:?} as certain: {xml}",
+            parsed.project_references
+        );
+    }
 }

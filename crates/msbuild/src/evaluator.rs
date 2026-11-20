@@ -1186,7 +1186,7 @@ struct State<'r> {
     /// fabricates one), so this alone does not raise
     /// [`Self::project_references_uncertain`]; an `Include` whose value read a
     /// name the walk doubts raises it as well, dropped or kept
-    /// (`item_pass::taint_reference_list_on_untrusted_value`). But a list *derived* from
+    /// (`item_pass::taint_reference_list_on_doubted_reads`). But a list *derived* from
     /// `@(ProjectReference)` is then incomplete, and a `Remove` driven by it can
     /// miss an item MSBuild removes. [`item_pass`]'s item-list view reads it.
     project_reference_includes_hidden: bool,
@@ -2932,6 +2932,20 @@ impl<'r> State<'r> {
 
     fn raw_uses_sdk_package_taint(&self, raw: &str) -> bool {
         self.sdk_package_taint_for_raw(raw).is_some()
+    }
+
+    /// Whether `raw` reads a name whose value the real build may hold
+    /// otherwise than the walk: one it holds and doubts (unpinned or
+    /// SDK-tainted, [`Trust::reference_is_untrusted`]), or one it holds no
+    /// value of and cannot show undefined (a write it refused to compute,
+    /// [`Self::undefined_read_is_exact`]). Read off the text, so that what
+    /// the expansion did with the name (stop at a function it does not
+    /// model, say) cannot hide the read.
+    fn raw_reads_a_doubted_name(&self, raw: &str) -> bool {
+        properties::property_references(raw).any(|name| {
+            self.trust_of(name).reference_is_untrusted()
+                || (!self.lookup.is_bound(name) && !self.undefined_read_is_exact(name))
+        })
     }
 
     /// The root to record for a value that read `name` while it was
