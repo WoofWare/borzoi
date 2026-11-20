@@ -624,7 +624,13 @@ const REFUSED: &str = "$([System.String]::Copy('Debug'))";
 /// `""`), to show that MSBuild's rejection rests on them: a number, a word, a
 /// version, a boolean, and a long value every indexer and separator the
 /// generator uses finds room in.
-const VARIED_VALUES: &[&str] = &["1", "abc", "a;b\tc;d\te;f\tg;h\ti;j;k\tl", "1.2.3", "true"];
+const VARIED_VALUES: &[&str] = &[
+    "1",
+    "abc",
+    "a;b\tc;d\te;f\tg;h\ti;j;k\tl;m;n;o",
+    "1.2.3",
+    "true",
+];
 
 /// What a value of the overwritten-later dimension is reset to after the
 /// site.
@@ -770,14 +776,26 @@ const WITNESSES: &[Witness] = &[
         gate: "",
         gap: "unmodelled-body",
     },
+    // Both gaps by construction: a version expression the walk does not
+    // model (an unquoted argument holding a line break) throws whatever the
+    // names hold, and no one value of `X` is both a version and ten fields.
     Witness {
         values: ["2.0", "true\n/out:obj/Evil.dll", "1.2.3", "abc"],
         template: "<ItemGroup><I Include=\"{t}\" /></ItemGroup>",
-        body: "$([MSBuild]::VersionGreaterThan($(B), 1.0));$(X.Split(\";\")[9].Contains(\"$(U)\"))",
+        body: "$([MSBuild]::VersionGreaterThan($(B), 1.0));$(X.Split(\";\")[9]);$([MSBuild]::VersionGreaterThan(\"$(X)\", \"1.0\"))",
         gate: "",
         gap: "unmodelled-body-and-uncertain-value",
     },
 ];
+
+/// The long value of [`VARIED_VALUES`] has room for every indexer
+/// [`operand`] writes: `Split(";")[9]`, `Split("\t")[1]` and `[9]`.
+#[test]
+fn a_varied_value_has_room_for_every_indexer() {
+    assert!(VARIED_VALUES.iter().any(|value| {
+        value.split(';').count() > 9 && value.split('\t').count() > 1 && value.chars().count() > 9
+    }));
+}
 
 #[test]
 fn every_witness_stands_at_a_site_the_generator_draws() {
