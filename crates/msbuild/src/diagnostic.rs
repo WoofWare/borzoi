@@ -306,6 +306,18 @@ pub enum RejectionCause {
     /// indexer out of range, a malformed `[MSBuild]::Version*` operand.
     /// `expression` is the `$(…)` text.
     ThrowingExpression { expression: String },
+    /// A `<UsingTask>` MSBuild refuses as it registers the task, without an
+    /// expression throwing: `attribute` (`TaskName`, `TaskFactory`,
+    /// `AssemblyFile`, `AssemblyName`, a body's `Evaluate`, a parameter's
+    /// `ParameterType`, `Output` or `Required`) expanded to `value`, which
+    /// the registration does not take (an empty name, a flag that is no
+    /// boolean, a type it does not resolve, a body under no task factory).
+    /// `task` is the `TaskName` as written.
+    UsingTaskRegistration {
+        task: String,
+        attribute: String,
+        value: String,
+    },
 }
 
 /// A construct MSBuild's loader (`ProjectParser`) refuses when it loads a

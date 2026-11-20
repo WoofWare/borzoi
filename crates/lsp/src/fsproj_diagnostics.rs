@@ -1047,6 +1047,17 @@ fn rejection_message(cause: &RejectionCause, certain: bool) -> String {
             "MSBuild may reject this project: it may be unable to evaluate the property \
              function `{expression}` — no evaluated value is trusted"
         ),
+        RejectionCause::UsingTaskRegistration {
+            task,
+            attribute,
+            value,
+        } => {
+            let rejects = if certain { "rejects" } else { "may reject" };
+            format!(
+                "MSBuild {rejects} this project: a `<UsingTask>` of `{task}` has `{attribute}` \
+                 `{value}`, which it cannot register — no evaluated value is trusted"
+            )
+        }
     }
 }
 
