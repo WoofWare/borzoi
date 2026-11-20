@@ -1042,11 +1042,8 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
     judge_registration(node, reached, state);
     for name in USING_TASK_EXPANDED {
         if let Some(text) = attribute(node, name) {
-            // MSBuild turns `AssemblyFile`'s own `\` into `/` before it expands
-            // it, where `\` is no separator (`ProjectUsingTaskElement.
-            // AssemblyFile`, `FixFilePath`), as an import's `Project`.
-            let text = if *name == "AssemblyFile" && std::path::MAIN_SEPARATOR != '\\' {
-                text.replace('\\', "/")
+            let text = if *name == "AssemblyFile" {
+                assembly_file_text(&text)
             } else {
                 text.into_owned()
             };
@@ -1105,6 +1102,18 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
     }
 }
 
+/// The text MSBuild expands of a `<UsingTask>`'s `AssemblyFile` written as
+/// `raw`: it turns the attribute's own `\` into `/` before it expands it,
+/// where `\` is no separator (`ProjectUsingTaskElement.AssemblyFile`,
+/// `FixFilePath`), as an import's `Project`.
+fn assembly_file_text(raw: &str) -> String {
+    if std::path::MAIN_SEPARATOR == '\\' {
+        raw.to_owned()
+    } else {
+        raw.replace('\\', "/")
+    }
+}
+
 /// A `<UsingTask>` value as the walk holds it, for the registration
 /// judgement ([`judge_registration`]).
 enum RegistrationValue {
@@ -1114,8 +1123,9 @@ enum RegistrationValue {
     /// Expanded from names each of which holds a value MSBuild may hold
     /// ([`holds_a_value_msbuild_may`]), some of them doubted.
     Possible(String),
-    /// A value holding an item list or metadatum, which MSBuild expands as
-    /// it registers the task and the walk does not: it may be any value.
+    /// A value holding an item list, which MSBuild expands as it registers
+    /// the task (`ExpandPropertiesAndItems`) and the walk does not: it may be
+    /// any value. A metadatum MSBuild leaves as written there, so it is text.
     Opaque(String),
     /// Not a value the walk can judge: an expression it does not model (no
     /// rejection site yet, #1094), or a name it holds no value MSBuild need
@@ -1124,8 +1134,15 @@ enum RegistrationValue {
     Unheld,
 }
 
+/// The value MSBuild registers `raw` as, expanded with the file system where
+/// the walk has it, as its other expansions are, so that a probe it makes is
+/// recorded and a function that reads the file system is computed.
 fn registration_value(raw: &str, state: &State<'_>) -> RegistrationValue {
-    let (value, issues) = properties::substitute(raw, &state.lookup);
+    let (value, issues) = if state.follow_imports {
+        properties::substitute_with_fs(raw, &state.lookup, state.observer)
+    } else {
+        properties::substitute(raw, &state.lookup)
+    };
     let value = value.ignoring_trust().as_escaped().to_owned();
     if issues.iter().any(|issue| {
         !matches!(
@@ -1135,7 +1152,7 @@ fn registration_value(raw: &str, state: &State<'_>) -> RegistrationValue {
     }) {
         return RegistrationValue::Unheld;
     }
-    if value.contains("@(") || value.contains("%(") {
+    if value.contains("@(") {
         return RegistrationValue::Opaque(value);
     }
     // A backslash MSBuild may turn into a separator, by its working
@@ -1286,7 +1303,13 @@ fn judge_registration(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) 
         attribute(node, "AssemblyName"),
     ) {
         (Some(raw), _) if !raw.is_empty() => {
-            judge(state, &raw, node.range(), "AssemblyFile", &non_empty);
+            judge(
+                state,
+                &assembly_file_text(&raw),
+                node.range(),
+                "AssemblyFile",
+                &non_empty,
+            );
         }
         (_, Some(raw)) => judge(state, &raw, node.range(), "AssemblyName", &non_empty),
         _ => {}
@@ -1299,7 +1322,37 @@ fn judge_registration(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) 
                 }
             }
             "ParameterGroup" => {
+                // MSBuild keys the parameters case-insensitively
+                // (`OrdinalIgnoreCase`): a second name the first folds to
+                // fails its registry. The loader keys them by exact name.
+                // Names are literal, so a collision of ASCII names is
+                // certain; one a fold outside ASCII may make is possible.
+                let mut seen: Vec<&str> = Vec::new();
                 for parameter in child.children().filter(Node::is_element) {
+                    let name = parameter.tag_name().name();
+                    let collision = seen.iter().find_map(|earlier| {
+                        if earlier.eq_ignore_ascii_case(name) {
+                            Some(true)
+                        } else if !(earlier.is_ascii() && name.is_ascii())
+                            && earlier.to_lowercase() == name.to_lowercase()
+                        {
+                            Some(false)
+                        } else {
+                            None
+                        }
+                    });
+                    seen.push(name);
+                    if let Some(sure) = collision {
+                        state.note_rejection(
+                            certain_if(sure && reached),
+                            RejectionCause::UsingTaskRegistration {
+                                task: task.clone(),
+                                attribute: "ParameterGroup".to_owned(),
+                                value: name.to_owned(),
+                            },
+                            parameter.range(),
+                        );
+                    }
                     if let Some(raw) =
                         attribute(parameter, "ParameterType").filter(|raw| !raw.is_empty())
                     {
