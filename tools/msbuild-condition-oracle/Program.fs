@@ -37,6 +37,15 @@
 ///     per-case `dotnet msbuild` pays .NET startup every time, which a
 ///     generative sweep cannot afford.
 ///
+///   {"op":"taskBodies","xml":s,"path":s}
+///     -> {"ok":true,"bodies":[s|null, ..]}      // each UsingTask's inline
+///                                               //   task body, unexpanded
+///      | {"ok":false}                           // MSBuild refuses to load it
+///     What MSBuild reads as an inline task's body
+///     (`ProjectUsingTaskBodyElement.TaskBody`: an element's inner text or
+///     inner XML, `Utilities.GetXmlNodeInnerContents`), for the rejection
+///     judgement's reading of it to be held to.
+///
 ///   {"op":"itemsMeta","xml":s,"path":s,"itemType":s,"metadata":[name, ..]}
 ///     -> {"ok":true,"items":[{"identity":s,"escaped":s,"metadata":{name:value, ..}}, ..]}
 ///      | {"ok":false}                           // MSBuild rejects the project
@@ -515,6 +524,37 @@ let private readGlobals (root: JsonElement) : Collections.Generic.IDictionary<st
 
         table :> Collections.Generic.IDictionary<string, string>
     | _ -> null
+
+/// The `taskBodies` op: each `<UsingTask>`'s inline task body as MSBuild
+/// reads it, unexpanded (`ProjectUsingTaskBodyElement.TaskBody`, which is
+/// `Utilities.GetXmlNodeInnerContents`), in document order; `null` for one
+/// with no body. The document is written to `path` and opened as that file,
+/// so it is read exactly as a project file is (whitespace nodes dropped).
+/// `None` when MSBuild refuses to load it.
+let private taskBodies (path: string) (xml: string) : string array option =
+    use collection = new ProjectCollection()
+
+    try
+        writeProject path xml
+        let element = Microsoft.Build.Construction.ProjectRootElement.Open(path, collection)
+
+        element.UsingTasks
+        |> Seq.map (fun usingTask ->
+            match usingTask.TaskBody with
+            | null -> null
+            | body -> body.TaskBody)
+        |> Seq.toArray
+        |> Some
+    with :? InvalidProjectFileException ->
+        None
+
+let private respondTaskBodies (root: JsonElement) : string =
+    let xml = root.GetProperty("xml").GetString()
+    let path = root.GetProperty("path").GetString()
+
+    match taskBodies path xml with
+    | Some bodies -> JsonSerializer.Serialize {| ok = true; bodies = bodies |}
+    | None -> JsonSerializer.Serialize {| ok = false |}
 
 let private respondItems (root: JsonElement) : string =
     let xml = root.GetProperty("xml").GetString()
@@ -1704,6 +1744,7 @@ let main argv =
                     | "project" -> respondProject root
                     | "items" -> respondItems root
                     | "itemsMeta" -> respondItemsMeta root
+                    | "taskBodies" -> respondTaskBodies root
                     | "restoreCone" -> respondRestoreCone root
                     | "evaluated" -> respondEvaluated root
                     | "targetItems" -> respondTargetItems root

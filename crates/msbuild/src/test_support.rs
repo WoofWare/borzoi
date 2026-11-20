@@ -243,3 +243,18 @@ pub fn compiled_assembly_name_grading(
         &|_, _| true,
     )
 }
+
+/// What the walk reads as the inline task body of the first `<UsingTask>` in
+/// `xml` (its `<Task>`), unexpanded, where it reproduces MSBuild's reading
+/// (`ProjectUsingTaskBodyElement.TaskBody`); `None` where it declines, or
+/// where there is none. Held to MSBuild's by `tests/inline_task_body_diff.rs`.
+pub fn inline_task_body(xml: &str) -> Option<String> {
+    let document = crate::document::parse(xml).ok()?;
+    let task = document
+        .root_element()
+        .children()
+        .filter(|node| node.is_element() && node.tag_name().name() == "UsingTask")
+        .flat_map(|using_task| using_task.children())
+        .find(|node| node.is_element() && node.tag_name().name() == "Task")?;
+    crate::evaluator::inline_task_body(task)
+}

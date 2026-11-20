@@ -995,6 +995,14 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
     }
 }
 
+/// What MSBuild reads as the inline task body at `task`, unexpanded
+/// (`ProjectUsingTaskBodyElement.TaskBody`), where the walk reproduces it:
+/// [`task_body`] for text, CDATA sections and comments alone, else
+/// [`task_inner_xml`].
+pub(crate) fn inline_task_body(task: Node<'_, '_>) -> Option<String> {
+    task_body(task).or_else(|| task_inner_xml(task))
+}
+
 /// The text MSBuild expands of the inline task body at `task`, where it holds
 /// text, CDATA sections and comments alone: as MSBuild reads such an element
 /// (`document::inner_contents`: its text, or its inner XML where markup
@@ -1011,14 +1019,15 @@ fn task_body(task: Node<'_, '_>) -> Option<String> {
 /// its inner text where it starts with a CDATA section after any
 /// whitespace, else its inner XML as `XmlDocument` serializes it
 /// ([`serialize_inner_xml`]). `None` where the walk does not reproduce that
-/// reading: a carriage return in it (whose line-end reading `roxmltree`
-/// folds), an `xml:space` scope, a CDATA section past the first child, a
+/// reading: a text whose line ends `roxmltree` folds and MSBuild's reader
+/// keeps, an `xml:space` scope, a CDATA section beside other text, a
 /// namespace declared or a prefix spelt, or a value serializing would spell
-/// as a reference.
+/// as a reference. Held to MSBuild's reading by
+/// `tests/inline_task_body_diff.rs`.
 fn task_inner_xml(task: Node<'_, '_>) -> Option<String> {
     let source = task.document().input_text();
     let body = &source[task.range()];
-    if body.contains('\r') || body.contains("xml:space") || under_xml_space(task) {
+    if body.contains("xml:space") || under_xml_space(task) {
         return None;
     }
     let first = task
@@ -1030,20 +1039,35 @@ fn task_inner_xml(task: Node<'_, '_>) -> Option<String> {
     {
         // The inner text: every text and CDATA section beneath it, joined.
         // With no carriage return in it, `roxmltree`'s reading is MSBuild's.
-        // A whitespace node MSBuild's reader drops.
+        // A whitespace node MSBuild's reader drops. `roxmltree` joins a CDATA
+        // section and the text beside it into one node, where MSBuild's
+        // reader sees a section and a text, either of which may be a
+        // whitespace node it drops: such a node declines.
         let mut text = String::new();
         for descendant in task.descendants().filter(Node::is_text) {
             if is_whitespace_node(descendant) {
                 continue;
             }
             #[allow(clippy::disallowed_methods)]
-            text.push_str(descendant.text()?);
+            let value = descendant.text()?;
+            let raw = &source[descendant.range()];
+            let one_piece = match raw
+                .strip_prefix("<![CDATA[")
+                .and_then(|rest| rest.strip_suffix("]]>"))
+            {
+                Some(section) => section == value,
+                None => crate::document::text(descendant).is_some_and(|read| read == value),
+            };
+            if !one_piece {
+                return None;
+            }
+            text.push_str(value);
         }
         return Some(text);
     }
     let mut out = String::new();
     for child in task.children() {
-        serialize_inner_xml(child, &mut out, 0)?;
+        serialize_inner_xml(child, &mut out, 0, None)?;
     }
     Some(out)
 }
@@ -1100,11 +1124,18 @@ fn is_whitespace_node(node: Node<'_, '_>) -> bool {
 
 /// `node` written as `XmlTextWriter` writes it into an element's inner XML:
 /// an element as `<name a="v" />` or `<name a="v">…</name>` (`"` around
-/// every attribute value, its `&`, `<`, `>` and `"` as entities), text with
-/// its `&`, `<` and `>` as entities, a whitespace node not at all, a comment
-/// or processing instruction as written. `None` where that is not certain
-/// (see [`task_inner_xml`]).
-fn serialize_inner_xml(node: Node<'_, '_>, out: &mut String, depth: usize) -> Option<()> {
+/// every attribute value, its `&`, `<`, `>` and `"` as entities, the default
+/// namespace declared after them where `written_namespace`, the one the
+/// written XML already declares, is another), text with its `&`, `<` and
+/// `>` as entities, a whitespace node not at all, a comment as written, a
+/// processing instruction as `<?target data?>`. `None` where that is not
+/// certain (see [`task_inner_xml`]).
+fn serialize_inner_xml(
+    node: Node<'_, '_>,
+    out: &mut String,
+    depth: usize,
+    written_namespace: Option<&str>,
+) -> Option<()> {
     if depth >= MAX_TASK_BODY_DEPTH {
         return None;
     }
@@ -1118,6 +1149,9 @@ fn serialize_inner_xml(node: Node<'_, '_>, out: &mut String, depth: usize) -> Op
                 '<' => escaped.push_str("&lt;"),
                 '>' => escaped.push_str("&gt;"),
                 '"' if attribute => escaped.push_str("&quot;"),
+                '\n' if attribute => escaped.push_str("&#xA;"),
+                '\r' if attribute => escaped.push_str("&#xD;"),
+                '\t' | '\n' | '\r' => escaped.push(c),
                 c if c.is_control() => return None,
                 c => escaped.push(c),
             }
@@ -1126,29 +1160,22 @@ fn serialize_inner_xml(node: Node<'_, '_>, out: &mut String, depth: usize) -> Op
     };
     if node.is_element() {
         // A namespace declaration, which `roxmltree` keeps out of the
-        // attributes and serializing writes back.
-        let in_scope = |node: Node<'_, '_>| {
-            node.namespaces()
-                .map(|namespace| {
-                    (
-                        namespace.name().map(str::to_owned),
-                        namespace.uri().to_owned(),
-                    )
-                })
-                .collect::<Vec<_>>()
-        };
-        let declares = node
-            .parent_element()
-            .is_none_or(|parent| in_scope(parent) != in_scope(node));
+        // attributes and `XmlDocument` keeps among them, in their order,
+        // even where it declares what is in scope already.
+        let declares = super::loader::attribute_names(node)
+            .iter()
+            .any(|name| *name == "xmlns" || name.starts_with("xmlns:"));
         // An element in a namespace it inherits (the project's own, as most
-        // `.targets` declare) is serialized with the declaration, which
-        // holds no expression; one that declares a namespace or spells a
-        // prefix declines.
+        // `.targets` declare) is serialized with that declaration after its
+        // attributes, where the inner XML has not declared it yet; one that
+        // declares a namespace or spells a prefix declines, and so does one
+        // in none beneath one in some (which would take `xmlns=""`).
         let name = node.tag_name().name();
         let unprefixed = raw[1..].starts_with(name)
             && raw[1 + name.len()..]
                 .starts_with(|c: char| c.is_whitespace() || c == '>' || c == '/');
-        if declares || !unprefixed {
+        let namespace = node.tag_name().namespace();
+        if declares || !unprefixed || (namespace.is_none() && written_namespace.is_some()) {
             return None;
         }
         out.push('<');
@@ -1162,6 +1189,13 @@ fn serialize_inner_xml(node: Node<'_, '_>, out: &mut String, depth: usize) -> Op
             out.push_str(attr.name());
             out.push_str("=\"");
             out.push_str(&escape(&value, true)?);
+            out.push('"');
+        }
+        if let Some(namespace) = namespace
+            && written_namespace != Some(namespace)
+        {
+            out.push_str(" xmlns=\"");
+            out.push_str(&escape(namespace, true)?);
             out.push('"');
         }
         if node.children().next().is_none() && raw.ends_with("/>") {
@@ -1195,7 +1229,7 @@ fn serialize_inner_xml(node: Node<'_, '_>, out: &mut String, depth: usize) -> Op
                 }
                 None => {
                     for child in node.children() {
-                        serialize_inner_xml(child, out, depth + 1)?;
+                        serialize_inner_xml(child, out, depth + 1, namespace)?;
                     }
                 }
             }
@@ -1208,8 +1242,16 @@ fn serialize_inner_xml(node: Node<'_, '_>, out: &mut String, depth: usize) -> Op
             return Some(());
         }
         out.push_str(&escape(&crate::document::text(node)?, false)?);
-    } else if node.is_comment() || node.is_pi() {
+    } else if node.is_comment() {
         out.push_str(raw);
+    } else if let Some(instruction) = node.pi() {
+        // Written from its target and data, a space between them however
+        // the source spaced them, or none.
+        out.push_str("<?");
+        out.push_str(instruction.target);
+        out.push(' ');
+        out.push_str(instruction.value.unwrap_or(""));
+        out.push_str("?>");
     }
     Some(())
 }

@@ -1701,6 +1701,42 @@ fn a_plain_reference_in_an_inline_task_attribute_is_no_throw() {
     }
 }
 
+/// An inline task written with Windows line ends is read as MSBuild reads it:
+/// its whitespace nodes, carriage returns and all, are dropped, and a plain
+/// reference in an attribute is no throw.
+#[test]
+fn an_inline_task_with_windows_line_ends_is_serialized() {
+    let body = "<PropertyGroup><Lib>abc.dll</Lib></PropertyGroup>\r\n\
+                <UsingTask TaskName=\"X\" TaskFactory=\"RoslynCodeTaskFactory\" AssemblyFile=\"y.dll\">\r\n\
+                <Task>\r\n  <Reference Include=\"$(Lib)\" />\r\n  \
+                <Code Type=\"Fragment\" Language=\"cs\"><![CDATA[x]]></Code>\r\n</Task>\r\n</UsingTask>";
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_eq!(parsed.rejection, None, "{body}: {:#?}", parsed.diagnostics);
+    }
+}
+
+/// Code written as an element's text over several lines is serialized as
+/// read, its line ends included: an expression in it is judged, a throw for
+/// certain and a plain reference as none.
+#[test]
+fn an_inline_tasks_code_over_several_lines_is_judged() {
+    let task = |code: &str| {
+        format!(
+            "<PropertyGroup><P>abc</P></PropertyGroup>\
+             <UsingTask TaskName=\"X\" TaskFactory=\"RoslynCodeTaskFactory\" AssemblyFile=\"y.dll\">\
+             <Task>\n  <Code Type=\"Fragment\" Language=\"cs\">\n    {code}\n  </Code>\n</Task></UsingTask>"
+        )
+    };
+    let throwing = task("Log.LogMessage(\"$(P[9])\");");
+    for parsed in both_walkers(&format!("  {throwing}")) {
+        assert_rejected(&parsed, &["Before", "After"]);
+    }
+    let plain = task("Log.LogMessage(\"$(P)\");");
+    for parsed in both_walkers(&format!("  {plain}")) {
+        assert_eq!(parsed.rejection, None, "{plain}: {:#?}", parsed.diagnostics);
+    }
+}
+
 /// An item group from content the walk does not take is judged knowing the
 /// writes of its whole path, those after it included: MSBuild evaluates it
 /// after every property write there, when `P` is long enough to index.

@@ -104,6 +104,8 @@ use item_pass::{
 use property_reads::PropertyRead;
 #[cfg(any(test, feature = "test-support"))]
 use reads::{EvaluationReads, ReadProbe};
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use rejection::inline_task_body;
 
 /// Maximum recursion depth for `<Import>` following. MSBuild itself
 /// caps at ~100; we pick a number well above any sane real-world
