@@ -698,6 +698,23 @@ fn a_site_reads_the_write_its_pass_sees() {
     assert_eq!(read(true, &plain, Some("A")), "2.0");
 }
 
+/// Whether the rewrite after the site reaches what is graded: where MSBuild
+/// evaluates the property pass through to it, which it does wherever it
+/// evaluates the project (`evaluated`), and wherever the site is read in the
+/// item pass (`item_pass`), after every property write. A rejection in the
+/// property pass, before it, is none of the rewrite's.
+fn rewrite_is_graded(item_pass: bool, evaluated: bool) -> bool {
+    item_pass || evaluated
+}
+
+#[test]
+fn a_rejection_before_the_rewrite_is_none_of_its() {
+    assert!(!rewrite_is_graded(false, false));
+    assert!(rewrite_is_graded(false, true));
+    assert!(rewrite_is_graded(true, false));
+    assert!(rewrite_is_graded(true, true));
+}
+
 /// What one generated project is made of.
 struct Drawing {
     /// The certain properties' values.
@@ -764,6 +781,11 @@ struct Witness {
     gate: &'static str,
     /// The gap it pins (`manifests/rejection_projects_wrong.txt`'s spelling).
     gap: &'static str,
+    /// Whether only striking both its unmodelled expressions and those on the
+    /// names the walk is not sure of shows the rejection, with the values the
+    /// classifier tries: held, so that a value added to them that rescues the
+    /// witness fails here rather than retiring the step it answers for.
+    both_strikes: bool,
 }
 
 impl Witness {
@@ -791,6 +813,7 @@ const WITNESSES: &[Witness] = &[
         body: "",
         gate: "!(Exists('$([MSBuild]::VersionLessThan(`$(X)`, `2.0`))'))",
         gap: "uncertain-value",
+        both_strikes: false,
     },
     Witness {
         values: ["1.2.3", "x;y;z", "1.2.3", "2.0"],
@@ -798,6 +821,7 @@ const WITNESSES: &[Witness] = &[
         body: "$(A.Contains(NULL))",
         gate: "",
         gap: "unmodelled-body",
+        both_strikes: false,
     },
     // The same gap, beside an expression on `X` no value tried for it
     // rescues (none is 41 characters long): the classifier reaches it only by
@@ -808,6 +832,7 @@ const WITNESSES: &[Witness] = &[
         body: "$([MSBuild]::VersionGreaterThan($(B), 1.0));$(X[40])",
         gate: "",
         gap: "unmodelled-body",
+        both_strikes: true,
     },
 ];
 
@@ -858,18 +883,26 @@ fn project_sweep(
     // The gap the case just graded was pinned as, and the witness's own
     // expectation of it.
     let gap_seen: std::cell::Cell<Option<&'static str>> = std::cell::Cell::new(None);
-    let mut expected: Option<(String, &'static str)> = None;
-    loop {
-        if let Some((key, gap)) = expected.take() {
+    let strikes_seen = std::cell::Cell::new(false);
+    let mut expected: Option<(String, &'static str, bool)> = None;
+    let held_to = |expected: Option<(String, &'static str, bool)>| {
+        if let Some((key, gap, both_strikes)) = expected {
             assert_eq!(
-                gap_seen.get(),
-                Some(gap),
-                "the witness {key} no longer pins the gap it stands for"
+                (gap_seen.get(), strikes_seen.get()),
+                (Some(gap), both_strikes),
+                "the witness {key} no longer pins the gap it stands for, by the step it stands for"
             );
         }
+    };
+    loop {
+        held_to(expected.take());
         gap_seen.set(None);
+        strikes_seen.set(false);
         let (drawing, witness) = match witnesses.next() {
-            Some((index, witness)) => (witness.drawing(), Some((index, witness.gap))),
+            Some((index, witness)) => (
+                witness.drawing(),
+                Some((index, witness.gap, witness.both_strikes)),
+            ),
             None if tally.cases < cases => match draw_project(rng, &excluded) {
                 Some(drawing) => (drawing, None),
                 None => continue,
@@ -891,11 +924,11 @@ fn project_sweep(
         for drawn in [&a, &b, &held, &real] {
             hostile.extend(drawn.hostile.iter().copied());
         }
-        if rewrite.is_some() {
-            hostile.extend(rewritten.hostile.iter().copied());
-        }
         assert!(
-            !hostile.iter().any(|d| excluded.contains(d)),
+            !hostile
+                .iter()
+                .chain(rewrite.iter().flat_map(|_| &rewritten.hostile))
+                .any(|d| excluded.contains(d)),
             "an excluded dimension is drawn"
         );
         // A witness is graded by its own expectation, not by the baseline, and
@@ -991,9 +1024,9 @@ fn project_sweep(
             .collect();
         let describe = || format!("--- xml ---\n{}\n{:#?}", elide(&xml), parsed.rejection);
         let key = match witness {
-            Some((index, gap)) => {
+            Some((index, gap, both_strikes)) => {
                 let key = format!("witness-{index}");
-                expected = Some((key.clone(), gap));
+                expected = Some((key.clone(), gap, both_strikes));
                 key
             }
             None => {
@@ -1007,6 +1040,9 @@ fn project_sweep(
             None => {}
         }
         let both = oracle.project_both(&xml, &names, Some(&project_path), &[]);
+        if rewrite.is_some() && rewrite_is_graded(item_pass, both.design_time.is_some()) {
+            hostile.extend(rewritten.hostile.iter().copied());
+        }
         let hash = fnv1a(&xml);
         // Whether the baseline answered this project wrongly, and a note of
         // the walk under test answering it wrongly.
@@ -1274,6 +1310,7 @@ fn project_sweep(
                 describe()
             );
             counts.rejected_on_an_unmodelled_body += 1;
+            strikes_seen.set(shown_with_unsure);
             answered_wrongly("unmodelled-body", grading);
             reach(&hostile, "msbuild-rejects-on-an-unmodelled-body");
             continue;
@@ -1299,13 +1336,7 @@ fn project_sweep(
         counts.baseline_wrong_now_not += usize::from(baseline_wrong == Some(true));
         reach(&hostile, outcome(false, committed));
     }
-    if let Some((key, gap)) = expected {
-        assert_eq!(
-            gap_seen.get(),
-            Some(gap),
-            "the witness {key} no longer pins the gap it stands for"
-        );
-    }
+    held_to(expected);
     census.finish(
         "BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-msbuild --test \
          rejection_generative_diff project_sweep_fixed_seed",
