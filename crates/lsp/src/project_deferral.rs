@@ -1039,6 +1039,14 @@ fn render_rejection_cause(cause: &RejectionCause, certain: bool) -> String {
                  {cannot} register, so MSBuild {rejects} the whole project"
             )
         }
+        RejectionCause::UsingTaskParameterCollision {
+            task,
+            first,
+            second,
+        } => format!(
+            "a `<UsingTask>` of `{task}` declaring parameters `{first}` and `{second}`, one name \
+             to MSBuild, which ignores case, so MSBuild {rejects} the whole project"
+        ),
     }
 }
 

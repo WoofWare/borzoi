@@ -1062,6 +1062,18 @@ fn rejection_message(cause: &RejectionCause, certain: bool) -> String {
                  `{value}`, which it {cannot} register — no evaluated value is trusted"
             )
         }
+        RejectionCause::UsingTaskParameterCollision {
+            task,
+            first,
+            second,
+        } => {
+            let rejects = if certain { "rejects" } else { "may reject" };
+            format!(
+                "MSBuild {rejects} this project: a `<UsingTask>` of `{task}` declares parameters \
+                 `{first}` and `{second}`, one name to MSBuild, which ignores case — rename \
+                 one; no evaluated value is trusted"
+            )
+        }
     }
 }
 

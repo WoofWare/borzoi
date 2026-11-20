@@ -683,3 +683,37 @@ fn wide_unheld_reads_are_struck_in_one_pass() {
         );
     }
 }
+
+/// An inline task of `width` parameters, no two named alike.
+fn wide_parameter_group(width: usize) -> String {
+    let parameters: String = (0..width)
+        .map(|i| format!("<P{i} ParameterType=\"System.String\" Required=\"false\" />"))
+        .collect();
+    format!(
+        "<UsingTask TaskName=\"X\" TaskFactory=\"RoslynCodeTaskFactory\" AssemblyFile=\"y.dll\">\
+         <ParameterGroup>{parameters}</ParameterGroup><Task>x</Task></UsingTask>"
+    )
+}
+
+/// A `<UsingTask>`'s parameters are registered, and their names checked for a
+/// case-folded collision, in one pass: four times the parameters cost about
+/// four times the time, where checking each against every earlier one costs
+/// sixteen. Timed as a ratio, as [`wide_unheld_reads_are_struck_in_one_pass`]
+/// is.
+#[test]
+fn a_wide_parameter_group_is_registered_in_one_pass() {
+    let time = |width: usize| {
+        let body = wide_parameter_group(width);
+        let start = std::time::Instant::now();
+        evaluate_project(body);
+        start.elapsed()
+    };
+    time(1_000);
+    let narrow = time(5_000);
+    let wide = time(20_000);
+    let ratio = wide.as_secs_f64() / narrow.as_secs_f64().max(1e-6);
+    assert!(
+        ratio < 10.0,
+        "4× the parameters took {ratio:.1}× the time ({narrow:?} → {wide:?})"
+    );
+}
