@@ -1020,6 +1020,14 @@ fn render_rejection_cause(cause: &RejectionCause, certain: bool) -> String {
             "the property function `{expression}`, which MSBuild may be unable to evaluate, \
              so MSBuild {rejects} the whole project"
         ),
+        RejectionCause::UsingTaskRegistration {
+            task,
+            attribute,
+            value,
+        } => format!(
+            "a `<UsingTask>` of `{task}` whose `{attribute}` reads `{value}`, which MSBuild \
+             cannot register, so MSBuild {rejects} the whole project"
+        ),
     }
 }
 
