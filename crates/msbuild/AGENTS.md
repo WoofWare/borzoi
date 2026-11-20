@@ -154,7 +154,13 @@ graded inert, and the loader's and a script launcher's (`LD_`, `DYLD_`,
 any other is inert by construction, which the grader checks by setting
 names off both lists and requiring fsc's arguments unchanged. The pin is
 keyed by platform (the binaries differ), each list the union over
-platforms; a platform's sections are regenerated on it. `fsproj_assembly_name_perturbation_diff`
+platforms; a platform's sections are regenerated on it.
+A `ProjectReference` is admitted bare, with each project it names certified
+in turn, transitively (`fsc::certified_compilation`, which also commits to
+the reference assemblies fsc is handed for them); the caller evaluates each
+under `fsc::reference_globals`. `fsproj_project_reference_name_diff` grades
+it on chains, fans and diamonds of two and three projects through
+`fsc_args`, holding both the name and those `-r:` paths to the real build. `fsproj_assembly_name_perturbation_diff`
 grades every listed name: it sets each one, everywhere it can be set, to
 line-break and option-shaped values, and holds each commit to fsc's `-o:`
 (its ignored `deep_every_perturbation` covers every case, and with

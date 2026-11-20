@@ -69,6 +69,7 @@
 //! | An item type's declarations | item types on `ALLOWED_ITEM_TYPES` (`RESTORE_ITEM_TYPES` from NuGet's file only), metadata names on `ALLOWED_METADATA` (`RESTORE_METADATA` from NuGet's file only); Compile items read as source files (not as options, assemblies or resources) |
 //! | The default item globs | every file under the project's directory but `bin/`, `obj/` and hidden directories ([`default_item_files`]) has a name without control characters or `%` (which MSBuild decodes as an escape) |
 //! | The reference set | every path the caller builds its assembly env from ([`ReferencePaths`]) is absolute, without control characters, not option-shaped |
+//! | Project references | each `ProjectReference` bare (no metadata, no item definition) and certain; the caller hands every project they name ([`ProjectReferences`]), evaluated under the globals a build hands it ([`reference_globals`]); each referenced project in the domain in turn, transitively, listing no target frameworks, its reference assembly the SDK's default and a plain absolute path ([`Certified::project_references`]); no cycle |
 //! | Package content files | every build action is on [`ADMITTED_CONTENT_ACTIONS`] ([`ContentFiles`]) |
 //! | Documents | no build code outside the install; no condition outside the install but in NuGet's restore files (#993: the walk cannot tell every value a condition compares, MSBuild respelling a backslash by its working directory); no item wildcard outside the install (a glob's match keeps the glob's spelling, which the walk's path does not); no expansion (`$(`, `@(`, `%(`) outside the install but in NuGet's restore files (MSBuild sets properties the walk takes for unset, `_MSBUILDTLENABLED`); no response file beside MSBuild, beside the project or above it ([`crate::AutoResponseFile::Absent`]); no `NotImported` site's file imported; no workload manifest from outside the install, and none a grading run of the SDK did not load ([`verified_manifests`]: manifests change apart from the SDK); the project's path without control characters |
 //! | The environment | the toolchain's own ([`TOOLCHAIN_VARIABLES`]) held fixed; `ALLOWED_PROPERTIES` held to their grammars; `ALLOWED_ENVIRONMENT` graded inert; NuGet's restore-only names declined; others declined if an SDK file reads a property of the name or the build's tools read the variable ([`environment_reads`]), else inert; no two variables naming one property ([`environment_decline`]) |
@@ -294,8 +295,79 @@ pub const ALLOWED_PROPERTIES: &[(&str, Grammar)] = &[
 ];
 
 /// The item types a document outside the .NET install may define and stay in
-/// the domain. Compile items are further held to read as source files.
-pub const ALLOWED_ITEM_TYPES: &[&str] = &["Compile", "Content", "None", "PackageReference"];
+/// the domain. Compile items are further held to read as source files, and
+/// `ProjectReference` items to be bare (no metadata, no item definition) and
+/// to name projects each certified in turn ([`ProjectReferences`]).
+pub const ALLOWED_ITEM_TYPES: &[&str] = &[
+    "Compile",
+    "Content",
+    "None",
+    "PackageReference",
+    "ProjectReference",
+];
+
+/// The global properties a build removes from those it hands a referenced
+/// project (`ResolveProjectReferences`: a single-targeted reference's
+/// `UndefineProperties`, `TargetFramework`, `RuntimeIdentifier` and
+/// `SelfContained`); the others it inherits, outside a solution
+/// (`ShouldUnsetParentConfigurationAndPlatform` false), with nothing set in
+/// their place, the reference carrying no `SetConfiguration`,
+/// `SetPlatform` or `SetTargetFramework`.
+pub const REFERENCE_GLOBALS_REMOVED: &[&str] =
+    &["RuntimeIdentifier", "SelfContained", "TargetFramework"];
+
+/// The global properties a referenced project is evaluated under, for a
+/// referencing build under `globals` ([`REFERENCE_GLOBALS_REMOVED`]).
+pub fn reference_globals(globals: &HashMap<String, String>) -> HashMap<String, String> {
+    globals
+        .iter()
+        .filter(|(name, _)| !on_list(REFERENCE_GLOBALS_REMOVED, name))
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect()
+}
+
+/// The projects a project's `ProjectReference` items name, each as the
+/// caller evaluated it, for the derivation to certify in turn.
+#[derive(Debug, Clone)]
+pub enum ProjectReferences {
+    /// Not read (a referenced project the caller could not evaluate, say).
+    Unread,
+    /// These: one per project the evaluation's `ProjectReference` items name.
+    Listed(Vec<ReferencedProject>),
+}
+
+/// A project another references, as the caller evaluated it: under the
+/// globals [`reference_globals`] gives for the referencing build's, and the
+/// same environment.
+#[derive(Debug, Clone)]
+pub struct ReferencedProject {
+    /// The project file, as the reference's `FullPath` names it.
+    pub path: PathBuf,
+    /// Its evaluation.
+    pub parsed: ParsedProject,
+    /// The global properties it was evaluated under.
+    pub globals: HashMap<String, String>,
+    /// The files the SDK's default item globs can match in it.
+    pub files: DefaultItemFiles,
+    /// Its reference set, as for the referencing project.
+    pub references: ReferencePaths,
+    /// Its packages' content files.
+    pub content: ContentFiles,
+    /// The projects it references in turn.
+    pub project_references: ProjectReferences,
+}
+
+/// What [`certified_compilation`] commits to for a project: the name of the
+/// assembly it compiles to, and the paths fsc is handed as references to the
+/// projects it references, directly and transitively.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Certified {
+    /// The compiled assembly's name, as FCS names it.
+    pub name: String,
+    /// Each referenced project's reference assembly (`TargetRefPath`), as
+    /// fsc is handed it (`-r:`), over the transitive closure.
+    pub project_references: BTreeSet<PathBuf>,
+}
 
 /// The properties NuGet's restore writes into the project's
 /// `obj/<project file>.nuget.g.props` ([`restore_props`]), with their
@@ -741,6 +813,14 @@ pub enum NameDecline {
     /// The walk is not certain of the Compile items, or fsc may read one as
     /// something other than a source file.
     Sources,
+    /// A `ProjectReference` carries metadata or an item definition, the walk
+    /// is not certain of the items, the caller did not hand the projects they
+    /// name (or handed others, or under other globals), or a referenced
+    /// project's reference assembly is not certain or not a plain absolute
+    /// path, or the references form a cycle: which.
+    ProjectReference(String),
+    /// A referenced project is outside the domain: the project, and why.
+    Referenced(PathBuf, Box<NameDecline>),
 }
 
 /// The files under a project's directory that the SDK's default item globs
@@ -811,8 +891,8 @@ pub fn default_item_files(project_path: &Path, observer: &Observer) -> DefaultIt
 
 /// The paths fsc is handed as references (`-r:`) for the project: the set the
 /// caller builds its assembly env from, the assets file's package and
-/// framework compile assets. (Project references are outside the domain: the
-/// `ProjectReference` item type is on no list.)
+/// framework compile assets. (Project references are certified apart:
+/// [`ProjectReferences`].)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReferencePaths {
     /// Not read.
@@ -853,6 +933,8 @@ pub struct NameInputs<'a> {
     pub references: &'a ReferencePaths,
     /// The packages' content files.
     pub content: &'a ContentFiles,
+    /// The projects its `ProjectReference` items name.
+    pub project_references: &'a ProjectReferences,
 }
 
 /// What feeds one parameter of the SDK's `<Fsc>` invocation in
@@ -911,12 +993,14 @@ pub enum Gate {
     /// packages' content files' ([`Gate::PackageContent`]). A project's own are
     /// on no list.
     EmbeddedResources,
-    /// It adds the reference set: [`ReferencePaths`].
+    /// It adds the reference set: [`ReferencePaths`], and each referenced
+    /// project's reference assembly ([`Certified::project_references`]).
     References,
     /// It selects from the Compile items, which the item rule holds (SourceLink
     /// embedding the sources source control does not track).
     FromCompile,
-    /// It runs only for project references, whose item type is on no list.
+    /// It runs only for a project reference with `OutputItemType` metadata,
+    /// and a `ProjectReference` carrying any metadata declines.
     ProjectReferences,
     /// It is in a file an F# project of the domain does not import: another
     /// language's or another SDK's targets. The derivation declines an
@@ -2041,47 +2125,279 @@ pub fn resolved_sdk_version(parsed: &ParsedProject) -> Option<String> {
 }
 
 /// [`CompiledAssemblyName`] of the project at `project_path`, from one
-/// evaluation of it (`parsed`) and the [`NameInputs`] beside it.
+/// evaluation of it (`parsed`) and the [`NameInputs`] beside it: the name
+/// [`certified_compilation`] commits to.
 pub fn compiled_assembly_name(
     project_path: &Path,
     parsed: &ParsedProject,
     inputs: &NameInputs<'_>,
 ) -> CompiledAssemblyName {
-    let graded = |version: &str| verified_sdks().any(|sdk| sdk == version);
-    let manifest_graded =
-        |version: &str, manifest: &str| verified_manifests(version).any(|m| m == manifest);
-    compiled_assembly_name_graded(project_path, parsed, inputs, &graded, &manifest_graded)
+    match certified_compilation(project_path, parsed, inputs) {
+        Ok(certified) => CompiledAssemblyName::Known(certified.name),
+        Err(decline) => CompiledAssemblyName::Unknown(decline),
+    }
 }
 
-/// [`compiled_assembly_name`], with `graded` saying which SDKs count as
-/// graded: the grading run itself names the SDK it grades.
-pub(crate) fn compiled_assembly_name_graded(
+/// What the derivation commits to for the project at `project_path`
+/// ([`Certified`]), from one evaluation of it (`parsed`) and the
+/// [`NameInputs`] beside it, or why it declines.
+pub fn certified_compilation(
     project_path: &Path,
     parsed: &ParsedProject,
     inputs: &NameInputs<'_>,
-    graded: &dyn Fn(&str) -> bool,
-    manifest_graded: &dyn Fn(&str, &str) -> bool,
-) -> CompiledAssemblyName {
+) -> Result<Certified, NameDecline> {
+    let graded = |version: &str| verified_sdks().any(|sdk| sdk == version);
+    let manifest_graded =
+        |version: &str, manifest: &str| verified_manifests(version).any(|m| m == manifest);
+    let grading = Grading {
+        graded: &graded,
+        manifest_graded: &manifest_graded,
+    };
+    certify(project_path, parsed, inputs, &grading, &mut Vec::new())
+}
+
+/// Which SDKs and workload manifests count as graded: the grading run itself
+/// names the SDK it grades.
+pub(crate) struct Grading<'g> {
+    pub(crate) graded: &'g dyn Fn(&str) -> bool,
+    pub(crate) manifest_graded: &'g dyn Fn(&str, &str) -> bool,
+}
+
+/// [`certified_compilation`] under `grading`, `visiting` the projects whose
+/// references are being certified, outermost first.
+pub(crate) fn certify(
+    project_path: &Path,
+    parsed: &ParsedProject,
+    inputs: &NameInputs<'_>,
+    grading: &Grading<'_>,
+    visiting: &mut Vec<PathBuf>,
+) -> Result<Certified, NameDecline> {
     let version = match resolved_sdk_version(parsed) {
-        Some(version) if graded(&version) => version,
-        Some(version) => return CompiledAssemblyName::Unknown(NameDecline::UngradedSdk(version)),
-        None => {
-            return CompiledAssemblyName::Unknown(NameDecline::HiddenContent(
-                "no SDK resolved".to_string(),
-            ));
-        }
+        Some(version) if (grading.graded)(&version) => version,
+        Some(version) => return Err(NameDecline::UngradedSdk(version)),
+        None => return Err(NameDecline::HiddenContent("no SDK resolved".to_string())),
     };
     if let Some(manifest) = parsed
         .workload_manifest_files
         .iter()
-        .find(|manifest| !manifest_graded(&version, manifest))
+        .find(|manifest| !(grading.manifest_graded)(&version, manifest))
     {
-        return CompiledAssemblyName::Unknown(NameDecline::WorkloadManifest(manifest.clone()));
+        return Err(NameDecline::WorkloadManifest(manifest.clone()));
     }
-    match decide(&version, project_path, parsed, inputs) {
-        Ok(name) => CompiledAssemblyName::Known(name),
-        Err(decline) => CompiledAssemblyName::Unknown(decline),
+    let name = decide(&version, project_path, parsed, inputs)?;
+    let project_references =
+        certify_project_references(project_path, parsed, inputs, grading, visiting)?;
+    Ok(Certified {
+        name,
+        project_references,
+    })
+}
+
+/// The reference assembly a project's build writes and a referencing build
+/// hands fsc (`TargetRefPath`, through `GetTargetPath`'s `ReferenceAssembly`
+/// and `ReferencePathWithRefAssemblies`), from the evaluation `parsed`, where
+/// it takes the SDK's default: `<project dir>/<BaseIntermediateOutputPath>
+/// <Configuration>/<target framework, lower-cased>/ref/<TargetFileName>`
+/// (`Microsoft.NET.DefaultOutputPaths.targets`, `Microsoft.Common.CurrentVersion.targets`).
+///
+/// The walk does not certify `IntermediateOutputPath` or `TargetRefPath`
+/// themselves (it reads `IntermediateOutputPath` while undefined, which a
+/// build's caller may define), so the path is composed from what it does
+/// certify, and only where nothing else the SDK's formula reads can differ:
+/// no name on that formula is on [`ALLOWED_PROPERTIES`], so within the
+/// domain neither a document, a global nor a variable sets one, and each
+/// must read as the SDK's default here (a reference assembly produced
+/// beside the intermediate assembly; no artifacts layout; the target
+/// framework appended; no runtime identifier; platform `AnyCPU`, which
+/// appends nothing). `fsproj_project_reference_name_diff` holds the path to
+/// the `-r:` a real build hands fsc.
+fn reference_assembly(parsed: &ParsedProject) -> Result<PathBuf, String> {
+    let value = |name: &str| match parsed.property(name) {
+        PropertyRead::Value(value) => Ok(value),
+        read => Err(format!("{name} is {read:?}")),
+    };
+    let is = |name: &str, want: &str| match parsed.property(name) {
+        PropertyRead::Value(value) if value.eq_ignore_ascii_case(want) => Ok(()),
+        read => Err(format!("{name} is {read:?}, not {want:?}")),
+    };
+    let unset_or_false = |name: &str| match parsed.property(name) {
+        PropertyRead::Unset => Ok(()),
+        PropertyRead::Value(value) if value.eq_ignore_ascii_case("false") => Ok(()),
+        read => Err(format!("{name} is {read:?}")),
+    };
+    is("ProduceReferenceAssembly", "true")?;
+    unset_or_false("ProduceReferenceAssemblyInOutDir")?;
+    unset_or_false("UseArtifactsOutput")?;
+    unset_or_false("UseArtifactsIntermediateOutput")?;
+    is("AppendTargetFrameworkToOutputPath", "true")?;
+    is("PlatformName", "AnyCPU")?;
+    match parsed.property("RuntimeIdentifier") {
+        PropertyRead::Unset => {}
+        read => return Err(format!("RuntimeIdentifier is {read:?}")),
     }
+    let directory = value("MSBuildProjectDirectory")?;
+    let base = value("BaseIntermediateOutputPath")?;
+    let configuration = value("Configuration")?;
+    let framework = value("TargetFramework")?;
+    let file = value("TargetFileName")?;
+    // Each a single plain component (the base its one `obj` and separator):
+    // nothing to fold, and nothing fsc reads as more than a path.
+    let component = |text: &str| {
+        !text.is_empty()
+            && text != "."
+            && text != ".."
+            && !text.contains(['/', '\\'])
+            && !text.chars().any(|c| c.is_control() || c == ';' || c == '%')
+    };
+    let base = base.strip_suffix(['/', '\\']).unwrap_or(&base);
+    if !(component(base)
+        && component(&configuration)
+        && Grammar::Framework.admits(&framework)
+        && Grammar::FileName.admits(file.strip_suffix(".dll").unwrap_or(""))
+        && plain_reference_path(&directory))
+    {
+        return Err(format!(
+            "its reference assembly's parts are not plain: {directory:?} {base:?} \
+             {configuration:?} {framework:?} {file:?}"
+        ));
+    }
+    let path = Path::new(&directory)
+        .join(base)
+        .join(&configuration)
+        .join(framework.to_ascii_lowercase())
+        .join("ref")
+        .join(&file);
+    let text = path.to_string_lossy();
+    if !plain_reference_path(&text) {
+        return Err(format!(
+            "its reference assembly {text:?} is not a plain path"
+        ));
+    }
+    Ok(lexical(&path))
+}
+
+/// Whether `path` is one fsc reads as a reference path and nothing else:
+/// absolute, with no control character (a line break would start an argument
+/// of its own), no `;` (which splits an item list) and no `%` (an escape
+/// MSBuild decodes), and not option-shaped.
+fn plain_reference_path(path: &str) -> bool {
+    Path::new(path).is_absolute()
+        && !path.chars().any(|c| c.is_control() || c == ';' || c == '%')
+        && !may_read_as_option(path)
+}
+
+/// The reference assemblies fsc is handed for the projects `parsed`'s
+/// `ProjectReference` items name, transitively, each project certified in
+/// turn (the toolchain's `ResolveProjectReferences`, and the SDK's
+/// `IncludeTransitiveProjectReferences`, which `DisableTransitiveProjectReferences`,
+/// on no list, would turn off).
+fn certify_project_references(
+    project_path: &Path,
+    parsed: &ParsedProject,
+    inputs: &NameInputs<'_>,
+    grading: &Grading<'_>,
+    visiting: &mut Vec<PathBuf>,
+) -> Result<BTreeSet<PathBuf>, NameDecline> {
+    let decline = |why: String| Err(NameDecline::ProjectReference(why));
+    let foreign = &parsed.foreign_definitions;
+    if let Some(names) = foreign
+        .item_type_metadata
+        .get("projectreference")
+        .filter(|names| !names.is_empty())
+    {
+        return decline(format!("metadata {names:?}"));
+    }
+    if foreign.item_definitions.contains_key("projectreference") {
+        return decline("an item definition".to_string());
+    }
+    // Before anything reads the items: an uncertain list may be short of one
+    // the build has.
+    if parsed.project_references_uncertain {
+        return decline("the walk is not certain of the items".to_string());
+    }
+    let listed: &[ReferencedProject] = match inputs.project_references {
+        ProjectReferences::Listed(listed) => listed,
+        ProjectReferences::Unread if parsed.project_references.is_empty() => &[],
+        ProjectReferences::Unread => {
+            return decline("the referenced projects were not read".to_string());
+        }
+    };
+    let ours: BTreeSet<PathBuf> = parsed
+        .project_references
+        .iter()
+        .map(|item| lexical(&item.include))
+        .collect();
+    let theirs: BTreeSet<PathBuf> = listed.iter().map(|l| lexical(&l.path)).collect();
+    if ours != theirs {
+        return decline(format!(
+            "the projects handed, {theirs:?}, are not those the evaluation names, {ours:?}"
+        ));
+    }
+    let here = lexical(project_path);
+    if visiting.contains(&here) {
+        return decline(format!("a cycle through {}", here.display()));
+    }
+    let globals = reference_globals(inputs.globals);
+    visiting.push(here);
+    let mut paths = BTreeSet::new();
+    for referenced in listed {
+        let within = |decline: NameDecline| {
+            NameDecline::Referenced(referenced.path.clone(), Box::new(decline))
+        };
+        if referenced.globals != globals {
+            visiting.pop();
+            return decline(format!(
+                "{} was evaluated under {:?}, not {globals:?}",
+                referenced.path.display(),
+                referenced.globals
+            ));
+        }
+        let inputs = NameInputs {
+            environment: inputs.environment,
+            globals: &referenced.globals,
+            files: &referenced.files,
+            references: &referenced.references,
+            content: &referenced.content,
+            project_references: &referenced.project_references,
+        };
+        let certified = match certify(
+            &referenced.path,
+            &referenced.parsed,
+            &inputs,
+            grading,
+            visiting,
+        ) {
+            Ok(certified) => certified,
+            Err(decline) => {
+                visiting.pop();
+                return Err(within(decline));
+            }
+        };
+        // A reference to a project that lists target frameworks is built
+        // under the one NuGet's nearest-framework rule picks
+        // (`SetTargetFramework`), which the walk does not model.
+        match referenced.parsed.property("TargetFrameworks") {
+            PropertyRead::Unset => {}
+            PropertyRead::Value(value) if value.trim().is_empty() => {}
+            read => {
+                visiting.pop();
+                return Err(within(NameDecline::ProjectReference(format!(
+                    "it lists target frameworks: {read:?}"
+                ))));
+            }
+        }
+        let target = match reference_assembly(&referenced.parsed) {
+            Ok(target) => target,
+            Err(why) => {
+                visiting.pop();
+                return Err(within(NameDecline::ProjectReference(why)));
+            }
+        };
+        paths.insert(target);
+        paths.extend(certified.project_references);
+    }
+    visiting.pop();
+    Ok(paths)
 }
 
 fn allowed_property(name: &str) -> Option<Grammar> {
@@ -2153,6 +2469,7 @@ fn decide(
         files,
         references,
         content,
+        project_references: _,
     } = *inputs;
     if let Some(cause) = &parsed.hidden_content {
         return Err(NameDecline::HiddenContent(format!("{cause:?}")));

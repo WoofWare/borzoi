@@ -1,0 +1,25 @@
+# Generated; do not edit by hand. One line per graded item, sorted.
+# Regenerate with:
+#   BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-msbuild --test fsproj_project_reference_name_diff deep_hostile_directories -- --ignored
+name.backslash	owed
+name.case-fold	owed
+name.confusable	owed
+name.control-char	owed
+name.dot-name	owed
+name.early-colon	owed
+name.edge-dot-or-space	owed
+name.expansion	owed
+name.glob-char	owed
+name.invisible	owed
+name.kind-by-extension	owed
+name.line-break	owed
+name.list-separator	owed
+name.long	owed
+name.non-utf8	excluded: the derivation takes paths as UTF-8 text, as its caller reads them
+name.normalisation	owed
+name.percent-escape	owed
+name.quote	owed
+name.switch-shaped	owed
+name.utf16-width	owed
+name.xml-markup	owed
+plain	owed

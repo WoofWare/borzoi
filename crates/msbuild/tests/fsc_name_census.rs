@@ -182,12 +182,18 @@ fn blocking_facts(
         let restore_written =
             on_list(RESTORE_ITEM_TYPES.iter().copied(), name) && only_restore(files);
         if !on_list(ALLOWED_ITEM_TYPES.iter().copied(), name) && !restore_written {
-            if name.eq_ignore_ascii_case("ProjectReference") {
-                fact("ProjectReference", "");
-            } else {
-                fact("item type off the list", name);
-            }
+            fact("item type off the list", name);
         }
+    }
+    // Project references: admitted bare and certain, each referenced project
+    // certified in turn (which shows as the derivation's decline).
+    if let Some(names) = foreign.item_type_metadata.get("projectreference") {
+        for name in names {
+            fact("ProjectReference metadata", name);
+        }
+    }
+    if parsed.project_references_uncertain {
+        fact("ProjectReference items uncertain", "");
     }
     for (name, files) in &foreign.item_metadata {
         let restore_written =
@@ -296,7 +302,14 @@ fn census() {
         for (column, environment) in &columns {
             let (verdict, facts) = match evaluate(project, &globals, environment, &dotnet_root) {
                 Ok(parsed) => (
-                    derive_from(project, &parsed, &globals, environment, Sdks::Verified),
+                    derive_from(
+                        project,
+                        &parsed,
+                        &globals,
+                        environment,
+                        &dotnet_root,
+                        Sdks::Verified,
+                    ),
                     blocking_facts(project, &parsed, environment),
                 ),
                 Err(e) => (
@@ -311,8 +324,21 @@ fn census() {
             // fact scan cannot see (a response file, a value outside its
             // grammar) still shows.
             let mut facts = facts;
-            if let CompiledAssemblyName::Unknown(_) = &verdict {
+            if let CompiledAssemblyName::Unknown(why) = &verdict {
                 facts.insert((format!("decline: {}", cause(&verdict)), String::new()));
+                // A referenced project's own decline, innermost: what a
+                // project reference waits on.
+                let mut inner = why;
+                while let borzoi_msbuild::fsc::NameDecline::Referenced(_, deeper) = inner {
+                    inner = deeper;
+                }
+                if !std::ptr::eq(inner, why) {
+                    let inner = CompiledAssemblyName::Unknown(inner.clone());
+                    facts.insert((
+                        format!("referenced project declines: {}", cause(&inner)),
+                        String::new(),
+                    ));
+                }
             }
             *first_cause.entry((column, cause(&verdict))).or_default() += 1;
             let rules: BTreeSet<&String> = facts.iter().map(|(rule, _)| rule).collect();

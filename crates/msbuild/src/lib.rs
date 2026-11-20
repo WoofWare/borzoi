@@ -1002,6 +1002,9 @@ pub struct ForeignDefinitions {
     /// item definition elements, and every attribute on one but the item
     /// operations, their modifiers, its condition and its label.
     pub item_metadata: BTreeMap<String, BTreeSet<PathBuf>>,
+    /// The same metadata names, by the item type (lowercased, as written)
+    /// of the item or item definition each is set on.
+    pub item_type_metadata: BTreeMap<String, BTreeSet<String>>,
     /// The documents holding an element with a `Condition` attribute.
     pub conditioned: BTreeSet<PathBuf>,
     /// The documents holding an expansion (`$(`, `@(` or `%(`) in an
@@ -1341,6 +1344,12 @@ impl ForeignDefinitions {
                 .entry(tag.to_ascii_lowercase())
                 .or_default()
                 .insert(file.to_path_buf());
+            if let Some(item) = node.parent_element() {
+                self.item_type_metadata
+                    .entry(item.tag_name().name().to_ascii_lowercase())
+                    .or_default()
+                    .insert(tag.to_ascii_lowercase());
+            }
             return;
         }
         if in_item_group {
@@ -1353,6 +1362,10 @@ impl ForeignDefinitions {
             for attribute in node.attributes() {
                 let name = attribute.name().to_ascii_lowercase();
                 if !ITEM_ATTRIBUTES.contains(&name.as_str()) {
+                    self.item_type_metadata
+                        .entry(tag.to_ascii_lowercase())
+                        .or_default()
+                        .insert(name.clone());
                     self.item_metadata
                         .entry(name)
                         .or_default()

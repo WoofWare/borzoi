@@ -6,13 +6,15 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use borzoi_msbuild::fsc::DefaultItemFiles;
 use borzoi_msbuild::fsc::{
-    CompiledAssemblyName, ContentFiles, NameDecline, NameInputs, ReferencePaths,
-    compiled_assembly_name, default_item_files, resolved_sdk_version,
+    Certified, CompiledAssemblyName, ContentFiles, NameDecline, NameInputs, ProjectReferences,
+    ReferencePaths, ReferencedProject, certified_compilation, default_item_files,
+    reference_globals, resolved_sdk_version,
 };
 use borzoi_msbuild::observed::Observer;
 use borzoi_msbuild::observed::host_fs::{self, HostPath};
-use borzoi_msbuild::test_support::compiled_assembly_name_grading;
+use borzoi_msbuild::test_support::certified_compilation_grading;
 use borzoi_msbuild::{ParsedProject, PropertyRead, glob_resolver, resolve_sdk, workloads};
 
 /// What the restored assets file `assets` names for the target framework
@@ -22,7 +24,9 @@ use borzoi_msbuild::{ParsedProject, PropertyRead, glob_resolver, resolve_sdk, wo
 /// packages' content files with their build actions. Unread when there is no
 /// assets file, it is not a regular file or not JSON, it holds no target for
 /// `tfm`, or it names more than one package folder (a fallback folder, whose
-/// choice among the folders this does not model).
+/// choice among the folders this does not model). A project library (a
+/// referenced project) is not a package: its assets are the derivation's to
+/// certify through the reference ([`ProjectReferences`]).
 pub fn package_assets(assets: &Path, tfm: &str) -> (ReferencePaths, ContentFiles) {
     let unread = (ReferencePaths::Unread, ContentFiles::Unread);
     if !assets.host_is_file() {
@@ -47,6 +51,9 @@ pub fn package_assets(assets: &Path, tfm: &str) -> (ReferencePaths, ContentFiles
     let mut paths = Vec::new();
     let mut content = Vec::new();
     for (library, target) in target {
+        if json["libraries"][library]["type"].as_str() == Some("project") {
+            continue;
+        }
         let Some(path) = json["libraries"][library]["path"].as_str() else {
             continue;
         };
@@ -91,7 +98,7 @@ pub fn derive(
     sdks: Sdks,
 ) -> CompiledAssemblyName {
     match evaluate(project, globals, environment, dotnet_root) {
-        Ok(parsed) => derive_from(project, &parsed, globals, environment, sdks),
+        Ok(parsed) => derive_from(project, &parsed, globals, environment, dotnet_root, sdks),
         // MSBuild rejects it too, so there is nothing to name.
         Err(e) => CompiledAssemblyName::Unknown(NameDecline::Property(format!(
             "our evaluation failed: {e}"
@@ -155,36 +162,127 @@ pub fn evaluate(
 }
 
 /// The derivation's verdict on the project at `project` from its evaluation
-/// `parsed`, made under `globals` and `environment`.
+/// `parsed`, made under `globals` and `environment`, its referenced projects
+/// evaluated from the .NET install at `dotnet_root`.
 pub fn derive_from(
     project: &Path,
     parsed: &ParsedProject,
     globals: &HashMap<String, String>,
     environment: &HashMap<String, String>,
+    dotnet_root: &Path,
     sdks: Sdks,
 ) -> CompiledAssemblyName {
-    let files = default_item_files(project, &Observer::new());
-    let tfm = match parsed.property("TargetFramework") {
-        PropertyRead::Value(tfm) => tfm,
-        _ => String::new(),
-    };
-    // The assets file the evaluation selected (`ProjectAssetsFile`, which only
-    // NuGet's restore file may set), or none.
-    let (references, content) = match parsed.property("ProjectAssetsFile") {
-        PropertyRead::Value(assets) => package_assets(Path::new(&assets), &tfm),
-        _ => (ReferencePaths::Unread, ContentFiles::Unread),
-    };
+    match certify_from(project, parsed, globals, environment, dotnet_root, sdks) {
+        Ok(certified) => CompiledAssemblyName::Known(certified.name),
+        Err(decline) => CompiledAssemblyName::Unknown(decline),
+    }
+}
+
+/// What the derivation certifies for the project at `project` (its name and
+/// its referenced projects' reference assemblies), from its evaluation
+/// `parsed`, made under `globals` and `environment`.
+pub fn certify(
+    project: &Path,
+    globals: &HashMap<String, String>,
+    environment: &HashMap<String, String>,
+    dotnet_root: &Path,
+    sdks: Sdks,
+) -> Result<Certified, NameDecline> {
+    match evaluate(project, globals, environment, dotnet_root) {
+        Ok(parsed) => certify_from(project, &parsed, globals, environment, dotnet_root, sdks),
+        Err(e) => Err(NameDecline::Property(format!("our evaluation failed: {e}"))),
+    }
+}
+
+/// [`certify`] from the evaluation `parsed`.
+pub fn certify_from(
+    project: &Path,
+    parsed: &ParsedProject,
+    globals: &HashMap<String, String>,
+    environment: &HashMap<String, String>,
+    dotnet_root: &Path,
+    sdks: Sdks,
+) -> Result<Certified, NameDecline> {
+    let (files, references, content) = gathered(project, parsed);
+    let project_references = referenced_projects(parsed, globals, environment, dotnet_root, 0);
     let inputs = NameInputs {
         environment,
         globals,
         files: &files,
         references: &references,
         content: &content,
+        project_references: &project_references,
     };
     match (sdks, resolved_sdk_version(parsed)) {
         (Sdks::Resolved, Some(sdk)) => {
-            compiled_assembly_name_grading(&sdk, project, parsed, &inputs)
+            certified_compilation_grading(&sdk, project, parsed, &inputs)
         }
-        _ => compiled_assembly_name(project, parsed, &inputs),
+        _ => certified_compilation(project, parsed, &inputs),
     }
+}
+
+/// What the LSP reads beside the evaluation `parsed` of the project at
+/// `project`: the default item files, and the reference set and content files
+/// of the assets file the evaluation selected (`ProjectAssetsFile`, which
+/// only NuGet's restore file may set), or none.
+pub fn gathered(
+    project: &Path,
+    parsed: &ParsedProject,
+) -> (DefaultItemFiles, ReferencePaths, ContentFiles) {
+    let files = default_item_files(project, &Observer::new());
+    let tfm = match parsed.property("TargetFramework") {
+        PropertyRead::Value(tfm) => tfm,
+        _ => String::new(),
+    };
+    let (references, content) = match parsed.property("ProjectAssetsFile") {
+        PropertyRead::Value(assets) => package_assets(Path::new(&assets), &tfm),
+        _ => (ReferencePaths::Unread, ContentFiles::Unread),
+    };
+    (files, references, content)
+}
+
+/// How deep [`referenced_projects`] follows references before it gives up
+/// (the derivation declines a cycle; this bounds the walk that would find
+/// one).
+const REFERENCE_DEPTH: usize = 8;
+
+/// The projects `parsed`'s `ProjectReference` items name, each evaluated
+/// under the globals a build under `globals` hands it and the same
+/// `environment`, with what the LSP reads beside each, recursively; Unread
+/// when one cannot be evaluated or the references run deeper than
+/// [`REFERENCE_DEPTH`].
+fn referenced_projects(
+    parsed: &ParsedProject,
+    globals: &HashMap<String, String>,
+    environment: &HashMap<String, String>,
+    dotnet_root: &Path,
+    depth: usize,
+) -> ProjectReferences {
+    if depth > REFERENCE_DEPTH {
+        return ProjectReferences::Unread;
+    }
+    let globals = reference_globals(globals);
+    let mut listed = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for item in &parsed.project_references {
+        if !seen.insert(item.include.clone()) {
+            continue;
+        }
+        let Ok(referenced) = evaluate(&item.include, &globals, environment, dotnet_root) else {
+            return ProjectReferences::Unread;
+        };
+        let (files, references, content) = gathered(&item.include, &referenced);
+        let project_references =
+            referenced_projects(&referenced, &globals, environment, dotnet_root, depth + 1);
+        listed.push(ReferencedProject {
+            path: item.include.clone(),
+            parsed: referenced,
+            globals: globals.clone(),
+            files,
+            references,
+            content,
+            project_references,
+        });
+    }
+    ProjectReferences::Listed(listed)
 }
