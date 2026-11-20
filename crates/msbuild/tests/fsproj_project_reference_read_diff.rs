@@ -122,6 +122,8 @@ struct ReadReference {
     /// Its own gate, and its group's (each with its leading space, or empty).
     condition: String,
     group_condition: String,
+    /// Whether its group stands in a `<When>` the walk cannot decide.
+    in_undecided_arm: bool,
 }
 
 /// One document of the doubted-read sweep: writes of `P` and `Q`, then
@@ -140,9 +142,13 @@ const RECEIVER_PADDING: &[&str] = &["", "", " ", "&#9;", "&#xA0;", "&#x2003;"];
 /// walk cannot decide.
 fn read_sweep_reference_condition(rng: &mut SplitMix64) -> String {
     let name = *rng.pick(&READ_NAMES);
-    match rng.below(6) {
+    match rng.below(9) {
         0 => format!(" Condition=\"'$({name})' != ''\""),
         1 => UNSUPPORTED_TRUE.to_owned(),
+        // A toolset name the walk holds no value of without a startup
+        // directory, and a gate false whatever any name holds.
+        2 => " Condition=\"'$(MSBuildStartupDirectory)' != ''\"".to_owned(),
+        3 => " Condition=\"false\"".to_owned(),
         _ => String::new(),
     }
 }
@@ -166,16 +172,30 @@ impl ReadDocument {
             .map(|i| {
                 let name = *rng.pick(&READ_NAMES);
                 let pad = *rng.pick(RECEIVER_PADDING);
+                // MSBuild reads a receiver past padding only before a member:
+                // a padded bare `$( P)` reads nothing (MSBuild 10.0.401).
+                let bare = |reads: &[&'static str]| -> Vec<&'static str> {
+                    if pad.is_empty() {
+                        reads.to_vec()
+                    } else {
+                        Vec::new()
+                    }
+                };
                 let (include, reads) = match rng.below(3) {
-                    0 => (format!("E{i}_$({pad}{name}).fsproj"), vec![name]),
+                    0 => (format!("E{i}_$({pad}{name}).fsproj"), bare(&[name])),
                     1 => (format!("E{i}_$({pad}{name}.Length).fsproj"), vec![name]),
-                    _ => (format!("E{i}_$({pad}P)_$(Q).fsproj"), vec!["P", "Q"]),
+                    _ => {
+                        let mut reads = bare(&["P"]);
+                        reads.push("Q");
+                        (format!("E{i}_$({pad}P)_$(Q).fsproj"), reads)
+                    }
                 };
                 ReadReference {
                     include,
                     reads,
                     condition: read_sweep_reference_condition(rng),
                     group_condition: read_sweep_reference_condition(rng),
+                    in_undecided_arm: rng.below(5) == 0,
                 }
             })
             .collect();
@@ -203,6 +223,7 @@ impl ReadDocument {
                 reads: vec!["P", "Q"],
                 condition: String::new(),
                 group_condition: String::new(),
+                in_undecided_arm: false,
             }],
         }
     }
@@ -223,12 +244,19 @@ impl ReadDocument {
             ));
         }
         for (i, reference) in self.references.iter().enumerate() {
-            xml.push_str(&format!(
-                "  <ItemGroup{group}><ProjectReference Include=\"{include}\"{own} Origin=\"E{i}\" /></ItemGroup>\n",
+            let group = format!(
+                "<ItemGroup{group}><ProjectReference Include=\"{include}\"{own} Origin=\"E{i}\" /></ItemGroup>",
                 group = reference.group_condition,
                 include = reference.include,
                 own = reference.condition,
-            ));
+            );
+            if reference.in_undecided_arm {
+                xml.push_str(&format!(
+                    "  <Choose><When{UNSUPPORTED_TRUE}>{group}</When></Choose>\n"
+                ));
+            } else {
+                xml.push_str(&format!("  {group}\n"));
+            }
         }
         xml.push_str("</Project>\n");
         xml
@@ -508,6 +536,19 @@ fn a_reference_reading_a_refused_name_is_no_certain_omission() {
              <ItemGroup Condition=\"'$(P)' != ''\"><ProjectReference Include=\"$(P).fsproj\" /></ItemGroup>\
              <ItemGroup><ProjectReference Include=\"A.fsproj\" /></ItemGroup>"
         ),
+        // An arm of a `<Choose>` the walk cannot decide.
+        format!(
+            "<PropertyGroup><P>{refused}</P></PropertyGroup>\
+             <Choose><When{UNSUPPORTED_TRUE}><ItemGroup><ProjectReference Include=\"$(P).fsproj\" /></ItemGroup></When></Choose>\
+             <ItemGroup><ProjectReference Include=\"A.fsproj\" /></ItemGroup>"
+        ),
+        // A gate on a toolset name the walk holds no value of without a
+        // startup directory.
+        format!(
+            "<PropertyGroup><P>{refused}</P></PropertyGroup>\
+             <ItemGroup><ProjectReference Include=\"$(P).fsproj\" Condition=\"'$(MSBuildStartupDirectory)' != ''\" /></ItemGroup>\
+             <ItemGroup><ProjectReference Include=\"A.fsproj\" /></ItemGroup>"
+        ),
         // A no-break space before the receiver, which MSBuild trims.
         format!(
             "<PropertyGroup><P>{refused}</P></PropertyGroup>\
@@ -545,4 +586,48 @@ fn a_reference_reading_a_refused_name_is_no_certain_omission() {
             parsed.project_references
         );
     }
+}
+
+/// A reference behind a gate false whatever any name holds reads nothing
+/// MSBuild uses, however doubted the names it reads, beside a live sibling
+/// in a group the walk cannot decide: the list keeps every edge it knows,
+/// certain, and MSBuild agrees with each.
+#[test]
+fn a_dead_reference_reading_a_refused_name_costs_no_certainty() {
+    let xml = format!(
+        "<Project><PropertyGroup><P>{REFUSED_BODY}</P></PropertyGroup>\
+         <ItemGroup><ProjectReference Include=\"A.fsproj\" /></ItemGroup>\
+         <ItemGroup{UNSUPPORTED_TRUE}><ProjectReference Include=\"B.fsproj\" />\
+         <ProjectReference Include=\"$(P).fsproj\" Condition=\"false\" /></ItemGroup>\
+         <ItemGroup Condition=\"false\"><ProjectReference Include=\"$(P).fsproj\" /></ItemGroup></Project>"
+    );
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let root = borzoi_msbuild::observed::host_fs::canonicalize(dir.path()).expect("canonicalize");
+    let proj = layout(&root);
+    std::fs::write(&proj, &xml).unwrap();
+    let theirs: Vec<PathBuf> = Oracle::spawn()
+        .items(&xml, &proj, "ProjectReference", &[])
+        .expect("MSBuild evaluates this document")
+        .iter()
+        .map(|p| lexical(p))
+        .collect();
+    let parsed = parse_fsproj_with_imports(
+        &borzoi_msbuild::ProjectFile::buffer(&proj, &xml)
+            .expect("a project path spelt as its full path"),
+        &HashMap::new(),
+        &common::oracle_environment(),
+        None,
+        None,
+    )
+    .expect("well-formed XML parses");
+    assert!(!parsed.project_references_uncertain, "{xml}");
+    let ours: Vec<PathBuf> = parsed
+        .project_references
+        .iter()
+        .map(|item| lexical(&item.include.to_string_lossy()))
+        .collect();
+    assert!(
+        !ours.is_empty() && ours.iter().all(|p| theirs.contains(p)),
+        "{ours:?} {theirs:?}"
+    );
 }

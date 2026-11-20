@@ -288,6 +288,9 @@ pub(super) fn replay_deferred_item_groups(entry_doc: &Document<'_>, state: &mut 
             state.judge_from_path(group.written.as_ref(), |state| {
                 rejection::judge_deferred(node, dir, group.reach_certain, state);
             });
+            if group.kind == DeferredGroupKind::ItemGroup {
+                taint_group_references_on_doubted_reads(node, state);
+            }
         };
         match group.file {
             DeferredFileKey::Entry => {
@@ -674,7 +677,6 @@ fn evaluate_item_group(node: Node<'_, '_>, state: &mut State<'_>) {
             }
             if group_reads_untrusted && reference_risk.list_op {
                 state.project_reference_includes_hidden = true;
-                taint_group_references_on_doubted_reads(node, state);
             }
             restore(state);
         }
@@ -691,7 +693,6 @@ fn evaluate_item_group(node: Node<'_, '_>, state: &mut State<'_>) {
             }
             if reference_risk.list_op {
                 state.project_reference_includes_hidden = true;
-                taint_group_references_on_doubted_reads(node, state);
             }
             restore(state);
         }
@@ -699,15 +700,29 @@ fn evaluate_item_group(node: Node<'_, '_>, state: &mut State<'_>) {
 }
 
 /// [`taint_reference_list_on_doubted_reads`] for every `<ProjectReference>`
-/// `Include` of the `<ItemGroup>` at `node`, which the walk skips under a
-/// gate the real build may take: one whose own gate holds there holds items
-/// the list lacks.
+/// `Include` of the `<ItemGroup>` at `node` the real build may make: every
+/// one but those behind a gate, the group's or its own, that is false
+/// whatever the names the walk is not certain of hold. Called on every
+/// group the item pass replays, walked or judged only (an arm of a
+/// `<Choose>` the walk could not decide), before the walk does anything
+/// with it, so that no route by which the walk keeps, drops or skips a
+/// reference decides whether its read is checked.
 fn taint_group_references_on_doubted_reads(node: Node<'_, '_>, state: &mut State<'_>) {
+    let dir = state.entry_project_dir.clone();
+    let dead = |element: Node<'_, '_>, state: &State<'_>| {
+        attribute(element, "Condition").is_some_and(|condition| {
+            directory_build::decision_from_certain_inputs(state, &condition, &dir) == Some(false)
+        })
+    };
+    if dead(node, state) {
+        return;
+    }
     for child in node.children().filter(|child| {
         child.is_element()
             && modelled_item_kind_for_element(*child) == Some(ItemKind::ProjectReference)
+            && child.has_attribute("Include")
     }) {
-        if child.has_attribute("Include") {
+        if !dead(child, state) {
             taint_reference_list_on_doubted_reads(child, state);
         }
     }
@@ -1042,9 +1057,6 @@ fn walk_item_child_inner(node: Node<'_, '_>, kind: ItemKind, state: &mut State<'
                     state.project_references_uncertain = true;
                 } else {
                     state.project_reference_includes_hidden = true;
-                    // One the real build makes holds items at a path the walk
-                    // does not know where its spec reads a name it doubts.
-                    taint_reference_list_on_doubted_reads(node, state);
                 }
             }
             return;
@@ -1057,14 +1069,8 @@ fn walk_item_child_inner(node: Node<'_, '_>, kind: ItemKind, state: &mut State<'
             if kind == ItemKind::ProjectReference && is_mutation {
                 state.project_references_uncertain = true;
             }
-            if kind == ItemKind::ProjectReference && node.has_attribute("Include") {
-                taint_reference_list_on_doubted_reads(node, state);
-            }
             return;
         }
-    }
-    if kind == ItemKind::ProjectReference && node.has_attribute("Include") {
-        taint_reference_list_on_doubted_reads(node, state);
     }
     if is_compile_item_kind(kind) && is_metadata_only_item_update(node) {
         if kind == ItemKind::Compile && compile_item_sets_compile_order(node) {
