@@ -102,7 +102,7 @@ test-support = []
 [dev-dependencies]
 borzoi-oracle-harness.workspace = true
 # Self-reference turns on `test-support` for the integration tests.
-borzoi = { path = ".", features = ["test-support"] }
+borzoi = { path = ".", default-features = false, features = ["test-support"] }
 # The metric-path walk the stats dashboard plots by, so a generator's
 # pinned metric namespace is read exactly as it is published.
 borzoi-stats.workspace = true
