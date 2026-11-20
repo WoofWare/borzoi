@@ -9204,6 +9204,23 @@ let private respondGraphReferenced (checker: FSharpChecker) (root: JsonElement) 
         let producerResults =
             checker.ParseAndCheckProject(built.[target], userOpName = "fcs-dump-graph-referenced")
             |> Async.RunSynchronously
+        // The producer, and every project it reads from source, was checked
+        // against exactly the references the request names: its signature
+        // describes that environment and no other.
+        let rec reachable (p: GraphProject) : GraphProject list =
+            p
+            :: (p.References
+                |> List.collect (function
+                    | ProjectRef q -> reachable graph.ById.[q]
+                    | Dll _ -> []))
+        for p in reachable producer |> List.distinctBy (fun p -> p.Id) do
+            let results =
+                if p.Id = target then
+                    producerResults
+                else
+                    checker.ParseAndCheckProject(built.[p.Id], userOpName = "fcs-dump-graph-referenced")
+                    |> Async.RunSynchronously
+            requireResolvedSet graph p results
         let failed =
             producerResults.Diagnostics
             |> Array.exists (fun d -> d.Severity = FSharp.Compiler.Diagnostics.FSharpDiagnosticSeverity.Error)

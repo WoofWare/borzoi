@@ -513,6 +513,16 @@ pub fn cells() -> Vec<Cell> {
             "self_named_generic_abbreviation",
             "namespace SelfGeneric\ntype Foo = { X: int }\n[<System.Runtime.CompilerServices.Extension>]\ntype Foo<'a> = Foo\n",
         ),
+        // A signature pair in one file excuses no lender in another: the
+        // per-path accounting's witness.
+        Cell::new(
+            "lender_beside_signature_pair",
+            &[
+                ("Lib.fsi", "module PairElsewhere\nval x: int\n"),
+                ("Lib.fs", "module PairElsewhere\nlet x = 1\n"),
+                ("Other.fs", "namespace OtherNs\ntype A = int\n"),
+            ],
+        ),
         // Codex round 6: an active pattern inside a compound binding.
         one(
             "active_pattern_in_compound_binding",

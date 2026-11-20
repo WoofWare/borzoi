@@ -263,6 +263,8 @@ pub enum Leaf {
     AugmentationHead,
     /// An abbreviation's target, where a reference may be a type provider.
     ProvidedTarget,
+    /// An `[<Extension>]` binding's pattern: the values it names.
+    BindingHead,
 }
 
 /// What the walk does with one form of a [`Leaf`].
@@ -293,6 +295,90 @@ pub struct LeafForm {
 
 /// The certified domain of each leaf ([`LeafForm`]).
 pub const LEAF_FORMS: &[LeafForm] = &[
+    LeafForm {
+        leaf: Leaf::BindingHead,
+        form: "value",
+        source: "module D\n[<System.Runtime.CompilerServices.Extension>]\nlet f = fun (s: string) -> s\n",
+        providers: ProviderReferences::None,
+        verdict: Verdict::Read,
+    },
+    LeafForm {
+        leaf: Leaf::BindingHead,
+        form: "function",
+        source: "module D\n[<System.Runtime.CompilerServices.Extension>]\nlet f (s: string) = s\n",
+        providers: ProviderReferences::None,
+        verdict: Verdict::Read,
+    },
+    LeafForm {
+        leaf: Leaf::BindingHead,
+        form: "operator",
+        source: "module D\n[<System.Runtime.CompilerServices.Extension>]\nlet (+++) (a: string) (b: string) = a + b\n",
+        providers: ProviderReferences::None,
+        verdict: Verdict::Read,
+    },
+    LeafForm {
+        leaf: Leaf::BindingHead,
+        form: "active_pattern",
+        source: "module D\n[<System.Runtime.CompilerServices.Extension>]\nlet (|Even|Odd|) (n: int) = if n % 2 = 0 then Even else Odd\n",
+        providers: ProviderReferences::None,
+        verdict: Verdict::Read,
+    },
+    LeafForm {
+        leaf: Leaf::BindingHead,
+        form: "nullary_active_pattern",
+        source: "module D\n[<System.Runtime.CompilerServices.Extension>]\nlet (|Zero|_|) = function 0 -> Some () | _ -> None\n",
+        providers: ProviderReferences::None,
+        verdict: Verdict::Read,
+    },
+    LeafForm {
+        leaf: Leaf::BindingHead,
+        form: "parenthesised_typed",
+        source: "module D\n[<System.Runtime.CompilerServices.Extension>]\nlet (f: string -> string) = id\n",
+        providers: ProviderReferences::None,
+        verdict: Verdict::Read,
+    },
+    LeafForm {
+        leaf: Leaf::BindingHead,
+        form: "upper_case_head",
+        source: "module D\n[<System.Runtime.CompilerServices.Extension>]\nlet Shout (s: string) = s\n",
+        providers: ProviderReferences::None,
+        verdict: Verdict::Read,
+    },
+    LeafForm {
+        leaf: Leaf::BindingHead,
+        form: "tuple",
+        source: "module D\n[<System.Runtime.CompilerServices.Extension>]\nlet a, b = 1, 2\n",
+        providers: ProviderReferences::None,
+        verdict: Verdict::Read,
+    },
+    LeafForm {
+        leaf: Leaf::BindingHead,
+        form: "as",
+        source: "module D\n[<System.Runtime.CompilerServices.Extension>]\nlet ((|Foo|_|) as f) = fun (x: int) -> Some x\n",
+        providers: ProviderReferences::None,
+        verdict: Verdict::Declined,
+    },
+    LeafForm {
+        leaf: Leaf::BindingHead,
+        form: "record",
+        source: "module D\ntype R = { A: int }\n[<System.Runtime.CompilerServices.Extension>]\nlet { A = a } = { A = 1 }\n",
+        providers: ProviderReferences::None,
+        verdict: Verdict::Declined,
+    },
+    LeafForm {
+        leaf: Leaf::BindingHead,
+        form: "list",
+        source: "module D\n[<System.Runtime.CompilerServices.Extension>]\nlet [ a; b ] = [ 1; 2 ]\n",
+        providers: ProviderReferences::None,
+        verdict: Verdict::Declined,
+    },
+    LeafForm {
+        leaf: Leaf::BindingHead,
+        form: "nested_tuple",
+        source: "module D\n[<System.Runtime.CompilerServices.Extension>]\nlet (a, (b, c)) = (1, (2, 3))\n",
+        providers: ProviderReferences::None,
+        verdict: Verdict::Declined,
+    },
     LeafForm {
         leaf: Leaf::TypeHead,
         form: "single",
@@ -460,6 +546,19 @@ pub struct SourceSurface {
     /// `GetAutoOpenAttributes`, or more.
     pub assembly_auto_opens: Vec<String>,
     /// Where the rows may hold more than FCS's.
+    pub approximations: BTreeSet<Approximation>,
+    /// Every abbreviation row that may lend (marked, or possibly marked,
+    /// `[<AutoOpen>]` or `[<Extension>]`), with the approximations that may
+    /// have made it: a surplus lender is accounted for at its own path.
+    pub lender_sources: Vec<LenderSource>,
+}
+
+/// An abbreviation row that may lend, and the approximations that may have
+/// made it ([`SourceSurface::lender_sources`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LenderSource {
+    pub namespace: Vec<String>,
+    pub enclosing: Vec<String>,
     pub approximations: BTreeSet<Approximation>,
 }
 
@@ -732,6 +831,7 @@ fn walk_project(
             routes,
             providers,
             module_abbreviations,
+            paired: partners[i].is_some(),
             out: std::mem::take(&mut out),
             lines: Lines::of(root).map(std::rc::Rc::new),
         };
@@ -769,6 +869,7 @@ fn walk_project(
         },
         assembly_auto_opens: out.auto_opens,
         approximations: out.approximations,
+        lender_sources: out.lender_sources,
     })
 }
 
@@ -788,6 +889,7 @@ struct Out {
     extensions: Vec<ExtensionRow>,
     auto_opens: Vec<String>,
     approximations: BTreeSet<Approximation>,
+    lender_sources: Vec<LenderSource>,
 }
 
 /// Whether something holds: yes, no, or not known.
@@ -969,6 +1071,9 @@ struct Scope {
     namespace: Vec<String>,
     /// The enclosing modules' and types' logical names, outermost first.
     enclosing: Vec<String>,
+    /// Whether an enclosing module is read under the `Module` suffix the
+    /// walk adds as a second reading ([`Approximation::ModuleSuffix`]).
+    suffixed: bool,
 }
 
 impl Scope {
@@ -977,6 +1082,7 @@ impl Scope {
         Scope {
             namespace,
             enclosing: Vec::new(),
+            suffixed: false,
         }
     }
 
@@ -987,6 +1093,7 @@ impl Scope {
         Scope {
             namespace: self.namespace.clone(),
             enclosing,
+            suffixed: self.suffixed,
         }
     }
 }
@@ -1022,6 +1129,8 @@ struct FileWalk<'r> {
     providers: ProviderReferences,
     /// Whether some file of the project declares a module abbreviation.
     module_abbreviations: bool,
+    /// Whether this file is one of a signature pair.
+    paired: bool,
     out: Out,
     /// The file's lines, or `None` when a `#line` directive may move them.
     lines: Option<std::rc::Rc<Lines>>,
@@ -1290,7 +1399,14 @@ impl FileWalk<'_> {
                 let members: Vec<MemberDefn> = e.members().collect();
                 self.members(&scope.inner(&name), &members, None)?;
                 self.type_bodies(&scope.inner(&name), None, &members)?;
-                self.entity(scope, &name, &[PickledEntityKind::Exception], &marks, false)
+                self.entity(
+                    scope,
+                    &name,
+                    &[PickledEntityKind::Exception],
+                    &marks,
+                    false,
+                    &BTreeSet::new(),
+                )
             }
             ModuleDecl::Let(l) => {
                 let lists: Vec<AttributeList> = l.attributes().collect();
@@ -1363,7 +1479,14 @@ impl FileWalk<'_> {
                 let members: Vec<MemberDefn> = e.members().collect();
                 self.members(&scope.inner(&name), &members, None)?;
                 self.type_bodies(&scope.inner(&name), None, &members)?;
-                self.entity(scope, &name, &[PickledEntityKind::Exception], &marks, false)
+                self.entity(
+                    scope,
+                    &name,
+                    &[PickledEntityKind::Exception],
+                    &marks,
+                    false,
+                    &BTreeSet::new(),
+                )
             }
             SigDecl::Val(v) => {
                 let lists: Vec<AttributeList> = v.attributes().collect();
@@ -1402,9 +1525,18 @@ impl FileWalk<'_> {
         }
         for logical in &readings {
             self.within_budget()?;
-            self.decls(&scope.inner(logical), decls, is_rec)?;
+            let mut inner = scope.inner(logical);
+            inner.suffixed |= logical != name;
+            self.decls(&inner, decls, is_rec)?;
             // `[<CompiledName>]` does not rename a module.
-            self.entity(scope, logical, &[PickledEntityKind::Module], &marks, false)?;
+            self.entity(
+                scope,
+                logical,
+                &[PickledEntityKind::Module],
+                &marks,
+                false,
+                &BTreeSet::new(),
+            )?;
         }
         Ok(())
     }
@@ -1419,6 +1551,7 @@ impl FileWalk<'_> {
         kinds: &[PickledEntityKind],
         marks: &Marks,
         honours_compiled_name: bool,
+        abbreviation_sources: &BTreeSet<Approximation>,
     ) -> Result<(), ExistenceUnread> {
         if honours_compiled_name && marks.compiled_name_unreadable {
             return Err(ExistenceUnread::UnreadableCompiledName(self.index));
@@ -1439,6 +1572,26 @@ impl FileWalk<'_> {
             self.out
                 .approximations
                 .insert(Approximation::UncertainAttribute);
+        }
+        // A row that may lend, with what may have made it one.
+        if kinds.contains(&PickledEntityKind::Abbreviation)
+            && (auto_open != Maybe::No || extension != Maybe::No)
+        {
+            let mut approximations = abbreviation_sources.clone();
+            if marks.uncertain && (auto_open == Maybe::Possibly || extension == Maybe::Possibly) {
+                approximations.insert(Approximation::UncertainAttribute);
+            }
+            if scope.suffixed {
+                approximations.insert(Approximation::ModuleSuffix);
+            }
+            if self.paired {
+                approximations.insert(Approximation::SignaturePair);
+            }
+            self.out.lender_sources.push(LenderSource {
+                namespace: scope.namespace.clone(),
+                enclosing: scope.enclosing.clone(),
+                approximations,
+            });
         }
         for &kind in kinds {
             for c in &compiled {
@@ -1481,6 +1634,7 @@ impl FileWalk<'_> {
         let generic = defn
             .typar_decls()
             .is_some_and(|d| d.typars().next().is_some());
+        let mut abbreviation_sources: BTreeSet<Approximation> = BTreeSet::new();
         let kinds: Vec<PickledEntityKind> = match defn.repr() {
             Some(TypeDefnRepr::Abbrev(a)) => {
                 let target = a.ty();
@@ -1491,7 +1645,10 @@ impl FileWalk<'_> {
                 if target.as_ref().is_some_and(provided) {
                     return Err(ExistenceUnread::TypeProvider(self.index));
                 }
-                self.abbreviation_kinds(&name, generic, target.as_ref(), &marks)
+                let (kinds, source) =
+                    self.abbreviation_kinds(&name, generic, target.as_ref(), &marks);
+                abbreviation_sources.extend(source);
+                kinds
             }
             Some(
                 TypeDefnRepr::Record(_)
@@ -1511,7 +1668,7 @@ impl FileWalk<'_> {
         let inner = scope.inner(&name);
         self.members(&inner, &members, None)?;
         self.type_bodies(&inner, defn.implicit_ctor(), &members)?;
-        self.entity(scope, &name, &kinds, &marks, true)
+        self.entity(scope, &name, &kinds, &marks, true, &abbreviation_sources)
     }
 
     /// What `type name = target` may be: an abbreviation, or (`target` one
@@ -1527,31 +1684,31 @@ impl FileWalk<'_> {
         generic: bool,
         target: Option<&Type>,
         marks: &Marks,
-    ) -> Vec<PickledEntityKind> {
+    ) -> (Vec<PickledEntityKind>, Option<Approximation>) {
         let measure = marks.get(Marker::Measure);
-        match target.and_then(abbrev_single_ident) {
+        let (kinds, source) = match target.and_then(abbrev_single_ident) {
             // `type Foo<'a> = Foo` may abbreviate another `Foo` of no arity.
             Some(t) if t == name && !generic => match measure {
-                Maybe::No => vec![PickledEntityKind::Type],
-                Maybe::Yes => vec![PickledEntityKind::Abbreviation],
-                Maybe::Possibly => {
-                    self.out
-                        .approximations
-                        .insert(Approximation::UncertainAttribute);
-                    vec![PickledEntityKind::Abbreviation, PickledEntityKind::Type]
-                }
+                Maybe::No => (vec![PickledEntityKind::Type], None),
+                Maybe::Yes => (vec![PickledEntityKind::Abbreviation], None),
+                Maybe::Possibly => (
+                    vec![PickledEntityKind::Abbreviation, PickledEntityKind::Type],
+                    Some(Approximation::UncertainAttribute),
+                ),
             },
             Some(t) if FSHARP_CORE_TYPE_NAMES.contains(&t.as_str()) => {
-                vec![PickledEntityKind::Abbreviation]
+                (vec![PickledEntityKind::Abbreviation], None)
             }
-            Some(_) if measure != Maybe::Yes => {
-                self.out
-                    .approximations
-                    .insert(Approximation::AbbreviationOrUnion);
-                vec![PickledEntityKind::Abbreviation, PickledEntityKind::Type]
-            }
-            _ => vec![PickledEntityKind::Abbreviation],
+            Some(_) if measure != Maybe::Yes => (
+                vec![PickledEntityKind::Abbreviation, PickledEntityKind::Type],
+                Some(Approximation::AbbreviationOrUnion),
+            ),
+            _ => (vec![PickledEntityKind::Abbreviation], None),
+        };
+        if let Some(a) = source {
+            self.out.approximations.insert(a);
         }
+        (kinds, source)
     }
 
     /// The rows of what a type, an augmentation or an exception declares
@@ -1677,6 +1834,12 @@ impl FileWalk<'_> {
                     vec![(name, at)]
                 }
                 None => {
+                    if !certified_pattern(&pat) {
+                        return Err(ExistenceUnread::OutsideDomain(
+                            self.index,
+                            Leaf::BindingHead,
+                        ));
+                    }
                     self.out
                         .approximations
                         .insert(Approximation::BindingPattern);
@@ -1975,8 +2138,18 @@ impl FileWalk<'_> {
             Some(name) => self.csharp_row(scope, &name, &marks),
             None => {
                 // A pattern binding names several values, each carrying the
-                // attribute; read every name the pattern spells.
-                let names = pat.as_ref().map(pattern_idents).unwrap_or_default();
+                // attribute: in a certified form ([`Leaf::BindingHead`]),
+                // every name the pattern spells.
+                let Some(pat) = pat.as_ref() else {
+                    return Err(ExistenceUnread::UnnamedDeclaration(self.index));
+                };
+                if !certified_pattern(pat) {
+                    return Err(ExistenceUnread::OutsideDomain(
+                        self.index,
+                        Leaf::BindingHead,
+                    ));
+                }
+                let names = pattern_idents(pat);
                 if names.is_empty() {
                     return Err(ExistenceUnread::UnnamedDeclaration(self.index));
                 }
@@ -2327,6 +2500,98 @@ fn pattern_idents(pat: &Pat) -> Vec<(String, TextSize)> {
             .map(|ap| (active_pattern_name(&ap), ap.syntax().text_range().start())),
     );
     names
+}
+
+/// Whether a binding's pattern, when it names no single value
+/// ([`binding_name`]), is a certified form ([`Leaf::BindingHead`]): a tuple
+/// of names and wildcards, or a head that may be a union case
+/// (`let Q (s: string) = …`, `let X = …`), under parentheses or a type
+/// annotation. Its identifiers then hold its binders. Any other pattern (an
+/// `as`, a record, a list, a cons, an `|`, a qualified case) is outside the
+/// domain.
+fn certified_pattern(pat: &Pat) -> bool {
+    let simple = |p: &Pat| match p {
+        Pat::Named(n) => n.active_pat_name().is_none(),
+        Pat::Wildcard(_) => true,
+        Pat::LongIdent(l) => {
+            l.active_pat_name().is_none()
+                && l.args().next().is_none()
+                && l.head().is_some_and(|h| h.idents().count() == 1)
+        }
+        Pat::Paren(_)
+        | Pat::Typed(_)
+        | Pat::Const(_)
+        | Pat::MeasureLit(_)
+        | Pat::Null(_)
+        | Pat::Tuple(_)
+        | Pat::As(_)
+        | Pat::ArrayOrList(_)
+        | Pat::Record(_)
+        | Pat::IsInst(_)
+        | Pat::ListCons(_)
+        | Pat::Ands(_)
+        | Pat::Or(_)
+        | Pat::Attrib(_)
+        | Pat::OptionalVal(_)
+        | Pat::Quote(_) => false,
+    };
+    match pat {
+        Pat::Paren(p) => p.inner().as_ref().is_some_and(certified_pattern),
+        Pat::Typed(t) => t.pat().as_ref().is_some_and(certified_pattern),
+        Pat::Tuple(t) => t.elements().all(|e| simple(&e)),
+        // A head that may be a union case, its arguments simple names.
+        Pat::LongIdent(l) => {
+            l.active_pat_name().is_none()
+                && l.head().is_some_and(|h| h.idents().count() == 1)
+                && l.args().all(|a| {
+                    // Through parentheses and annotations: `(s: string)`.
+                    let mut a = a;
+                    loop {
+                        let inner = match &a {
+                            Pat::Paren(p) => p.inner(),
+                            Pat::Typed(t) => t.pat(),
+                            Pat::Named(_)
+                            | Pat::LongIdent(_)
+                            | Pat::Wildcard(_)
+                            | Pat::Const(_)
+                            | Pat::MeasureLit(_)
+                            | Pat::Null(_)
+                            | Pat::Tuple(_)
+                            | Pat::As(_)
+                            | Pat::ArrayOrList(_)
+                            | Pat::Record(_)
+                            | Pat::IsInst(_)
+                            | Pat::ListCons(_)
+                            | Pat::Ands(_)
+                            | Pat::Or(_)
+                            | Pat::Attrib(_)
+                            | Pat::OptionalVal(_)
+                            | Pat::Quote(_) => break simple(&a),
+                        };
+                        match inner {
+                            Some(i) => a = i,
+                            None => break false,
+                        }
+                    }
+                })
+        }
+        // `let _ = …` binds nothing: certified, and then unnamed.
+        Pat::Wildcard(_) => true,
+        Pat::Named(_)
+        | Pat::Const(_)
+        | Pat::MeasureLit(_)
+        | Pat::Null(_)
+        | Pat::As(_)
+        | Pat::ArrayOrList(_)
+        | Pat::Record(_)
+        | Pat::IsInst(_)
+        | Pat::ListCons(_)
+        | Pat::Ands(_)
+        | Pat::Or(_)
+        | Pat::Attrib(_)
+        | Pat::OptionalVal(_)
+        | Pat::Quote(_) => false,
+    }
 }
 
 /// A module `let` binding's single name: `let f …`, `let x`, `let (|A|_|) …`,

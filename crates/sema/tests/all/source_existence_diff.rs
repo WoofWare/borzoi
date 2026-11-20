@@ -647,9 +647,11 @@ pub fn grade(cell: &Cell, fcs: &Fcs, ours: &SourceExistence) -> Result<String, S
     }
     let surplus = Surplus::of(&mine, &theirs);
     // A surplus abbreviation lender makes every name a possible extension:
-    // on a producer FCS accepts and the walk read whole, it must come from
-    // a place the walk named.
-    let lender_sources = [
+    // on a producer FCS accepts and the walk read whole, each one must come
+    // from an abbreviation row at its own path that an approximation that
+    // can make a lender accounts for. The paths a row lends at are the
+    // existence set's own, from a set of that row alone.
+    let lender_approximations = [
         Approximation::UncertainAttribute,
         Approximation::AbbreviationOrUnion,
         Approximation::SignaturePair,
@@ -657,21 +659,49 @@ pub fn grade(cell: &Cell, fcs: &Fcs, ours: &SourceExistence) -> Result<String, S
         // abbreviation under it.
         Approximation::ModuleSuffix,
     ];
-    if fcs.clean
-        && !fcs.undecodable
-        && surplus.lenders > 0
-        && !lender_sources
+    if fcs.clean && !fcs.undecodable && surplus.lenders > 0 {
+        let excused: BTreeSet<Vec<String>> = surface
+            .lender_sources
             .iter()
-            .any(|a| surface.approximations.contains(a))
-    {
-        return Err(format!(
-            "{}: {} surplus abbreviation lender(s) with no approximation that may make one ({:?})\n  ours: {:?}\n  FCS's: {:?}",
-            cell.name,
-            surplus.lenders,
-            surface.approximations,
-            mine.abbreviation_lenders,
-            theirs.abbreviation_lenders
-        ));
+            .filter(|l| {
+                lender_approximations
+                    .iter()
+                    .any(|a| l.approximations.contains(a))
+            })
+            .flat_map(|l| {
+                let row = PickledEntityRow {
+                    namespace: l.namespace.clone(),
+                    enclosing: l.enclosing.clone(),
+                    logical_name: "Lender".to_owned(),
+                    compiled_name: "Lender".to_owned(),
+                    kind: borzoi_assembly::existence::PickledEntityKind::Abbreviation,
+                    public: true,
+                    auto_open: false,
+                    extension: true,
+                };
+                existence_facts(
+                    &ExistenceIndex {
+                        il: Vec::new(),
+                        pickle: PickleLayer::Read(vec![row]),
+                        extensions: Vec::new(),
+                    },
+                    &[],
+                )
+                .abbreviation_lenders
+            })
+            .collect();
+        let unexcused: Vec<String> = mine
+            .abbreviation_lenders
+            .difference(&theirs.abbreviation_lenders)
+            .filter(|p| !excused.contains(*p))
+            .map(|p| p.join("."))
+            .collect();
+        if !unexcused.is_empty() {
+            return Err(format!(
+                "{}: surplus abbreviation lender(s) {unexcused:?} no approximation at their path accounts for ({:?})",
+                cell.name, surface.lender_sources
+            ));
+        }
     }
     let state = match (fcs.clean, fcs.undecodable) {
         (true, false) => "",
@@ -930,4 +960,68 @@ fn the_fsharp_core_type_names_are_fsharp_core_types() {
             "{name} is no public type of Microsoft.FSharp.Core"
         );
     }
+}
+
+/// The `referenced` op describes the producer under exactly the references
+/// the request names: a producer FCS checks against an assembly the request
+/// does not give it (here, the consumer's `System.Runtime` reaching it) is
+/// refused, not reported.
+#[test]
+fn the_referenced_op_refuses_a_producer_checked_against_other_references() {
+    use borzoi_oracle_harness::project_graph::{GraphProject, GraphRequest, Reference};
+    let framework = framework_references();
+    let without_runtime: Vec<Reference> = framework
+        .iter()
+        .filter(|p| p.file_name().is_none_or(|n| n != "System.Runtime.dll"))
+        .cloned()
+        .map(Reference::Dll)
+        .collect();
+    assert!(
+        without_runtime.len() < framework.len(),
+        "the framework set holds System.Runtime.dll"
+    );
+    let producer_source = crate::common::temp_fs_file(
+        "referenced_producer",
+        "module RefProducer\nlet f (s: string) = s\n",
+    );
+    let consumer_source = crate::common::temp_fs_file(
+        "referenced_consumer",
+        "module RefConsumer\nlet x = RefProducer.f \"x\"\n",
+    );
+    let mut consumer_refs: Vec<Reference> = framework.iter().cloned().map(Reference::Dll).collect();
+    consumer_refs.push(Reference::Project(plain("Producer")));
+    let request = GraphRequest::new(
+        vec![
+            GraphProject {
+                id: plain("Producer"),
+                assembly_name: plain("RefProducer"),
+                target: Target::Library,
+                sources: vec![producer_source],
+                defines: Vec::new(),
+                references: without_runtime,
+            },
+            GraphProject {
+                id: plain("Consumer"),
+                assembly_name: plain("RefConsumer"),
+                target: Target::Library,
+                sources: vec![consumer_source],
+                defines: Vec::new(),
+                references: consumer_refs,
+            },
+        ],
+        plain("Consumer"),
+    )
+    .expect("a valid graph request");
+    let line = request
+        .referenced_line(&plain("Producer"))
+        .expect("the consumer references the producer");
+    let answer = request_referenced(&line);
+    assert!(
+        answer.as_ref().is_err_and(|e| e.contains("does not name")),
+        "the oracle answered a producer checked against other references: {answer:?}"
+    );
+}
+
+fn request_referenced(line: &str) -> Result<ReferencedResponse, String> {
+    request(line)
 }

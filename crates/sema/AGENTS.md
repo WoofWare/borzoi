@@ -46,8 +46,9 @@ answers is monotone, so the claim is containment: the set built from our
 rows holds every fact of the set built from FCS's CCU for A, which
 `tests/all/source_existence_diff.rs` checks on the set's own facts
 (`test_support::existence_facts`), pinning ours' surplus per kind and
-failing a surplus abbreviation lender no `Approximation` accounts for (one
-makes every name a possible extension). Fields no existence question reads
+failing a surplus abbreviation lender no `Approximation` accounts for at
+its own path (`SourceSurface::lender_sources`; one makes every name a
+possible extension). Fields no existence question reads
 (accessibility, kinds beyond abbreviation, the inferred `[<Extension>]`)
 are constants: **a stage that reads more of a source producer derives and
 grades those itself.** Its input enumerates what only the caller knows (an
@@ -60,7 +61,8 @@ declines). Every match over a syntax enum in the walk and its member reader
 names its kinds (`clippy::wildcard_enum_match_arm` is denied there), so a
 construct no arm reads is a compile error, not a silent skip. The leaves it
 interprets (a type's head, an augmentation's head, an abbreviation's target
-where a provider may be referenced) are certified form by form in
+where a provider may be referenced, an `[<Extension>]` binding's pattern)
+are certified form by form in
 `LEAF_FORMS`: a form outside the table declines (`OutsideDomain`), and
 `source_existence_domain` grades every row against FCS and holds the walk to
 each row's verdict, so the predicate and the table cannot drift apart. A
