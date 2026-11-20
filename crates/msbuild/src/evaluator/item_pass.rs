@@ -674,6 +674,7 @@ fn evaluate_item_group(node: Node<'_, '_>, state: &mut State<'_>) {
             }
             if group_reads_untrusted && reference_risk.list_op {
                 state.project_reference_includes_hidden = true;
+                taint_group_references_on_doubted_reads(node, state);
             }
             restore(state);
         }
@@ -690,8 +691,24 @@ fn evaluate_item_group(node: Node<'_, '_>, state: &mut State<'_>) {
             }
             if reference_risk.list_op {
                 state.project_reference_includes_hidden = true;
+                taint_group_references_on_doubted_reads(node, state);
             }
             restore(state);
+        }
+    }
+}
+
+/// [`taint_reference_list_on_doubted_reads`] for every `<ProjectReference>`
+/// `Include` of the `<ItemGroup>` at `node`, which the walk skips under a
+/// gate the real build may take: one whose own gate holds there holds items
+/// the list lacks.
+fn taint_group_references_on_doubted_reads(node: Node<'_, '_>, state: &mut State<'_>) {
+    for child in node.children().filter(|child| {
+        child.is_element()
+            && modelled_item_kind_for_element(*child) == Some(ItemKind::ProjectReference)
+    }) {
+        if child.has_attribute("Include") {
+            taint_reference_list_on_doubted_reads(child, state);
         }
     }
 }
@@ -1025,6 +1042,9 @@ fn walk_item_child_inner(node: Node<'_, '_>, kind: ItemKind, state: &mut State<'
                     state.project_references_uncertain = true;
                 } else {
                     state.project_reference_includes_hidden = true;
+                    // One the real build makes holds items at a path the walk
+                    // does not know where its spec reads a name it doubts.
+                    taint_reference_list_on_doubted_reads(node, state);
                 }
             }
             return;
@@ -1036,6 +1056,9 @@ fn walk_item_child_inner(node: Node<'_, '_>, kind: ItemKind, state: &mut State<'
             // way (see the Update/Remove gate below).
             if kind == ItemKind::ProjectReference && is_mutation {
                 state.project_references_uncertain = true;
+            }
+            if kind == ItemKind::ProjectReference && node.has_attribute("Include") {
+                taint_reference_list_on_doubted_reads(node, state);
             }
             return;
         }

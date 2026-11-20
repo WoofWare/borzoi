@@ -1147,7 +1147,7 @@ fn a_project_reference_gated_on_a_refused_name_is_not_certain() {
 /// #1098: a `ProjectReference` reading a name refused twice (a refused write,
 /// then a refused write under a gate reading it) is not dropped from a list
 /// published as certain. Every expression is one MSBuild evaluates and the
-/// walk does not; `fsproj_project_reference_remove_diff`'s
+/// walk does not; `fsproj_project_reference_read_diff`'s
 /// `a_reference_reading_a_refused_name_is_no_certain_omission` holds the shape
 /// to MSBuild's items.
 #[test]

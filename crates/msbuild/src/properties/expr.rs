@@ -240,10 +240,11 @@ pub(crate) fn property_references(raw: &str) -> impl Iterator<Item = &str> {
         // reached as an opener in its own right rather than by recursing
         // through the argument slices.
         search_from = open;
-        // MSBuild tolerates whitespace inside `$( … )`, and the condition
+        // MSBuild tolerates whitespace inside `$( … )`, Unicode's included (a
+        // no-break space before a receiver still reads it), and the condition
         // tokeniser trims it before resolving the reference, so skip it — else
         // a legal spelling would report nothing.
-        let interior = raw[open..].trim_start_matches(|c: char| c.is_ascii_whitespace());
+        let interior = raw[open..].trim_start_matches(char::is_whitespace);
         if let Some(name) = receiver_name(interior) {
             refs.push(name);
         }
