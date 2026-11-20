@@ -518,20 +518,22 @@ impl SourceSurface {
     /// rows beside the source's (an unreadable pickle leaves the whole
     /// index unknowable, as it does a DLL's).
     pub fn index(&self) -> ExistenceIndex {
-        let source = PickleLayer::Read(self.entities.clone());
         match &self.built {
             None => ExistenceIndex {
                 il: Vec::new(),
-                pickle: source,
+                pickle: PickleLayer::Read(self.entities.clone()),
                 extensions: Vec::new(),
             },
             Some(built) => ExistenceIndex {
                 il: built.il.clone(),
                 pickle: match &built.pickle {
                     PickleLayer::Read(rows) => {
-                        PickleLayer::Read(self.entities.iter().chain(rows).cloned().collect())
+                        let mut all = Vec::with_capacity(self.entities.len() + rows.len());
+                        all.extend_from_slice(&self.entities);
+                        all.extend_from_slice(rows);
+                        PickleLayer::Read(all)
                     }
-                    PickleLayer::NotFSharp => source,
+                    PickleLayer::NotFSharp => PickleLayer::Read(self.entities.clone()),
                     PickleLayer::Unreadable(why) => PickleLayer::Unreadable(why.clone()),
                 },
                 extensions: built.extensions.clone(),
@@ -1575,7 +1577,7 @@ impl FileWalk<'_> {
                                 self.type_defn(scope, &defn)?;
                             }
                         }
-                        ModuleDecl::Exception(e) => self.exception(scope, e)?,
+                        ModuleDecl::Exception(e) => self.exception(scope, e, is_rec)?,
                         // Extension members, `let`s and `extern`s are A's
                         // `ExtensionNames`'; the rest declares no entity.
                         ModuleDecl::Let(_)
@@ -1607,7 +1609,7 @@ impl FileWalk<'_> {
                                 self.type_defn(scope, &defn)?;
                             }
                         }
-                        SigDecl::Exception(e) => self.exception(scope, e)?,
+                        SigDecl::Exception(e) => self.exception(scope, e, is_rec)?,
                         SigDecl::Val(_)
                         | SigDecl::Open(_)
                         | SigDecl::ModuleAbbrev(_)
@@ -1860,7 +1862,16 @@ impl FileWalk<'_> {
         })
     }
 
-    fn exception(&mut self, scope: &Scope, e: &ExceptionDefnDecl) -> Result<(), ExistenceUnread> {
+    /// `exception E …`. FCS honours a `[<CompiledName>]` on an exception
+    /// only in a recursive group (`namespace rec`, `module rec`), whose
+    /// declarations it checks with the type definitions; elsewhere the
+    /// compiled name is the logical one.
+    fn exception(
+        &mut self,
+        scope: &Scope,
+        e: &ExceptionDefnDecl,
+        is_rec: bool,
+    ) -> Result<(), ExistenceUnread> {
         if !consumed(
             e.syntax(),
             |n| {
@@ -1894,7 +1905,13 @@ impl FileWalk<'_> {
         });
         let attrs: Vec<AttributeList> = e.attributes().collect();
         let marks = self.marks(&attrs)?;
-        self.entity(scope, &name, &[PickledEntityKind::Exception], &marks, false)
+        self.entity(
+            scope,
+            &name,
+            &[PickledEntityKind::Exception],
+            &marks,
+            is_rec,
+        )
     }
 }
 

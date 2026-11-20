@@ -524,4 +524,29 @@ fn only_a_complete_fold_answers_for_the_whole_project() {
         assert!(whole.extension_names().may_have("Shout", false));
         assert!(whole.extension_names().unknowable().is_none());
     }
+    // An unpaired signature last: FCS reports the missing implementation and
+    // still imports the earlier file's extension, so the names are every
+    // file's, not the last slot's, cold and incremental alike.
+    let mut with_tail = sources.clone();
+    with_tail.push((
+        "Tail.fsi".to_owned(),
+        "module Tail
+val y: int
+"
+        .to_owned(),
+    ));
+    let tail_files = project_files(&with_tail);
+    let cold = resolve_project_files(&tail_files, &env);
+    let (incremental, _) = borzoi_sema::resolve_project_files_incremental(
+        &files,
+        &resolve_project_files(&files, &env),
+        &tail_files,
+        &env,
+    );
+    for (what, whole) in [("cold", cold), ("incremental", incremental)] {
+        assert!(
+            whole.extension_names().may_have("Shout", false),
+            "{what}: a trailing signature drops the earlier files' names"
+        );
+    }
 }

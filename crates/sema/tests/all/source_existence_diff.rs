@@ -33,14 +33,14 @@
 //! ([`certify_by_spelling`] when A's references add no route to a marker,
 //! a hand-written one otherwise) and under [`MarkerRoutes::Unknown`].
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use borzoi_assembly::existence::{
     ExistenceIndex, ExtensionRow, IndexLayer, PickleLayer, PickledEntityRow,
 };
 use borzoi_assembly::{Ecma335Assembly, EcmaView};
-use borzoi_cst::parser::{FileKind, ParseOptions, parse_with_options};
+use borzoi_cst::parser::FileKind;
 use borzoi_cst::syntax::{AstNode, ImplFile, SigFile};
 use borzoi_oracle_harness::assembly_entities::{ExtensionStyle, FcsExtensionMember};
 use borzoi_oracle_harness::manifest::Manifest;
@@ -594,13 +594,6 @@ pub fn fcs(cell: &Cell) -> Fcs {
 /// Our reading of `cell` under `routes`, or how it declines.
 /// `cell`'s files, parsed as the walk reads them.
 fn project_files(cell: &Cell) -> Vec<ProjectFile> {
-    // FCS defines `COMPILED` in every compiled project (the LSP does too).
-    let symbols: HashSet<String> = cell
-        .defines
-        .iter()
-        .cloned()
-        .chain(std::iter::once("COMPILED".to_owned()))
-        .collect();
     let dir = PathBuf::from("/fixture");
     let mut files = Vec::new();
     let mut recoveries = Vec::new();
@@ -610,14 +603,7 @@ fn project_files(cell: &Cell) -> Vec<ProjectFile> {
         } else {
             FileKind::Impl
         };
-        let parse = parse_with_options(
-            text,
-            ParseOptions {
-                file_kind: kind,
-                symbols: &symbols,
-                lang: borzoi_cst::language_version::LanguageVersion::V10_0,
-            },
-        );
+        let parse = crate::common::parse_as_graph_checks(text, kind, &cell.defines);
         recoveries.push(SyntaxRecovery::of(&parse));
         files.push(match kind {
             FileKind::Sig => SourceFile::Sig(SigFile::cast(parse.root).expect("a sig root")),

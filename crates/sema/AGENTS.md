@@ -61,8 +61,11 @@ attribute verdict cannot see one shadowing it: until it does,
 name `N` when a source reference declares an abbreviation named `N` or
 `NAttribute` (FCS strips it to its target), or a type of that name at a
 path where the marker sits (FCS classifies a well-known attribute of
-another assembly by its path, `resolveAttribPath`); the scope grid's
-`CsProducer*` kinds grade both routes, and a type at no marker's path. FCS
+another assembly by its path, `resolveAttribPath`). The producer's own
+files ask the same rule (`AssemblyEnv::may_denote_marker`) of a type
+they declare, since a dependant reading their extension names takes it by
+its path; the scope grid's `CsProducer*` kinds grade each route, and a type
+at no marker's path. FCS
 falls back to A's output assembly where it cannot build A from source, so
 the caller states whether one exists (`BuiltOutput`), and the set is then
 the union of its rows and the source's. Fields no

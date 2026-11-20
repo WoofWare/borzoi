@@ -27,6 +27,7 @@ use super::extension_names::{Damage, ExtensionNames, MarkerQuestion};
 use super::path_set::{Extended, PathPrefixes, PathSet};
 use super::state::ActivePatternShape;
 use super::unknowables::{Unknowable, Unknowables};
+use crate::assembly_env::MarkerCandidate;
 
 /// One export recorded at a qualified path, in the Compile order
 /// [`ProjectItems::extend_with`] appends them (file order, then source order
@@ -4791,9 +4792,13 @@ impl ResolvedFile {
     /// - a committed [`Resolution::Entity`] is the target exactly when
     ///   `is_target` says so, while an **abbreviation** may alias it (FCS
     ///   strips it before matching);
-    /// - a committed [`Resolution::Local`] is its own tycon when the in-file
-    ///   declaration is a concrete type, and may be anything when it is an
-    ///   **abbreviation** (the resolver does not chase in-file targets);
+    /// - a committed [`Resolution::Local`] is asked
+    ///   `AssemblyEnv::may_denote_marker`, the rule a dependant reads the
+    ///   type by: an **abbreviation** may be anything (the resolver does not
+    ///   chase in-file targets), and a concrete type may be the target when
+    ///   it sits at the target's path, since a dependant reading this
+    ///   project's extension names takes it by its path (an unplaced one, of
+    ///   unknown path, may be anything);
     /// - no record at all means both candidates missed everywhere with no
     ///   shadow possible: FCS errors and binds nothing.
     ///
@@ -4812,9 +4817,21 @@ impl ResolvedFile {
             None => false,
             Some(Resolution::Deferred(_)) => true,
             Some(Resolution::Entity(h)) => env.is_abbreviation(*h) || is_target(*h),
-            Some(Resolution::Local(id)) => self
-                .own_abbrev_type_simple_names
-                .contains(env.names().text(self.def(*id).name())),
+            Some(Resolution::Local(id)) => {
+                let name = env.names().text(self.def(*id).name());
+                let candidate = if self.own_abbrev_type_simple_names.contains(name) {
+                    Some(MarkerCandidate::Abbreviation)
+                } else {
+                    self.surface
+                        .placed_types
+                        .iter()
+                        .find(|t| t.def == *id)
+                        .and_then(|t| t.path.split_last())
+                        .map(|(name, container)| MarkerCandidate::Type { container, name })
+                };
+                // An unplaced type's path is unknown: it may be anything.
+                candidate.is_none_or(|c| env.may_denote_marker(c, &is_target))
+            }
             // No other variant is ever recorded for an attribute; if one
             // appears, defer rather than trust it.
             Some(_) => true,
@@ -5131,10 +5148,11 @@ impl ResolvedFile {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedProject {
     pub(super) files: Vec<Arc<ResolvedFile>>,
-    /// The fold reached the last Compile item: what the whole project
-    /// declares is the last file's surface and its preceding files'. A
-    /// prefix fold ([`crate::resolve_project_files_prefix`]) is not.
-    pub(super) complete: bool,
+    /// The union of every file's extension-member names, as the fold
+    /// threaded it past the last Compile item: `None` for a prefix fold
+    /// ([`crate::resolve_project_files_prefix`]), which has not read the
+    /// files past its horizon.
+    pub(super) extension_names: Option<ExtensionNames>,
 }
 
 impl ResolvedProject {
@@ -5157,7 +5175,7 @@ impl ResolvedProject {
             other => other.clone(),
         };
         ResolvedProject {
-            complete: self.complete,
+            extension_names: self.extension_names.clone(),
             files: self
                 .files
                 .iter()
@@ -5203,26 +5221,19 @@ impl ResolvedProject {
         &self.files[idx]
     }
 
-    /// The extension-member names the whole project may declare: the last
-    /// file's preceding names and its own. What a project that references
-    /// this one from source reads of its extensions
+    /// The extension-member names the whole project may declare: the union
+    /// the fold threaded past its last Compile item, every file's own
+    /// whatever kind the last one is. What a project that references this
+    /// one from source reads of its extensions
     /// ([`AssemblyEnv::add_source_existence`](crate::AssemblyEnv::add_source_existence)).
     /// A prefix fold has not read the files past its horizon, so its names
     /// are [`NamesUnknowable::PartialFold`](super::extension_names::NamesUnknowable::PartialFold).
     pub fn extension_names(&self) -> ExtensionNames {
-        if !self.complete {
-            return ExtensionNames::Unknowable(
+        self.extension_names
+            .clone()
+            .unwrap_or(ExtensionNames::Unknowable(
                 super::extension_names::NamesUnknowable::PartialFold,
-            );
-        }
-        match self.files.last() {
-            Some(last) => {
-                let mut names = last.preceding_extension_names().clone();
-                names.absorb(&last.extension_names());
-                names
-            }
-            None => ExtensionNames::default(),
-        }
+            ))
     }
 
     /// The full path of every module (by its declaration) and every type the

@@ -1550,7 +1550,7 @@ fn resolve_project_files_impl(
     surface_reference::assert_surface_fold_agrees(files, assemblies, &folded.files);
     ResolvedProject {
         files: folded.files,
-        complete: horizon == files.len(),
+        extension_names: (horizon == files.len()).then_some(folded.state.ext),
     }
 }
 
@@ -2179,7 +2179,7 @@ fn resolve_project_files_incremental_impl(
     (
         ResolvedProject {
             files: folded.files,
-            complete: horizon == new_files.len(),
+            extension_names: (horizon == new_files.len()).then_some(folded.state.ext),
         },
         folded.reused,
     )

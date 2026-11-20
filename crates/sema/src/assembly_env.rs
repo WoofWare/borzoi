@@ -261,6 +261,20 @@ fn container_may_hold_accessor_extensions(entity: &Entity) -> bool {
             .any(|m| matches!(m, Member::Property(_) | Member::Event(_)))
 }
 
+/// An F# entity an attribute may name, as far as what the attribute denotes
+/// ([`AssemblyEnv::may_denote_marker`]).
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum MarkerCandidate<'p> {
+    /// A type abbreviation, whose target is not known.
+    Abbreviation,
+    /// Any other entity: its container's path (namespace and enclosing
+    /// entities' logical names) and its logical name.
+    Type {
+        container: &'p [String],
+        name: &'p str,
+    },
+}
+
 /// The entities of the project references read from source, by logical
 /// name ([`AssemblyEnv::source_reference_may_denote`]).
 #[derive(Debug, Clone, Default)]
@@ -5497,21 +5511,43 @@ impl AssemblyEnv {
         self.invalidate_fold_surfaces();
     }
 
+    /// Whether an attribute naming `candidate`, an F# entity of this project
+    /// or of a project reference read from source, may denote a type
+    /// `is_target` picks out, as a reader in **another** assembly than the
+    /// candidate's takes it. The one rule both halves ask: the producer's
+    /// own files, whose extension names a dependant reads, and the
+    /// dependant's view of the producer's rows.
+    ///
+    /// - An **abbreviation** may denote anything: FCS strips it to its
+    ///   target before it compares (`IsMatchingFSharpAttribute`'s
+    ///   `tyconRefEq`).
+    /// - Any other entity is its own type, which FCS takes for a well-known
+    ///   attribute by its **path** when it lives in another assembly
+    ///   (`resolveAttribPath`, `TypedTreeOps.Attributes.fs`): so it may
+    ///   denote the target exactly when a type `is_target` picks out sits at
+    ///   the same path here. Inside its own assembly FCS reads no path, so
+    ///   the answer over-approximates there.
+    pub(crate) fn may_denote_marker(
+        &self,
+        candidate: MarkerCandidate<'_>,
+        is_target: &dyn Fn(EntityHandle) -> bool,
+    ) -> bool {
+        match candidate {
+            MarkerCandidate::Abbreviation => true,
+            MarkerCandidate::Type { container, name } => {
+                self.lookup_type(container, name, 0).is_some_and(is_target)
+            }
+        }
+    }
+
     /// Whether an attribute whose written name ends in `written` (its last
     /// identifier, unquoted) may denote, through an entity of a project
     /// reference read from source, a type `is_target` picks out. Name
     /// resolution does not index those entities, so its verdict on the
     /// attribute cannot see one shadowing it; this asks the rows instead,
     /// position-blind. FCS tries both `written` and `writtenAttribute`
-    /// (`ResolveAttributeType`), and an entity of either name:
-    ///
-    /// - an **abbreviation** may denote anything: FCS strips it to its target
-    ///   before it compares (`IsMatchingFSharpAttribute`'s `tyconRefEq`);
-    /// - any other entity is its own type, which FCS takes for a well-known
-    ///   attribute by its **path** when it lives in another assembly
-    ///   (`resolveAttribPath`, `TypedTreeOps.Attributes.fs`): so it may
-    ///   denote the target exactly when a type `is_target` picks out sits at
-    ///   the same path here.
+    /// (`ResolveAttributeType`), and each entity of either name is asked
+    /// [`Self::may_denote_marker`].
     ///
     /// Some reference's entities being unknown, every name may denote
     /// anything.
@@ -5527,11 +5563,12 @@ impl AssemblyEnv {
         let suffixed = format!("{written}Attribute");
         [written, suffixed.as_str()].into_iter().any(|name| {
             names.by_name.get(name).is_some_and(|entities| {
-                entities.iter().any(|entity| match entity {
-                    SourceEntity::Abbreviation => true,
-                    SourceEntity::Type(container) => {
-                        self.lookup_type(container, name, 0).is_some_and(is_target)
-                    }
+                entities.iter().any(|entity| {
+                    let candidate = match entity {
+                        SourceEntity::Abbreviation => MarkerCandidate::Abbreviation,
+                        SourceEntity::Type(container) => MarkerCandidate::Type { container, name },
+                    };
+                    self.may_denote_marker(candidate, is_target)
                 })
             })
         })

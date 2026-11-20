@@ -360,6 +360,19 @@ pub fn cells() -> Vec<Cell> {
             "compiled_name",
             "namespace CN\n[<CompiledName(\"RenamedType\")>]\ntype T() = member _.X = 1\n[<CompiledName(\"RenamedModule\")>]\nmodule M =\n    let x = 1\n[<CompiledNameAttribute(@\"Verbatim\")>]\ntype V = { A: int }\n",
         ),
+        // A recursive group honours an exception's `[<CompiledName>]`.
+        one(
+            "compiled_name_exception_namespace_rec",
+            "namespace rec CNR\n[<CompiledName(\"Renamed\")>]\nexception E of int\n",
+        ),
+        one(
+            "compiled_name_exception_module_rec",
+            "module rec CNM\n[<CompiledName(\"Renamed\")>]\nexception E of int\nmodule Inner =\n    [<CompiledName(\"InnerRenamed\")>]\n    exception F of int\n",
+        ),
+        one(
+            "compiled_name_exception_rec_unreadable",
+            "module rec CNU\n[<Literal>]\nlet N = \"Renamed\"\n[<CompiledName(N)>]\nexception E of int\n",
+        ),
         one(
             "compiled_name_exception_and_union",
             "namespace CNE\n[<CompiledName(\"RenamedExn\")>]\nexception E of string\n[<CompiledName(\"RenamedUnion\")>]\ntype U = | A | B\n[<CompiledName(\"RenamedAbbrev\")>]\ntype Ab = int\n",

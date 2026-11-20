@@ -13,8 +13,7 @@ use super::{
 use borzoi_cst::parser::parse;
 use borzoi_cst::syntax::{AstNode, ImplFile, TextRange, TextSize};
 use borzoi_oracle_harness::project_graph::{
-    FixtureFile, FixtureProject, GraphResponse, PlainName, ProjectGraphFixture,
-    framework_references, parse_response,
+    FixtureFile, FixtureProject, GraphResponse, PlainName, ProjectGraphFixture, parse_response,
 };
 use borzoi_sema::{
     BuiltOutput, CompileItem, GateInput, Incomplete, Producer, ProjectFile, ProviderReferences,
@@ -294,12 +293,12 @@ pub const PRODUCER: &str = "ExtProducer";
 pub const CONSUMER: &str = "ExtConsumer";
 
 /// `sources` (Compile order; implementation files only) as one project's
-/// files.
-fn project_files(sources: &[(&str, String)]) -> Vec<ProjectFile> {
+/// files, parsed as the graph oracle's check parses them.
+fn graph_project_files(sources: &[(&str, String)]) -> Vec<ProjectFile> {
     let parsed: Vec<(ImplFile, SyntaxRecovery)> = sources
         .iter()
         .map(|(_, s)| {
-            let p = parse(s);
+            let p = super::parse_as_graph_checks(s, borzoi_cst::parser::FileKind::Impl, &[]);
             let recovery = SyntaxRecovery::of(&p);
             (ImplFile::cast(p.root).expect("impl file"), recovery)
         })
@@ -346,7 +345,8 @@ pub fn check_referenced(
     calls: &[Call],
     extension: &dyn Fn(&serde_json::Value) -> bool,
 ) -> Checked {
-    let a_files = project_files(producer);
+    let (dlls, base) = super::graph_ext_universe();
+    let a_files = graph_project_files(producer);
     let a_refs: Vec<&ProjectFile> = a_files.iter().collect();
     let routes = certify_by_spelling(&a_refs);
     let items: Vec<CompileItem<'_>> = a_files.iter().map(CompileItem::Parsed).collect();
@@ -356,11 +356,10 @@ pub fn check_referenced(
         providers: ProviderReferences::None,
         output: BuiltOutput::Absent,
     });
-    let base = ext_universe_env();
     let a_names = resolve_project_files(&a_files, base).extension_names();
     let mut env = base.clone();
     env.add_source_existence(&existence, &a_names);
-    let b_files = project_files(consumer);
+    let b_files = graph_project_files(consumer);
     let resolved = resolve_project_files(&b_files, &env);
     let inferred = infer_project(&b_files, &resolved, &env);
 
@@ -380,9 +379,7 @@ pub fn check_referenced(
     let mut b = FixtureProject::new(b_name.clone(), fixture_files(consumer));
     b.project_refs = vec![a_name];
     let fixture = ProjectGraphFixture::materialise(vec![a, b]).expect("materialise the projects");
-    let mut dlls: Vec<PathBuf> = framework_references().to_vec();
-    dlls.push(ensure_ext_universe_fixture_built().to_path_buf());
-    let graph = fixture.request(&b_name, &dlls, &BTreeMap::new());
+    let graph = fixture.request(&b_name, dlls, &BTreeMap::new());
     let response: GraphResponse =
         match parse_response(&invoke_fcs_dump_graph(&graph.to_json_line())) {
             Ok(r) => r,

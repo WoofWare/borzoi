@@ -4168,3 +4168,52 @@ pub fn parse_fcs_overloads_with_errors(json: &str, source: &str) -> (Vec<FcsCall
         .collect();
     (calls, errors)
 }
+
+/// `text` parsed as the project-graph oracle's FCS check parses a project's
+/// source (`fcs-dump`'s `graphArgv`): at the graph's pinned F# 10, with
+/// `COMPILED` defined (FCS defines it in every compiled project) beside
+/// `defines`.
+pub fn parse_as_graph_checks(
+    text: &str,
+    kind: borzoi_cst::parser::FileKind,
+    defines: &[String],
+) -> borzoi_cst::parser::Parse {
+    let symbols = defines
+        .iter()
+        .cloned()
+        .chain(std::iter::once("COMPILED".to_owned()))
+        .collect();
+    borzoi_cst::parser::parse_with_options(
+        text,
+        borzoi_cst::parser::ParseOptions {
+            file_kind: kind,
+            symbols: &symbols,
+            lang: LanguageVersion::V10_0,
+        },
+    )
+}
+
+/// The references a project-graph cell over the extension-universe fixture
+/// hands FCS (the SDK's reference pack and FSharp.Core, then the fixture),
+/// and the env our side reads from exactly those files, so neither side
+/// sees an assembly the other does not.
+pub fn graph_ext_universe() -> &'static (Vec<PathBuf>, borzoi_sema::AssemblyEnv) {
+    static REFS: OnceLock<(Vec<PathBuf>, borzoi_sema::AssemblyEnv)> = OnceLock::new();
+    REFS.get_or_init(|| {
+        use borzoi_assembly::Ecma335Assembly;
+        let mut dlls: Vec<PathBuf> =
+            borzoi_oracle_harness::project_graph::framework_references().to_vec();
+        dlls.push(ensure_ext_universe_fixture_built().to_path_buf());
+        let views: Vec<Ecma335Assembly> = dlls
+            .iter()
+            .map(|p| {
+                let bytes =
+                    std::fs::read(p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()));
+                Ecma335Assembly::parse(&bytes)
+                    .unwrap_or_else(|e| panic!("parse {}: {e:?}", p.display()))
+            })
+            .collect();
+        let env = borzoi_sema::AssemblyEnv::from_views(&views).expect("build AssemblyEnv");
+        (dlls, env)
+    })
+}
