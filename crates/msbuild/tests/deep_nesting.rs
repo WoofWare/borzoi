@@ -551,6 +551,56 @@ fn groups_ask_only_of_the_writes_they_read() {
     }
 }
 
+/// A `<Choose>` of `width` `<When>`s the walk cannot decide, each holding a
+/// write and a `<ProjectReference>`, which `rejection::arm_is_dead` asks of
+/// every arm.
+fn wide_undecided_choose(width: usize) -> String {
+    let whens: String = (0..width)
+        .map(|i| {
+            format!(
+                "<When Condition=\"'É' == 'é' And '$(P{i})' == ''\">\
+                 <PropertyGroup><P{i}>x</P{i}></PropertyGroup>\
+                 <ItemGroup><ProjectReference Include=\"R{i}.fsproj\" /></ItemGroup></When>"
+            )
+        })
+        .collect();
+    format!("<Choose>{whens}</Choose>")
+}
+
+/// The `<When>` gates `rejection::arm_is_dead` decides over `body`, on a 2 MiB
+/// stack.
+fn arm_gate_decisions(body: String) -> u64 {
+    on_small_stack("parse_fsproj", move || {
+        let source = format!("<Project>{body}</Project>");
+        let (_, costs) = borzoi_msbuild::test_support::count_walk_costs(|| {
+            parse_fsproj(
+                &borzoi_msbuild::ProjectFile::buffer(Path::new("/deep/p.fsproj"), &source)
+                    .expect("a project path spelt as its full path"),
+                &HashMap::new(),
+                &HashMap::new(),
+            )
+            .expect("well-formed XML evaluates")
+        });
+        costs.arm_gate_decisions
+    })
+}
+
+/// Whether each arm of [`wide_undecided_choose`] is one MSBuild cannot take
+/// is decided once per `<When>` for the whole chain
+/// (`rejection::arm_is_dead`): `n` arms cost `n` decisions, where deciding
+/// every earlier `<When>` again for each arm costs `n(n + 1) / 2`. Counted,
+/// so no load on the machine moves it.
+#[test]
+fn a_wide_undecided_choose_decides_each_when_once() {
+    for width in [1, 2, 500, 2_000] {
+        let decisions = arm_gate_decisions(wide_undecided_choose(width));
+        assert_eq!(
+            decisions, width as u64,
+            "{width} arms took {decisions} decisions"
+        );
+    }
+}
+
 /// The rejection judgement strikes each read of [`wide_unheld_reads`] with a
 /// value in one pass over the text, so four times the width costs about four
 /// times the time; striking one read at a time over the whole text costs

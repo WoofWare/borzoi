@@ -1183,8 +1183,10 @@ struct State<'r> {
     /// Whether a `<ProjectReference>` `Include` that may run in the real build
     /// went uncaptured — skipped on an untrusted gate, or one we could not
     /// evaluate. The list contract tolerates that (a missing edge never
-    /// fabricates one), so it does not raise
-    /// [`Self::project_references_uncertain`]; but a list *derived* from
+    /// fabricates one), so this alone does not raise
+    /// [`Self::project_references_uncertain`]; an `Include` whose value read a
+    /// name the walk doubts raises it as well, dropped or kept
+    /// (`item_pass::reads_a_doubted_name`). But a list *derived* from
     /// `@(ProjectReference)` is then incomplete, and a `Remove` driven by it can
     /// miss an item MSBuild removes. [`item_pass`]'s item-list view reads it.
     project_reference_includes_hidden: bool,
@@ -1309,6 +1311,10 @@ struct State<'r> {
     /// written on that path before what it judges, whose value there the walk
     /// does not hold. `None` outside one.
     speculation: Option<Speculation>,
+    /// The `<When>` decisions of each `<Choose>` the judgement is judging the
+    /// arms of now, by the `<Choose>` (its document and offset), taken once on
+    /// the state before it ([`rejection::judge_branch`]).
+    arm_decisions: HashMap<(usize, usize), rejection::ArmFates>,
     /// The root each root-surfacing diagnostic stood for, by its index in
     /// `diagnostics`, captured when it was pushed. A diagnostic carries only a
     /// name, and that name's root may change later in the walk;
@@ -1445,6 +1451,11 @@ struct Speculation {
     inherited: Option<PathOf>,
     /// How many nested walks are open.
     depth: usize,
+    /// How many of [`Self::arms`] MSBuild cannot take, by gates the walk
+    /// decides exactly on the state before their `<Choose>`
+    /// ([`rejection::judge_branch`]): an item group deferred from within one
+    /// holds no reference the build makes.
+    dead_arms: usize,
 }
 
 /// An arm of a `<Choose>` the judgement walks: the `<Choose>` (its document
@@ -1834,6 +1845,7 @@ impl<'r> State<'r> {
             taken_import_path_certain: false,
             item_pass: None,
             speculation: None,
+            arm_decisions: HashMap::new(),
             diagnostic_roots: HashMap::new(),
         }
     }
@@ -2318,6 +2330,7 @@ impl<'r> State<'r> {
             taken_import_path_certain: _,
             item_pass: _,
             speculation: _,
+            arm_decisions: _,
             diagnostic_roots: _,
         } = self;
         // Central Package Management opt-in: a versionless
@@ -2930,6 +2943,66 @@ impl<'r> State<'r> {
 
     fn raw_uses_sdk_package_taint(&self, raw: &str) -> bool {
         self.sdk_package_taint_for_raw(raw).is_some()
+    }
+
+    /// The way the gate `condition` of a reference, its group or an arm of a
+    /// `<Choose>` around it decides whatever the names the walk doubts hold
+    /// (the reference gates' policy: unpinned or SDK-tainted, held as no value
+    /// it can show undefined, or written on the path the judgement walks), on
+    /// the values it holds, three-valued (`condition::decide_without`), `Exists`
+    /// resolved against `dir`, or, with none, probing nothing (an `Exists` leaf
+    /// then decides nothing): a gate MSBuild may not evaluate (a `<When>` after
+    /// one it takes) is decided with none, so the read set gains no probe
+    /// MSBuild does not make. A refusal a clean write overwrote leaves the
+    /// bound value deciding, as it does not for an import point
+    /// ([`directory_build::decision_from_certain_inputs`]). Once the walk has
+    /// hidden content, a doubted name it reads settles nothing
+    /// ([`Self::condition_is_decided_exactly`] says why).
+    fn reference_gate_decision(&self, condition: &str, dir: Option<&Path>) -> Option<bool> {
+        let unknown = |name: &str| {
+            self.trust_of(name).reference_is_untrusted()
+                || (!self.lookup.is_bound(name) && !self.undefined_read_is_exact(name))
+                || self.speculatively_unheld(name)
+        };
+        if self.walk_opaque.is_some() && properties::property_references(condition).any(unknown) {
+            return None;
+        }
+        let observer = self.observer;
+        let exists = dir.map(|dir| move |path: &str| condition_exists(observer, path, dir));
+        let probes = match (&exists, self.follow_imports) {
+            (Some(exists), true) => Some(condition::Probes { exists, observer }),
+            _ => None,
+        };
+        match condition::decide_without(
+            condition,
+            &self.lookup,
+            probes,
+            self.condition_site(),
+            &unknown,
+        ) {
+            condition::Decision::Decided(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    /// Whether `raw` reads a name whose value the real build may hold
+    /// otherwise than the walk: one it holds and doubts (unpinned or
+    /// SDK-tainted, [`Trust::reference_is_untrusted`]), or one it holds no
+    /// value of and cannot show undefined (a write it refused to compute,
+    /// [`Self::undefined_read_is_exact`]). Read off the text of an item's
+    /// spec ([`properties::item_spec_references`]), so that what the
+    /// expansion did with the name (stop at a function it does not model,
+    /// say) cannot hide the read, with the names a function reads without
+    /// naming them ([`condition::implicit_references`]).
+    fn raw_reads_a_doubted_name(&self, raw: &str) -> bool {
+        let doubted = |name: &str| {
+            self.trust_of(name).reference_is_untrusted()
+                || (!self.lookup.is_bound(name) && !self.undefined_read_is_exact(name))
+        };
+        let mut implicit = Vec::new();
+        condition::implicit_references(raw, &mut implicit);
+        properties::item_spec_references(raw).any(doubted)
+            || implicit.iter().any(|name| doubted(name))
     }
 
     /// The root to record for a value that read `name` while it was
@@ -4274,8 +4347,54 @@ fn handle_choose(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State<
             }
             _ => None,
         };
+        // MSBuild may choose any of those branches, and evaluate the gates
+        // after this one: against the state before the `<Choose>`, as no
+        // branch has run when it does, so before the branches' writes are
+        // marked below. A later gate false whatever the uncertain names hold
+        // there rules its branch out, which a gate read after the marks would
+        // not.
+        for branch in &whens[first_unsure.unwrap_or(from)..=from] {
+            rejection::judge_branch(*branch, current_file_dir, false, state);
+        }
+        rejection::judge_whens(node, from + 1, current_file_dir, false, state);
+        // The branches MSBuild may take: every one but those a gate false
+        // whatever the uncertain names hold rules out, and those after one
+        // whose gate holds whatever they hold, each decided on the state
+        // before the `<Choose>`, which is MSBuild's state when it evaluates
+        // the gates (so before any branch's writes are marked below). Decided
+        // with no file system: MSBuild may evaluate none of these gates, so
+        // asking probes nothing, and an `Exists` decides nothing.
+        let live: Vec<Node<'_, '_>> = {
+            let mut live = vec![whens[from]];
+            let mut taken = false;
+            for branch in whens[from + 1..].iter().copied() {
+                let decision = attribute(branch, "Condition").and_then(|condition| {
+                    match condition::decide_without(
+                        &condition,
+                        &state.lookup,
+                        None,
+                        state.condition_site(),
+                        &|name| !directory_build::is_certain(state, name),
+                    ) {
+                        condition::Decision::Decided(value) => Some(value),
+                        _ => None,
+                    }
+                });
+                if decision != Some(false) {
+                    live.push(branch);
+                }
+                if decision == Some(true) {
+                    taken = true;
+                    break;
+                }
+            }
+            if !taken {
+                live.extend(otherwise);
+            }
+            live
+        };
         let mut items = item_pass::UndecidedChooseItems::default();
-        for branch in whens[from..].iter().copied().chain(otherwise) {
+        for branch in live {
             scan_undecided_choose_branch(branch, unpinned_root.as_ref(), state, &mut items);
         }
         items.apply(node.range(), state);
@@ -4284,12 +4403,6 @@ fn handle_choose(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State<
                 state.mark_skipped_write_stale(&name, &cause);
             }
         }
-        // MSBuild may choose any of those branches, and evaluate the gates
-        // after this one.
-        for branch in &whens[first_unsure.unwrap_or(from)..=from] {
-            rejection::judge_branch(*branch, current_file_dir, false, state);
-        }
-        rejection::judge_whens(node, from + 1, current_file_dir, false, state);
         state.reach_doubted -= usize::from(first_unsure.is_some());
         return;
     }
@@ -4306,6 +4419,7 @@ fn handle_choose(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State<
     if !chosen_is_certain {
         rejection::judge_whens(node, walked + 1, current_file_dir, false, state);
     }
+    state.arm_decisions.remove(&rejection::choose_key(node));
     // From the first gate the walk decided on a stale value, MSBuild may take
     // any branch but the walk's up to the first whose gate holds whatever the
     // uncertain names hold (and `<Otherwise>` only if none does), skipping

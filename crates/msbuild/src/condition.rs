@@ -1286,7 +1286,7 @@ fn explicit_references(raw: &str, out: &mut Vec<String>) {
 /// it is spaced (the property-expression parser allows whitespace within
 /// `$( … )` and before the arguments), reads
 /// `MSBuildDisableFeaturesFromVersion`.
-fn implicit_references(raw: &str, out: &mut Vec<String>) {
+pub(crate) fn implicit_references(raw: &str, out: &mut Vec<String>) {
     const CALL: &str = "[msbuild]::arefeaturesenabled(";
     // Compared lazily, so a reference that is no such call costs a character.
     let calls = raw.match_indices("$(").any(|(at, _)| {

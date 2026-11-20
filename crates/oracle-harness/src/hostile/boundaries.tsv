@@ -198,6 +198,7 @@ crates/msbuild/tests/fsproj_global_perturbation_diff.rs	pending	2
 crates/msbuild/tests/fsproj_item_escape_generative_diff.rs	pending	2
 crates/msbuild/tests/fsproj_packageref_generative_diff.rs	pending	2
 crates/msbuild/tests/fsproj_packageref_identity_generative_diff.rs	pending	2
+crates/msbuild/tests/fsproj_project_reference_read_diff.rs	draws	reference_reads=value+name
 crates/msbuild/tests/fsproj_project_reference_remove_diff.rs	pending	2
 crates/msbuild/tests/fsproj_property_table_diff.rs	pending	2
 crates/msbuild/tests/fsproj_sdk_default_compile_diff.rs	pending	2

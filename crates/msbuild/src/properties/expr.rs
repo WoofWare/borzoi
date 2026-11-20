@@ -240,12 +240,39 @@ pub(crate) fn property_references(raw: &str) -> impl Iterator<Item = &str> {
         // reached as an opener in its own right rather than by recursing
         // through the argument slices.
         search_from = open;
-        // MSBuild tolerates whitespace inside `$( … )`, and the condition
+        // MSBuild tolerates whitespace inside `$( … )`, Unicode's included (a
+        // no-break space before a receiver still reads it), and the condition
         // tokeniser trims it before resolving the reference, so skip it — else
         // a legal spelling would report nothing.
-        let interior = raw[open..].trim_start_matches(|c: char| c.is_ascii_whitespace());
+        let interior = raw[open..].trim_start_matches(char::is_whitespace);
         if let Some(name) = receiver_name(interior) {
             refs.push(name);
+        }
+    }
+    refs.into_iter()
+}
+
+/// [`property_references`] for an item's spec, where MSBuild reads a receiver
+/// past padding only before a member: a bare `$( P)` or `$(P )`, padded on
+/// either side, expands to empty whatever `P` holds (MSBuild 10.0.401), so it
+/// reads nothing, while
+/// `$( P.Length)` reads `P`. Every other reference is reported as
+/// [`property_references`] reports it.
+pub(crate) fn item_spec_references(raw: &str) -> impl Iterator<Item = &str> {
+    let mut refs = Vec::new();
+    let mut search_from = 0;
+    while let Some(relative_idx) = raw[search_from..].find("$(") {
+        let open = search_from + relative_idx + 2;
+        search_from = open;
+        let interior = raw[open..].trim_start_matches(char::is_whitespace);
+        let padded = interior.len() != raw.len() - open;
+        if let Some(name) = receiver_name(interior) {
+            let after = &interior[name.len()..];
+            let rest = after.trim_start_matches(char::is_whitespace);
+            let trailing = rest.len() != after.len();
+            if !((padded || trailing) && rest.starts_with(')')) {
+                refs.push(name);
+            }
         }
     }
     refs.into_iter()
@@ -2984,7 +3011,7 @@ mod property_reference_tests {
                 Some(close) => &after[..close],
                 None => after,
             };
-            let trimmed = inner.trim_matches(|c: char| c.is_ascii_whitespace());
+            let trimmed = inner.trim_matches(char::is_whitespace);
             if let Some(expr) = parse(trimmed) {
                 if let Root::Property(name) = expr.root {
                     refs.push(name);
@@ -3017,6 +3044,8 @@ mod property_reference_tests {
         " ",
         "\t",
         "\n",
+        "\u{a0}",
+        "\u{2003}",
         "Foo",
         "A",
         "x-1",
@@ -3069,6 +3098,7 @@ mod property_reference_tests {
         // with the whitespace-trimming condition tokeniser.
         assert_eq!(refs("$( Foo )"), vec!["Foo"]);
         assert_eq!(refs("$(  Foo)"), vec!["Foo"]);
+        assert_eq!(refs("$(\u{a0}P.Length)"), vec!["P"]);
         assert_eq!(refs("$(P.Contains ('x'))"), vec!["P"]);
         assert_eq!(refs("$( P.Contains('x') )"), vec!["P"]);
     }

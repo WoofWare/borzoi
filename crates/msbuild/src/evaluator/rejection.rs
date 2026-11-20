@@ -109,7 +109,7 @@
 //! SDK the walk cannot resolve: its resolver may decline one MSBuild resolves.
 //! The pure walker follows no import and judges none; it judges conditions.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
@@ -269,6 +269,7 @@ impl State<'_> {
                     arms: Vec::new(),
                     inherited: None,
                     depth: 1,
+                    dead_arms: 0,
                 });
             }
         }
@@ -357,6 +358,7 @@ impl State<'_> {
             arms: Vec::new(),
             inherited: Some(written.clone()),
             depth: 1,
+            dead_arms: 0,
         });
         judge(self);
         self.speculation = saved;
@@ -849,6 +851,7 @@ pub(super) fn judge_whens(
         written.extend(judge_branch(otherwise, dir, at, state));
     }
     state.mark_unheld(written);
+    state.arm_decisions.remove(&choose_key(node));
 }
 
 /// Judge what the `<When>` or `<Otherwise>` at `branch` holds, which MSBuild
@@ -860,6 +863,9 @@ pub(super) fn judge_branch(
     reached: bool,
     state: &mut State<'_>,
 ) -> HashSet<String> {
+    // Decided before the walk opens, on the path as it stands at the
+    // `<Choose>`.
+    let dead = arm_is_dead(branch, state);
     state.open_speculation();
     let choose = branch.parent_element().unwrap_or(branch);
     let arm: Arm = (
@@ -872,6 +878,7 @@ pub(super) fn judge_branch(
     let mark = match state.speculation.as_mut() {
         Some(speculation) => {
             speculation.arms.push(arm);
+            speculation.dead_arms += usize::from(dead);
             speculation.gained.len()
         }
         None => 0,
@@ -880,6 +887,7 @@ pub(super) fn judge_branch(
     let mut written = HashSet::new();
     if let Some(speculation) = state.speculation.as_mut() {
         speculation.arms.pop();
+        speculation.dead_arms -= usize::from(dead);
         for name in speculation.gained.drain(mark..) {
             speculation.unheld.remove(&name);
             written.insert(name);
@@ -887,6 +895,103 @@ pub(super) fn judge_branch(
     }
     state.close_speculation();
     written
+}
+
+/// Whether MSBuild cannot take the `<When>` or `<Otherwise>` at `branch`, by
+/// the gates of its `<Choose>`, which MSBuild evaluates on the state before
+/// the `<Choose>`: an earlier `<When>`'s true, or its own false, each decided
+/// whatever the names the walk doubts hold, those the judged path writes
+/// included ([`State::reference_gate_decision`]). A refusal a clean write
+/// overwrote does not keep such a gate open, as it keeps an import point's
+/// ([`directory_build::decision_from_certain_inputs`]): the rejection
+/// judgement walks the arm all the same; [`super::item_pass`]'s reference
+/// check does not count what it defers from there.
+///
+/// Only an arm holding a `<ProjectReference>` is asked about, as only such an
+/// arm defers a group the check reads, so an arm with none probes nothing.
+/// The arms' fates are taken in one forward pass over the `<Choose>` per pass
+/// over its arms (`State::arm_decisions`, which [`judge_whens`] and
+/// `handle_choose` clear when the pass ends), as far as the arm asked about
+/// and no further, and a gate after one that holds whatever the doubted names
+/// hold is not evaluated, as MSBuild does not evaluate it: so a chain of `n`
+/// arms costs at most `n` decisions, and the read set gains no probe MSBuild
+/// does not make.
+fn arm_is_dead(branch: Node<'_, '_>, state: &mut State<'_>) -> bool {
+    if !branch.descendants().any(|node| {
+        node.is_element() && node.has_tag_name("ProjectReference") && node.has_attribute("Include")
+    }) {
+        return false;
+    }
+    // Once the walk has hidden content no arm is ruled out (a gate reading a
+    // doubted name settles nothing then, `State::reference_gate_decision`),
+    // and a gate decided on held values alone may itself rest on a value the
+    // hidden content rewrote, so none is probed: an arm counts as live, which
+    // costs at most a decline.
+    if state.walk_opaque.is_some() {
+        return false;
+    }
+    let Some(choose) = branch.parent_element() else {
+        return false;
+    };
+    let mut fates = state
+        .arm_decisions
+        .remove(&choose_key(choose))
+        .unwrap_or_default();
+    let from = fates.next;
+    for arm in choose
+        .children()
+        .filter(|arm| arm.is_element() && arm.range().start >= from)
+    {
+        let gate = attribute(arm, "Condition").filter(|_| arm.has_tag_name("When"));
+        let dead = fates.taken
+            || match gate {
+                Some(condition) => {
+                    crate::cost::count(|costs| costs.arm_gate_decisions += 1);
+                    match state.reference_gate_decision(&condition, None) {
+                        Some(true) => {
+                            fates.taken = true;
+                            false
+                        }
+                        Some(false) => true,
+                        None => false,
+                    }
+                }
+                None => false,
+            };
+        fates.dead.insert(arm.range().start, dead);
+        fates.next = arm.range().end;
+        if arm.id() == branch.id() {
+            break;
+        }
+    }
+    let dead = fates
+        .dead
+        .get(&branch.range().start)
+        .copied()
+        .unwrap_or(false);
+    state.arm_decisions.insert(choose_key(choose), fates);
+    dead
+}
+
+/// The arms of one `<Choose>` whose fates [`arm_is_dead`] has taken so far,
+/// in order.
+#[derive(Default)]
+pub(super) struct ArmFates {
+    /// Each arm's fate, by the offset of its `<When>` or `<Otherwise>`.
+    dead: HashMap<usize, bool>,
+    /// Whether an arm taken so far holds whatever the doubted names hold, so
+    /// that every later one is dead.
+    taken: bool,
+    /// The offset past the last arm taken so far.
+    next: usize,
+}
+
+/// The key of the `<Choose>` at `choose` in `State::arm_decisions`.
+pub(super) fn choose_key(choose: Node<'_, '_>) -> (usize, usize) {
+    (
+        std::ptr::from_ref(choose.document()) as usize,
+        choose.range().start,
+    )
 }
 
 /// [`judge_branch`] within its speculative walk.
