@@ -7820,13 +7820,13 @@ mod tests {
     /// project, the temporary directory's ancestors among them, so those
     /// directories' entries decide some of the reads, and concurrent tests
     /// make and remove entries there; so the test holds them still
-    /// ([`crate::observed::host_fs::hold_ancestors_still`]), and the counts
+    /// ([`crate::observed::held_still::hold_ancestors_still`]), and the counts
     /// depend only on what it does to its own tree.
     #[test]
     fn an_env_resolved_again_starts_with_the_witnesses_it_shares() {
         let tmp = TempDir::new().unwrap();
         let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
-        let _still = crate::observed::host_fs::hold_ancestors_still(&root);
+        let _still = crate::observed::held_still::hold_ancestors_still(&root);
         let project = root.join("App/App.fsproj");
         write(&project, "<Project />");
         write_app_assets(project.parent().unwrap(), false);

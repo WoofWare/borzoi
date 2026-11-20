@@ -1512,7 +1512,7 @@ mod host_tests {
                 && !HostDisk.canonical_spells_as_asked()
         };
         {
-            let _still = host_fs::hold_ancestors_still(&root);
+            let _still = crate::observed::held_still::hold_ancestors_still(&root);
             generation(&mut checker);
             generation(&mut checker);
         }
