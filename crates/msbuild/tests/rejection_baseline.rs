@@ -70,11 +70,13 @@ fn record_baseline() {
                 read => read.value().map(|v| format!("{name}={}", encode(v))),
             })
             .collect();
-        out.push_str(&format!(
-            "{key}\t{}\t{rejection}\t{}\n",
-            fnv1a(&xml),
-            committed.join(" ")
-        ));
+        // A row that commits nothing ends at its rejection: a manifest line
+        // holds no trailing tab.
+        out.push_str(&format!("{key}\t{}\t{rejection}", fnv1a(&xml)));
+        if !committed.is_empty() {
+            out.push_str(&format!("\t{}", committed.join(" ")));
+        }
+        out.push('\n');
     }
     std::fs::write(dump.join("baseline.txt"), out).unwrap();
 }

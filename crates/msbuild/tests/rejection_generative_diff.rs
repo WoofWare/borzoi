@@ -76,7 +76,7 @@ fn draw_value(rng: &mut SplitMix64) -> hostile::Drawn<String> {
 fn operand(rng: &mut SplitMix64, names: &[&str]) -> String {
     let name = *rng.pick(names);
     let other = *rng.pick(names);
-    match rng.below(30) {
+    match rng.below(31) {
         0 => format!("'{}'", rng.pick(&["", "1", "2.0", "abc", "true", "x", "É"])),
         1 => format!("'$({name})'"),
         2 => format!("$({name})"),
@@ -131,6 +131,10 @@ fn operand(rng: &mut SplitMix64, names: &[&str]) -> String {
                 .to_owned()
         }
         28 => format!("'$([System.String]::IsNullOrWhiteSpace(\"\u{a0}\"))$({name})$({other})'"),
+        // Text before a throw: equality asks whether the operand is empty
+        // without expanding it, so a comparison with an empty one never
+        // reaches the throw.
+        30 => format!("'a$({name}[9])'"),
         // A throw before a later step that reads another name.
         29 => format!("'$({name}.Split(\";\")[9].Contains(\"$({other})\"))'"),
         _ => format!("'$({name}.Split(\";\")[1].Length)'"),
@@ -378,6 +382,10 @@ const SITES: &[&str] = &[
     "<ItemGroup><I Include=\"x\" Label=\"{t}\" /></ItemGroup>",
     "<UsingTask TaskName=\"X\" AssemblyFile=\"y.dll\" Label=\"{t}\" />",
     "<UsingTask TaskName=\"X\" AssemblyFile=\"y.dll\" Runtime=\"{t}\" />",
+    "<UsingTask TaskName=\"X\" AssemblyFile=\"y.dll\" RequiredRuntime=\"{t}\" />",
+    // An inline task's body, which MSBuild expands as it
+    // registers the task.
+    "<UsingTask TaskName=\"X\" TaskFactory=\"RoslynCodeTaskFactory\" AssemblyFile=\"y.dll\"><Task>{t}</Task></UsingTask>",
     "<ItemGroup><I Update=\"nothere\" M=\"{t}\" /></ItemGroup>",
     "<ItemGroup><I Include=\"x\" /><I Update=\"x\" M=\"{t}\" /></ItemGroup>",
     // Each operation's attributes, on its own item and on others'.

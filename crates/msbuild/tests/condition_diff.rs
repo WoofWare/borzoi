@@ -47,6 +47,29 @@ fn illegal_corners() -> Vec<Case> {
         // it, so a syntax error rejects it whatever the values, and behind a
         // deciding `And`/`Or` operand too.
         ("tr ue", props(&[]), Verdict::Illegal),
+        // Equality asks each side whether it is empty first, expanding only
+        // a side that is one reference whole: where one is empty, the other
+        // is not expanded, so its throw is not reached.
+        ("'a$(P[9])' == ''", props(&[("P", "abc")]), Verdict::False),
+        ("'' != 'a$(P[9])'", props(&[("P", "abc")]), Verdict::True),
+        (
+            "'$(P[9])x' == '$(E)'",
+            props(&[("P", "abc")]),
+            Verdict::False,
+        ),
+        ("'%41$(P[9])' == ''", props(&[("P", "abc")]), Verdict::False),
+        ("' $(P[9])' == ''", props(&[("P", "abc")]), Verdict::False),
+        (
+            "'$(A)$(P[9])' == ''",
+            props(&[("P", "abc"), ("A", "x")]),
+            Verdict::Illegal,
+        ),
+        ("'$(P[9])' == ''", props(&[("P", "abc")]), Verdict::Illegal),
+        (
+            "'a$(P[9])' == 'x'",
+            props(&[("P", "abc")]),
+            Verdict::Illegal,
+        ),
         ("$(A) == ", props(&[("A", "a")]), Verdict::Illegal),
         ("(true", props(&[]), Verdict::Illegal),
         ("true)", props(&[]), Verdict::Illegal),
@@ -1327,6 +1350,133 @@ fn item_attributes_are_judged_by_their_operation() {
                     parsed.rejection
                 );
             }
+        }
+    }
+    assert!(rejects >= 10 && evaluates >= 10, "{rejects} {evaluates}");
+}
+
+/// What MSBuild expands of a `<UsingTask>` as it registers the task, each
+/// text holding a property function it throws on, and the walk's rejection
+/// judgement held to it, certain-implies-exact: every attribute it takes,
+/// an inline task's parameters and body, the body's `Evaluate` in each
+/// spelling, and the body's comments, CDATA and elements.
+#[test]
+fn using_task_texts_are_judged_where_msbuild_expands_them() {
+    const T: &str = "$(P[9])";
+    const BASE: &str = "TaskName=\"X\" AssemblyFile=\"y.dll\"";
+    const INLINE: &str = "TaskName=\"X\" TaskFactory=\"RoslynCodeTaskFactory\" \
+                          AssemblyFile=\"$(MSBuildToolsPath)\\Microsoft.Build.Tasks.Core.dll\"";
+    let mut rows: Vec<String> = Vec::new();
+    rows.push(format!(
+        "<UsingTask TaskName=\"{T}\" AssemblyFile=\"y.dll\" />"
+    ));
+    rows.push(format!("<UsingTask TaskName=\"X\" AssemblyFile=\"{T}\" />"));
+    rows.push(format!("<UsingTask TaskName=\"X\" AssemblyName=\"{T}\" />"));
+    for attribute in [
+        "TaskFactory",
+        "Architecture",
+        "Runtime",
+        "RequiredPlatform",
+        "RequiredRuntime",
+        "Override",
+        "Label",
+    ] {
+        rows.push(format!("<UsingTask {BASE} {attribute}=\"{T}\" />"));
+    }
+    for evaluate in [
+        None,
+        Some("false"),
+        Some("FALSE"),
+        Some(" false "),
+        Some("$(Fa)"),
+        Some("true"),
+        Some("off"),
+        Some("$(Missing)"),
+        Some(T),
+    ] {
+        let attribute = evaluate.map_or(String::new(), |e| format!(" Evaluate=\"{e}\""));
+        rows.push(format!(
+            "<UsingTask {INLINE}><Task{attribute}>{T}</Task></UsingTask>"
+        ));
+        // An `Evaluate` other than `true` or `false` MSBuild refuses as it
+        // registers the task whatever the body holds, a rule of its own the
+        // walk does not model (#1099): only with a body that throws anyway.
+        if !matches!(evaluate, Some("off" | "$(Missing)")) {
+            rows.push(format!(
+                "<UsingTask {INLINE}><Task{attribute}>x</Task></UsingTask>"
+            ));
+        }
+    }
+    for parameter in ["ParameterType", "Required", "Output"] {
+        rows.push(format!(
+            "<UsingTask {INLINE}><ParameterGroup><A {parameter}=\"{T}\" /></ParameterGroup><Task>x</Task></UsingTask>"
+        ));
+        rows.push(format!(
+            "<UsingTask {INLINE} Condition=\"false\"><ParameterGroup><A {parameter}=\"{T}\" /></ParameterGroup><Task>x</Task></UsingTask>"
+        ));
+    }
+    rows.push(format!(
+        "<UsingTask {INLINE}><ParameterGroup><A ParameterType=\"System.String\" Required=\"true\" Output=\"false\" /></ParameterGroup><Task>x</Task></UsingTask>"
+    ));
+    rows.push(format!(
+        "<UsingTask {INLINE} Condition=\"false\"><Task>{T}</Task></UsingTask>"
+    ));
+    rows.push(format!(
+        "<UsingTask {INLINE}><Task><!-- {T} --></Task></UsingTask>"
+    ));
+    rows.push(format!(
+        "<UsingTask {INLINE}><Task><![CDATA[{T}]]></Task></UsingTask>"
+    ));
+    rows.push(format!(
+        "<UsingTask {INLINE}><Task><Code Type=\"{T}\">x</Code></Task></UsingTask>"
+    ));
+    rows.push(format!(
+        "<UsingTask {INLINE}><Task><Code>{T}</Code></Task></UsingTask>"
+    ));
+    let mut oracle = Oracle::spawn();
+    let tmp = tempfile::TempDir::new().unwrap();
+    let dir = borzoi_msbuild::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    let project_path = dir.join("Demo.fsproj");
+    let (mut rejects, mut evaluates) = (0, 0);
+    for row in rows {
+        let xml = format!(
+            "<Project><PropertyGroup><P>abc</P><Fa>false</Fa></PropertyGroup>{}\
+             <PropertyGroup><After>ok</After></PropertyGroup></Project>",
+            row.replace('\'', "&apos;")
+        );
+        std::fs::write(&project_path, &xml).unwrap();
+        let parsed = common::parse_fsproj_with_imports(
+            &borzoi_msbuild::ProjectFile::buffer(&project_path, &xml)
+                .expect("a project path spelt as its full path"),
+            &std::collections::HashMap::new(),
+            &common::oracle_environment(),
+            None,
+            None,
+        )
+        .expect("well-formed");
+        let msbuild_rejects = oracle
+            .project_design_time(&xml, &["After".to_string()], Some(&project_path), &[])
+            .is_none();
+        let certainty = parsed.rejection.as_ref().map(|r| r.certainty);
+        if msbuild_rejects {
+            rejects += 1;
+            assert!(
+                certainty.is_some(),
+                "MSBuild rejects, and the walk claims nothing: {xml}"
+            );
+        } else {
+            evaluates += 1;
+            assert_ne!(
+                certainty,
+                Some(borzoi_msbuild::RejectionCertainty::Certain),
+                "MSBuild evaluates, and the walk claims it rejects: {xml}"
+            );
+            assert_eq!(
+                parsed.property("After").value(),
+                Some("ok"),
+                "MSBuild evaluates, and the walk withdrew: {xml}\n{:#?}",
+                parsed.rejection
+            );
         }
     }
     assert!(rejects >= 10 && evaluates >= 10, "{rejects} {evaluates}");

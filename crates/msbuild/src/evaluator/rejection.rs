@@ -599,7 +599,7 @@ pub(super) fn judge_unwalked(node: Node<'_, '_>, dir: &Path, reached: bool, stat
         "UsingTask" => {
             let gate = judge_gate(node, dir, reached, state);
             if let Some(inner) = gate.inner(reached) {
-                judge_unwalked_attributes(node, inner, state);
+                judge_using_task(node, inner, state);
             }
         }
         _ => {}
@@ -689,18 +689,105 @@ pub(super) fn judge_deferred(node: Node<'_, '_>, dir: &Path, reached: bool, stat
     judge_unwalked(node, dir, reached, state);
 }
 
-/// Judge each attribute of the `<UsingTask>` at `node` but its `Condition`
-/// and `Label`, which MSBuild expands as `reached` says, for an expression it
-/// throws on.
-fn judge_unwalked_attributes(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
-    for attr in node.attributes() {
-        if attr.namespace().is_none()
-            && !matches!(attr.name(), "Condition" | "Label")
-            && let Some(text) = attribute(node, attr.name())
-        {
+/// The attributes of a `<UsingTask>` MSBuild expands as it registers the
+/// task. Its `Condition` is judged as one, and it expands neither its
+/// `Label` nor `RequiredPlatform` nor `RequiredRuntime` (probed,
+/// `msbuild-condition-oracle`, SDK 10.0.401; `tests/condition_diff.rs`'s
+/// `using_task_texts_are_judged_where_msbuild_expands_them`).
+const USING_TASK_EXPANDED: &[&str] = &[
+    "TaskName",
+    "AssemblyFile",
+    "AssemblyName",
+    "TaskFactory",
+    "Architecture",
+    "Runtime",
+    "Override",
+];
+
+/// Judge what MSBuild expands of the `<UsingTask>` at `node` as it registers
+/// the task, which it does as `reached` says, for an expression it throws on:
+/// the attributes it expands ([`USING_TASK_EXPANDED`]), each parameter's
+/// `ParameterType`, `Required` and `Output`, the body's `Evaluate`, and the
+/// body itself (its text, CDATA included, and its elements' attributes; not
+/// its comments) unless `Evaluate` holds `false`, in any case and padding.
+/// Any other `Evaluate` MSBuild evaluates the body under or throws on, which
+/// rejects alike. A value the walk cannot vouch for leaves the body reached
+/// perhaps.
+fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
+    for name in USING_TASK_EXPANDED {
+        if let Some(text) = attribute(node, name) {
             judge_unwalked_text(state, &text, reached, node.range());
         }
     }
+    for child in node.children().filter(Node::is_element) {
+        match child.tag_name().name() {
+            "ParameterGroup" => {
+                for parameter in child.children().filter(Node::is_element) {
+                    for name in ["ParameterType", "Required", "Output"] {
+                        if let Some(text) = attribute(parameter, name) {
+                            judge_unwalked_text(state, &text, reached, parameter.range());
+                        }
+                    }
+                }
+            }
+            "Task" => {
+                let body_reached = match attribute(child, "Evaluate") {
+                    None => Some(reached),
+                    Some(evaluate) => {
+                        judge_unwalked_text(state, &evaluate, reached, child.range());
+                        let (value, issues) = properties::substitute(&evaluate, &state.lookup);
+                        // Its trust is judged just below, name by name.
+                        let value =
+                            properties::escaping::unescape(value.ignoring_trust().as_escaped());
+                        if !issues.is_empty() || !operands_are_certain(state, &evaluate) {
+                            Some(false)
+                        } else if value.trim().eq_ignore_ascii_case("false") {
+                            None
+                        } else {
+                            Some(reached)
+                        }
+                    }
+                };
+                if let Some(body_reached) = body_reached {
+                    match task_body(child) {
+                        Some(body) => {
+                            judge_unwalked_text(state, &body, body_reached, child.range())
+                        }
+                        // Text read apart from MSBuild's reading (a CDATA
+                        // section) is judged as its source, comments and
+                        // all: perhaps reached, so a throw there claims no
+                        // more than that MSBuild may reject.
+                        None => {
+                            let source = &child.document().input_text()[child.range()];
+                            judge_unwalked_text(state, source, false, child.range());
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The text MSBuild expands of the inline task body at `task`: each text
+/// node, and each attribute of an element in it, apart, so that no two form
+/// an expression; `None` where a text node is one `document::text` does not
+/// read as MSBuild does.
+fn task_body(task: Node<'_, '_>) -> Option<String> {
+    let mut body = String::new();
+    for descendant in task.descendants().skip(1) {
+        if descendant.is_text() {
+            body.push_str(&crate::document::text(descendant)?);
+            body.push('\n');
+        }
+        for attr in descendant.attributes() {
+            if let Some(value) = attribute(descendant, attr.name()) {
+                body.push_str(&value);
+                body.push('\n');
+            }
+        }
+    }
+    Some(body)
 }
 
 /// Judge each metadatum of the item or item definition at `node` written as

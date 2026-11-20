@@ -466,3 +466,38 @@ fn deep_project_text_evaluates_without_aborting() {
          <R Condition=\"'{deep}' == 'y'\">1</R></PropertyGroup>"
     ));
 }
+
+/// A name the walk holds no value of (`X`, a write it refuses), read `width`
+/// times over in the argument of a function that throws whatever it returns:
+/// no repetition of a value is a version.
+fn wide_unheld_reads(width: usize) -> String {
+    let wide = "$(X)".repeat(width);
+    format!(
+        "<PropertyGroup><X>$([System.String]::Copy('d'))</X>\
+         <R>$([MSBuild]::VersionLessThan('{wide}', '1.0'))</R></PropertyGroup>"
+    )
+}
+
+/// The rejection judgement strikes each read of [`wide_unheld_reads`] with a
+/// value in one pass over the text, so four times the width costs about four
+/// times the time; striking one read at a time over the whole text costs
+/// sixteen. Timed as a ratio of two runs on one machine, which a loaded
+/// machine slows alike.
+#[test]
+fn wide_unheld_reads_are_struck_in_one_pass() {
+    let time = |width: usize| {
+        let body = wide_unheld_reads(width);
+        let start = std::time::Instant::now();
+        evaluate_project(body);
+        start.elapsed()
+    };
+    // Warm the allocator and the code once before timing.
+    time(DEEP / 16);
+    let narrow = time(DEEP / 4);
+    let wide = time(DEEP);
+    let ratio = wide.as_secs_f64() / narrow.as_secs_f64().max(1e-6);
+    assert!(
+        ratio < 10.0,
+        "4× the width took {ratio:.1}× the time ({narrow:?} → {wide:?})"
+    );
+}

@@ -4485,18 +4485,29 @@ fn walk_property_child_inner(
     // Whether MSBuild evaluates the body exactly when the walk does
     // ([`rejection`]), asked of the values the gate reads: only for a body
     // that throws, or one the walk skips.
-    let own_gate_certain = |state: &State<'_>| {
-        attribute(node, "Condition").is_none_or(|condition| {
-            directory_build::decided_from_certain_inputs(state, &condition, &entry_dir)
-        })
+    // `None` where the gate reads a value that may decide it otherwise.
+    let own_gate = |state: &State<'_>| match attribute(node, "Condition") {
+        None => Some(true),
+        Some(condition) => {
+            directory_build::decision_from_certain_inputs(state, &condition, &entry_dir)
+        }
     };
     let diagnostics_before_condition = state.diagnostics.len();
     let gate = evaluate_property_condition(node, state);
     let own_condition_maybe_wrong = state.diagnostics.len() != diagnostics_before_condition
         || matches!(&gate, CondGate::Unsupported);
-    // MSBuild may take a write the walk skips, and evaluate its body.
-    if !matches!(gate, CondGate::Run) && !own_gate_certain(state) {
-        rejection::judge_unwalked_body(node, false, state);
+    // MSBuild may take a write the walk skips, and evaluate its body: one
+    // whose gate holds whatever the walk could not evaluate in it (`… Or
+    // true`) it takes wherever the walk reaches it.
+    if !matches!(gate, CondGate::Run) {
+        match own_gate(state) {
+            Some(false) => {}
+            Some(true) => {
+                let reached = rejection::reach_is_certain(state);
+                rejection::judge_unwalked_body(node, reached, state);
+            }
+            None => rejection::judge_unwalked_body(node, false, state),
+        }
     }
     let write_condition_maybe_wrong = inherited_condition_maybe_wrong || own_condition_maybe_wrong;
     let condition_taints_property = inherited_sdk_package_taint
@@ -4624,7 +4635,7 @@ fn walk_property_child_inner(
     let expansion = state.expand_property_pass_value(&raw, node.range(), &name);
     state.in_define_value = prev_in_value;
     if !expansion.throws.is_empty() {
-        let reached = rejection::reach_is_certain(state) && own_gate_certain(state);
+        let reached = rejection::reach_is_certain(state) && own_gate(state) == Some(true);
         let expressions = expansion.throws.clone();
         rejection::judge_throwing_expression(state, expressions, reached, node.range());
     }

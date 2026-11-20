@@ -1437,3 +1437,23 @@ fn a_throw_whatever_an_unheld_name_returns_may_reject() {
         }
     }
 }
+
+/// A body under a gate the walk decides true whatever it could not evaluate
+/// (`'$(U[0])' == 'z' Or true` is true wherever it returns) is one MSBuild
+/// evaluates, and a throw in it is judged.
+#[test]
+fn a_throw_under_a_gate_decided_true_past_an_unknown_operand_is_judged() {
+    let refused = "<U>$([System.String]::Copy('abc'))</U>";
+    for gate in ["'$(U[0])' == 'z' Or true", "'$(U)' == 'z' Or true"] {
+        let body = format!(
+            "<PropertyGroup><P>a</P>{refused}<R Condition=\"{gate}\">$(P[9])</R></PropertyGroup>"
+        );
+        for parsed in both_walkers(&format!("  {body}")) {
+            let certainty = parsed
+                .rejection
+                .as_ref()
+                .map_or(RejectionCertainty::Possible, |r| r.certainty);
+            assert_withdrawn_as(&parsed, &["Before", "After"], certainty);
+        }
+    }
+}

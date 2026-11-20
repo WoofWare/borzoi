@@ -3,7 +3,12 @@
 #   BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-msbuild --test fsproj_assembly_name_perturbation_diff deep_hostile_values -- --ignored
 plain	owed
 value.blank	owed
+value.boolean-spelling	owed
+value.case-folding	owed
+value.item-expression	owed
+value.item-separator	owed
 value.long-value	owed
+value.number-spelling	owed
 value.option	owed
 value.option-after-line-break	owed
 value.overwritten-later	owed
@@ -14,3 +19,4 @@ value.quoted-argument	owed
 value.reads-the-build	owed
 value.response-file	owed
 value.self-set-property	owed
+value.version-spelling	owed

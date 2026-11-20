@@ -1552,18 +1552,27 @@ pub fn gen_expand_value(rng: &mut SplitMix64) -> String {
 /// The same generator turns those `Partial`s `Exact` once Stage 3's dispatch
 /// lands, still under certain-implies-exact.
 pub fn gen_grammar_value(rng: &mut SplitMix64) -> String {
-    format!("$({})", gen_grammar_inner(rng, 2))
+    format!("$({})", gen_grammar_inner(rng, 2, false))
 }
 
-fn gen_grammar_inner(rng: &mut SplitMix64, depth: u32) -> String {
-    let mut s = gen_grammar_root(rng, depth);
+/// [`gen_grammar_value`] with every argument spelling MSBuild reads drawn
+/// too (an unquoted word, `null`, unquoted text around an expansion, a tab,
+/// the markers a property body reads as text) and the statics those
+/// spellings matter to. A separate stream, so the sweeps that draw
+/// [`gen_grammar_value`] keep theirs.
+pub fn gen_grammar_value_spelled(rng: &mut SplitMix64) -> String {
+    format!("$({})", gen_grammar_inner(rng, 2, true))
+}
+
+fn gen_grammar_inner(rng: &mut SplitMix64, depth: u32, spelled: bool) -> String {
+    let mut s = gen_grammar_root(rng, depth, spelled);
     for _ in 0..rng.below(3) {
-        s.push_str(&gen_grammar_link(rng, depth));
+        s.push_str(&gen_grammar_link(rng, depth, spelled));
     }
     s
 }
 
-fn gen_grammar_root(rng: &mut SplitMix64, depth: u32) -> String {
+fn gen_grammar_root(rng: &mut SplitMix64, depth: u32, spelled: bool) -> String {
     // Property receiver (defined-or-undefined), or a static call.
     if rng.below(3) == 0 {
         return (*rng.pick(CONTROLLED_PROPERTY_NAMES)).to_string();
@@ -1576,10 +1585,6 @@ fn gen_grammar_root(rng: &mut SplitMix64, depth: u32) -> String {
     ];
     const STATICS: &[&str] = &[
         "Parse",
-        "VersionLessThan",
-        "VersionEquals",
-        "IsNullOrEmpty",
-        "IsNullOrWhiteSpace",
         "Combine",
         "GetTargetFrameworkVersion",
         "GetTargetFrameworkIdentifier",
@@ -1591,15 +1596,25 @@ fn gen_grammar_root(rng: &mut SplitMix64, depth: u32) -> String {
         "NormalizePath",
         "Nope",
     ];
+    const SPELLED_STATICS: &[&str] = &[
+        "VersionLessThan",
+        "VersionEquals",
+        "IsNullOrEmpty",
+        "IsNullOrWhiteSpace",
+    ];
+    let ty = *rng.pick(TYPES);
+    let member = if spelled && rng.below(3) == 0 {
+        *rng.pick(SPELLED_STATICS)
+    } else {
+        *rng.pick(STATICS)
+    };
     format!(
-        "[{}]::{}({})",
-        rng.pick(TYPES),
-        rng.pick(STATICS),
-        gen_grammar_args(rng, depth)
+        "[{ty}]::{member}({})",
+        gen_grammar_args(rng, depth, spelled)
     )
 }
 
-fn gen_grammar_link(rng: &mut SplitMix64, depth: u32) -> String {
+fn gen_grammar_link(rng: &mut SplitMix64, depth: u32, spelled: bool) -> String {
     const PARENLESS: &[&str] = &["Major", "Minor", "Build", "Length", "Bogus"];
     const METHODS: &[&str] = &[
         "Contains",
@@ -1613,11 +1628,15 @@ fn gen_grammar_link(rng: &mut SplitMix64, depth: u32) -> String {
     match rng.below(5) {
         0 => format!("[{}]", rng.below(4)),
         1 => format!(".{}", rng.pick(PARENLESS)),
-        _ => format!(".{}({})", rng.pick(METHODS), gen_grammar_args(rng, depth)),
+        _ => format!(
+            ".{}({})",
+            rng.pick(METHODS),
+            gen_grammar_args(rng, depth, spelled)
+        ),
     }
 }
 
-fn gen_grammar_args(rng: &mut SplitMix64, depth: u32) -> String {
+fn gen_grammar_args(rng: &mut SplitMix64, depth: u32, spelled: bool) -> String {
     if depth == 0 {
         return String::new();
     }
@@ -1628,15 +1647,15 @@ fn gen_grammar_args(rng: &mut SplitMix64, depth: u32) -> String {
         return " ".to_string();
     }
     (0..rng.below(3))
-        .map(|_| gen_grammar_arg(rng, depth - 1))
+        .map(|_| gen_grammar_arg(rng, depth - 1, spelled))
         .collect::<Vec<_>>()
         .join(",")
 }
 
-fn gen_grammar_arg(rng: &mut SplitMix64, depth: u32) -> String {
-    match rng.below(7) {
+fn gen_grammar_arg(rng: &mut SplitMix64, depth: u32, spelled: bool) -> String {
+    match rng.below(if spelled { 7 } else { 5 }) {
         0 => rng.below(10).to_string(),
-        1 => format!("$({})", gen_grammar_inner(rng, depth)),
+        1 => format!("$({})", gen_grammar_inner(rng, depth, spelled)),
         // The argument spellings MSBuild reads other than as a quoted literal:
         // an unquoted word (`TrimStart(vV)`), `null` in any case (no string at
         // all), unquoted text around an expansion (`$(V).0`), a tab, a
@@ -1712,7 +1731,7 @@ fn gen_grammar_arg_literal(rng: &mut SplitMix64, depth: u32) -> String {
         "999.999",
     ];
     if depth > 0 && rng.below(2) == 0 {
-        format!("$({})", gen_grammar_inner(rng, depth))
+        format!("$({})", gen_grammar_inner(rng, depth, false))
     } else {
         (*rng.pick(LITS)).to_string()
     }

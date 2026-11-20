@@ -29,7 +29,7 @@ use common::case_axis::{CaseContext, non_ascii_lookalike, respell_case, respell_
 use common::{
     CONTROLLED_PROPERTY_NAMES, ExpandVerdict, Oracle, SplitMix64, breaks_inside_quote,
     check_expand_certain_implies_exact, gen_expand_props, gen_expand_value, gen_grammar_value,
-    respell_whitespace, soak_parameters,
+    gen_grammar_value_spelled, respell_whitespace, soak_parameters,
 };
 
 fn props(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
@@ -787,7 +787,7 @@ fn grammar_acceptance_sweep() {
     let mut partial = 0usize;
 
     for _ in 0..CASES {
-        let value = gen_grammar_value(&mut rng);
+        let value = gen_grammar_value_spelled(&mut rng);
         let props = gen_expand_props(&mut rng);
         match check_expand_certain_implies_exact(&mut oracle, &value, &props) {
             ExpandVerdict::Exact => exact += 1,

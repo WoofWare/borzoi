@@ -755,6 +755,37 @@ fn uncertain_expressions(text: &str, uncertain: &dyn Fn(&str) -> bool) -> Vec<St
     found
 }
 
+/// `text` with each occurrence of one of `expressions` (`$(…)` texts)
+/// replaced by `value`, in one pass from the left: the text is scanned once
+/// and each opener compared with the expressions, so a text repeating one
+/// costs its length, not its length per occurrence.
+fn strike(text: &str, expressions: &[String], value: &str) -> String {
+    let mut expressions: Vec<&str> = expressions.iter().map(String::as_str).collect();
+    expressions.sort_unstable();
+    expressions.dedup();
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find("$(") {
+        out.push_str(&rest[..at]);
+        rest = &rest[at..];
+        match expressions
+            .iter()
+            .find(|expression| rest.starts_with(**expression))
+        {
+            Some(expression) => {
+                out.push_str(value);
+                rest = &rest[expression.len()..];
+            }
+            None => {
+                out.push_str("$(");
+                rest = &rest[2..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Whether MSBuild throws evaluating `expression`, one `$(…)` of a text that
 /// throws on the values `props` holds, whatever the expressions in it that
 /// read a name `unheld` names return: with each of them in turn returning each
@@ -772,9 +803,7 @@ pub(crate) fn expression_throws_whatever_they_return(
         return false;
     }
     RETURNED.iter().all(|value| {
-        let struck = inner.iter().fold(expression.to_owned(), |text, inner| {
-            text.replace(inner.as_str(), value)
-        });
+        let struck = strike(expression, &inner, value);
         let (_, issues) = match observer {
             Some(observer) => substitute_with_fs(&struck, props, observer),
             None => substitute(&struck, props),
@@ -807,11 +836,7 @@ fn throws_whatever_they_return(
     if expressions.is_empty() {
         return false;
     }
-    let strike = |raw: &str, value: &str| {
-        expressions.iter().fold(raw.to_owned(), |raw, expression| {
-            raw.replace(expression.as_str(), value)
-        })
-    };
+    let strike = |raw: &str, value: &str| strike(raw, &expressions, value);
     let scalar = |scalar: &ScalarExpr, value: &str| match scalar {
         ScalarExpr::String(raw) | ScalarExpr::Property(raw) => {
             Some(ScalarExpr::String(strike(raw, value)))
@@ -2123,6 +2148,28 @@ fn eval_bool(
                 }
             };
             let (lhs_scalar, rhs_scalar) = (lhs, rhs);
+            // Equality asks each side, left then right, whether it is empty
+            // first, expanding only a side that is one reference whole
+            // (`MultipleComparisonExpressionNode`, `EvaluatesToEmpty`); where
+            // one is, emptiness decides it and nothing more is expanded.
+            if !relational {
+                let lhs_empty =
+                    evaluates_to_empty(lhs_scalar, props, fs.map(|fs| fs.observer), undefined);
+                if let Err(reject @ (Reject::Throws | Reject::Illegal)) = lhs_empty {
+                    return Err(reject);
+                }
+                let rhs_empty =
+                    evaluates_to_empty(rhs_scalar, props, fs.map(|fs| fs.observer), undefined);
+                match (lhs_empty, rhs_empty) {
+                    (Ok(lhs_empty), Ok(rhs_empty)) if lhs_empty || rhs_empty => {
+                        let equal = lhs_empty == rhs_empty;
+                        return Ok(matches!(op, CompareOp::Eq) == equal);
+                    }
+                    (Ok(true), Err(reject)) | (Err(reject), Ok(true)) => return Err(reject),
+                    (_, Err(reject @ (Reject::Throws | Reject::Illegal))) => return Err(reject),
+                    _ => {}
+                }
+            }
             // MSBuild expands both operands before it compares them, so an
             // operand whose value we do not know does not keep it from the
             // other, which may throw: the worse of the two stands. One that
@@ -2176,6 +2223,43 @@ fn eval_bool(
             })
         }
     }
+}
+
+/// Whether MSBuild's equality takes the operand `scalar` as empty
+/// (`StringExpressionNode.EvaluatesToEmpty`), expanding it only as MSBuild
+/// does: text it has nothing to expand in is empty when it is, text of one or
+/// two characters is not, and neither is text that is not one reference whole
+/// (`$(`, `%(` or `@(` first, `)` last), which it does not expand at all
+/// (`'a$(P[9])' == ''` is false, and throws on nothing; probed,
+/// `msbuild-condition-oracle`, SDK 10.0.401). Any other it expands, its
+/// properties in full, as a comparison would.
+fn evaluates_to_empty(
+    scalar: &ScalarExpr,
+    props: &PropertyMap,
+    fs_observer: Option<&Observer>,
+    undefined: &mut Vec<String>,
+) -> Result<bool, Reject> {
+    let raw = match scalar {
+        ScalarExpr::Bare(raw) => return Ok(raw.is_empty()),
+        ScalarExpr::String(raw) if !raw.contains("$(") && !raw.contains('%') => {
+            return Ok(raw.is_empty());
+        }
+        ScalarExpr::String(raw) | ScalarExpr::Property(raw) => raw.as_str(),
+        ScalarExpr::SystemVersionPart { .. } => {
+            return expand_scalar_for_condition(scalar, props, fs_observer, undefined)
+                .map(|value| value.is_empty());
+        }
+    };
+    let bytes = raw.as_bytes();
+    match bytes.len() {
+        0 => return Ok(true),
+        1 | 2 => return Ok(false),
+        _ => {}
+    }
+    if bytes[1] != b'(' || !matches!(bytes[0], b'$' | b'%' | b'@') || !raw.ends_with(')') {
+        return Ok(false);
+    }
+    expand_scalar_for_condition(scalar, props, fs_observer, undefined).map(|value| value.is_empty())
 }
 
 /// Whether the operand `scalar` is one `$(…)` whose only issue is a boolean
