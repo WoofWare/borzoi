@@ -1127,7 +1127,7 @@ mod tests {
         let cause = RejectionCause::UsingTaskRegistration {
             task: "X".into(),
             attribute: "ParameterType".to_owned(),
-            value: "System.TimeSpan".to_owned(),
+            value: "System.TimeSpan".into(),
         };
         let possible = rejection_message(&cause, false);
         assert!(possible.contains("may be unable to register"), "{possible}");

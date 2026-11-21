@@ -317,7 +317,7 @@ pub enum RejectionCause {
     UsingTaskRegistration {
         task: std::sync::Arc<str>,
         attribute: String,
-        value: String,
+        value: std::sync::Arc<str>,
     },
     /// Two parameters of a `<UsingTask>`'s `<ParameterGroup>` whose names
     /// MSBuild's registry, keyed case-insensitively, takes for one: it fails
