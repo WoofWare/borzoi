@@ -388,10 +388,9 @@ fn unsure_names(parsed: &borzoi_msbuild::ParsedProject) -> Vec<&'static str> {
 /// The names the attribution strikes are those the walk is not sure of at
 /// the site, not after it: an import the walk cannot decide unsettles every
 /// name read after it, `A` and `B` among them, though the site's condition
-/// read them certain. Striking those too took the one assignment that shows
-/// a throw on `X` alone out of reach, and a rejection on the value of a
-/// refused name (#1097) was reported as a violation (soak seed
-/// 1795204238191503702).
+/// read them certain. Each name struck adds places to the bounded search over
+/// assignments, and striking names the condition read certain can put the
+/// one assignment that isolates a throw on an unsure name outside that bound.
 #[test]
 fn the_names_struck_are_those_unsure_at_the_site() {
     let tmp = TempDir::new().unwrap();
@@ -924,7 +923,7 @@ const WITNESSES: &[Witness] = &[
         values: ["2.0", "1.2.3", "", "\n"],
         template: "<Import Project=\"there.props\" Condition=\"{c}\" />",
         body: "",
-        gate: "((('$([MSBuild]::VersionLessThan($(A).0, 2.0))' And $([System.String]::IsNullOrWhiteSpace(' ')) And $(B) <= '$([System.String]::IsNullOrEmpty(null))') And (HasTrailingSlash('x$([System.String]::IsNullOrWhiteSpace(\" \"))') Or true Or '$(B.Split(\";\")[1].Length)') And $([System.String]::IsNullOrWhiteSpace(' '))) Or '$(X.Substring(2))' Or $([MSBuild]::VersionLessThan(`$(A)`, `2.0`)))",
+        gate: "((('$([MSBuild]::VersionLessThan($(A).0, 2.0))' And $([System.String]::IsNullOrWhiteSpace('\u{a0}')) And $(B) <= '$([System.String]::IsNullOrEmpty(null))') And (HasTrailingSlash('x$([System.String]::IsNullOrWhiteSpace(\"\u{a0}\"))') Or true Or '$(B.Split(\";\")[1].Length)') And $([System.String]::IsNullOrWhiteSpace('\u{a0}'))) Or '$(X.Substring(2))' Or $([MSBuild]::VersionLessThan(`$(A)`, `2.0`)))",
         gap: "uncertain-value",
         both_strikes: false,
     },
