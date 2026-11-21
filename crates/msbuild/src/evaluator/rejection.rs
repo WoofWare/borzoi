@@ -1205,7 +1205,8 @@ enum Registered {
 /// those steps decide is only which error MSBuild reports, which nothing
 /// reads.
 fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
-    let task: std::sync::Arc<str> = attribute(node, "TaskName").unwrap_or_default().into();
+    let task: std::sync::Arc<str> =
+        preview(&attribute(node, "TaskName").unwrap_or_default()).into();
     // The step of `raw`, judged by `rule`. Returns the value the walk holds
     // for certain, if it does.
     let step = |state: &mut State<'_>,
@@ -1289,18 +1290,27 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
             Registered::Unknown
         }
     };
+    // An attribute written empty, or a `TaskFactory` missing under children,
+    // is the loader's to refuse (`judge_load_time`): the registration judges
+    // only one written with text, which may expand to empty.
+    let written = |raw: &str| !raw.is_empty();
     if let Some(raw) = attribute(node, "TaskName") {
-        step(state, &raw, node.range(), "TaskName", Some(&non_empty));
+        step(
+            state,
+            &raw,
+            node.range(),
+            "TaskName",
+            written(&raw).then_some(&non_empty as &dyn Fn(&str) -> Registered),
+        );
     }
-    let factory_raw = attribute(node, "TaskFactory");
-    if factory_raw.is_some() || !children.is_empty() || others {
-        let raw = factory_raw.unwrap_or_default();
+    if let Some(raw) = attribute(node, "TaskFactory") {
         step(
             state,
             &raw,
             node.range(),
             "TaskFactory",
-            (!children.is_empty() || others).then_some(&factory as &dyn Fn(&str) -> Registered),
+            (written(&raw) && (!children.is_empty() || others))
+                .then_some(&factory as &dyn Fn(&str) -> Registered),
         );
     }
     match (
@@ -1317,13 +1327,21 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
             );
         }
         (_, Some(raw)) => {
-            step(state, &raw, node.range(), "AssemblyName", Some(&non_empty));
+            step(
+                state,
+                &raw,
+                node.range(),
+                "AssemblyName",
+                written(&raw).then_some(&non_empty as &dyn Fn(&str) -> Registered),
+            );
         }
         _ => {}
     }
     if let Some(body) = children.last().filter(|child| named(child, "Task")) {
         let body_reached = match attribute(*body, "Evaluate") {
+            // Written empty, it reads as absent: `true`.
             None => Some(reached),
+            Some(evaluate) if evaluate.is_empty() => Some(reached),
             Some(evaluate) => {
                 let held = step(
                     state,

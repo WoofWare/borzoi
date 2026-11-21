@@ -107,12 +107,24 @@ fn grade(oracle: &mut Oracle, writes: &str, body: &str, doubt: Doubt) -> Graded 
         else {
             continue;
         };
-        if let borzoi_msbuild::RejectionCause::UsingTaskRegistration { value, .. } = cause {
-            assert!(
-                value.len() <= 256 + "…".len(),
-                "a refusal keeps a value of {} bytes: {xml}",
-                value.len()
-            );
+        let bound = 256 + "…".len();
+        match cause {
+            borzoi_msbuild::RejectionCause::UsingTaskRegistration { task, value, .. } => {
+                assert!(
+                    value.len() <= bound && task.len() <= bound,
+                    "a refusal keeps a value of {} bytes and a task name of {}: {xml}",
+                    value.len(),
+                    task.len()
+                );
+            }
+            borzoi_msbuild::RejectionCause::UsingTaskParameterCollision { task, .. } => {
+                assert!(
+                    task.len() <= bound,
+                    "a collision keeps a task name of {} bytes",
+                    task.len()
+                );
+            }
+            _ => {}
         }
         if matches!(
             diagnostic.kind,
@@ -129,7 +141,7 @@ fn grade(oracle: &mut Oracle, writes: &str, body: &str, doubt: Doubt) -> Graded 
                 span: diagnostic.span.clone(),
                 origin: diagnostic.origin.clone(),
             };
-            assert_msbuild_refuses_alone(oracle, writes, &rejection, &xml);
+            assert_msbuild_refuses_alone(oracle, writes, &rejection, &xml, &project_path);
         }
     }
     let v_unheld = writes.contains("<V>") && !parsed.properties.contains_key("V");
@@ -209,18 +221,13 @@ fn alone(
         RejectionCause::UsingTaskRegistration {
             attribute, value, ..
         } => {
-            // An attribute written empty is the loader's to refuse, and a
-            // `TaskFactory` not written is one MSBuild reads as empty: one
-            // that expands to empty is the registration's.
+            // An attribute written empty, or not written, is the loader's to
+            // refuse, never the registration's.
             let v = match raw {
                 Some(raw) if !raw.is_empty() => raw.to_owned(),
-                _ => {
-                    assert!(
-                        value.is_empty(),
-                        "{attribute} is not written, and holds {value:?}"
-                    );
-                    "$(Empty)".to_owned()
-                }
+                _ => panic!(
+                    "a registration refusal of `{attribute}`, not written with text ({value:?})"
+                ),
             };
             match attribute.as_str() {
                 "TaskName" => (
@@ -298,16 +305,12 @@ fn assert_msbuild_refuses_alone(
     writes: &str,
     rejection: &borzoi_msbuild::Rejection,
     xml: &str,
+    path: &std::path::Path,
 ) {
     let cause = &rejection.cause;
-    if let borzoi_msbuild::RejectionCause::UsingTaskRegistration {
-        attribute, value, ..
-    } = cause
-    {
-        // A `TaskFactory` not written is one MSBuild reads as empty.
-        let unwritten_factory = attribute == "TaskFactory" && value.is_empty();
+    if let borzoi_msbuild::RejectionCause::UsingTaskRegistration { attribute, .. } = cause {
         assert!(
-            unwritten_factory || xml[rejection.span.clone()].contains(&format!(" {attribute}=")),
+            xml[rejection.span.clone()].contains(&format!(" {attribute}=")),
             "the walk claims MSBuild refuses `{attribute}`, and the element it names has no such \
              attribute: {xml}\n{rejection:#?}"
         );
@@ -321,14 +324,13 @@ fn assert_msbuild_refuses_alone(
     let Some((body, attribute)) = alone(cause, raw.as_deref()) else {
         panic!("a certain refusal the differential does not isolate: {cause:?}: {xml}");
     };
-    let tmp = tempfile::TempDir::new().unwrap();
-    let dir = borzoi_msbuild::observed::host_fs::canonicalize(tmp.path()).unwrap();
-    let path = dir.join("Alone.fsproj");
+    // At the document's own path, so that what reads the project's name or
+    // directory reads what it did there.
     let alone = format!(
         "<Project><PropertyGroup><Empty></Empty>{writes}</PropertyGroup>{ITEMS}{body}</Project>"
     );
-    std::fs::write(&path, &alone).unwrap();
-    let Some(rejected) = design_time_code(oracle, &alone, &path) else {
+    std::fs::write(path, &alone).unwrap();
+    let Some(rejected) = design_time_code(oracle, &alone, path) else {
         panic!(
             "the walk claims MSBuild refuses {cause:?}, and alone MSBuild evaluates it: \
              {alone}\nclaimed in {xml}"
@@ -845,6 +847,49 @@ fn hand_picked_registrations() {
         // collision besides (every certain diagnostic is graded alone).
         (
             inline_task("", "<ParameterGroup><A /><A /></ParameterGroup><Task>x</Task>"),
+            true,
+            Some(Certain),
+        ),
+        // `Evaluate` written empty reads as absent, `true`: the body is
+        // expanded, and its throw (`P` is `a`) is certain.
+        (
+            format!(
+                "<PropertyGroup><P>a</P></PropertyGroup>{}",
+                inline_task("", "<Task Evaluate=\"\">$(P[9])</Task>")
+            ),
+            true,
+            Some(Certain),
+        ),
+        // A name written empty is the loader's refusal alone, with no
+        // registration refusal besides (each certain one is graded alone,
+        // replaying the attribute as written).
+        (
+            "<UsingTask TaskName=\"\" AssemblyFile=\"y.dll\" />".to_owned(),
+            true,
+            Some(Certain),
+        ),
+        (
+            inline_task("", "<Task>x</Task>").replace(" TaskFactory=\"RoslynCodeTaskFactory\"", ""),
+            true,
+            Some(Certain),
+        ),
+        // A long task name, which each refusal of its parameters names: kept
+        // bounded.
+        (
+            format!(
+                "<UsingTask TaskName=\"{}\" TaskFactory=\"RoslynCodeTaskFactory\" AssemblyFile=\"y.dll\">\
+                 <ParameterGroup><A Required=\"bad\" /><B Required=\"bad\" /></ParameterGroup>\
+                 <Task>x</Task></UsingTask>",
+                "N".repeat(1000)
+            ),
+            true,
+            Some(Certain),
+        ),
+        // A value that reads the project's own name: graded alone at the same
+        // path.
+        (
+            "<UsingTask TaskName=\"$(MSBuildProjectName.TrimStart('Demo'))\" AssemblyFile=\"y.dll\" />"
+                .to_owned(),
             true,
             Some(Certain),
         ),
