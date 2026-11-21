@@ -38,6 +38,12 @@
 //! drawn from the hostile alphabets, and requires fsc to be handed exactly
 //! what it is handed without them.
 //!
+//! A variable reaches the build a third way, through the restore: a
+//! `NuGet.Config` may name one (`%TEAM_CACHE%`) for its package folder or a
+//! feed. That moves only what the restore writes, which the derivation reads
+//! (its `RestoreSuccess`, its assets file's reference set) and does not
+//! rederive; the assets file's freshness is assumed below.
+//!
 //! **Stated assumption: the build's environment is the evaluation's.** The
 //! LSP evaluates under its own environment and cannot see the one a build
 //! runs in. The derivation assumes the build environment adds no variable
@@ -400,6 +406,29 @@ pub const TOOLCHAIN_VARIABLES: &[&str] = &[
     "TMPDIR",
 ];
 
+/// The prefixes of the variables read before any code of the install runs,
+/// which no scan of it sees, each compared without case: the dynamic
+/// loader's (`LD_`, ld.so(8); `DYLD_`, dyld(1)), which load other code into
+/// every process of the build, and the functions bash(1) imports from the
+/// environment (`BASH_FUNC_`), for a `dotnet` that is a script (the Nix
+/// wrapper is one).
+pub const LAUNCHER_PREFIXES: &[&str] = &["BASH_FUNC_", "DYLD_", "LD_"];
+
+/// The variables read before any code of the install runs, beside
+/// [`LAUNCHER_PREFIXES`]: the files a shell running a script runs first
+/// (bash's `BASH_ENV`, a POSIX shell's `ENV`).
+pub const LAUNCHER_VARIABLES: &[&str] = &["BASH_ENV", "ENV"];
+
+/// Whether `name` is one of the launcher's ([`LAUNCHER_PREFIXES`],
+/// [`LAUNCHER_VARIABLES`]), compared without case.
+pub fn launcher_variable(name: &str) -> bool {
+    on_list(LAUNCHER_VARIABLES, name)
+        || LAUNCHER_PREFIXES.iter().any(|prefix| {
+            name.get(..prefix.len())
+                .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+        })
+}
+
 /// Whether `name`, exactly, is one of [`TOOLCHAIN_VARIABLES`]. A variable
 /// differing from one only by case is not: a tool reading `HOME` does not
 /// read `home`, which MSBuild reads as the property `HOME`.
@@ -438,8 +467,11 @@ fn all_environment_reads() -> &'static HashMap<String, EnvironmentReads> {
 }
 
 /// The lists of `src/fsc_environment_reads.txt`, by SDK: sections headed
-/// `[<sdk> <list>]` (`properties`, `property-prefixes`, `variables`,
-/// `variable-prefixes`), one lowercased name a line, `# ` lines comments.
+/// `[<sdk> <list> <platform>]` (`properties`, `property-prefixes`,
+/// `variables`, `variable-prefixes`; the platform the scan ran on, whose
+/// binaries differ from another's), one lowercased name a line, `# ` lines
+/// comments. Each list is the union of its sections over the platforms, so a
+/// name read on any platform counts on every one.
 pub fn parse_environment_reads(text: &str) -> HashMap<String, EnvironmentReads> {
     let mut all: HashMap<String, EnvironmentReads> = HashMap::new();
     let mut current: Option<(String, String)> = None;
@@ -454,9 +486,12 @@ pub fn parse_environment_reads(text: &str) -> HashMap<String, EnvironmentReads> 
             .and_then(|h| h.strip_suffix(']'))
             .filter(|h| h.contains(' '))
         {
-            let (sdk, list) = header
-                .split_once(' ')
-                .unwrap_or_else(|| panic!("fsc_environment_reads.txt: bad header {line:?}"));
+            let mut words = header.split(' ');
+            let (Some(sdk), Some(list), Some(_platform), None) =
+                (words.next(), words.next(), words.next(), words.next())
+            else {
+                panic!("fsc_environment_reads.txt: bad header {line:?}");
+            };
             current = Some((sdk.to_string(), list.to_string()));
             all.entry(sdk.to_string()).or_default();
             continue;
@@ -506,6 +541,9 @@ pub fn restore_file_read(name: &str) -> bool {
 pub enum VariableClass {
     /// One of [`TOOLCHAIN_VARIABLES`], held fixed.
     Toolchain,
+    /// Read by the loader or the launcher before the install's code runs
+    /// ([`launcher_variable`]): declined.
+    Launcher,
     /// One of [`ALLOWED_PROPERTIES`] (in any case), whose value must match
     /// this grammar.
     AllowedProperty(Grammar),
@@ -529,14 +567,17 @@ impl VariableClass {
     pub fn admitted(self) -> bool {
         !matches!(
             self,
-            VariableClass::RestoreWritten | VariableClass::SdkRead | VariableClass::ToolRead
+            VariableClass::Launcher
+                | VariableClass::RestoreWritten
+                | VariableClass::SdkRead
+                | VariableClass::ToolRead
         )
     }
 }
 
 /// What the variable `name` is to the derivation under the SDK `sdk`, or
 /// `None` when that SDK's reads are not pinned. In order: the toolchain's own
-/// (exact name), an allowed property (any case, as MSBuild reads it), graded
+/// (exact name), the loader's and launcher's, an allowed property (any case, as MSBuild reads it), graded
 /// inert (exact name), NuGet's restore-only names, a property an SDK file or
 /// NuGet's restore file reads (any case), a variable the tools read (any
 /// case, by name or by a prefix), else inert. A tool's read compares without
@@ -547,6 +588,8 @@ pub fn classify_variable(sdk: &str, name: &str) -> Option<VariableClass> {
     let prefixed = |prefixes: &BTreeSet<String>| prefixes.iter().any(|p| lower.starts_with(p));
     Some(if toolchain_variable(name) {
         VariableClass::Toolchain
+    } else if launcher_variable(name) {
+        VariableClass::Launcher
     } else if let Some(grammar) = allowed_property(name) {
         VariableClass::AllowedProperty(grammar)
     } else if ALLOWED_ENVIRONMENT.contains(&name) {
@@ -576,6 +619,9 @@ pub fn environment_decline(
     sdk: &str,
     environment: &HashMap<String, String>,
 ) -> Option<NameDecline> {
+    if environment_reads(sdk).is_none() {
+        return Some(NameDecline::UnscannedSdk(sdk.to_string()));
+    }
     let mut names: Vec<&String> = environment.keys().collect();
     names.sort();
     let mut by_property: HashMap<String, &String> = HashMap::new();
@@ -2359,8 +2405,46 @@ fn sources_read_as_files(project_path: &Path, parsed: &ParsedProject) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{DefaultItemFiles, Grammar, default_item_files, may_read_as_option};
+    use super::{
+        DefaultItemFiles, Grammar, NameDecline, VariableClass, classify_variable,
+        default_item_files, environment_decline, may_read_as_option, verified_sdks,
+    };
     use crate::observed::Observer;
+    use std::collections::HashMap;
+
+    /// The loader's and the launcher's variables decline under every
+    /// verified SDK, in any case, though no scan of the install sees them.
+    #[test]
+    fn launcher_variables_decline() {
+        for sdk in verified_sdks() {
+            for name in [
+                "LD_PRELOAD",
+                "LD_LIBRARY_PATH",
+                "ld_preload",
+                "DYLD_INSERT_LIBRARIES",
+                "DYLD_LIBRARY_PATH",
+                "BASH_ENV",
+                "BASH_FUNC_dotnet%%",
+                "ENV",
+            ] {
+                assert_eq!(
+                    classify_variable(sdk, name),
+                    Some(VariableClass::Launcher),
+                    "{sdk}: {name}"
+                );
+            }
+        }
+    }
+
+    /// An SDK whose reads are not pinned declines, whatever the environment,
+    /// an empty one included.
+    #[test]
+    fn an_unscanned_sdk_declines_any_environment() {
+        assert_eq!(
+            environment_decline("0.0.0-unscanned", &HashMap::new()),
+            Some(NameDecline::UnscannedSdk("0.0.0-unscanned".to_string()))
+        );
+    }
     use std::fs::{create_dir_all, write};
     use std::path::Path;
 

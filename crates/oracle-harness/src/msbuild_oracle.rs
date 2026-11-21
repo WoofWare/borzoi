@@ -342,11 +342,20 @@ pub enum InputError {
 
 /// The prefixes of the variables [`BuildInputs::unlisted_env`] refuses,
 /// compared without case (as a tool on Windows compares names): the host's
-/// and the runtime's knobs, NuGet's and MSBuild's switches, and the dynamic
-/// loader's, any of which may choose what the build runs. A grader whose
-/// subject commits under one, needing it built, has found its failure.
+/// and the runtime's knobs, NuGet's and MSBuild's switches, the dynamic
+/// loader's, and bash's start-up file and imported functions, any of which
+/// may choose what the build runs. A grader whose subject commits under one,
+/// needing it built, has found its failure.
 pub const MACHINERY: &[&str] = &[
-    "DOTNET_", "COMPLUS_", "CORECLR_", "NUGET_", "MSBUILD", "DYLD_", "LD_",
+    "DOTNET_",
+    "COMPLUS_",
+    "CORECLR_",
+    "NUGET_",
+    "MSBUILD",
+    "DYLD_",
+    "LD_",
+    "BASH_ENV",
+    "BASH_FUNC_",
 ];
 
 /// What a caller sets for a build beyond the tree: global properties (`-p:`)
@@ -398,8 +407,8 @@ impl BuildInputs {
     /// whatever they are. Refuses one of [`INPUT_NAMES`] (set through
     /// [`Self::env`]), one of [`build_environment`]'s
     /// ([`BUILD_ENVIRONMENT_NAMES`], held fixed), one starting with a
-    /// [`MACHINERY`] prefix, and a name no variable can have (empty, or
-    /// holding `=` or NUL). Whatever it sets, the build's launch checks still
+    /// [`MACHINERY`] prefix, one of [`SELECTORS`], and a name no variable
+    /// can have (empty, or holding `=` or NUL). Whatever it sets, the build's launch checks still
     /// decide whether fsc's arguments are the SDK compiler's.
     pub fn unlisted_env(mut self, name: &str, value: &str) -> Result<BuildInputs, InputError> {
         let refused = name.is_empty()
@@ -411,7 +420,8 @@ impl BuildInputs {
             || MACHINERY.iter().any(|prefix| {
                 name.get(..prefix.len())
                     .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
-            });
+            })
+            || SELECTORS.iter().any(|n| n.eq_ignore_ascii_case(name));
         if refused {
             return Err(InputError::Refused(name.to_string()));
         }
@@ -496,6 +506,34 @@ impl BuildInputs {
         Ok(name)
     }
 }
+
+/// The properties [`BuildInputs::unlisted_env`] refuses as variables, each
+/// compared without case: those that choose the compiler, the targets and
+/// imports, the restore's inputs or outputs, or whether fsc runs, which
+/// [`INPUT_NAMES`] leaves off for that reason. A grader whose subject commits
+/// under one, needing it built, has found its failure.
+pub const SELECTORS: &[&str] = &[
+    "BaseIntermediateOutputPath",
+    "CustomAfterMicrosoftCommonProps",
+    "CustomAfterMicrosoftCommonTargets",
+    "CustomBeforeMicrosoftCommonProps",
+    "CustomBeforeMicrosoftCommonTargets",
+    "DirectoryBuildPropsPath",
+    "DirectoryBuildTargetsPath",
+    "DotnetFscCompilerPath",
+    "FSharpBuildAssemblyFile",
+    "FSharpTargetsPath",
+    "FscToolExe",
+    "FscToolPath",
+    "ImportDirectoryBuildProps",
+    "ImportDirectoryBuildTargets",
+    "NuGetPackageRoot",
+    "RestoreAdditionalProjectSources",
+    "RestoreConfigFile",
+    "RestorePackagesPath",
+    "RestoreSources",
+    "SkipCompilerExecution",
+];
 
 /// One [`fsc_args`] call.
 #[derive(Debug, Clone, Copy)]
@@ -937,6 +975,8 @@ mod tests {
             "MSBUILDDEBUGONSTART",
             "DYLD_INSERT_LIBRARIES",
             "LD_PRELOAD",
+            "BASH_ENV",
+            "BASH_FUNC_dotnet%%",
         ] {
             assert!(
                 matches!(
@@ -944,6 +984,30 @@ mod tests {
                     Err(InputError::Refused(_))
                 ),
                 "{name:?}"
+            );
+        }
+        // What chooses the toolchain, refused by either API in any case.
+        for name in [
+            "FscToolExe",
+            "fsctoolexe",
+            "FSharpBuildAssemblyFile",
+            "DirectoryBuildTargetsPath",
+            "RestoreAdditionalProjectSources",
+            "SkipCompilerExecution",
+        ] {
+            assert!(
+                matches!(
+                    BuildInputs::new().unlisted_env(name, "x"),
+                    Err(InputError::Refused(_))
+                ),
+                "{name} unlisted"
+            );
+            assert!(
+                matches!(
+                    BuildInputs::new().env(name, "x"),
+                    Err(InputError::NotAnInput(_))
+                ),
+                "{name} listed"
             );
         }
         let repeated = BuildInputs::new()

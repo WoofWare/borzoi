@@ -68,6 +68,77 @@ fn sdks_to_pin() -> BTreeSet<String> {
         .collect()
 }
 
+/// Whether the SDK `sdk` is installed in the devshell's .NET install, so it
+/// can be scanned here.
+fn installed(sdk: &str) -> bool {
+    common::dotnet_root_from_env()
+        .join("sdk")
+        .join(sdk)
+        .host_is_dir()
+}
+
+/// The platform this scan runs on, which keys every list of the pin: the
+/// binaries of one SDK version differ between platforms (their native code,
+/// their runtime's build).
+fn platform() -> String {
+    format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)
+}
+
+/// A version directory's name as numbers (`10.0.12`), or `None` for one
+/// with a prerelease label or another shape.
+fn version(name: &str) -> Option<Vec<u64>> {
+    name.split('.').map(|part| part.parse().ok()).collect()
+}
+
+/// The directory under `parent` the .NET host would roll a request for
+/// `wanted` forward to: the highest version of the same major and minor, at
+/// least `wanted` (its default `LatestPatch`).
+fn rolled_forward(parent: &Path, wanted: &str) -> PathBuf {
+    let wanted = version(wanted).unwrap_or_else(|| panic!("a version {wanted:?}"));
+    host_fs::read_dir(parent)
+        .unwrap_or_else(|e| panic!("{}: {e}", parent.display()))
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let v = version(&name)?;
+            (v.len() == 3 && v[..2] == wanted[..2] && v >= wanted).then_some((v, entry.path()))
+        })
+        .max()
+        .map(|(_, path)| path)
+        .unwrap_or_else(|| {
+            panic!(
+                "no version under {} rolls {wanted:?} forward",
+                parent.display()
+            )
+        })
+}
+
+/// The runtime the SDK `sdk` runs on: its `dotnet.runtimeconfig.json`'s
+/// framework, rolled forward as the host rolls it, and the host resolver
+/// (`host/fxr`) of the same version.
+fn sdk_runtime(dotnet_root: &Path, sdk: &str) -> (PathBuf, PathBuf) {
+    let config = dotnet_root
+        .join("sdk")
+        .join(sdk)
+        .join("dotnet.runtimeconfig.json");
+    let json: serde_json::Value =
+        serde_json::from_str(&host_fs::read_to_string(&config).unwrap()).unwrap();
+    let framework = &json["runtimeOptions"]["framework"];
+    assert_eq!(
+        framework["name"].as_str(),
+        Some("Microsoft.NETCore.App"),
+        "{}: the SDK runs on another framework",
+        config.display()
+    );
+    let wanted = framework["version"].as_str().expect("a framework version");
+    let runtime = rolled_forward(
+        &dotnet_root.join("shared").join("Microsoft.NETCore.App"),
+        wanted,
+    );
+    let fxr = rolled_forward(&dotnet_root.join("host").join("fxr"), wanted);
+    (runtime, fxr)
+}
+
 /// Every regular file under `dir`, links followed (a Nix install is a farm
 /// of them), each directory entered once.
 fn files_under(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -346,12 +417,10 @@ fn native_strings(bytes: &[u8], out: &mut BTreeSet<String>) {
 /// how many environment reads the IL scan found and could not resolve.
 fn tool_variables(dotnet_root: &Path, sdk: &str) -> (BTreeSet<String>, BTreeSet<String>) {
     let mut files = Vec::new();
+    let (runtime, fxr) = sdk_runtime(dotnet_root, sdk);
     files_under(&dotnet_root.join("sdk").join(sdk), &mut files);
-    files_under(&dotnet_root.join("host"), &mut files);
-    files_under(
-        &dotnet_root.join("shared").join("Microsoft.NETCore.App"),
-        &mut files,
-    );
+    files_under(&runtime, &mut files);
+    files_under(&fxr, &mut files);
     files.push(host_fs::canonicalize(dotnet_root.join("dotnet")).expect("the dotnet muxer"));
     files.sort();
     let mut variables = BTreeSet::new();
@@ -408,104 +477,167 @@ fn tool_variables(dotnet_root: &Path, sdk: &str) -> (BTreeSet<String>, BTreeSet<
     (variables, prefixes)
 }
 
-/// The scan of the SDK `sdk`, once per run.
+/// The scan of the installed SDK `sdk`, once per run: one scan per SDK
+/// whichever tests ask for it, and however many at once.
 fn scanned(sdk: &str) -> EnvironmentReads {
-    static SCANS: OnceLock<Mutex<BTreeMap<String, EnvironmentReads>>> = OnceLock::new();
-    let scans = SCANS.get_or_init(Default::default);
-    if let Some(reads) = scans.lock().unwrap().get(sdk) {
-        return reads.clone();
-    }
-    let root = common::dotnet_root_from_env();
-    assert!(
-        root.join("sdk").join(sdk).host_is_dir(),
-        "the SDK {sdk} is not installed under {}",
-        root.display()
-    );
-    let (properties, property_prefixes) = sdk_properties(&root, sdk);
-    let (variables, variable_prefixes) = tool_variables(&root, sdk);
-    let reads = EnvironmentReads {
-        properties,
-        property_prefixes,
-        variables,
-        variable_prefixes,
-    };
-    scans.lock().unwrap().insert(sdk.to_string(), reads.clone());
-    reads
+    static SCANS: OnceLock<Mutex<BTreeMap<String, std::sync::Arc<OnceLock<EnvironmentReads>>>>> =
+        OnceLock::new();
+    let cell = SCANS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .entry(sdk.to_string())
+        .or_default()
+        .clone();
+    cell.get_or_init(|| {
+        let root = common::dotnet_root_from_env();
+        assert!(
+            installed(sdk),
+            "the SDK {sdk} is not installed under {}",
+            root.display()
+        );
+        let (properties, property_prefixes) = sdk_properties(&root, sdk);
+        let (variables, variable_prefixes) = tool_variables(&root, sdk);
+        EnvironmentReads {
+            properties,
+            property_prefixes,
+            variables,
+            variable_prefixes,
+        }
+    })
+    .clone()
 }
 
-/// `reads` as the pinned file spells the sections of the SDK `sdk`.
-fn render(sdk: &str, reads: &EnvironmentReads) -> String {
-    let mut out = String::new();
+/// `reads` as the pinned file spells the sections of the SDK `sdk` on the
+/// platform `platform`, by section header.
+fn render(sdk: &str, platform: &str, reads: &EnvironmentReads) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
     for (list, set) in [
         ("properties", &reads.properties),
         ("property-prefixes", &reads.property_prefixes),
         ("variables", &reads.variables),
         ("variable-prefixes", &reads.variable_prefixes),
     ] {
-        out.push_str(&format!("[{sdk} {list}]\n"));
+        let mut section = String::new();
         for name in set {
             // What the file's reading takes for a name.
             assert!(
                 !name.is_empty() && !name.contains(char::is_whitespace),
                 "{sdk} {list}: {name:?} cannot be pinned"
             );
-            out.push_str(name);
-            out.push('\n');
+            section.push_str(name);
+            section.push('\n');
+        }
+        out.insert(format!("[{sdk} {list} {platform}]"), section);
+    }
+    out
+}
+
+/// The sections of the pinned file's text, by header, in order.
+fn sections(text: &str) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    let mut current: Option<String> = None;
+    for line in text.lines() {
+        if line.is_empty() || line == "#" || line.starts_with("# ") {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') && line.contains(' ') {
+            current = Some(line.to_string());
+            out.insert(line.to_string(), String::new());
+        } else if let Some(header) = &current {
+            let section = out.get_mut(header).unwrap();
+            section.push_str(line);
+            section.push('\n');
         }
     }
     out
 }
 
-/// Every SDK that must be pinned is, exactly as its scan reads it.
+/// The SDK a section header names.
+fn header_sdk(header: &str) -> &str {
+    header
+        .trim_start_matches('[')
+        .split(' ')
+        .next()
+        .unwrap_or_default()
+}
+
+/// The platform a section header names.
+fn header_platform(header: &str) -> &str {
+    header
+        .trim_end_matches(']')
+        .split(' ')
+        .nth(2)
+        .unwrap_or_default()
+}
+
+/// Every installed SDK that must be pinned is, on this platform, exactly as
+/// its scan reads it; every other one that must be pinned is, on some
+/// platform. Regeneration rewrites this platform's sections of the installed
+/// SDKs alone, keeping every other platform's and those of an SDK no longer
+/// installed (a bump grades the new one before it retires the old), and
+/// drops those of an SDK neither verified nor the devshell's.
 #[test]
 fn the_pinned_reads_are_each_sdk_s_own() {
     let file = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/fsc_environment_reads.txt");
     let sdks = sdks_to_pin();
+    let platform = platform();
+    let text = host_fs::read_to_string(&file).unwrap_or_default();
+    let pinned = sections(&text);
+    let scans: BTreeMap<String, String> = sdks
+        .iter()
+        .filter(|sdk| installed(sdk))
+        .flat_map(|sdk| render(sdk, &platform, &scanned(sdk)))
+        .collect();
     if std::env::var_os("BORZOI_UPDATE_MANIFESTS").is_some() {
-        let pinned = host_fs::read_to_string(&file).unwrap_or_default();
-        let header: String = pinned
+        let header: String = text
             .lines()
             .take_while(|line| line.starts_with('#'))
             .map(|line| format!("{line}\n"))
             .collect();
-        let body: String = sdks.iter().map(|sdk| render(sdk, &scanned(sdk))).collect();
+        let mut all: BTreeMap<String, String> = pinned
+            .into_iter()
+            .filter(|(header, _)| {
+                !header_platform(header).is_empty()
+                    && sdks.contains(header_sdk(header))
+                    && !(installed(header_sdk(header)) && header_platform(header) == platform)
+            })
+            .collect();
+        all.extend(scans);
+        let body: String = all
+            .iter()
+            .map(|(header, section)| format!("{header}\n{section}"))
+            .collect();
         std::fs::write(&file, format!("{header}{body}")).unwrap();
         return;
     }
-    let pinned = parse_environment_reads(&host_fs::read_to_string(&file).unwrap());
     let mut failures = Vec::new();
-    for sdk in &sdks {
-        let scan = scanned(sdk);
-        match pinned.get(sdk.as_str()) {
-            None => failures.push(format!("{sdk}: not pinned")),
-            Some(pin) if *pin != scan => {
-                let diff = |list: &str, a: &BTreeSet<String>, b: &BTreeSet<String>| {
-                    let extra: Vec<_> = a.difference(b).take(10).collect();
-                    let missing: Vec<_> = b.difference(a).take(10).collect();
-                    (!extra.is_empty() || !missing.is_empty()).then(|| {
-                        format!("{sdk} {list}: pinned but not scanned {extra:?}; scanned but not pinned {missing:?}")
-                    })
-                };
-                failures.extend(
-                    [
-                        diff("properties", &pin.properties, &scan.properties),
-                        diff(
-                            "property-prefixes",
-                            &pin.property_prefixes,
-                            &scan.property_prefixes,
-                        ),
-                        diff("variables", &pin.variables, &scan.variables),
-                        diff(
-                            "variable-prefixes",
-                            &pin.variable_prefixes,
-                            &scan.variable_prefixes,
-                        ),
-                    ]
-                    .into_iter()
-                    .flatten(),
-                );
+    for (header, scan) in &scans {
+        match pinned.get(header) {
+            None => failures.push(format!("{header}: not pinned")),
+            Some(pin) if pin != scan => {
+                let lines = |s: &str| s.lines().map(str::to_string).collect::<BTreeSet<_>>();
+                let (pin, scan) = (lines(pin), lines(scan));
+                let extra: Vec<_> = pin.difference(&scan).take(10).collect();
+                let missing: Vec<_> = scan.difference(&pin).take(10).collect();
+                failures.push(format!(
+                    "{header}: pinned but not scanned {extra:?}; scanned but not pinned {missing:?}"
+                ));
             }
             Some(_) => {}
+        }
+    }
+    for sdk in sdks.iter().filter(|sdk| !installed(sdk)) {
+        if !pinned.keys().any(|header| header_sdk(header) == sdk) {
+            failures.push(format!("{sdk}: not installed, and pinned on no platform"));
+        }
+    }
+    if !failures.is_empty() {
+        // This platform's scan whole, for a platform the regenerating
+        // machine is not: paste its sections into the file.
+        eprintln!("the scan on {platform}:");
+        for (header, section) in &scans {
+            eprint!("{header}\n{section}");
         }
     }
     assert!(
@@ -513,6 +645,23 @@ fn the_pinned_reads_are_each_sdk_s_own() {
         "the pinned environment reads are not the SDKs' own; regenerate with\n  {REGENERATE}\n{}",
         failures.join("\n")
     );
+}
+
+/// The pin's lists are its sections' union over platforms, so a variable a
+/// tool reads on one platform declines on every platform.
+#[test]
+fn the_lists_are_the_union_over_platforms() {
+    let parsed = parse_environment_reads(
+        "# a comment\n[9.0.100 variables linux-x86_64]\nonly_linux\nshared\n\
+         [9.0.100 variables macos-aarch64]\nonly_macos\nshared\n\
+         [9.0.100 properties macos-aarch64]\nassemblyname\n",
+    );
+    let reads = &parsed["9.0.100"];
+    assert_eq!(
+        reads.variables,
+        BTreeSet::from(["only_linux".into(), "only_macos".into(), "shared".into()])
+    );
+    assert_eq!(reads.properties, BTreeSet::from(["assemblyname".into()]));
 }
 
 /// Every verified SDK's reads are pinned, so the derivation never commits
@@ -568,8 +717,9 @@ fn the_scan_finds_the_known_reads() {
         // NuGet
         "nuget_packages",
         "nuget_fallback_packages",
-        // MSBuild
+        // MSBuild, by an environment read and by a property getter
         "msbuildnoinprocnode",
+        "msbuildtreatwarningsaserrors",
         "msbuilddisablefeaturesfromversion",
         // the CLI
         "dotnet_cli_telemetry_optout",

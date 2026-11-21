@@ -346,6 +346,19 @@ fn environment_cases(listed: usize, inert: usize) -> Vec<Case> {
             });
         }
     }
+    // The loader's and the launcher's, which no scan of the install sees.
+    for (name, value) in [
+        ("LD_PRELOAD", "/nonexistent/borzoi/evil.so"),
+        ("DYLD_INSERT_LIBRARIES", "/nonexistent/borzoi/evil.dylib"),
+        ("BASH_ENV", "/nonexistent/borzoi/evil.sh"),
+        ("BASH_FUNC_dotnet%%", "() { exit 1; }"),
+        ("ENV", "/nonexistent/borzoi/evil.sh"),
+    ] {
+        cases.push(Case {
+            must_decline: true,
+            ..Case::variables(&[(name, value)])
+        });
+    }
     let reads = graded_reads();
     let properties: BTreeSet<&String> = reads.iter().flat_map(|r| &r.properties).collect();
     let variables: BTreeSet<&String> = reads.iter().flat_map(|r| &r.variables).collect();
@@ -1222,15 +1235,20 @@ fn unsettable(case: &Case) -> Vec<(String, String)> {
 
 /// `case`'s variables, in order, as the build's inputs where the oracle sets
 /// them (through [`BuildInputs::env`] for a name on its list, else
-/// [`BuildInputs::unlisted_env`]), and the rest: those it refuses, and a
-/// second spelling of a name already set (which a build's environment holds,
-/// and the oracle does not take twice). `None` when a value cannot be
-/// carried.
+/// [`BuildInputs::unlisted_env`] for one the derivation calls inert), and the
+/// rest: a name on no list the derivation declines (it is never built, so
+/// neither the restore nor the build need run under it), one the oracle
+/// refuses, and a second spelling of a name already set (which a build's
+/// environment holds, and the oracle does not take twice). `None` when a
+/// value cannot be carried.
 fn split_variables(case: &Case) -> Option<(BuildInputs, Vec<(String, String)>)> {
     let mut inputs = BuildInputs::new();
     let mut rest = Vec::new();
     for (name, value) in &case.variables {
         let set = match inputs.clone().env(name, value) {
+            Err(InputError::NotAnInput(_)) if class_of(name) != Some(VariableClass::Inert) => {
+                Err(InputError::Refused(name.clone()))
+            }
             Err(InputError::NotAnInput(_)) => inputs.clone().unlisted_env(name, value),
             other => other,
         };
@@ -1659,10 +1677,33 @@ fn the_grading_environment_is_admitted() {
 
 /// `cases`, but for those `BORZOI_FSC_NAME_ONLY` (a name) leaves out.
 fn only(cases: Vec<Case>) -> Vec<Case> {
-    match std::env::var("BORZOI_FSC_NAME_ONLY") {
-        Ok(name) => cases.into_iter().filter(|c| c.name == name).collect(),
-        Err(_) => cases,
-    }
+    only_named(cases, std::env::var("BORZOI_FSC_NAME_ONLY").ok().as_deref())
+}
+
+/// `cases`, but for those that set no name `name` (as the case's name, or one
+/// of its variables'), when one is given. Selecting nothing is a mistake, so
+/// it fails rather than grade nothing.
+fn only_named(cases: Vec<Case>, name: Option<&str>) -> Vec<Case> {
+    let Some(name) = name else {
+        return cases;
+    };
+    let kept: Vec<Case> = cases
+        .into_iter()
+        .filter(|c| c.name == name || c.variables.iter().any(|(n, _)| n == name))
+        .collect();
+    assert!(!kept.is_empty(), "no case sets {name:?}");
+    kept
+}
+
+/// Selecting a variable's name keeps the cases that set it.
+#[test]
+fn a_variable_is_selected_by_its_name() {
+    assert!(!only_named(cases(), Some("LANG")).is_empty());
+    assert!(
+        only_named(cases(), Some("LANG"))
+            .iter()
+            .all(|c| c.variables.iter().any(|(n, _)| n == "LANG"))
+    );
 }
 
 fn run(cases: &[Case]) {
@@ -1723,6 +1764,16 @@ fn committed_names_survive_perturbation() {
         let i = rng.below(rest.len());
         chosen.push(rest.swap_remove(i));
     }
+    // A bounded hostile sample beside them: the first environment and the
+    // first variable name of each dimension (`deep_hostile_environment`
+    // grades every one).
+    let mut dimensions = BTreeSet::new();
+    chosen.extend(
+        hostile_environment_cases()
+            .into_iter()
+            .filter(|(_, dimension)| dimensions.insert(*dimension))
+            .map(|(case, _)| case),
+    );
     run(&only(chosen));
 }
 

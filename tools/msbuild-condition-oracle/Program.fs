@@ -1757,7 +1757,8 @@ let private decode (il: byte[]) : Instruction list =
 /// The environment variables the managed assembly at `path` may read, from
 /// its IL. A read is a call to a method whose name holds
 /// `EnvironmentVariable` (`Environment.GetEnvironmentVariable`, NuGet's and
-/// the CLI's readers alike), or to a method of the assembly that passes one of
+/// the CLI's readers alike), or that reads a property by name
+/// (`GetPropertyValue` and its kin: a variable is a property), or to a method of the assembly that passes one of
 /// its own arguments to such a call (a helper, followed to a fixed point). The
 /// names are the strings loaded in the eight instructions before the call:
 /// each `ldstr`, and each `ldsfld` of a static field some method assigns a
@@ -1824,6 +1825,13 @@ let private envReadsOf (path: string) =
                           Reflection.Metadata.Ecma335.MetadataTokens.GetToken(entity), decode il ]
 
         let isCall (op: int16) = op = 0x28s || op = 0x6Fs || op = 0x73s
+
+        // A read of a property by name from MSBuild's project or build
+        // engine (`ProjectInstance.GetPropertyValue("MSBuildTreatWarningsAsErrors")`):
+        // every variable is a property, so the name is read from the
+        // environment too.
+        let propertyGetter (name: string) =
+            name.StartsWith "Get" && name.Contains "Propert"
         let isLdarg (op: int16) = (op >= 0x02s && op <= 0x05s) || op = 0x0Es || op = 0xFE09s
 
         // `ldstr`; `stsfld`: a static field holding a literal.
@@ -1872,6 +1880,7 @@ let private envReadsOf (path: string) =
 
                         let reads =
                             name.Contains "EnvironmentVariable"
+                            || propertyGetter name
                             || (def |> Option.exists readers.Contains)
 
                         if reads then

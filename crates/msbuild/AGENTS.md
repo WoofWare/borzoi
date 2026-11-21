@@ -149,8 +149,12 @@ per verified SDK in `src/fsc_environment_reads.txt` (scanned from the SDK's
 documents and binaries by `tests/fsc_environment_reads.rs`, which fails until
 an SDK bump is rescanned, the binaries through the condition oracle's
 `envReads` op), unless it is the toolchain's own, an allowed property or
-graded inert; any other is inert by construction, which the grader checks by
-setting names off both lists and requiring fsc's arguments unchanged. `fsproj_assembly_name_perturbation_diff`
+graded inert, and the loader's and a script launcher's (`LD_`, `DYLD_`,
+`BASH_ENV`, …, which run before any code of the install) always decline;
+any other is inert by construction, which the grader checks by setting
+names off both lists and requiring fsc's arguments unchanged. The pin is
+keyed by platform (the binaries differ), each list the union over
+platforms; a platform's sections are regenerated on it. `fsproj_assembly_name_perturbation_diff`
 grades every listed name: it sets each one, everywhere it can be set, to
 line-break and option-shaped values, and holds each commit to fsc's `-o:`
 (its ignored `deep_every_perturbation` covers every case, and with
