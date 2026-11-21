@@ -1029,11 +1029,19 @@ fn render_rejection_cause(cause: &RejectionCause, certain: bool) -> String {
             attribute,
             value,
         } => {
-            let refuses = if certain { "refuses" } else { "may refuse" };
-            format!(
-                "a `<UsingTask>` of `{task}` whose `{attribute}` reads `{value}`, which MSBuild \
-                 {refuses} to register, so MSBuild {rejects} the whole project"
-            )
+            // A possible refusal rests on a value the walk holds that MSBuild
+            // may not read: it is named as one the attribute may read.
+            if certain {
+                format!(
+                    "a `<UsingTask>` of `{task}` whose `{attribute}` reads `{value}`, which \
+                     MSBuild refuses to register, so MSBuild {rejects} the whole project"
+                )
+            } else {
+                format!(
+                    "a `<UsingTask>` of `{task}` whose `{attribute}` may read `{value}`, which \
+                     MSBuild would refuse to register, so MSBuild {rejects} the whole project"
+                )
+            }
         }
         RejectionCause::UsingTaskParameterCollision {
             task,
