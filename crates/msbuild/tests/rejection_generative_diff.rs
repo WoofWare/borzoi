@@ -352,9 +352,89 @@ fn expressions(piece: &str) -> Vec<&str> {
     found
 }
 
+/// The walk's reading of `writes`, the property writes before a site, and
+/// of `site` where it is given: a site's condition reads the names before
+/// the site, which may unsettle them after it; a text in the site reads them
+/// after what the site writes before it.
+fn read_before_site(
+    project_path: &std::path::Path,
+    writes: &str,
+    site: Option<&str>,
+) -> borzoi_msbuild::ParsedProject {
+    let site = site.unwrap_or("");
+    let xml = format!(
+        "<Project>\n  <PropertyGroup>{writes}</PropertyGroup>\n  {ITEMS}\n  {site}\n</Project>\n"
+    );
+    std::fs::write(project_path, &xml).unwrap();
+    parse_fsproj_with_imports(
+        &borzoi_msbuild::ProjectFile::buffer(project_path, &xml)
+            .expect("a project path spelt as its full path"),
+        &HashMap::new(),
+        &common::oracle_environment(),
+        None,
+        None,
+    )
+    .expect("well-formed")
+}
+
+/// The generated names `parsed` holds no certain value of.
+fn unsure_names(parsed: &borzoi_msbuild::ParsedProject) -> Vec<&'static str> {
+    ["A", "B", "U", "X"]
+        .into_iter()
+        .filter(|name| !matches!(parsed.property(name), PropertyRead::Value(_)))
+        .collect()
+}
+
+/// The names the attribution strikes are those the walk is not sure of at
+/// the site, not after it: an import the walk cannot decide unsettles every
+/// name read after it, `A` and `B` among them, though the site's condition
+/// read them certain. Each name struck adds places to the bounded search over
+/// assignments, and striking names the condition read certain can put the
+/// one assignment that isolates a throw on an unsure name outside that bound.
+#[test]
+fn the_names_struck_are_those_unsure_at_the_site() {
+    let tmp = TempDir::new().unwrap();
+    let dir = borzoi_msbuild::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    std::fs::write(
+        dir.join("there.props"),
+        "<Project><PropertyGroup><Delta>d</Delta></PropertyGroup></Project>",
+    )
+    .unwrap();
+    let project_path = dir.join("Demo.fsproj");
+    let writes = format!(
+        "<A>2.0</A><B>1.2.3</B><U></U><U Condition=\"{}\">\n</U>\
+         <X>$([System.String]::Copy('Debug'))</X>",
+        xml_attribute(UNDECIDED_TRUE)
+    );
+    assert_eq!(
+        unsure_names(&read_before_site(&project_path, &writes, None)),
+        ["U", "X"]
+    );
+    // Read after the import, as the final table is, every name is unsure.
+    let xml = format!(
+        "<Project>\n  <PropertyGroup>{writes}</PropertyGroup>\n  {ITEMS}\n  \
+         <Import Project=\"there.props\" Condition=\"{}\" />\n</Project>\n",
+        xml_attribute(UNDECIDED_TRUE)
+    );
+    std::fs::write(&project_path, &xml).unwrap();
+    let after = parse_fsproj_with_imports(
+        &borzoi_msbuild::ProjectFile::buffer(&project_path, &xml).unwrap(),
+        &HashMap::new(),
+        &common::oracle_environment(),
+        None,
+        None,
+    )
+    .expect("well-formed");
+    assert_eq!(unsure_names(&after), ["A", "B", "U", "X"]);
+}
+
 /// `xml` with each line cut to a readable length: a long hostile value
-/// otherwise buries the site a failure is about.
+/// otherwise buries the site a failure is about. `BORZOI_REJECTION_FULL`
+/// set prints it whole, to reproduce a failure from.
 fn elide(xml: &str) -> String {
+    if std::env::var_os("BORZOI_REJECTION_FULL").is_some() {
+        return xml.to_owned();
+    }
     xml.lines()
         .map(|line| match line.char_indices().nth(400) {
             Some((at, _)) => format!("{}… ({} bytes)", &line[..at], line.len()),
@@ -834,6 +914,19 @@ const WITNESSES: &[Witness] = &[
         gap: "unmodelled-body",
         both_strikes: true,
     },
+    // The first gap, at an import the walk cannot decide, after which every
+    // name is unsure though only `U` and `X` are at the site: the rejection
+    // on `X`'s value shows by striking `$(X.Substring(2))` alone, out of reach
+    // of the bounded assignments over every name's expressions (soak seed
+    // 1795204238191503702).
+    Witness {
+        values: ["2.0", "1.2.3", "", "\n"],
+        template: "<Import Project=\"there.props\" Condition=\"{c}\" />",
+        body: "",
+        gate: "((('$([MSBuild]::VersionLessThan($(A).0, 2.0))' And $([System.String]::IsNullOrWhiteSpace('\u{a0}')) And $(B) <= '$([System.String]::IsNullOrEmpty(null))') And (HasTrailingSlash('x$([System.String]::IsNullOrWhiteSpace(\"\u{a0}\"))') Or true Or '$(B.Split(\";\")[1].Length)') And $([System.String]::IsNullOrWhiteSpace('\u{a0}'))) Or '$(X.Substring(2))' Or $([MSBuild]::VersionLessThan(`$(A)`, `2.0`)))",
+        gap: "uncertain-value",
+        both_strikes: false,
+    },
 ];
 
 /// The long value of [`VARIED_VALUES`] has room for every indexer
@@ -1085,26 +1178,19 @@ fn project_sweep(
             // some value, which the walk's judgement leaves to them: a throw
             // on the `""` the walk substitutes is no claim.
             // The walk's reading at the site, before a later write puts a
-            // name's plain value back: the property pass's. The item pass
-            // reads the final table.
-            let at_site = if later.is_empty() || item_pass {
+            // name's plain value back: the property pass's. A site's own
+            // condition is read before anything the site writes or imports
+            // (an import the walk cannot decide unsettles every name after
+            // it); a text, after what the site writes before it. The item
+            // pass reads the final table.
+            let at_site = if item_pass {
+                None
+            } else if template.contains("{c}") {
+                Some(read_before_site(&project_path, &writes, None))
+            } else if later.is_empty() {
                 None
             } else {
-                let xml = format!(
-                    "<Project>\n  <PropertyGroup>{writes}</PropertyGroup>\n  {ITEMS}\n  {site}\n</Project>\n"
-                );
-                std::fs::write(&project_path, &xml).unwrap();
-                Some(
-                    parse_fsproj_with_imports(
-                        &borzoi_msbuild::ProjectFile::buffer(&project_path, &xml)
-                            .expect("a project path spelt as its full path"),
-                        &HashMap::new(),
-                        &common::oracle_environment(),
-                        None,
-                        None,
-                    )
-                    .expect("well-formed"),
-                )
+                Some(read_before_site(&project_path, &writes, Some(&site)))
             };
             let parsed = at_site.as_ref().unwrap_or(&parsed);
             let as_held = |name: &str, drawn: &hostile::Drawn<String>, unheld: &str| {
@@ -1161,10 +1247,7 @@ fn project_sweep(
             // it survives with every part reading such a name struck from the
             // site: a condition's leaf by a boolean (true for every one, then
             // false), a text's expression by a value.
-            let unsure_names: Vec<&str> = ["A", "B", "U", "X"]
-                .into_iter()
-                .filter(|name| !matches!(parsed.property(name), PropertyRead::Value(_)))
-                .collect();
+            let unsure_names = unsure_names(parsed);
             let reads_unsure = |text: &str| {
                 property_references(text)
                     .iter()
