@@ -5338,7 +5338,10 @@ fn emit_unsupported_condition(node: Node<'_, '_>, state: &mut State<'_>) {
 /// a spurious degrade, never a wrong commit. `OS` is here for non-unix
 /// hosts only (unix seeds it exactly); `DOTNET_HOST_PATH` is injected by
 /// the dotnet muxer for its children, so a build run via `dotnet` sees it
-/// even when the caller's snapshot lacks it.
+/// even when the caller's snapshot lacks it; `LocalAppData` MSBuild seeds
+/// from the profile when the environment lacks it
+/// (`Utilities.GetEnvironmentProperties`), the one name it so seeds that
+/// the prefix does not cover.
 ///
 /// One pinned exception to the prefix: `MSBuildIsRestoring` (probed:
 /// `[$(MSBuildIsRestoring)]` on the build/`-getProperty` entrypoint reads
@@ -5356,7 +5359,11 @@ pub(crate) fn is_toolset_initial_property_name(lower: &str) -> bool {
     lower.starts_with("msbuild")
         || matches!(
             lower,
-            "visualstudioversion" | "roslyntargetspath" | "os" | "dotnet_host_path"
+            "visualstudioversion"
+                | "roslyntargetspath"
+                | "os"
+                | "dotnet_host_path"
+                | "localappdata"
         )
 }
 
@@ -5485,11 +5492,13 @@ pub(crate) fn toolset_assembly_version(version_dir: &Path) -> Option<&'static st
     toolset_product_version(version_dir)
 }
 
-/// The property names MSBuild's toolset defines, non-empty, before any
-/// project text is evaluated: the toolset seeds of
-/// [`State::seed_toolset_properties`], among them `VisualStudioVersion` and
-/// `MSBuildAssemblyVersion` (each seeded only where the SDK's version says
-/// what the toolset defines). Lowercase.
+/// The property names MSBuild defines, non-empty, before any project text is
+/// evaluated: the toolset seeds of [`State::seed_toolset_properties`], among
+/// them `VisualStudioVersion` and `MSBuildAssemblyVersion` (each seeded only
+/// where the SDK's version says what the toolset defines), and the names
+/// MSBuild's evaluator seeds from the process's profile when the environment
+/// lacks them (`Utilities.GetEnvironmentProperties`: `LocalAppData` and the
+/// extension paths). Lowercase.
 ///
 /// Whenever the walk holds no value for one of these, the real build still
 /// does, so the absence is never a fact (see
@@ -5507,8 +5516,10 @@ pub(crate) const TOOLSET_PREDEFINED_NAMES: &[&str] = &[
     "msbuildassemblyversion",
     "msbuildextensionspath",
     "msbuildextensionspath32",
+    "msbuildextensionspath64",
     "msbuildsdkspath",
     "visualstudioversion",
+    "localappdata",
 ];
 
 fn is_toolset_predefined_name(lower: &str) -> bool {
