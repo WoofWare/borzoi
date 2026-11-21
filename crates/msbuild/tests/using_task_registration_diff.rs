@@ -98,31 +98,46 @@ fn grade(oracle: &mut Oracle, writes: &str, body: &str, doubt: Doubt) -> Graded 
     )
     .expect("well-formed");
     let walk = parsed.rejection.as_ref().map(|r| r.certainty);
+    // Every certain registration refusal the walk reports, each a diagnostic
+    // the LSP renders, names a construct MSBuild refuses alone; and the value
+    // it keeps is bounded.
+    for diagnostic in &parsed.diagnostics {
+        let (borzoi_msbuild::DiagnosticKind::Rejected { cause }
+        | borzoi_msbuild::DiagnosticKind::MayBeRejected { cause }) = &diagnostic.kind
+        else {
+            continue;
+        };
+        if let borzoi_msbuild::RejectionCause::UsingTaskRegistration { value, .. } = cause {
+            assert!(
+                value.len() <= 256 + "…".len(),
+                "a refusal keeps a value of {} bytes: {xml}",
+                value.len()
+            );
+        }
+        if matches!(
+            diagnostic.kind,
+            borzoi_msbuild::DiagnosticKind::Rejected { .. }
+        ) && !matches!(cause, borzoi_msbuild::RejectionCause::LoadTime(_))
+        {
+            assert!(
+                code.is_some(),
+                "MSBuild evaluates, and the walk claims a refusal: {xml}\n{diagnostic:#?}"
+            );
+            let rejection = borzoi_msbuild::Rejection {
+                certainty: RejectionCertainty::Certain,
+                cause: cause.clone(),
+                span: diagnostic.span.clone(),
+                origin: diagnostic.origin.clone(),
+            };
+            assert_msbuild_refuses_alone(oracle, writes, &rejection, &xml);
+        }
+    }
     let v_unheld = writes.contains("<V>") && !parsed.properties.contains_key("V");
-    if let Some(code) = &code {
+    if code.is_some() {
         assert!(
             walk.is_some() || v_unheld || doubt == Doubt::Differs,
             "MSBuild rejects, and the walk claims nothing: {xml}"
         );
-        // A certain rejection names a construct MSBuild refuses. The loader
-        // refuses a file before MSBuild evaluates any of it, so its refusal
-        // is the one MSBuild reports.
-        if let Some(rejection) = parsed
-            .rejection
-            .as_ref()
-            .filter(|r| r.certainty == RejectionCertainty::Certain)
-        {
-            if matches!(rejection.cause, borzoi_msbuild::RejectionCause::LoadTime(_)) {
-                assert_eq!(
-                    Some(code),
-                    code_of(&rejection.cause).as_ref(),
-                    "MSBuild rejects with {code}, and the walk claims the loader refuses \
-                     otherwise: {xml}\n{rejection:#?}"
-                );
-            } else {
-                assert_msbuild_refuses_alone(oracle, writes, rejection, &xml);
-            }
-        }
     } else {
         assert_ne!(
             walk,
@@ -399,16 +414,16 @@ fn attribute_at(xml: &str, rejected: &common::DesignTimeRejection) -> Option<Str
     (!name.is_empty() && xml[offset + name.len()..].starts_with('=')).then_some(name)
 }
 
-/// The error MSBuild rejects a project with, as [`Oracle::design_time_rejection_code`]
-/// reports it, for a `cause` the walk claims certainly: `MSB4184` for an
-/// expression that throws, `MSB4022` for an attribute whose value the
-/// registration does not take, `MSB4069` for a parameter type it does not
-/// resolve, `MSB4067` for a body under no task factory, and the loader's
-/// message, which carries no code, for what the loader refuses. A condition
+/// The error MSBuild rejects a construct with, alone ([`alone`]), as
+/// [`Oracle::design_time_rejection_code`] reports it, for a `cause` the walk
+/// claims certainly: `MSB4184` for an expression that throws, `MSB1025` for
+/// two parameters one name to its registry, `MSB4022` for an attribute whose
+/// value the registration does not take, `MSB4069` for a parameter type it
+/// does not resolve, `MSB4067` for a body under no task factory. A condition
 /// MSBuild refuses has a code by why it does, which the cause does not carry
 /// (`condition_diff` grades conditions): `None`, its place alone graded.
 fn code_of(cause: &borzoi_msbuild::RejectionCause) -> Option<String> {
-    use borzoi_msbuild::{LoadTimeError, RejectionCause};
+    use borzoi_msbuild::RejectionCause;
     Some(match cause {
         RejectionCause::ThrowingExpression { .. } => "MSB4184".to_owned(),
         RejectionCause::UsingTaskParameterCollision { .. } => "MSB1025".to_owned(),
@@ -420,26 +435,6 @@ fn code_of(cause: &borzoi_msbuild::RejectionCause) -> Option<String> {
             _ => "MSB4022",
         }
         .to_owned(),
-        RejectionCause::LoadTime(LoadTimeError::Malformed { element, rule })
-            if element == "UsingTask" =>
-        {
-            match *rule {
-                "`TaskName` is missing or empty" => "no code: \"Task name cannot be empty.\"",
-                "not exactly one of `AssemblyName` and `AssemblyFile`" => "MSB4072",
-                "a `<ParameterGroup>` or `<Task>` without a `TaskFactory`" => "MSB4035",
-                other => {
-                    return Some(format!(
-                        "a loader refusal the differential does not expect: {other}"
-                    ));
-                }
-            }
-            .to_owned()
-        }
-        RejectionCause::LoadTime(LoadTimeError::UnrecognizedChild { parent, .. })
-            if parent == "UsingTask" =>
-        {
-            "MSB4067".to_owned()
-        }
         RejectionCause::IllegalCondition { .. } => return None,
         other => panic!("a refusal the registration differential does not expect: {other:?}"),
     })
@@ -820,6 +815,39 @@ fn hand_picked_registrations() {
             true,
             Some(Certain),
         ),
+        // A padded reference, which MSBuild expands to empty, and the walk
+        // does not model: a decline.
+        (
+            format!(
+                "<PropertyGroup><Flag>true</Flag></PropertyGroup>{}",
+                inline_task(
+                    "",
+                    "<ParameterGroup><A Required=\"$( Flag)\" /></ParameterGroup><Task>x</Task>"
+                )
+            ),
+            true,
+            Some(Possible),
+        ),
+        // A value whose expansion holds `$(`: MSBuild does not expand it
+        // again, so `$(Dollar)(Bool)` is the text `$(Bool)`, no boolean.
+        (
+            format!(
+                "<PropertyGroup><Dollar>$</Dollar><Bool>true</Bool></PropertyGroup>{}",
+                inline_task(
+                    "",
+                    "<ParameterGroup><A Required=\"$(Dollar)(Bool)\" /></ParameterGroup><Task>x</Task>"
+                )
+            ),
+            true,
+            Some(Certain),
+        ),
+        // Two parameters spelt alike: the loader's refusal, and no registry
+        // collision besides (every certain diagnostic is graded alone).
+        (
+            inline_task("", "<ParameterGroup><A /><A /></ParameterGroup><Task>x</Task>"),
+            true,
+            Some(Certain),
+        ),
         // A child the loader does not take, where no parse configuration can
         // have it skipped
         // ([`a_child_a_parse_configuration_may_skip_needs_no_certain_factory`]).
@@ -844,6 +872,25 @@ fn hand_picked_registrations() {
     }
 }
 
+/// The registration expands a value for its rules alone: `Runtime`,
+/// `Architecture` and `Override`, which no rule judges, are read for their
+/// throws and not expanded again.
+#[test]
+fn attributes_no_rule_judges_are_expanded_once() {
+    let xml = "<Project><UsingTask TaskName=\"X\" AssemblyFile=\"y.dll\" Runtime=\"NET\" \
+               Architecture=\"x64\" Override=\"true\" /></Project>";
+    let (_, costs) = borzoi_msbuild::test_support::count_walk_costs(|| {
+        borzoi_msbuild::parse_fsproj(
+            &borzoi_msbuild::ProjectFile::buffer(std::path::Path::new("/p/p.fsproj"), xml)
+                .expect("a project path spelt as its full path"),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .expect("well-formed")
+    });
+    assert_eq!(costs.registration_expansions, 2, "{costs:?}");
+}
+
 /// A `<UsingTask>` whose child is one the loader does not take, beside a
 /// `Directory.Parse.config`, which a newer MSBuild may read and skip the
 /// child by: an unknown element, or a `<Task>` under a prefix, which the
@@ -860,6 +907,8 @@ fn a_child_a_parse_configuration_may_skip_needs_no_certain_factory() {
             "<UsingTask {INLINE}><ext:Task xmlns:ext=\"urn:x\" Evaluate=\"off\">x</ext:Task>\
              </UsingTask>"
         ),
+        "<ext:UsingTask xmlns:ext=\"urn:x\" TaskName=\"$(Missing)\" AssemblyFile=\"y.dll\" />"
+            .to_owned(),
     ] {
         let tmp = tempfile::TempDir::new().unwrap();
         let dir = borzoi_msbuild::observed::host_fs::canonicalize(tmp.path()).unwrap();
@@ -1083,6 +1132,8 @@ const SPECIAL: &[&str] = &[
     "$(F)",
     "Prefix$(T)",
     "false$(Missing)",
+    "$( P)",
+    "$(D)(B)",
     "$([System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture)",
     "$(Empty)",
     "%(M)",
@@ -1138,7 +1189,7 @@ fn mostly(rng: &mut SplitMix64, value: &str) -> String {
 fn composite_document(rng: &mut SplitMix64) -> String {
     let mut children = Vec::new();
     if rng.below(3) != 0 {
-        let mut names = vec!["A", "B", "a"];
+        let mut names = vec!["A", "B", "a", "A"];
         let count = 1 + rng.below(3);
         let mut parameters = String::new();
         for _ in 0..count {
@@ -1217,12 +1268,13 @@ const CONDITIONS: &[&str] = &["true", "false", "'É' == 'é'", "1", "'$(P[9])' =
 
 /// [`COMPOSITE_WRITES`] with each doubted name holding only the value the walk
 /// holds.
-const COMPOSITE_HELD: &str = "<P>a</P><At>@</At><F>first</F><T>y</T>";
+const COMPOSITE_HELD: &str = "<P>a</P><At>@</At><F>first</F><T>y</T><D>$</D><B>true</B>";
 
 /// The property writes every [`composite_sweep`] document makes.
 const COMPOSITE_WRITES: &str = "<P>a</P><At>@</At><At Condition=\"'É' == 'é'\">@</At>\
                                 <F>first</F><F Condition=\"'É' == 'é'\"></F>\
-                                <T>y</T><T Condition=\"'É' == 'é'\">@(Input->Substring(4))</T>";
+                                <T>y</T><T Condition=\"'É' == 'é'\">@(Input->Substring(4))</T>\
+                                <D>$</D><B>true</B>";
 
 /// `cases` documents of one or two whole `<UsingTask>`s from `seed`
 /// ([`composite_document`]), each graded ([`grade`]): a certain rejection
