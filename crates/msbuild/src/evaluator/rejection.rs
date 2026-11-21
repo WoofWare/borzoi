@@ -775,6 +775,9 @@ pub(super) fn judge_unwalked(node: Node<'_, '_>, dir: &Path, reached: bool, stat
         // A `<UsingTask>` resolves `Exists` against its own file's directory.
         // MSBuild expands its attributes where it takes it.
         "UsingTask" => {
+            // MSBuild evaluates its condition only once it has registered
+            // every earlier task (`State::registrations_pass`).
+            let reached = reached && state.registrations_pass;
             let gate = judge_gate(node, dir, reached, state);
             if let Some(inner) = gate.inner(reached) {
                 judge_using_task(node, inner, state);
@@ -1196,20 +1199,26 @@ enum Registered {
 /// rejection whose cause the walk cannot name, so it is only possible.
 fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
     let task: std::sync::Arc<str> = attribute(node, "TaskName").unwrap_or_default().into();
-    // Whether MSBuild reaches the next step for certain: not past a construct
-    // before the task it may already have stopped at, nor past an earlier
-    // task it may not have registered.
-    let mut reach = reached && state.rejection.is_none() && state.registrations_pass;
+    // Whether MSBuild gets past every construct before the task for certain:
+    // none it may already have stopped at, nor an earlier task it may not
+    // have registered (`State::registrations_pass`).
+    let prior = state.rejection.is_none() && state.registrations_pass;
+    // Whether it reaches the task for certain.
+    let entry = reached && prior;
+    // Whether it certainly passes every step so far, should it reach them:
+    // a step is reached for certain where `entry && ok`. A task MSBuild may
+    // skip does not stop the next, so `ok` alone carries on.
+    let mut ok = true;
     // The step of `raw`, judged by `rule`; whether MSBuild certainly passes
-    // it narrows `reach`. Returns the value as the walk holds it.
+    // it narrows `ok`. Returns the value as the walk holds it.
     let step = |state: &mut State<'_>,
-                reach: &mut bool,
+                ok: &mut bool,
                 raw: &str,
                 span: Range<usize>,
                 attribute_name: &str,
                 rule: Option<&dyn Fn(&str) -> Registered>|
      -> Option<String> {
-        judge_unwalked_text(state, raw, *reach, span.clone());
+        judge_unwalked_text(state, raw, entry && *ok, span.clone());
         let value = registration_value(raw, state);
         let passes = match (&value, rule) {
             (RegistrationValue::Certain(value), Some(rule)) => rule(value) == Registered::Takes,
@@ -1229,9 +1238,18 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
             _ => None,
         };
         if let Some(rule) = rule {
-            judge_registered(state, &task, raw, value, span, attribute_name, rule, *reach);
+            judge_registered(
+                state,
+                &task,
+                raw,
+                value,
+                span,
+                attribute_name,
+                rule,
+                entry && *ok,
+            );
         }
-        *reach &= passes;
+        *ok &= passes;
         certain
     };
     let non_empty = |value: &str| {
@@ -1290,7 +1308,7 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
     if let Some(raw) = attribute(node, "TaskName") {
         step(
             state,
-            &mut reach,
+            &mut ok,
             &raw,
             node.range(),
             "TaskName",
@@ -1302,7 +1320,7 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
         let raw = factory_raw.unwrap_or_default();
         step(
             state,
-            &mut reach,
+            &mut ok,
             &raw,
             node.range(),
             "TaskFactory",
@@ -1315,7 +1333,7 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
     ) {
         (Some(raw), _) if !raw.is_empty() => step(
             state,
-            &mut reach,
+            &mut ok,
             &assembly_file_text(&raw),
             node.range(),
             "AssemblyFile",
@@ -1323,7 +1341,7 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
         ),
         (_, Some(raw)) => step(
             state,
-            &mut reach,
+            &mut ok,
             &raw,
             node.range(),
             "AssemblyName",
@@ -1333,12 +1351,11 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
     };
     if let Some(body) = children.last().filter(|child| named(child, "Task")) {
         let body_reached = match attribute(*body, "Evaluate") {
-            None => Some(reach),
+            None => Some(entry && ok),
             Some(evaluate) => {
-                let reach_before = reach;
                 let held = step(
                     state,
-                    &mut reach,
+                    &mut ok,
                     &evaluate,
                     body.range(),
                     "Evaluate",
@@ -1356,7 +1373,7 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
                     {
                         None
                     }
-                    Some(_) => Some(reach_before && reach),
+                    Some(_) => Some(entry && ok),
                     None => Some(false),
                 }
             }
@@ -1366,7 +1383,7 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
             // MSBuild passes the body only where it expands it without
             // throwing, which the walk is certain of only for text it reads
             // and holds the value of.
-            reach &= element_inner_contents(*body).is_some_and(|text| {
+            ok &= element_inner_contents(*body).is_some_and(|text| {
                 matches!(
                     registration_value(&text, state),
                     RegistrationValue::Certain(_)
@@ -1399,7 +1416,7 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
                 if let Some(raw) = attribute(parameter, name) {
                     step(
                         state,
-                        &mut reach,
+                        &mut ok,
                         &raw,
                         parameter.range(),
                         name,
@@ -1409,7 +1426,7 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
             }
             if let Some((first, _)) = collision.filter(|(_, second)| *second == at) {
                 state.note_rejection(
-                    certain_if(reach),
+                    certain_if(entry && ok),
                     RejectionCause::UsingTaskParameterCollision {
                         task: std::sync::Arc::clone(&task),
                         first: loader::qname(parameters[first]).to_owned(),
@@ -1417,17 +1434,17 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
                     },
                     parameter.range(),
                 );
-                reach = false;
+                ok = false;
                 break;
             }
         }
     }
     for name in ["Runtime", "Architecture", "Override"] {
         if let Some(raw) = attribute(node, name) {
-            step(state, &mut reach, &raw, node.range(), name, None);
+            step(state, &mut ok, &raw, node.range(), name, None);
         }
     }
-    state.registrations_pass = reach;
+    state.registrations_pass = prior && ok;
 }
 
 /// Judge `value`, as the walk holds it (written `raw_text`), of `attribute_name` of the
@@ -1478,7 +1495,7 @@ fn judge_registered(
         RejectionCause::UsingTaskRegistration {
             task: std::sync::Arc::clone(task),
             attribute: attribute_name.to_owned(),
-            value,
+            value: value.into(),
         },
         span,
     );

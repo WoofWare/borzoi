@@ -1157,7 +1157,7 @@ fn a_possible_registration_refusal_claims_nothing_of_the_value() {
     let cause = borzoi_msbuild::RejectionCause::UsingTaskRegistration {
         task: "X".into(),
         attribute: "ParameterType".to_owned(),
-        value: "System.TimeSpan".to_owned(),
+        value: "System.TimeSpan".into(),
     };
     let possible = render_rejection_cause(&cause, false);
     assert!(possible.contains("may be unable to register"), "{possible}");
