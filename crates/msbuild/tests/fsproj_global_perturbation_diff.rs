@@ -623,6 +623,7 @@ fn evaluate_both(
             &workloads::WorkloadEnvironment {
                 user_dotnet_root: user_dotnet_root.as_deref(),
                 overrides_present: *overrides_present,
+                resolver_switched_off: false,
                 // The fixture tempdir has no global.json above it.
                 global_json: Default::default(),
                 process_architecture: None,

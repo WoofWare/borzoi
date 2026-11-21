@@ -148,10 +148,10 @@ impl std::fmt::Display for SdkResolveError {
 impl std::error::Error for SdkResolveError {}
 
 /// Locate the SDK named `sdk_name` as MSBuild's resolvers do: the running
-/// host SDK's own copy under `dotnet_root`, else a restored copy in the
-/// per-user NuGet package cache.
+/// host SDK's own copy under `dotnet_root`, else the workload pack of that
+/// id, else a restored copy in the per-user NuGet package cache.
 ///
-/// The two layouts, in the order MSBuild consults them:
+/// The three, in the order MSBuild consults them:
 ///
 /// - **`$DOTNET_ROOT`** —
 ///   `{dotnet_root}/sdk/{version}/Sdks/{sdk_name}/Sdk/Sdk.{props,targets}`.
@@ -162,6 +162,20 @@ impl std::error::Error for SdkResolveError {}
 ///   `Directory.Exists` finds it, whatever version the reference names,
 ///   and before NuGet's resolver is asked; it never tries another installed
 ///   version.
+/// - **Workload packs** — the workload SDK resolver (priority 4000, ahead of
+///   NuGet's 6000) looks the name up as a workload pack id
+///   ([`workloads::resolve_workload_pack`], under `workload_env`) wherever the
+///   running SDK does not ship it. An installed pack serves its `Sdk` folder
+///   (a root an import resolves against, which [`resolve_sdk`] returns as
+///   [`SdkResolution::Roots`], and this declines, having no entry points to
+///   serve); no pack of the name for the host passes the name on to NuGet. Its
+///   manifests load before it answers, so a workload state we cannot resolve
+///   exactly declines every name the running SDK does not ship.
+///
+/// The resolvers MSBuild loads are taken to be the running SDK's own, as it
+/// ships them under `SdkResolvers`; an environment that adds or removes
+/// resolvers is the caller's to decline (the LSP folds the variables that do
+/// into [`workloads::WorkloadEnvironment::overrides_present`]).
 /// - **NuGet package cache** —
 ///   `{nuget_packages_dir}/{sdk_name.to_ascii_lowercase()}/{version}/{Sdk,sdk}/Sdk.{props,targets}`.
 ///   Used by every NuGet-distributed SDK (`Microsoft.DotNet.Arcade.Sdk`,
@@ -193,22 +207,32 @@ impl std::error::Error for SdkResolveError {}
 ///   consulted or has no version of it.
 /// - [`SdkResolveError::UnsupportedLayout`] if the directory a resolver
 ///   serves lacks a regular `Sdk.props` or `Sdk.targets` (MSBuild then
-///   fails the import), NuGet serves a directory that does not exist, or
-///   the NuGet folder NuGet would consult is a relative path.
+///   fails the import), NuGet serves a directory that does not exist, the
+///   NuGet folder NuGet would consult is a relative path, the workload
+///   resolver's state is outside what [`workloads`] certifies, or the name is
+///   a workload pack that is not installed (MSBuild then imports nothing and
+///   adds a `MissingWorkloadPack` item, which the walk does not model).
 ///
 /// The function does not canonicalise the returned paths; they are
-/// `dotnet_root.join("sdk").join(...)` or
+/// `dotnet_root.join("sdk").join(...)`, a pack root's `packs/...` or
 /// `nuget_packages_dir.join(lowercased_name)...` literally, so the
 /// caller can tell which root won by inspecting the path components.
 ///
 /// ```no_run
 /// use std::path::PathBuf;
-/// use borzoi_msbuild::{locate_dotnet_sdk, parse_fsproj_with_imports};
+/// use borzoi_msbuild::{locate_dotnet_sdk, parse_fsproj_with_imports, workloads};
 ///
 /// let dotnet_root = PathBuf::from("/usr/local/share/dotnet");
 /// let nuget = PathBuf::from("/Users/me/.nuget/packages");
+/// let workload_env = workloads::WorkloadEnvironment {
+///     user_dotnet_root: None,
+///     overrides_present: false,
+///     resolver_switched_off: false,
+///     global_json: Default::default(),
+///     process_architecture: None,
+/// };
 /// let resolver = |name: &str, observer: &borzoi_msbuild::observed::Observer| {
-///     locate_dotnet_sdk(&dotnet_root, Some(&nuget), name, None, None, observer)
+///     locate_dotnet_sdk(&dotnet_root, Some(&nuget), name, None, None, &workload_env, observer)
 /// };
 /// // pass `Some(&resolver)` to parse_fsproj_with_imports.
 /// # let _ = resolver;
@@ -219,8 +243,42 @@ pub fn locate_dotnet_sdk(
     sdk_name: &str,
     spec: Option<&VersionSpec>,
     msbuild_sdks: Option<&std::collections::BTreeMap<String, SdkVersion>>,
+    workload_env: &workloads::WorkloadEnvironment<'_>,
     observer: &Observer,
 ) -> Result<SdkPaths, SdkResolveError> {
+    match locate(
+        dotnet_root,
+        nuget_packages_dir,
+        sdk_name,
+        spec,
+        msbuild_sdks,
+        workload_env,
+        observer,
+    )? {
+        SdkResolution::Single(paths) => Ok(paths),
+        SdkResolution::Roots(roots) => Err(SdkResolveError::UnsupportedLayout {
+            reason: format!(
+                "{sdk_name} is a workload pack, whose folder {roots:?} an import resolves \
+                 against, with no Sdk.props and Sdk.targets of its own to serve"
+            ),
+        }),
+    }
+}
+
+/// [`locate_dotnet_sdk`], with a workload pack's answer as
+/// [`SdkResolution::Roots`]: the workload resolver serves the pack's `Sdk`
+/// folder on the pack directory's existence alone, so it is a root an import
+/// resolves its `Project` against (and judges it, as for the locators), not
+/// a pair of entry points this has verified.
+fn locate(
+    dotnet_root: &Path,
+    nuget_packages_dir: Option<&Path>,
+    sdk_name: &str,
+    spec: Option<&VersionSpec>,
+    msbuild_sdks: Option<&std::collections::BTreeMap<String, SdkVersion>>,
+    workload_env: &workloads::WorkloadEnvironment<'_>,
+    observer: &Observer,
+) -> Result<SdkResolution, SdkResolveError> {
     // MSBuild allows `Sdk="Name/Version"` (e.g.
     // `Sdk="Microsoft.Build.NoTargets/1.0.80"`): the version half names
     // the package version NuGet's resolver looks for.
@@ -270,13 +328,52 @@ pub fn locate_dotnet_sdk(
             .iter()
             .position(|v| v == version)
             .expect("selection returns a candidate from the slice");
-        let sdk_root = host_versions[idx].1.join("Sdks").join(name).join("Sdk");
+        let host_dir = &host_versions[idx].1;
+        let sdk_root = host_dir.join("Sdks").join(name).join("Sdk");
         if let Some(root) = sdk_directory(sdk_root, observer)? {
-            return Ok(sdk_paths(root));
+            return Ok(SdkResolution::Single(sdk_paths(root)));
+        }
+        // 2. The workload SDK resolver of the running SDK, unless it is
+        //    switched off, when it answers nothing. A locator name is
+        //    [`resolve_sdk`]'s to route before it reaches here.
+        if !workloads::is_workload_locator(name) && !workload_env.resolver_switched_off {
+            match workloads::resolve_workload_pack(
+                name,
+                dotnet_root,
+                host_dir,
+                workload_env,
+                observer,
+            )? {
+                workloads::WorkloadPackResolution::NotAPack => {}
+                // The `<Project Sdk="Name/Version">` shorthand hands the
+                // resolver the name, and an explicit `<Import Sdk=...>` the
+                // whole spelling, which names no pack; the resolver is handed
+                // only the spelling, so it cannot tell which.
+                _ if per_import_version.is_some() => {
+                    return Err(SdkResolveError::UnsupportedLayout {
+                        reason: format!(
+                            "{sdk_name} names the workload pack {name}, which only the \
+                             <Project Sdk=...> shorthand would look up"
+                        ),
+                    });
+                }
+                workloads::WorkloadPackResolution::Installed(root) => {
+                    return Ok(SdkResolution::Roots(vec![root]));
+                }
+                workloads::WorkloadPackResolution::Missing { version } => {
+                    return Err(SdkResolveError::UnsupportedLayout {
+                        reason: format!(
+                            "the workload pack {name} {version} is not installed, so MSBuild \
+                             imports nothing and adds a MissingWorkloadPack item, which is \
+                             not modelled"
+                        ),
+                    });
+                }
+            }
         }
     }
 
-    // 2. NuGet, only with a version source: the per-import version, else the
+    // 3. NuGet, only with a version source: the per-import version, else the
     //    `msbuild-sdks` entry. Upstream's `Microsoft.Build.NuGetSdkResolver`
     //    refuses to scan the cache for a "best version" without one, and
     //    picking the highest restored copy could import a different SDK
@@ -304,7 +401,8 @@ pub fn locate_dotnet_sdk(
                 .iter()
                 .position(|v| v == version)
                 .expect("selection returns a candidate from the slice");
-            nuget_served(nuget_candidates[idx].1.clone(), observer).map(sdk_paths)
+            nuget_served(nuget_candidates[idx].1.clone(), observer)
+                .map(|root| SdkResolution::Single(sdk_paths(root)))
         }
         None if nuget_versions.is_empty() => Err(SdkResolveError::NotFound),
         None => {
@@ -725,15 +823,15 @@ pub fn resolve_sdk(
             observer,
         );
     }
-    locate_dotnet_sdk(
+    locate(
         dotnet_root,
         nuget_packages_dir,
         sdk_name,
         spec,
         msbuild_sdks,
+        workload_env,
         observer,
     )
-    .map(SdkResolution::from)
 }
 
 /// The version of `sdk_name` that [`resolve_sdk`] looks for in the NuGet

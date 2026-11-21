@@ -129,7 +129,9 @@ pub struct SdkPaths {
 /// shorthand needs. Resolver-backed locator SDKs — today the workload
 /// locators `Microsoft.NET.SDK.WorkloadManifestTargetsLocator` /
 /// `Microsoft.NET.SDK.WorkloadAutoImportPropsLocator` — are
-/// [`SdkResolution::Roots`]: zero or more roots, in import order, each
+/// [`SdkResolution::Roots`], and so is an installed workload pack named as
+/// an SDK (its `Sdk` folder, which the workload resolver serves whatever it
+/// holds): zero or more roots, in import order, each
 /// of which the import's `Project` is resolved against (zero roots
 /// means the import cleanly contributes nothing, exactly as MSBuild
 /// treats an empty workload-resolver result). `Roots` carries no
@@ -167,11 +169,13 @@ impl From<SdkPaths> for SdkResolution {
 ///   versions. Remediation: install a matching version, or relax
 ///   the constraint.
 /// - `Err(SdkResolveError::UnsupportedLayout { .. })` →
-///   [`DiagnosticKind::SdkResolutionUnsupported`]: the SDK is a
-///   resolver-backed locator whose on-disk state is outside the
-///   layout envelope we can resolve exactly (workload sets, install
-///   state, ambiguous manifest versions, …). Remediation: none —
-///   this is the deliberate "degrade, don't guess" path.
+///   [`DiagnosticKind::SdkResolutionUnsupported`]: the SDK is one the
+///   workload resolver answers for (a workload locator, or a name the
+///   running SDK does not ship, which it looks up as a workload pack), and
+///   the on-disk state is outside the layout envelope we can resolve exactly
+///   (workload sets, install state, ambiguous manifest versions, a workload
+///   pack that is not installed, …). Remediation: none — this is the
+///   deliberate "degrade, don't guess" path.
 ///
 /// In all error cases the walker walks the body without the SDK's files, so
 /// it reaches none of the SDK's `Directory.Build.*` import points, and

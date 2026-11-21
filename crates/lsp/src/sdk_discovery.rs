@@ -286,9 +286,19 @@ pub struct SdkDiscoveryEnv {
     /// True when any workload-resolution override variable is set
     /// (`DOTNETSDK_WORKLOAD_MANIFEST_ROOTS`,
     /// `DOTNETSDK_WORKLOAD_MANIFEST_IGNORE_DEFAULT_ROOTS`,
-    /// `DOTNETSDK_WORKLOAD_PACK_ROOTS`). The in-house locator resolution
-    /// degrades rather than model those redirections.
+    /// `DOTNETSDK_WORKLOAD_PACK_ROOTS`). The in-house workload resolution
+    /// (the locators, and any name the running SDK does not ship) degrades
+    /// rather than model those redirections.
     pub workload_overrides_present: bool,
+    /// True when MSBuild loads SDK resolvers from a folder beside the running
+    /// SDK's own (`MSBUILDADDITIONALSDKRESOLVERSFOLDER_NET`, else
+    /// `MSBUILDADDITIONALSDKRESOLVERSFOLDER`), which can add to or stand in
+    /// for the workload resolver and NuGet's. Resolution then declines every
+    /// name, as for a `MSBuildSDKsPath` override.
+    pub sdk_resolvers_folder_override: bool,
+    /// True when `MSBuildEnableWorkloadResolver` switches the workload
+    /// resolver off ([`borzoi_msbuild::workloads::WorkloadEnvironment::resolver_switched_off`]).
+    pub workload_resolver_switched_off: bool,
     /// The environment MSBuild would fold in as initial properties when
     /// evaluating a project under this configuration.
     ///
@@ -317,6 +327,8 @@ impl Default for SdkDiscoveryEnv {
             host_default_allow_prerelease: true,
             dotnet_cli_home: None,
             workload_overrides_present: false,
+            sdk_resolvers_folder_override: false,
+            workload_resolver_switched_off: false,
             build_environment: HashMap::new(),
         }
     }
@@ -405,6 +417,15 @@ impl SdkDiscoveryEnv {
             workload_overrides_present: get("DOTNETSDK_WORKLOAD_MANIFEST_ROOTS").is_some()
                 || get("DOTNETSDK_WORKLOAD_MANIFEST_IGNORE_DEFAULT_ROOTS").is_some()
                 || non_empty("DOTNETSDK_WORKLOAD_PACK_ROOTS").is_some(),
+            // `SdkResolverLoader` takes the first that is set at all (`??`),
+            // an empty value included.
+            sdk_resolvers_folder_override: get("MSBUILDADDITIONALSDKRESOLVERSFOLDER_NET").is_some()
+                || get("MSBUILDADDITIONALSDKRESOLVERSFOLDER").is_some(),
+            // `CachingWorkloadResolver` is off where
+            // `MSBuildEnableWorkloadResolver` equals `false` as
+            // `OrdinalIgnoreCase` compares (untrimmed), and on otherwise.
+            workload_resolver_switched_off: get("MSBuildEnableWorkloadResolver")
+                .is_some_and(|value| value.eq_ignore_ascii_case("false")),
         }
     }
 }
@@ -451,6 +472,10 @@ pub struct SdkDiscovery {
     user_dotnet_root: Option<PathBuf>,
     /// See [`SdkDiscoveryEnv::workload_overrides_present`].
     workload_overrides_present: bool,
+    /// See [`SdkDiscoveryEnv::sdk_resolvers_folder_override`].
+    sdk_resolvers_folder_override: bool,
+    /// See [`SdkDiscoveryEnv::workload_resolver_switched_off`].
+    workload_resolver_switched_off: bool,
     /// What MSBuild's workload manifest provider reads of the discovered
     /// `global.json` (`GlobalJson::workloads`): MSBuild hands it the same
     /// file, where `sdk.workloadVersion` selects a workload set and
@@ -598,6 +623,8 @@ impl SdkDiscovery {
                 .find(|home| !home.as_os_str().is_empty())
                 .map(|home| home.join(".dotnet")),
             workload_overrides_present: env.workload_overrides_present,
+            sdk_resolvers_folder_override: env.sdk_resolvers_folder_override,
+            workload_resolver_switched_off: env.workload_resolver_switched_off,
             unmodelled_sdks_path_override: build_env_sdks_path_override(&env.build_environment),
         })
     }
@@ -659,6 +686,16 @@ impl SdkDiscovery {
                 ),
             });
         }
+        // An additional resolver folder changes which resolvers answer after
+        // the default one; which of them would claim a name is not modelled,
+        // so every name declines, as above.
+        if self.sdk_resolvers_folder_override {
+            return Err(SdkResolveError::UnsupportedLayout {
+                reason: "MSBuild loads SDK resolvers from an additional folder, which \
+                         this resolver does not model"
+                    .to_owned(),
+            });
+        }
         // A name NuGet has a version for is resolved from the global packages
         // folder, so where that folder cannot be said, so cannot the
         // resolution. Any other name reads no NuGet folder, and resolves the
@@ -681,12 +718,12 @@ impl SdkDiscovery {
         let workload_env = workloads::WorkloadEnvironment {
             user_dotnet_root: self.user_dotnet_root.as_deref(),
             overrides_present: self.workload_overrides_present,
+            resolver_switched_off: self.workload_resolver_switched_off,
             global_json: self.global_json_workloads.clone(),
-            // Only a workload locator reads it, so no other name reads the
-            // muxer.
-            process_architecture: workloads::is_workload_locator(sdk_name)
-                .then(|| self.build_process_architecture(observer))
-                .flatten(),
+            // A workload locator reads it, and so does any name the running
+            // SDK does not ship, which the workload resolver looks up as a
+            // pack.
+            process_architecture: self.build_process_architecture(observer),
         };
         let locate = |root: &Path, name: &str| {
             resolve_sdk(
@@ -730,7 +767,8 @@ impl SdkDiscovery {
     ///
     /// `None` where the host root is unnamed ([`Self::host_root`]), the muxer
     /// cannot be read, or its header does not settle the architecture (a
-    /// universal binary of two, say): the locators then decline wherever an
+    /// universal binary of two, say): workload resolution (the locators, and
+    /// any name the running SDK does not ship) then declines wherever an
     /// install-state file exists. The muxer is the host root's, as discovery
     /// names it: a `$DOTNET_ROOT` naming another install than the `dotnet` the
     /// user builds with is outside what discovery models, here as for the

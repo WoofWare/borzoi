@@ -219,6 +219,7 @@ fn evaluate(root: &Path, project: &Path, source: &str, through: Through<'_>) -> 
             &workloads::WorkloadEnvironment {
                 user_dotnet_root: None,
                 overrides_present: false,
+                resolver_switched_off: false,
                 global_json: Default::default(),
                 process_architecture: None,
             },
@@ -438,6 +439,7 @@ fn a_file_read_as_text_and_as_xml_is_read_once() {
                     &workloads::WorkloadEnvironment {
                         user_dotnet_root: None,
                         overrides_present: false,
+                        resolver_switched_off: false,
                         global_json: Default::default(),
                         process_architecture: None,
                     },
@@ -893,4 +895,78 @@ fn the_sweep_keeps_permissions() {
     assert_eq!(mode(&unreadable), 0o000);
     assert_eq!(mode(&read_only), 0o444);
     std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o644)).unwrap();
+}
+
+/// An `<Import Sdk="…"/>` of a workload pack the running SDK does not ship
+/// walks the pack's `Sdk` folder, as MSBuild's workload resolver serves it,
+/// and the read set covers what the resolution read ([`super::sound`] sweeps
+/// the tree, the manifest and the pack directory among it). The pack ships
+/// `Sdk.props` alone, as some real packs do, which an import of it needs. A
+/// pack that is not installed declines.
+#[test]
+fn a_workload_pack_named_as_an_sdk_is_walked_soundly() {
+    for installed in [true, false] {
+        let tmp = TempDir::new().unwrap();
+        let root = canon(tmp.path());
+        let dotnet = root.join("dotnet");
+        crate::test_support::install_host_sdk_dir(&dotnet.join("sdk/10.0.100"));
+        write_at(
+            &dotnet,
+            "sdk-manifests/10.0.100/contoso.one/1.0.0/WorkloadManifest.json",
+            r#"{"version": "1.0.0", "packs": {"Contoso.Pack": {"kind": "Sdk", "version": "1.0.0"}}}"#,
+        );
+        if installed {
+            write_at(
+                &dotnet,
+                "packs/Contoso.Pack/1.0.0/Sdk/Sdk.props",
+                "<Project><PropertyGroup><FromPack>yes</FromPack></PropertyGroup></Project>",
+            );
+        }
+        let source =
+            "<Project>\n  <Import Project=\"Sdk.props\" Sdk=\"contoso.pack\" />\n</Project>\n";
+        let project = canon(&write_at(&root, "proj/Demo.fsproj", source));
+        let resolver = |name: &str, observer: &Observer| {
+            resolve_sdk(
+                &dotnet,
+                None,
+                name,
+                None,
+                None,
+                &workloads::WorkloadEnvironment {
+                    user_dotnet_root: None,
+                    overrides_present: false,
+                    resolver_switched_off: false,
+                    global_json: Default::default(),
+                    process_architecture: None,
+                },
+                observer,
+            )
+        };
+        let parsed = sound(&project, |through| {
+            through
+                .evaluate(
+                    source,
+                    &project,
+                    &HashMap::new(),
+                    &HashMap::new(),
+                    Some(&resolver),
+                    None,
+                )
+                .expect("well-formed XML parses")
+        });
+        let unsupported = parsed
+            .diagnostics
+            .iter()
+            .any(|d| matches!(d.kind, DiagnosticKind::SdkResolutionUnsupported { .. }));
+        assert_eq!(unsupported, !installed, "{:#?}", parsed.diagnostics);
+        if installed {
+            assert_eq!(
+                parsed.properties.get("FromPack").map(String::as_str),
+                Some("yes"),
+                "{:#?}",
+                parsed.diagnostics
+            );
+            assert!(parsed.property("FromPack").is_exact());
+        }
+    }
 }

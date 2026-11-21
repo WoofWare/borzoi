@@ -1,8 +1,9 @@
 //! Resolution of the two MSBuild **workload locator SDKs** —
 //! `Microsoft.NET.SDK.WorkloadManifestTargetsLocator` and
-//! `Microsoft.NET.SDK.WorkloadAutoImportPropsLocator` — against the
-//! canonical dotnet on-disk layout, under the "resolve identically or
-//! degrade" policy of `docs/completed/sdk-chain-exactness-plan.md` (D2).
+//! `Microsoft.NET.SDK.WorkloadAutoImportPropsLocator` — and of **workload
+//! packs named as SDKs**, against the canonical dotnet on-disk layout, under
+//! the "resolve identically or degrade" policy of
+//! `docs/completed/sdk-chain-exactness-plan.md` (D2).
 //!
 //! In MSBuild these names are claimed by the workload MSBuild SDK
 //! resolver, which returns a *list* of directories; `<Import
@@ -62,6 +63,19 @@
 //!   `{root}/packs/{id}/{version}` is a directory under the first pack root
 //!   (the user-local one, then the dotnet root) that has it, and each folder
 //!   once.
+//! * Any other SDK name the running SDK does not ship reaches the same
+//!   resolver (`TryGetPackInfo`, [`crate::workloads::resolve_workload_pack`]): the pack whose id
+//!   it names, ignoring case, resolved as above, is looked up at its kind's
+//!   location (`packs/{id}/{version}` for an SDK or framework pack,
+//!   `tool-packs/{id}/{version}` for a tool pack, a lower-cased `.nupkg` under
+//!   `template-packs` or `library-packs` for the others) under the first pack
+//!   root holding it, else the first root, and the resolver serves that
+//!   location's `Sdk` folder wherever `Directory.Exists` finds the location.
+//!   Where it does not, the pack is missing: the resolver succeeds with no
+//!   path and adds a `MissingWorkloadPack` item to the evaluation, which
+//!   [`crate::resolve_sdk`] declines rather than model. No pack of the name for
+//!   the host (none defined, or an alias naming none of the host's runtime
+//!   identifiers) leaves the name to the next resolver.
 //!
 //! * A workload set, selected by `global.json`, by the install state or by
 //!   default from the host band's, overrides the manifests it names, and
@@ -92,12 +106,12 @@
 //! since MSBuild's import of it (and the walk's) would read it, and so does a
 //! relative root, which the resolver takes against a working directory we
 //! cannot see.
-//! The auto-import locator also declines unless the workload resolver
-//! certainly loads every resolved manifest (`manifest::load_manifests`:
+//! The auto-import locator and a pack lookup also decline unless the workload
+//! resolver certainly loads every resolved manifest (`manifest::load_manifests`:
 //! the reader's grammar, the localization catalogs, and the composition's
-//! `depends-on` and conflict checks), where an installed SDK pack it would
-//! look up has a version that is no plain path component, and where an
-//! `AutoImport.props` it would return is a special file.
+//! `depends-on` and conflict checks), and where a pack they would look up has
+//! a version that is no plain path component; the auto-import locator also
+//! declines where an `AutoImport.props` it would return is a special file.
 //!
 //! Every existence probe asks what CLR `File.Exists` answers
 //! (`dotnet_io::file_exists`), which `tools/workload-oracle` grades with a
@@ -162,6 +176,11 @@ pub struct WorkloadEnvironment<'a> {
     /// `DOTNETSDK_WORKLOAD_PACK_ROOTS`): those redirect resolution in ways
     /// we do not model, so their presence degrades.
     pub overrides_present: bool,
+    /// True when `MSBuildEnableWorkloadResolver` equals `false` as
+    /// `OrdinalIgnoreCase` compares (untrimmed): `CachingWorkloadResolver`
+    /// then answers nothing, leaving every name to the next resolver. A pack
+    /// lookup is then no pack, and a locator declines.
+    pub resolver_switched_off: bool,
     /// What the workload reader reads of the `global.json` governing the
     /// evaluation (`GlobalJson::workloads`): MSBuild passes the discovered
     /// `global.json` path into its workload manifest provider, where an
@@ -252,28 +271,11 @@ pub fn resolve_workload_locator(
     observer: &Observer,
 ) -> Result<SdkResolution, SdkResolveError> {
     debug_assert!(is_workload_locator(sdk_name));
-    if env.overrides_present {
-        return Err(unsupported(
-            "a workload environment override variable is set",
-        ));
+    // The switched-off resolver leaves a locator to the resolvers after it.
+    if env.resolver_switched_off {
+        return Err(unsupported("the workload resolver is switched off"));
     }
-    // The resolver's `File.Exists` takes a relative path against the process's
-    // working directory, which we cannot see.
-    if ![
-        Some(dotnet_root),
-        Some(sdk_version_dir),
-        env.user_dotnet_root,
-    ]
-    .into_iter()
-    .flatten()
-    .all(Path::has_root)
-    {
-        return Err(unsupported("a workload root is a relative path"));
-    }
-    let band = host_feature_band(sdk_version_dir)?;
-    let runtime_identifiers = runtime_identifier_chain(sdk_version_dir, observer)?;
-    let roots = workload_roots(dotnet_root, &band, env, observer)?;
-    let manifest_roots = enumerate_manifest_roots(sdk_version_dir, &band, &roots, env, observer)?;
+    let resolver = WorkloadResolver::create(dotnet_root, sdk_version_dir, env, observer)?;
 
     if sdk_name.eq_ignore_ascii_case(WORKLOAD_MANIFEST_TARGETS_LOCATOR) {
         // `CachingWorkloadResolver` keeps only the manifest directories
@@ -282,7 +284,7 @@ pub fn resolve_workload_locator(
         // skipped, not an error. A special file there is declined: MSBuild's
         // import of a FIFO never returns, and neither would the walk's.
         let mut with_targets = Vec::new();
-        for resolved in manifest_roots {
+        for resolved in resolver.manifests {
             let dir = resolved.directory;
             let targets = dir.join("WorkloadManifest.targets");
             if !dotnet_io::file_exists(observer, &targets) {
@@ -299,28 +301,214 @@ pub fn resolve_workload_locator(
         return Ok(SdkResolution::Roots(with_targets));
     }
 
-    // The auto-import locator asks the workload resolver for installed packs,
-    // which first opens and parses every resolved manifest. A manifest that
-    // is no regular file (a dangling link, a socket) throws there, and a FIFO
-    // blocks for good; one it cannot read or compose throws too.
-    for resolved in &manifest_roots {
-        let manifest = resolved.directory.join("WorkloadManifest.json");
-        if !observed::is_file(observer, &manifest) {
+    let packs = resolver.load_packs(observer)?;
+    auto_import_folders(
+        &packs,
+        &resolver.runtime_identifiers,
+        &resolver.roots,
+        observer,
+    )
+    .map(SdkResolution::Roots)
+}
+
+/// What `CachingWorkloadResolver` builds before it answers any request: the
+/// manifest provider's resolved manifests (`SdkDirectoryWorkloadManifestProvider`,
+/// whose construction selects the workload set) and `WorkloadResolver.Create`'s
+/// runtime identifiers and pack roots.
+struct WorkloadResolver {
+    runtime_identifiers: Vec<String>,
+    roots: WorkloadRoots,
+    manifests: Vec<ResolvedManifest>,
+}
+
+impl WorkloadResolver {
+    fn create(
+        dotnet_root: &Path,
+        sdk_version_dir: &Path,
+        env: &WorkloadEnvironment<'_>,
+        observer: &Observer,
+    ) -> Result<WorkloadResolver, SdkResolveError> {
+        if env.overrides_present {
+            return Err(unsupported(
+                "a workload environment override variable is set",
+            ));
+        }
+        // The resolver's `File.Exists` takes a relative path against the
+        // process's working directory, which we cannot see.
+        if ![
+            Some(dotnet_root),
+            Some(sdk_version_dir),
+            env.user_dotnet_root,
+        ]
+        .into_iter()
+        .flatten()
+        .all(Path::has_root)
+        {
+            return Err(unsupported("a workload root is a relative path"));
+        }
+        // `CachingWorkloadResolver` answers nothing (null, so MSBuild asks the
+        // next resolver) when this sentinel sits in the SDK directory, where
+        // CLR `File.Exists` finds it. No installed SDK ships one, and the
+        // resolver reads it from its own directory, which the differential
+        // cannot point at a generated layout, so it declines.
+        let sentinel = sdk_version_dir.join("DisableWorkloadResolver.sentinel");
+        if dotnet_io::file_exists(observer, &sentinel) {
             return Err(unsupported(format!(
-                "the workload resolver would open a manifest that is no regular file: {}",
-                manifest.display()
+                "the workload resolver is disabled by {}",
+                sentinel.display()
             )));
         }
-    }
-    let resolved: Vec<manifest::Resolved<'_>> = manifest_roots
-        .iter()
-        .map(|m| manifest::Resolved {
-            id: &m.id,
-            directory: &m.directory,
+        let band = host_feature_band(sdk_version_dir)?;
+        let runtime_identifiers = runtime_identifier_chain(sdk_version_dir, observer)?;
+        let roots = workload_roots(dotnet_root, &band, env, observer)?;
+        let manifests = enumerate_manifest_roots(sdk_version_dir, &band, &roots, env, observer)?;
+        Ok(WorkloadResolver {
+            runtime_identifiers,
+            roots,
+            manifests,
         })
-        .collect();
-    let packs = manifest::load_manifests(&resolved, observer)?;
-    auto_import_folders(&packs, &runtime_identifiers, &roots, observer).map(SdkResolution::Roots)
+    }
+
+    /// The packs of every resolved manifest, in composition order, or the
+    /// decline unless the workload resolver certainly loads them all
+    /// (`InitializeManifests`, which every pack request runs first). A
+    /// manifest that is no regular file (a dangling link, a socket) throws
+    /// there, and a FIFO blocks for good; one it cannot read or compose
+    /// throws too.
+    fn load_packs(&self, observer: &Observer) -> Result<Vec<manifest::Pack>, SdkResolveError> {
+        for resolved in &self.manifests {
+            let manifest = resolved.directory.join("WorkloadManifest.json");
+            if !observed::is_file(observer, &manifest) {
+                return Err(unsupported(format!(
+                    "the workload resolver would open a manifest that is no regular file: {}",
+                    manifest.display()
+                )));
+            }
+        }
+        let resolved: Vec<manifest::Resolved<'_>> = self
+            .manifests
+            .iter()
+            .map(|m| manifest::Resolved {
+                id: &m.id,
+                directory: &m.directory,
+            })
+            .collect();
+        manifest::load_manifests(&resolved, observer)
+    }
+}
+
+/// What the workload SDK resolver answers for an SDK name that is no locator
+/// (`CachingWorkloadResolver.Resolve`'s last branch, which asks
+/// `WorkloadResolver.TryGetPackInfo` for a workload pack of that id).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkloadPackResolution {
+    /// No pack of the name resolves for the host: no manifest defines one, or
+    /// it is an alias whose `alias-to` names none of the host's runtime
+    /// identifiers. The resolver returns null and MSBuild asks the next one.
+    NotAPack,
+    /// The pack's directory exists: the resolver returns its `Sdk` folder,
+    /// which an import's `Project` is resolved against.
+    Installed(PathBuf),
+    /// The pack's directory does not exist: the resolver succeeds with no
+    /// path, and adds one `MissingWorkloadPack` item to the evaluation, its
+    /// spec the SDK name as the import spells it and its `Version` metadata
+    /// this version.
+    Missing { version: String },
+}
+
+/// Resolve `sdk_name`, which is no locator, as the workload SDK resolver
+/// does: the workload pack whose id it names, ignoring case, resolved for the
+/// host's runtime identifiers, looked up under the pack roots.
+pub fn resolve_workload_pack(
+    sdk_name: &str,
+    dotnet_root: &Path,
+    sdk_version_dir: &Path,
+    env: &WorkloadEnvironment<'_>,
+    observer: &Observer,
+) -> Result<WorkloadPackResolution, SdkResolveError> {
+    debug_assert!(!is_workload_locator(sdk_name));
+    if env.resolver_switched_off {
+        return Ok(WorkloadPackResolution::NotAPack);
+    }
+    // `new WorkloadPackId(name)` throws on a name `IsNullOrWhiteSpace` finds
+    // blank; any name with no visible character declines.
+    if sdk_name.chars().all(char::is_whitespace) {
+        return Err(unsupported(
+            "a blank SDK name, which the workload resolver refuses",
+        ));
+    }
+    let resolver = WorkloadResolver::create(dotnet_root, sdk_version_dir, env, observer)?;
+    let packs = resolver.load_packs(observer)?;
+    // `_packs` is keyed by `WorkloadPackId`, which compares as
+    // `OrdinalIgnoreCase`; every pack id `load_manifests` admits is ASCII, so
+    // ASCII folding is that comparison whatever the name holds.
+    let Some(pack) = packs.iter().find(|p| p.id.eq_ignore_ascii_case(sdk_name)) else {
+        return Ok(WorkloadPackResolution::NotAPack);
+    };
+    let Some(id) = pack.resolved_id(&resolver.runtime_identifiers) else {
+        return Ok(WorkloadPackResolution::NotAPack);
+    };
+    if !is_pack_path_component(&pack.version) {
+        return Err(unsupported(format!(
+            "a workload pack version that is no plain path component: {} {:?}",
+            pack.id, pack.version
+        )));
+    }
+    // `GetPackPath`: the location under the first pack root where the
+    // pack's kind finds it installed, else under the first root.
+    let mut located = None;
+    for root in resolver.roots.pack_roots() {
+        let (path, is_file) = pack_location(root, id, &pack.version, pack.kind);
+        let installed = if is_file {
+            dotnet_io::file_exists(observer, &path)
+        } else {
+            dotnet_io::directory_exists(observer, &path)
+        };
+        let first = located.is_none();
+        if installed || first {
+            located = Some(path);
+        }
+        if installed {
+            break;
+        }
+    }
+    let path = located.expect("the dotnet root is always a pack root");
+    // `CachingWorkloadResolver` then asks `Directory.Exists` of that location,
+    // whatever the kind: an installed file-kind pack is missing to it.
+    if dotnet_io::directory_exists(observer, &path) {
+        Ok(WorkloadPackResolution::Installed(path.join("Sdk")))
+    } else {
+        Ok(WorkloadPackResolution::Missing {
+            version: pack.version.clone(),
+        })
+    }
+}
+
+/// Where `GetPackPath` looks for a pack of `kind` resolved to `id` under
+/// `root`, and whether it asks `File.Exists` of it (a `.nupkg`) rather than
+/// `Directory.Exists`. The file name is the NuGet canonical id
+/// (`ToLowerInvariant`, which is ASCII lowering on the ASCII ids and plain
+/// versions admitted here) and the lowered version.
+fn pack_location(
+    root: &Path,
+    id: &str,
+    version: &str,
+    kind: manifest::PackKind,
+) -> (PathBuf, bool) {
+    use manifest::PackKind;
+    let nupkg = || {
+        format!(
+            "{}.{}.nupkg",
+            id.to_ascii_lowercase(),
+            version.to_ascii_lowercase()
+        )
+    };
+    match kind {
+        PackKind::Sdk | PackKind::Framework => (root.join("packs").join(id).join(version), false),
+        PackKind::Tool => (root.join("tool-packs").join(id).join(version), false),
+        PackKind::Template => (root.join("template-packs").join(nupkg()), true),
+        PackKind::Library => (root.join("library-packs").join(nupkg()), true),
+    }
 }
 
 /// The auto-import locator's answer: `CachingWorkloadResolver` asks
