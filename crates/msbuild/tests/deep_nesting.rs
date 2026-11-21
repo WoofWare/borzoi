@@ -656,6 +656,17 @@ fn wide_unheld_reads_are_struck_in_one_pass() {
                 "{width} reads took {} struck texts",
                 costs.strikes
             );
+            // Exactly: each of the eight texts copies the expression's text
+            // around the reads once, and the value once per read
+            // (`condition::RETURNED`'s eight are 18 bytes in all), so a copy
+            // the count misses, or one it makes twice, moves it.
+            let around = "$([MSBuild]::VersionLessThan('', '1.0'))".len() as u64;
+            assert_eq!(
+                costs.struck_bytes,
+                8 * around + 18 * width as u64,
+                "{width} reads copied {} bytes",
+                costs.struck_bytes
+            );
         }
         // Each struck text is built once, no longer than twice the text it
         // strikes (a value is at most five bytes, a read at least four).
