@@ -1034,12 +1034,25 @@ fn file_module_attribute_is_reported_once() {
     );
 }
 
-/// Whether some attribute of the file resolved to (or may be) the
-/// `[<Extension>]` marker, by the per-attribute verdicts.
-fn some_attribute_may_mark(rf: &borzoi_sema::ResolvedFile, env: &AssemblyEnv) -> bool {
-    rf.attribute_resolutions()
-        .keys()
-        .any(|&range| rf.attribute_may_be(range, env, |h| env.is_extension_attribute(h)))
+/// The last identifier of the attribute name `src` spells at `range`,
+/// unquoted: what [`borzoi_sema::ResolvedFile::attribute_may_be`] takes as
+/// the written name.
+fn written_at(src: &str, range: TextRange) -> &str {
+    let text = &src[usize::from(range.start())..usize::from(range.end())];
+    let last = text.rsplit('.').next().expect("a name");
+    last.strip_prefix("``")
+        .and_then(|s| s.strip_suffix("``"))
+        .unwrap_or(last)
+}
+
+/// Whether some attribute of the file `rf` resolves `src` to resolved to (or
+/// may be) the `[<Extension>]` marker, by the per-attribute verdicts.
+fn some_attribute_may_mark(src: &str, rf: &borzoi_sema::ResolvedFile, env: &AssemblyEnv) -> bool {
+    rf.attribute_resolutions().keys().any(|&range| {
+        rf.attribute_may_be(range, written_at(src, range), env, |h| {
+            env.is_extension_attribute(h)
+        })
+    })
 }
 
 /// Whether an attribute may be the marker, derived from the per-attribute
@@ -1048,7 +1061,7 @@ fn some_attribute_may_mark(rf: &borzoi_sema::ResolvedFile, env: &AssemblyEnv) ->
 #[test]
 fn gate_bit_derivation_from_the_verdicts() {
     let env = fsharp_core_env();
-    let bit = |src: &str| some_attribute_may_mark(&resolve(src, &env), &env);
+    let bit = |src: &str| some_attribute_may_mark(src, &resolve(src, &env), &env);
     assert!(
         !bit("module Test\n\n[<Literal>]\nlet X = 5\n"),
         "a committed non-extension assembly type contributes nothing"
@@ -1111,7 +1124,7 @@ fn an_assembly_abbreviation_of_an_attribute_may_be_its_target() {
         let rf = resolve(&src, &env);
         if extension {
             assert!(
-                some_attribute_may_mark(&rf, &env),
+                some_attribute_may_mark(&src, &rf, &env),
                 "`[<{written}>]` may mark an extension"
             );
         }
@@ -1122,7 +1135,7 @@ fn an_assembly_abbreviation_of_an_attribute_may_be_its_target() {
                 u32::try_from(start + written.len()).unwrap().into(),
             );
             assert!(
-                rf.attribute_may_be(span, &env, |h| env.is_entry_point_attribute(h)),
+                rf.attribute_may_be(span, written, &env, |h| env.is_entry_point_attribute(h)),
                 "`[<{written}>]` may be `EntryPoint`"
             );
         }

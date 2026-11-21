@@ -4360,6 +4360,10 @@ pub struct ResolvedFile {
     /// may alias `ExtensionAttribute`, so [`Self::attribute_may_be`] treats it
     /// as possibly any attribute.
     pub(super) own_abbrev_type_simple_names: HashSet<String>,
+    /// Each placed type's position in [`FileSurface::placed_types`], by its
+    /// def: how [`Self::placed_type_index`] finds a type without a scan per
+    /// use.
+    pub(super) placed_type_of_def: HashMap<DefId, usize>,
     /// The file-wide unknowables the walk raised ([`Unknowables`]), read
     /// through [`Self::opens_unenumerated`] and [`Self::opens_project`].
     pub(super) unknowables: Unknowables,
@@ -4579,6 +4583,7 @@ impl ResolvedFile {
             attribute_resolutions: HashMap::default(),
             field_labels: HashMap::default(),
             own_abbrev_type_simple_names: HashSet::default(),
+            placed_type_of_def: HashMap::default(),
             unknowables: Unknowables::default(),
             preceding_extension_names: ExtensionNames::default(),
             namespace_paths: Vec::new(),
@@ -4771,9 +4776,9 @@ impl ResolvedFile {
         root: &borzoi_cst::syntax::SyntaxNode,
         env: &AssemblyEnv,
     ) -> ExtensionNames {
-        super::extension_names::file_extension_names(root, false, &|range, question| {
+        super::extension_names::file_extension_names(root, false, &|range, written, question| {
             !self.attribute_resolutions.contains_key(&range)
-                || self.attribute_may_be(range, env, |h| {
+                || self.attribute_may_be(range, written, env, |h| {
                     env.is_extension_attribute(h)
                         || (question == MarkerQuestion::ExtensionOrAutoOpen
                             && env.is_auto_open_attribute(h))
@@ -4782,8 +4787,9 @@ impl ResolvedFile {
     }
 
     /// Whether the attribute written at `range` (its name's range, the
-    /// [`Self::attribute_resolutions`] key) may denote a type `is_target`
-    /// picks out:
+    /// [`Self::attribute_resolutions`] key), whose last identifier is
+    /// `written` (unquoted, as `id_text` spells it), may denote a type
+    /// `is_target` picks out:
     ///
     /// - a [`Resolution::Deferred`] verdict may be anything;
     /// - a committed [`Resolution::Entity`] is the target exactly when
@@ -4795,10 +4801,14 @@ impl ResolvedFile {
     /// - no record at all means both candidates missed everywhere with no
     ///   shadow possible: FCS errors and binds nothing.
     ///
-    /// `is_target` is only ever asked about a concrete type.
+    /// `is_target` is only ever asked about a concrete type. In debug
+    /// builds, a committed [`Resolution::Local`] asserts that `written` names
+    /// it, as FCS's `ResolveAttributeType` does: the declaration is `written`
+    /// or `writtenAttribute`.
     pub fn attribute_may_be(
         &self,
         range: TextRange,
+        written: &str,
         env: &AssemblyEnv,
         is_target: impl Fn(EntityHandle) -> bool,
     ) -> bool {
@@ -4806,9 +4816,14 @@ impl ResolvedFile {
             None => false,
             Some(Resolution::Deferred(_)) => true,
             Some(Resolution::Entity(h)) => env.is_abbreviation(*h) || is_target(*h),
-            Some(Resolution::Local(id)) => self
-                .own_abbrev_type_simple_names
-                .contains(env.names().text(self.def(*id).name())),
+            Some(Resolution::Local(id)) => {
+                let name = env.names().text(self.def(*id).name());
+                debug_assert!(
+                    name == written || name.strip_suffix("Attribute") == Some(written),
+                    "the attribute written `{written}` resolved to the in-file `{name}`"
+                );
+                self.own_abbrev_type_simple_names.contains(name)
+            }
             // No other variant is ever recorded for an attribute; if one
             // appears, defer rather than trust it.
             Some(_) => true,
@@ -5078,11 +5093,8 @@ impl ResolvedFile {
     /// [`Resolution::EarlierFileType`] names it by — or `None` when `def` is
     /// not a type the walk placed.
     pub fn placed_type_index(&self, def: DefId) -> Option<u32> {
-        let index = self
-            .surface
-            .placed_types
-            .iter()
-            .position(|t| t.def == def)?;
+        let index = *self.placed_type_of_def.get(&def)?;
+        debug_assert_eq!(self.surface.placed_types[index].def, def);
         Some(u32::try_from(index).expect("more than u32::MAX types in a file"))
     }
 

@@ -183,13 +183,14 @@ pub(crate) enum MarkerQuestion {
 
 /// The extension names the file rooted at `root` (an implementation or a
 /// signature) declares. `recovered` is whether the parser recovered from it.
-/// `may_be(range, question)` answers whether the attribute whose written name
-/// spans `range` may be the attribute `question` names; it must answer yes
-/// for an attribute it has no verdict on.
+/// `may_be(range, written, question)` answers whether the attribute whose
+/// written name spans `range`, and ends in the identifier `written`, may be
+/// the attribute `question` names; it must answer yes for an attribute it
+/// has no verdict on.
 pub(crate) fn file_extension_names(
     root: &SyntaxNode,
     recovered: bool,
-    may_be: &dyn Fn(TextRange, MarkerQuestion) -> bool,
+    may_be: &dyn Fn(TextRange, &str, MarkerQuestion) -> bool,
 ) -> ExtensionNames {
     let mut names = ExtensionNames::default();
     if recovered {
@@ -202,10 +203,12 @@ pub(crate) fn file_extension_names(
     {
         names.fail(NamesUnknowable::HashReference);
     }
-    for range in super::prescan::abbreviation_attributes(root) {
-        match range {
+    for name in super::prescan::abbreviation_attributes(root) {
+        match name {
             None => names.fail(NamesUnknowable::AttributeShape),
-            Some(range) if may_be(range, MarkerQuestion::ExtensionOrAutoOpen) => {
+            Some((range, written))
+                if may_be(range, &written, MarkerQuestion::ExtensionOrAutoOpen) =>
+            {
                 names.fail(NamesUnknowable::AttributedAbbreviation);
             }
             Some(_) => {}
@@ -242,7 +245,7 @@ pub(crate) fn file_extension_names(
             match (toks.first(), toks.last()) {
                 (Some(first), Some(last)) => {
                     let range = TextRange::new(first.fcs_range().start(), last.fcs_range().end());
-                    marked |= may_be(range, MarkerQuestion::Extension);
+                    marked |= may_be(range, &id_text(last), MarkerQuestion::Extension);
                 }
                 _ => names.fail(NamesUnknowable::AttributeShape),
             }
@@ -598,7 +601,7 @@ mod tests {
     fn names(src: &str, marked: bool) -> ExtensionNames {
         let parsed = parse(src);
         assert!(parsed.errors.is_empty(), "{src}: {:?}", parsed.errors);
-        file_extension_names(&parsed.root, false, &|_, _: MarkerQuestion| marked)
+        file_extension_names(&parsed.root, false, &|_, _: &str, _: MarkerQuestion| marked)
     }
 
     fn known(n: &ExtensionNames) -> (Vec<String>, Vec<String>) {
@@ -691,14 +694,14 @@ mod tests {
             ),
         ] {
             let parsed = parse(src);
-            let n = file_extension_names(&parsed.root, false, &|_, _| true);
+            let n = file_extension_names(&parsed.root, false, &|_, _, _| true);
             assert_eq!(n.unknowable(), Some(why), "{src}");
         }
         let n = names("module M\n#nowarn \"40\"\nlet x = 1\n", true);
         assert_eq!(known(&n), (vec![], vec![]));
         let parsed = parse("module M\nlet x = 1\n");
         assert_eq!(
-            file_extension_names(&parsed.root, true, &|_, _| true).unknowable(),
+            file_extension_names(&parsed.root, true, &|_, _, _| true).unknowable(),
             Some(NamesUnknowable::Recovered)
         );
     }

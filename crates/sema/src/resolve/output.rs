@@ -149,6 +149,11 @@ impl Output {
             namespace_opens,
         } = contributions;
         let (declaration_defs, local_defs) = defs.into_spaces();
+        let placed_type_of_def = placed_types
+            .iter()
+            .enumerate()
+            .map(|(index, t)| (t.def, index))
+            .collect();
         ResolvedFile {
             local_defs,
             surface: FileSurface {
@@ -186,6 +191,7 @@ impl Output {
             attribute_resolutions,
             field_labels,
             own_abbrev_type_simple_names: prescan.own_abbrev_type_simple_names,
+            placed_type_of_def,
             unknowables,
             // Stamped by the Compile-order fold; a single file has no
             // preceding files.

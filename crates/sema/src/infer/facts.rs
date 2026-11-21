@@ -209,7 +209,12 @@ impl<'a> FileFacts<'a> {
                     return true;
                 };
                 let range = TextRange::new(first.fcs_range().start(), last.fcs_range().end());
-                self.resolved.attribute_may_be(range, self.env, &is_target)
+                self.resolved.attribute_may_be(
+                    range,
+                    &crate::def::id_text(last),
+                    self.env,
+                    &is_target,
+                )
             })
     }
 
