@@ -40,6 +40,7 @@ fn lay_out(root: &std::path::Path, layout: &str) -> HashMap<String, Vec<String>>
             Some("file") => {
                 std::fs::write(root.join(fields.next().expect("a file")), "").unwrap();
             }
+            Some("root") => {}
             Some("project") => {
                 let project = fields.next().expect("a project").to_owned();
                 let labels = fields
@@ -65,21 +66,23 @@ fn record_baseline() {
     let tmp = tempfile::Builder::new()
         .tempdir_in(fixture_parent())
         .unwrap();
-    // One level inside the temporary directory, as the sweep lays it out.
-    let root = host_fs::canonicalize(tmp.path()).unwrap().join("fixture");
-    std::fs::create_dir(&root).unwrap();
-    let root_text = root.to_str().unwrap().to_owned();
     let layout = host_fs::read_to_string(dump.join("layout.txt")).unwrap();
+    // Where the sweep puts its root inside the temporary directory: its
+    // layout's `root` line.
+    let root_in_tmp = layout
+        .lines()
+        .find_map(|line| line.strip_prefix("root\t"))
+        .expect("the layout names the root");
+    let tmp_path = host_fs::canonicalize(tmp.path()).unwrap();
+    let root = tmp_path.join(root_in_tmp);
+    std::fs::create_dir_all(&root).unwrap();
+    let root_text = root.to_str().unwrap().to_owned();
     let starts_of = lay_out(&root, &layout);
     let uext = common::oracle_environment()
         .get("MSBuildUserExtensionsPath")
         .cloned()
         .unwrap_or_default();
-    let parent_text = root
-        .parent()
-        .and_then(std::path::Path::to_str)
-        .unwrap_or(&root_text)
-        .to_owned();
+    let parent_text = tmp_path.to_str().unwrap().to_owned();
     let unplace = |text: &str| {
         text.replace("{ROOT}", &root_text)
             .replace("{TMP}", &parent_text)

@@ -103,18 +103,27 @@ fn held(holds: Holds) -> Vec<String> {
     match holds {
         Holds::Nothing => Vec::new(),
         Holds::Only(name) => vec![name.to_owned()],
-        Holds::Every => relative_names(),
+        Holds::Every => relative_names().to_vec(),
     }
 }
 
 /// Every relative first segment a generated expansion may ask MSBuild's
-/// fixup about, found by brute force over the generator's own vocabulary:
-/// each relative first segment of [`PREFIXES`] (alone, and before a `\`),
-/// inside each read [`TEMPLATES`] entry, inside each copy template or none,
-/// and each literal run of those templates, which the fixup asks about
-/// piece by piece. A start that holds every one varies every probe a point
-/// can make, not only `seg` and `obj`.
-fn relative_names() -> Vec<String> {
+/// fixup about, found by brute force over the generator's own vocabulary,
+/// as an over-approximation. A value's head is a relative [`PREFIXES`] entry
+/// or a [`PARTS`] entry (an indexer's field starts at a part), then up to
+/// three `%5c`-joined parts and perhaps a last `%5c` (an escaped backslash is
+/// no separator, so it stays in the name the fixup probes); the value is
+/// that head alone or before a `\`. Each sits inside each read
+/// [`TEMPLATES`] entry, inside each copy template or none; and each literal
+/// run of those templates and of the indexer's bodies ([`index_body`]) is
+/// probed piece by piece. A start that holds every one varies every probe a
+/// point can make, not only `seg` and `obj`.
+fn relative_names() -> &'static [String] {
+    static NAMES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    NAMES.get_or_init(compute_relative_names)
+}
+
+fn compute_relative_names() -> Vec<String> {
     let mut names = std::collections::BTreeSet::new();
     let mut note = |text: &str| {
         let text = text.replace("$(Empty)", "");
@@ -126,11 +135,30 @@ fn relative_names() -> Vec<String> {
             names.insert(first.to_owned());
         }
     };
-    let values: Vec<String> = PREFIXES
+    let mut heads: Vec<String> = PREFIXES
         .iter()
         .filter(|prefix| !prefix.starts_with(['/', '\\']))
-        .flat_map(|prefix| [(*prefix).to_owned(), format!("{prefix}\\x")])
+        .chain(PARTS)
+        .map(|token| (*token).to_owned())
         .collect();
+    let mut chain = heads.clone();
+    for _ in 0..3 {
+        chain = chain
+            .iter()
+            .flat_map(|head| PARTS.iter().map(move |part| format!("{head}%5c{part}")))
+            .collect();
+        heads.extend(chain.iter().cloned());
+    }
+    let values: Vec<String> = heads
+        .iter()
+        .flat_map(|head| [head.clone(), format!("{head}%5c")])
+        .flat_map(|head| [head.clone(), format!("{head}\\x")])
+        .collect();
+    for variant in 0..4 {
+        for run in index_body(variant, 0).split("$(") {
+            note(run);
+        }
+    }
     for read in TEMPLATES {
         for run in read.split("{v}") {
             note(run);
@@ -185,14 +213,27 @@ const PROJECTS: [(&str, [usize; 5]); 2] = [
     ("proj-empty", [0, 1, 2, 3, 5]),
 ];
 
-/// The fixture's layout as text: a `dir` line per start, its directory and
+/// Where the fixture's root sits inside its temporary directory: deep enough
+/// that no generated value climbs out (three `..` at most, from the root or
+/// from a directory in it, and a template's one part after), so that every
+/// path a point names is the fixture's or a host-rooted name
+/// [`host_rooted_names_are_the_facts_the_baseline_assumes`] pins, never a
+/// file of the host's temporary directory.
+const ROOT_IN_TMP: &str = "climb/climb/fixture";
+
+/// The fixture's layout as text: a `root` line, [`ROOT_IN_TMP`]; a `dir` line per start, its directory and
 /// each name it holds; a `file` line per file under `proj-full` and beside
 /// each project; and a `project` line per project, with its starts. The
 /// sweep lays the fixture out from it ([`lay_out`]), dumps it for
 /// `path_fixup_baseline.rs`, which lays its fixture out from that dump, and
 /// hashes it into every point's key ([`point_fingerprint`]).
-fn layout_text() -> String {
-    let mut text = String::new();
+fn layout_text() -> &'static str {
+    static LAYOUT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    LAYOUT.get_or_init(compute_layout_text)
+}
+
+fn compute_layout_text() -> String {
+    let mut text = format!("root\t{ROOT_IN_TMP}\n");
     for (dir, holds) in STARTS {
         text.push_str(&format!("dir\t{dir}"));
         for name in held(holds) {
@@ -227,7 +268,7 @@ fn lay_out(root: &std::path::Path, layout: &str) {
             Some("file") => {
                 std::fs::write(root.join(fields.next().expect("a file")), "").unwrap();
             }
-            Some("project") => {}
+            Some("root" | "project") => {}
             other => panic!("no layout line {other:?}"),
         }
     }
@@ -237,13 +278,9 @@ impl Fixture {
     /// The fixture for `seed`, in a new temporary directory under `parent`.
     fn new(seed: u64, parent: &std::path::Path) -> Fixture {
         let tmp = tempfile::Builder::new().tempdir_in(parent).unwrap();
-        // The root sits one level inside the temporary directory, so that a
-        // value climbing out of it names a directory unique to this run, not
-        // the host's temporary directory, whose spelling a generated literal
-        // may share ([`placeholder`]).
-        let root = host_fs::canonicalize(tmp.path()).unwrap().join("fixture");
-        std::fs::create_dir(&root).unwrap();
-        lay_out(&root, &layout_text());
+        let root = host_fs::canonicalize(tmp.path()).unwrap().join(ROOT_IN_TMP);
+        std::fs::create_dir_all(&root).unwrap();
+        lay_out(&root, layout_text());
         let mut rng = SplitMix64(seed ^ 0x5eed_e1f1_0000_0001);
         let root_text = root.to_str().unwrap().to_owned();
         let environment: Vec<(String, String)> = (0..ENVIRONMENT_VALUES)
@@ -469,11 +506,12 @@ fn gen_site_value(rng: &mut SplitMix64, root: &str, site: Site) -> String {
     }
 }
 
-/// The first segments [`gen_value`] writes beside the fixture's root. Those
-/// rooted at the host's `/` (`\tmp`, a UNC `\\…`, or a part a template
-/// roots) are probed on the host, so the answers the baseline records are
-/// host facts: [`host_rooted_names_are_the_facts_the_baseline_assumes`]
-/// pins each.
+/// The first segments [`gen_value`] writes beside the fixture's root, which
+/// stands for an absolute path that exists. Those rooted at the host's `/`
+/// (a UNC `\\…`, or a part a template roots) are probed on the host, so the
+/// answers the baseline records are host facts:
+/// [`host_rooted_names_are_the_facts_the_baseline_assumes`] pins each
+/// absent.
 const PREFIXES: &[&str] = &[
     "/borzoi-missing",
     "seg",
@@ -482,7 +520,6 @@ const PREFIXES: &[&str] = &[
     "..",
     "",
     r"\\borzoi-missing",
-    r"\tmp",
     r"\borzoi-missing",
     "a",
 ];
@@ -507,10 +544,9 @@ fn gen_value(rng: &mut SplitMix64, root: &str) -> String {
     value
 }
 
-/// Each name a generated value may root at the host's `/` is a directory
-/// there exactly when the baseline assumes it: `/tmp` is, every other is
-/// not. A host where this fails answers the fixed seed's points apart from
-/// the host that recorded the baseline.
+/// No name a generated value may root at the host's `/` is there, so that
+/// nothing under it is either. A host where this fails answers the fixed
+/// seed's points apart from the host that recorded the baseline.
 #[test]
 fn host_rooted_names_are_the_facts_the_baseline_assumes() {
     let mut names: Vec<&str> = PREFIXES
@@ -522,9 +558,8 @@ fn host_rooted_names_are_the_facts_the_baseline_assumes() {
     names.sort_unstable();
     names.dedup();
     for name in names {
-        let present =
-            host_fs::metadata(std::path::Path::new("/").join(name)).is_ok_and(|m| m.is_dir());
-        assert_eq!(present, name == "tmp", "/{name}: a directory on this host?");
+        let present = host_fs::metadata(std::path::Path::new("/").join(name)).is_ok();
+        assert!(!present, "/{name} is on this host");
     }
 }
 
@@ -905,11 +940,12 @@ struct Seen {
 /// The served modes, as the baseline names them.
 const MODES: [&str; 3] = ["wi", "rd", "pu"];
 
-/// What a glob at an item point found, by MSBuild's answer from any start: a
-/// file under `proj-full`'s segments ([`ITEM_FILES`]) through a wildcard,
-/// and that, beside an `Exclude`, with the excluded file gone. Counted so
-/// that a gate whose globs found nothing cannot pass for one that grades
-/// them.
+/// What a glob at an item point found, by MSBuild's answer from any start,
+/// where the served walk committed too: a file under `proj-full`'s segments
+/// ([`ITEM_FILES`]) through a wildcard, and that, beside an `Exclude`, with
+/// the excluded file gone. Counted so that a gate whose globs found nothing,
+/// or whose walk declined every one that did, cannot pass for one that
+/// grades them.
 #[derive(Default)]
 struct GlobCoverage {
     found: usize,
@@ -918,7 +954,7 @@ struct GlobCoverage {
 
 impl GlobCoverage {
     fn count(&mut self, point: &Point, seen: &Seen) {
-        if point.site != Site::Item || !point.xml.contains('*') {
+        if point.site != Site::Item || !point.xml.contains('*') || !seen.served {
             return;
         }
         let listed = |file: &str| {
@@ -1364,6 +1400,45 @@ fn a_condition_reading_two_segments_is_wrong_only_where_one_is_present() {
     );
 }
 
+/// A glob that finds files, alone and beside an `Exclude` that removes one,
+/// is graded whatever the soak's seed draws: MSBuild lists the files, and
+/// the served walk commits them.
+#[test]
+fn a_glob_that_finds_files_is_graded() {
+    let mut world = World::new(4);
+    for (include, exclude) in [
+        ("seg\\*.fs", None),
+        ("seg\\*.fs", Some("seg\\a.fs")),
+        ("obj/*.fs", None),
+    ] {
+        let exclude = exclude
+            .map(|exclude| format!(" Exclude=\"{exclude}\""))
+            .unwrap_or_default();
+        let point = Point {
+            source: Source::Literal,
+            site: Site::Item,
+            xml: format!(
+                "<Project>\n  <ItemGroup>\n    <Compile Include=\"{include}\"{exclude} />\n  \
+                 </ItemGroup>\n</Project>\n"
+            ),
+            globals: Vec::new(),
+            project: world.fixture.root.join("proj-full").join("Demo.fsproj"),
+            starts: PROJECTS[0].1,
+            read: Read::Items,
+            value: include.to_owned(),
+        };
+        let seen = check_all_absent(&mut world, &point);
+        let mut globs = GlobCoverage::default();
+        globs.count(&point, &seen);
+        assert_eq!(globs.found, 1, "{include}{exclude}: graded and found");
+        assert_eq!(
+            globs.found_beside_exclude,
+            usize::from(!exclude.is_empty()),
+            "{include}{exclude}: the Exclude removed its file"
+        );
+    }
+}
+
 /// The generated sweep over sources, read sites and values.
 #[test]
 fn expansions_hold_msbuilds_path_fixup() {
@@ -1371,7 +1446,6 @@ fn expansions_hold_msbuilds_path_fixup() {
     let mut rng = SplitMix64(seed);
     let mut world = World::new(seed);
     let mut census: BTreeMap<(Source, Site), Census> = BTreeMap::new();
-    let mut globs = GlobCoverage::default();
     for case in 0..cases {
         let source = Source::ALL[case % Source::ALL.len()];
         let site = match *rng.pick(&Site::SOAKED) {
@@ -1381,7 +1455,6 @@ fn expansions_hold_msbuilds_path_fixup() {
         };
         let point = gen_point(&mut rng, &world.fixture, source, site, (case / 7) % 2);
         let seen = check_all_absent(&mut world, &point);
-        globs.count(&point, &seen);
         let entry = census.entry((source, site)).or_default();
         entry.points += 1;
         entry.served += usize::from(seen.served);
@@ -1419,7 +1492,6 @@ fn expansions_hold_msbuilds_path_fixup() {
     }
     let moved: usize = census.values().map(|e| e.moved).sum();
     assert!(moved > 0, "no point moved with the working directory");
-    assert!(globs.found > 0, "no item glob found a file");
     for site in Site::SOAKED {
         let (points, served, site_moved, supplied_moved) = census
             .iter()
@@ -1503,11 +1575,12 @@ fn placeholder(text: &str, root: &str) -> String {
             .cloned()
             .unwrap_or_default()
     });
-    // A value that climbs out of the root names its parent.
-    let parent = std::path::Path::new(root)
-        .parent()
-        .and_then(std::path::Path::to_str)
-        .unwrap_or(root);
+    // A value that climbs out of the root names a directory of the
+    // temporary directory's.
+    let parent = root
+        .strip_suffix(ROOT_IN_TMP)
+        .and_then(|tmp| tmp.strip_suffix('/'))
+        .expect("the root sits at ROOT_IN_TMP");
     let mut text = text.to_owned();
     for (path, token) in [
         (root, "{ROOT}"),
@@ -1775,8 +1848,11 @@ fn fixed_seed_sweep_regresses_nothing_main_answers() {
         pins.len()
     );
     eprintln!(
-        "item globs that found a file: {}, of them beside an Exclude that removed one: {}",
-        globs.found, globs.found_beside_exclude
+        "item globs that found a file: {}, of them beside an Exclude that removed one: {}; \
+         relative names the full starts hold: {}",
+        globs.found,
+        globs.found_beside_exclude,
+        relative_names().len()
     );
     assert!(
         globs.found > 0 && globs.found_beside_exclude > 0,
@@ -1822,7 +1898,8 @@ fn fixed_seed_sweep_regresses_nothing_main_answers() {
 /// (mode, name, the start MSBuild contradicts it from). It takes a relative
 /// probe to miss (#993), so it commits `obj\` and `bin\` as MSBuild spells
 /// them from a directory holding neither, served and supplied alike, and the
-/// conditions on them in the project as decided there.
+/// conditions on them in the project as decided there, so the assembly name
+/// one of them gates, and the target names composed from it, too.
 const SDK_WRONG_CLAIMS: &[(&str, &str, &str)] = &[
     ("served", "BaseIntermediateOutputPath", "project"),
     ("supplied", "BaseIntermediateOutputPath", "project"),
@@ -1830,6 +1907,12 @@ const SDK_WRONG_CLAIMS: &[(&str, &str, &str)] = &[
     ("supplied", "_InitialBaseIntermediateOutputPath", "project"),
     ("served", "BaseOutputPath", "project"),
     ("supplied", "BaseOutputPath", "project"),
+    ("served", "AssemblyName", "project"),
+    ("supplied", "AssemblyName", "project"),
+    ("served", "TargetName", "project"),
+    ("supplied", "TargetName", "project"),
+    ("served", "TargetFileName", "project"),
+    ("supplied", "TargetFileName", "project"),
     ("served", "Moved", "project"),
     ("supplied", "Moved", "project"),
     ("served", "BaseIntermediateOutputPath", "full"),
@@ -1838,6 +1921,12 @@ const SDK_WRONG_CLAIMS: &[(&str, &str, &str)] = &[
     ("supplied", "_InitialBaseIntermediateOutputPath", "full"),
     ("served", "BaseOutputPath", "full"),
     ("supplied", "BaseOutputPath", "full"),
+    ("served", "AssemblyName", "full"),
+    ("supplied", "AssemblyName", "full"),
+    ("served", "TargetName", "full"),
+    ("supplied", "TargetName", "full"),
+    ("served", "TargetFileName", "full"),
+    ("supplied", "TargetFileName", "full"),
     ("served", "Moved", "full"),
     ("supplied", "Moved", "full"),
 ];
@@ -1889,7 +1978,7 @@ fn sdk_output_paths_moved_by_the_startup_directory_are_pinned() {
     let xml = "<Project Sdk=\"Microsoft.NET.Sdk\">\n  <PropertyGroup>\n    \
                <TargetFramework>net10.0</TargetFramework>\n    \
                <Moved Condition=\"'$(BaseIntermediateOutputPath)' == 'obj/'\">yes</Moved>\n    \
-               <AssemblyName Condition=\"'$(BaseOutputPath)' == 'bin/'\">Moved</AssemblyName>\n  \
+               <AssemblyName Condition=\"'$(Moved)' == 'yes'\">Moved</AssemblyName>\n  \
                </PropertyGroup>\n</Project>\n";
     let dotnet_root = common::dotnet_root_from_env();
     let (user_dotnet_root, overrides_present) = common::workload_env_from_process();
@@ -1964,5 +2053,14 @@ fn sdk_output_paths_moved_by_the_startup_directory_are_pinned() {
         spellings,
         ["obj/", "obj\\", "obj/"],
         "MSBuild's spellings by start"
+    );
+    let names: Vec<&str> = answers
+        .iter()
+        .map(|(_, answer)| answer["AssemblyName"].as_str())
+        .collect();
+    assert_eq!(
+        names,
+        ["Moved", "App", "Moved"],
+        "MSBuild's assembly names by start"
     );
 }
