@@ -569,3 +569,52 @@ fn a_project_marker_at_the_marker_path_names_its_members_in_any_env() {
     let names = resolve_project_files(&files, &AssemblyEnv::default()).extension_names();
     assert!(names.may_have("Shout", false), "{names:?}");
 }
+
+/// A headerless file's types are not placed, so a local attribute type's
+/// container is unknown; only a classified marker's name may then be one.
+/// `FieldOnly` names no marker, and `[<Obsolete>]` of a local
+/// `ObsoleteAttribute` may be FCS's (the file could be `System.fs`).
+#[test]
+fn an_unplaced_attribute_type_may_be_only_a_marker_of_its_name() {
+    let src = "type FieldOnlyAttribute() =\n    inherit System.Attribute()\n\
+               type ObsoleteAttribute() =\n    inherit System.Attribute()\n\
+               [<FieldOnly>]\nlet f () = 1\n[<Obsolete>]\nlet g () = 1\n";
+    let files = project_files(&[("Lib.fs".to_owned(), src.to_owned())]);
+    let env = AssemblyEnv::default();
+    let resolved = resolve_project_files(&files, &env);
+    let span = |written: &str| {
+        let start = src.find(&format!("[<{written}>]")).expect("written") + 2;
+        borzoi_cst::syntax::TextRange::new(
+            u32::try_from(start).unwrap().into(),
+            u32::try_from(start + written.len()).unwrap().into(),
+        )
+    };
+    let file = resolved.file(0);
+    assert!(!file.attribute_may_be(span("FieldOnly"), "FieldOnly", &env, |_| true));
+    assert!(file.attribute_may_be(span("Obsolete"), "Obsolete", &env, |_| true));
+}
+
+/// A type at a classified marker's path is that marker, and only that one:
+/// with the env indexing the BCL's `ObsoleteAttribute`, a project's own type
+/// at its path may be `[<Obsolete>]` and is never `[<Extension>]`.
+#[test]
+fn a_classified_path_denotes_only_its_own_marker() {
+    let src = "namespace System\n\
+               type ObsoleteAttribute() =\n    inherit Attribute()\n\
+               module M =\n    [<Obsolete>]\n    let g () = 1\n";
+    let files = project_files(&[("Lib.fs".to_owned(), src.to_owned())]);
+    let env = crate::common::ext_universe_env();
+    let resolved = resolve_project_files(&files, env);
+    let start = src.find("[<Obsolete>]").expect("written") + 2;
+    let span = borzoi_cst::syntax::TextRange::new(
+        u32::try_from(start).unwrap().into(),
+        u32::try_from(start + "Obsolete".len()).unwrap().into(),
+    );
+    let file = resolved.file(0);
+    let full_name = |h| env.entity_full_name(h);
+    assert!(
+        file.attribute_may_be(span, "Obsolete", env, |h| full_name(h)
+            == "System.ObsoleteAttribute")
+    );
+    assert!(!file.attribute_may_be(span, "Obsolete", env, |h| env.is_extension_attribute(h)));
+}

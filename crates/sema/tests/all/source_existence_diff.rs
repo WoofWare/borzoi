@@ -140,6 +140,10 @@ pub struct Fcs {
     pub compile_errors: Vec<String>,
     /// The entities of a clean A whose members FCS's view could not read.
     pub view_unread: Vec<String>,
+    /// FCS's view of A's entities lost an entity or its place (a read error
+    /// on an entity's own field, or a dropped child): where the signature is
+    /// undecodable, that view is the oracle, and it may omit what FCS holds.
+    pub entity_view_incomplete: bool,
     /// The assembly-level auto-opens of the DLL FCS compiles and of its
     /// in-memory signature, where they differ: FCS takes an assembly
     /// attribute for `AutoOpen` by its owner's identity in memory
@@ -252,6 +256,21 @@ fn view_entity_rows(
     rows
 }
 
+/// The entity fields whose read error in FCS's view loses an entity row or
+/// its place (`collectAssemblyEntityRows`); a member's fields only lose
+/// extension rows, which this differential does not grade.
+const ENTITY_FIELDS: [&str; 9] = [
+    "LogicalName",
+    "IsNamespace",
+    "Namespace",
+    "CompiledName",
+    "Kind",
+    "Accessibility",
+    "AutoOpen",
+    "Extension",
+    "NestedEntities",
+];
+
 /// The producer's assembly name: fixed, so no generated name can collide
 /// with it.
 const PRODUCER: &str = "SourceExistenceProducer";
@@ -354,6 +373,7 @@ pub fn fcs(cell: &Cell) -> Fcs {
                 errors: Vec::new(),
                 compile_errors: Vec::new(),
                 view_unread: Vec::new(),
+                entity_view_incomplete: false,
                 auto_open_split: None,
                 refused: Some(if e.contains("FCS reads it from its DLL") {
                     Refusal::ReadsDll
@@ -588,6 +608,12 @@ pub fn fcs(cell: &Cell) -> Fcs {
         errors,
         compile_errors,
         view_unread,
+        entity_view_incomplete: ENTITY_FIELDS.iter().any(|f| {
+            response
+                .read_errors
+                .iter()
+                .any(|e| e.contains(": dropped, ") || e.contains(&format!("): {f}: ")))
+        }),
         auto_open_split,
         refused: None,
     }
@@ -715,6 +741,12 @@ pub fn grade(cell: &Cell, fcs: &Fcs, ours: &SourceExistence) -> Result<String, S
         SourceExistence::Unread(why) => return Ok(format!("unread {why:?}")),
         SourceExistence::Read(s) => s,
     };
+    if fcs.undecodable && fcs.entity_view_incomplete {
+        return Ok(
+            "ungraded: FCS's signature is undecodable and its view of the entities incomplete"
+                .to_owned(),
+        );
+    }
     // Both sides as the entity questions read them: the facts of the set
     // each index builds, by the code every question runs. The extension
     // facts are A's `ExtensionNames`', graded by the gate grids, not here.

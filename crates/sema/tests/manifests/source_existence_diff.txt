@@ -26,6 +26,7 @@ attribute_target_return_on_entities	certified: exact []; unknown: covers surplus
 attribute_target_return_on_signature_val	certified: exact [SignaturePair]; unknown: exact [SignaturePair]
 attribute_targets	certified: exact []; unknown: covers surplus(prefix 0, entity 0, lends 2, auto-open 0) [UncertainAttribute]
 augmentation_constructor	certified: exact, FCS rejects []; unknown: exact, FCS rejects [] [FCS: FS3192,FS871,FS1,FS696]
+augmentation_head_dotted_with_constructor	certified: unread Unreadable(0, TypeDefinition); unknown: unread Unreadable(0, TypeDefinition) [FCS: FS10,FS10,FS925,FS929,FS912]
 augmentation_head_with_constructor	certified: exact, FCS rejects []; unknown: exact, FCS rejects [UncertainAttribute] [FCS: FS10,FS10,FS929,FS912]
 augmentation_of_local_exception	certified: exact []; unknown: exact []
 augmentation_of_single_case_abbreviation	certified: exact [AbbreviationOrUnion]; unknown: exact [AbbreviationOrUnion]
@@ -153,6 +154,7 @@ signature_augmentation	certified: exact [SignaturePair]; unknown: exact [Signatu
 signature_augmentation_missing_in_implementation	certified: exact, FCS rejects [SignaturePair]; unknown: exact, FCS rejects [SignaturePair] [FCS: FS193]
 signature_augmentation_override	certified: exact, FCS rejects [SignaturePair]; unknown: exact, FCS rejects [SignaturePair] [FCS: FS854]
 signature_empty_with_block	certified: exact [SignaturePair]; unknown: exact [SignaturePair,UncertainAttribute]
+signature_empty_with_block_dotted	certified: unread Unreadable(0, TypeDefinition); unknown: unread Unreadable(0, TypeDefinition) [FCS: FS925,FS297]
 signature_method_unreadable_rename	certified: exact [SignaturePair]; unknown: exact [SignaturePair]
 signature_with_block_members	certified: covers, FCS rejects surplus(prefix 1, entity 1, lends 1, auto-open 0) [SignaturePair]; unknown: covers, FCS rejects surplus(prefix 1, entity 1, lends 1, auto-open 0) [SignaturePair,UncertainAttribute] [FCS: FS35,FS39]
 standalone_assembly_attribute	certified: exact []; unknown: unread TypeProvider(0)

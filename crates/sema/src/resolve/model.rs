@@ -4825,15 +4825,16 @@ impl ResolvedFile {
             Some(Resolution::Local(id)) => {
                 let name = env.names().text(self.def(*id).name());
                 let candidate = if self.own_abbrev_type_simple_names.contains(name) {
-                    Some(MarkerCandidate::Abbreviation)
+                    MarkerCandidate::Abbreviation
                 } else {
                     self.placed_type_of_def
                         .get(id)
                         .and_then(|&index| self.surface.placed_types[index].path.split_last())
-                        .map(|(name, container)| MarkerCandidate::Type { container, name })
+                        .map_or(MarkerCandidate::Unplaced { name }, |(name, container)| {
+                            MarkerCandidate::Type { container, name }
+                        })
                 };
-                // An unplaced type's path is unknown: it may be anything.
-                candidate.is_none_or(|c| env.may_denote_marker(c, &is_target))
+                env.may_denote_marker(candidate, &is_target)
             }
             // No other variant is ever recorded for an attribute; if one
             // appears, defer rather than trust it.

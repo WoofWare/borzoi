@@ -288,6 +288,9 @@ pub(crate) enum MarkerCandidate<'p> {
         container: &'p [String],
         name: &'p str,
     },
+    /// Any other entity whose container is not known (a type of a
+    /// headerless file, which the walk does not place): its logical name.
+    Unplaced { name: &'p str },
 }
 
 /// The entities of the project references read from source, by logical
@@ -5539,24 +5542,39 @@ impl AssemblyEnv {
     /// - Any other entity is its own type, which FCS takes for a well-known
     ///   attribute by its **path** when it lives in another assembly
     ///   (`resolveAttribPath`, `TypedTreeOps.Attributes.fs`): so it may
-    ///   denote the target when its path is one FCS classifies
-    ///   ([`PATH_CLASSIFIED_MARKERS`]), whether or not the env indexes a copy
-    ///   of that type, or when a type `is_target` picks out sits at the same
-    ///   path here. Inside its own assembly FCS reads no path, so the answer
+    ///   denote the target when a type `is_target` picks out sits at the same
+    ///   path here, or when its path is one FCS classifies
+    ///   ([`PATH_CLASSIFIED_MARKERS`]) and the env indexes no copy to ask.
+    ///   One whose container is unknown may denote a classified marker of
+    ///   its name. Inside its own assembly FCS reads no path, so the answer
     ///   over-approximates there.
     pub(crate) fn may_denote_marker(
         &self,
         candidate: MarkerCandidate<'_>,
         is_target: &dyn Fn(EntityHandle) -> bool,
     ) -> bool {
+        // A marker FCS classifies by path, asked of the env's copy of it, or,
+        // with none indexed, possibly the one asked about.
+        let classified = |ns: &[&str], type_name: &str| {
+            let ns: Vec<String> = ns.iter().map(|s| (*s).to_owned()).collect();
+            self.lookup_type(&ns, type_name, 0).is_none_or(is_target)
+        };
         match candidate {
             MarkerCandidate::Abbreviation => true,
             MarkerCandidate::Type { container, name } => {
-                PATH_CLASSIFIED_MARKERS.iter().any(|(ns, type_name)| {
+                match PATH_CLASSIFIED_MARKERS.iter().find(|(ns, type_name)| {
                     *type_name == name
                         && container.iter().map(String::as_str).eq(ns.iter().copied())
-                }) || self.lookup_type(container, name, 0).is_some_and(is_target)
+                }) {
+                    Some((ns, type_name)) => classified(ns, type_name),
+                    None => self.lookup_type(container, name, 0).is_some_and(is_target),
+                }
             }
+            // Its container unknown, a type may sit at the path of any
+            // classified marker of its name, and at no other marker's.
+            MarkerCandidate::Unplaced { name } => PATH_CLASSIFIED_MARKERS
+                .iter()
+                .any(|(ns, type_name)| *type_name == name && classified(ns, type_name)),
         }
     }
 

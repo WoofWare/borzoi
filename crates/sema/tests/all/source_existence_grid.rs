@@ -366,6 +366,18 @@ pub fn cells() -> Vec<Cell> {
             "augmentation_head_with_constructor",
             "namespace CtorHead\n[<AutoOpen>]\ntype T() with end\n",
         ),
+        // Dotted, FCS imports the first segment: the walk declines.
+        one(
+            "augmentation_head_dotted_with_constructor",
+            "namespace CtorDotted\ntype One.Two() with end\n",
+        ),
+        Cell::new(
+            "signature_empty_with_block_dotted",
+            &[
+                ("Lib.fsi", "namespace WD\ntype One.Two with end\n"),
+                ("Lib.fs", "namespace WD\ntype One() = class end\n"),
+            ],
+        ),
         // FSharp.Core opens `Microsoft` at the root, so a rooted name may
         // start at `FSharp`.
         one(
