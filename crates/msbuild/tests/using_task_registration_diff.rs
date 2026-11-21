@@ -331,6 +331,9 @@ fn assert_msbuild_refuses_alone(
     // The claimed task's `Condition`, as written: the construct is replayed
     // under it, so that MSBuild refuses it only where it reaches it.
     let gate = task_condition(xml, rejection.span.start);
+    // And its children in their places: a body MSBuild reads only as the
+    // last child, a parameter group only as the first.
+    let (group_first, body_last) = child_places(xml, rejection.span.start);
     let (body, attribute) = match cause {
         // A throw is replayed where it was, under the task's condition and
         // the body's `Evaluate`, so that MSBuild throws there only if it
@@ -359,6 +362,7 @@ fn assert_msbuild_refuses_alone(
     };
     // At the document's own path, so that what reads the project's name or
     // directory reads what it did there.
+    let body = in_place(&body, group_first, body_last);
     // The document as it was, every property and item in it, with its
     // `<UsingTask>`s replaced by the one construct.
     let _ = writes;
@@ -413,6 +417,54 @@ fn colliding_parameters(xml: &str, at: usize) -> String {
             .find(|first| first.eq_ignore_ascii_case(&second_name))
             .expect("an earlier parameter of the folded name");
     format!("<{first_name} /><{second_name} />")
+}
+
+/// Whether the `<UsingTask>` holding the element starting at `at` in `xml`
+/// has a `<ParameterGroup>` as its first child, and a `<Task>` as its last:
+/// where MSBuild reads each. Both true for an element outside a task.
+fn child_places(xml: &str, at: usize) -> (bool, bool) {
+    let document = borzoi_msbuild::document::parse(xml).expect("well-formed");
+    let root = document.root_element();
+    let Some(task) = document
+        .descendants()
+        .find(|node| node.is_element() && node.range().start == at)
+        .and_then(|element| {
+            element
+                .ancestors()
+                .find(|node| node.parent_element() == Some(root))
+        })
+    else {
+        return (true, true);
+    };
+    let children: Vec<_> = task.children().filter(|node| node.is_element()).collect();
+    let named = |node: Option<&roxmltree::Node<'_, '_>>, name: &str| {
+        node.is_some_and(|node| node.tag_name().name() == name)
+    };
+    let has = |name: &str| children.iter().any(|node| node.tag_name().name() == name);
+    (
+        !has("ParameterGroup") || named(children.first(), "ParameterGroup"),
+        !has("Task") || named(children.last(), "Task"),
+    )
+}
+
+/// A replayed `<UsingTask>` (`body`, whose parameter group, if any, comes
+/// first and whose body last) with its children placed as the claimed
+/// task's were: a parameter group that was not first follows the body, and a
+/// body that was not last comes before an empty group.
+fn in_place(body: &str, group_first: bool, body_last: bool) -> String {
+    let Some(start) = body.find("<ParameterGroup>") else {
+        if !body_last {
+            return body.replacen("</UsingTask>", "<ParameterGroup /></UsingTask>", 1);
+        }
+        return body.to_owned();
+    };
+    if group_first {
+        return body.to_owned();
+    }
+    let end = body.find("</ParameterGroup>").expect("closed") + "</ParameterGroup>".len();
+    let group = &body[start..end];
+    let rest = format!("{}{}", &body[..start], &body[end..]);
+    rest.replacen("</UsingTask>", &format!("{group}</UsingTask>"), 1)
 }
 
 /// The ` Condition="…"` of the `<UsingTask>` holding the element starting at
@@ -1121,6 +1173,18 @@ fn hand_picked_registrations() {
             true,
             Some(Certain),
         ),
+        // A body MSBuild does not read (not the last child), with a flag it
+        // would refuse, beside a task it refuses: a claim of the flag would
+        // be graded with the body in its place, and fail.
+        (
+            format!(
+                "<UsingTask TaskName=\"$(Empty)\" AssemblyFile=\"y.dll\" />{}",
+                inline_task("", "<Task Evaluate=\"off\">x</Task><ParameterGroup />")
+                    .replace("\"X\"", "\"Y\"")
+            ),
+            true,
+            Some(Certain),
+        ),
         // A parameter named as a project element is a parameter.
         (
             inline_task(
@@ -1560,11 +1624,18 @@ fn composite_document(rng: &mut SplitMix64) -> String {
         } else {
             String::new()
         };
+        body_drawn.extend(split(before_body));
+        let before_text = mark();
         let text = if rng.below(4) == 0 {
             composite_value(rng)
         } else {
             "x".to_owned()
         };
+        // The text is expanded for certain only under no `Evaluate`.
+        let text_drawn = split(before_text);
+        if evaluate.is_empty() {
+            body_drawn.extend(text_drawn);
+        }
         children.push(format!("<Task{evaluate}>{text}</Task>"));
     }
     body_drawn.extend(split(before_body));
