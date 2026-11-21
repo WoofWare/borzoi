@@ -85,12 +85,24 @@ pub(super) fn comparison_key(identity: &str, project_dir: &Path) -> Option<Strin
     // (`/tmp/a:b` and `/tmp/a:b/.`); written relative, it equals none, since
     // every full path starts with `/`.
     if crate::glob::compares_unnormalised(identity) {
-        return Some(identity.to_ascii_lowercase());
+        return verbatim_key(identity);
     }
     let spelled = identity.replace('\\', "/");
     let mut key = full_path(spelled.trim_end_matches('/'), project_dir)?;
     key.make_ascii_lowercase();
     Some(key)
+}
+
+/// The key of a spelling MSBuild compares as written: the spelling, case
+/// folded. `None` for one with a `\` or a run of separators, which MSBuild
+/// collapses or not as the build's working directory has the spelling's
+/// first segment (`FileUtilities.MaybeAdjustFilePath`), so that its text, and
+/// with it the key, turns on where the build runs.
+fn verbatim_key(identity: &str) -> Option<String> {
+    if identity.contains('\\') || identity.contains("//") {
+        return None;
+    }
+    Some(identity.to_ascii_lowercase())
 }
 
 /// The key a batch of `Update`s holds a fragment by, comparing it with the
@@ -112,7 +124,7 @@ pub(super) fn batch_key(identity: &str, project_dir: &Path) -> Option<String> {
         return None;
     }
     if crate::glob::compares_unnormalised(identity) {
-        return Some(identity.to_ascii_lowercase());
+        return verbatim_key(identity);
     }
     let spelled = identity.replace('\\', "/");
     let mut segments: Vec<&str> = Vec::new();
@@ -270,7 +282,11 @@ mod tests {
         assert_eq!(key("a:b"), Some("a:b".to_string()));
         assert_ne!(key("a:b"), key("./a:b"));
         assert_ne!(key("a:b"), key("/root/Proj/a:b"));
-        assert_eq!(key("seg\\a:b"), Some("seg\\a:b".to_string()));
+        // A `\` or a run of separators MSBuild collapses or not, as the
+        // working directory has the first segment: no key.
+        assert_eq!(key("seg\\a:b"), None);
+        assert_eq!(key("src//a:b"), None);
+        assert_eq!(batch_key("seg\\a:b", Path::new("/r\u{f6}\u{f6}t")), None);
     }
 
     /// Under a non-ASCII project directory, relative identities that stay

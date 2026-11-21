@@ -2645,9 +2645,30 @@ fn update_strands_late(node: Node<'_, '_>, item_type: &str, state: &mut State<'_
             return false;
         }
     };
+    // An `Update` the walk does not certainly run may or may not have joined:
+    // whatever it did, the batch after it is one the walk does not know.
+    let certainly_runs = matches!(
+        evaluate_item_condition_silent(node, state),
+        (CondGate::Run, false)
+    );
     let expansion = expand_silent(update, state);
     let project_dir = state.entry_project_dir.clone();
     let run = state.update_batches.entry(key).or_default();
+    let strands = feed_update_batch(run, &expansion, &project_dir);
+    if !certainly_runs {
+        run.unknown = true;
+        run.pending = false;
+    }
+    strands
+}
+
+/// [`update_strands_late`] for an `Update` that runs, spelled `expansion`:
+/// moves `run` past it, and answers whether it may strand a fragment late.
+///
+/// While `run.unknown` holds, `run.pending` means only that whatever the
+/// batch holds, the next operation that runs leaves it empty: the batch is
+/// pending, or already empty.
+fn feed_update_batch(run: &mut UpdateBatchRun, expansion: &Expansion, project_dir: &Path) -> bool {
     if expansion.had_issue() {
         // A spec the walk cannot expand may join or leave anywhere: keep
         // every key, take no batch as pending, and leave every later
@@ -2657,6 +2678,7 @@ fn update_strands_late(node: Node<'_, '_>, item_type: &str, state: &mut State<'_
         return false;
     }
     let fragments: Vec<&str> = spec_fragments(expansion.value.ignoring_trust()).collect();
+    let (was_pending, was_known_empty) = (run.pending, !run.unknown && run.keys.is_empty());
     // From which fragment on the batch may hold a key the walk does not know.
     let mut unknown_from = run.unknown.then_some(0);
     let mut left_at = None;
@@ -2675,7 +2697,7 @@ fn update_strands_late(node: Node<'_, '_>, item_type: &str, state: &mut State<'_
             .any(|marker| fragment.contains(marker));
         let decoded = fragment_identity(fragment);
         let fragment_key = (!expands)
-            .then(|| item_spec::batch_key(&decoded, &project_dir))
+            .then(|| item_spec::batch_key(&decoded, project_dir))
             .flatten();
         let may_collide = unknown_from.is_some() || fragment_key.is_none();
         if (expands || may_collide) && i > 0 && strandable {
@@ -2710,9 +2732,12 @@ fn update_strands_late(node: Node<'_, '_>, item_type: &str, state: &mut State<'_
     if unknown_from.is_some() {
         // Where the spec left, if it did, and so whether it flushed, are
         // unknown: keep every key, take no batch as pending, and count any
-        // strand it may leave.
+        // strand it may leave. A lone fragment either joins (pending) or
+        // leaves at once (flushing a pending batch, else stranding nothing),
+        // so a batch that was pending, or known to be empty, is pending or
+        // empty after it.
         run.unknown = true;
-        run.pending = false;
+        run.pending = fragments.len() == 1 && left_at.is_none() && (was_pending || was_known_empty);
         return may_strand;
     }
     match left_at {

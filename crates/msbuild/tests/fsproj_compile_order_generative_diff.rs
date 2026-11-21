@@ -208,6 +208,9 @@ enum Spelling {
     /// `A.fs:v/.`: its file name is `.`, so MSBuild normalises it, to the
     /// key [`Spelling::VerbatimRooted`] is written as.
     VerbatimDotted,
+    /// `ÉA.fs`: another item, never included, outside the ASCII domain the
+    /// walk keys, so the batch holds a key the walk does not know.
+    Unkeyed,
 }
 
 impl Spelling {
@@ -225,6 +228,7 @@ impl Spelling {
             Spelling::Verbatim => format!("{name}:v"),
             Spelling::VerbatimRooted => format!("$(MSBuildProjectDirectory)/{name}:v"),
             Spelling::VerbatimDotted => format!("{name}:v/."),
+            Spelling::Unkeyed => format!("\u{c9}{name}"),
         }
     }
 }
@@ -899,6 +903,7 @@ fn batch_update_spec_strategy(dir: CaseDir) -> impl Strategy<Value = UpdateSpec>
         common => Just(Spelling::Verbatim),
         1 => Just(Spelling::VerbatimRooted),
         common => Just(Spelling::VerbatimDotted),
+        1 => Just(Spelling::Unkeyed),
     ];
     proptest::collection::vec((0..3usize, spelling), 2..5).prop_map(UpdateSpec::Files)
 }
@@ -906,8 +911,10 @@ fn batch_update_spec_strategy(dir: CaseDir) -> impl Strategy<Value = UpdateSpec>
 /// Runs of consecutive `Update`s (each writing `CompileOrder` or only other
 /// metadata) between `Include`s: MSBuild's batch of `Update`s, its strands
 /// and what removing a fragment by its text leaves, are what this sweeps.
-/// Every operation runs. Half the cases lay the project out under a
-/// directory that is not ASCII ([`CaseDir::NonAscii`]).
+/// Now and then a `CompileOrder` `Update` sits under a cleanly false gate,
+/// which MSBuild skips and the walk takes as leaving the batch unknown. Half
+/// the cases lay the project out under a directory that is not ASCII
+/// ([`CaseDir::NonAscii`]).
 fn batch_fixture_strategy() -> impl Strategy<Value = (Fixture, CaseDir)> {
     prop_oneof![Just(CaseDir::Ascii), Just(CaseDir::NonAscii)]
         .prop_flat_map(|dir| (batch_runs_strategy(dir), Just(dir)))
@@ -916,14 +923,18 @@ fn batch_fixture_strategy() -> impl Strategy<Value = (Fixture, CaseDir)> {
 /// [`batch_fixture_strategy`]'s project under `dir`.
 fn batch_runs_strategy(dir: CaseDir) -> impl Strategy<Value = Fixture> {
     let update = prop_oneof![
-        1 => (batch_update_spec_strategy(dir), (0..5usize))
-            .prop_map(|(spec, order)| ItemDecl::OrderUpdate {
+        1 => (
+            batch_update_spec_strategy(dir),
+            (0..5usize),
+            prop_oneof![12 => Just(Cond::None), 1 => Just(Cond::SwitchEq(false))],
+        )
+            .prop_map(|(spec, order, cond)| ItemDecl::OrderUpdate {
                 spec,
                 order: OrderMeta {
                     attr: Some(OrderValue::Lit(order)),
                     children: Vec::new(),
                 },
-                cond: Cond::None,
+                cond,
             }),
         1 => batch_update_spec_strategy(dir)
             .prop_map(|spec| ItemDecl::Boundary(Boundary::OtherMetadataUpdate(spec))),
@@ -968,6 +979,14 @@ fn batch_runs_strategy(dir: CaseDir) -> impl Strategy<Value = Fixture> {
 /// declines.)
 #[test]
 fn update_batches_match_msbuild() {
+    // `CaseDir` names only the case's own directory; the walk asks whether
+    // the whole project path is ASCII.
+    let root = shared().root.to_string_lossy().into_owned();
+    assert!(
+        root.is_ascii(),
+        "the shared root {root} is not ASCII, so no case lies under an ASCII directory: \
+         build with CARGO_TARGET_DIR at an ASCII path"
+    );
     let cases: u32 = std::env::var("BORZOI_COMPILE_ORDER_CASES")
         .ok()
         .and_then(|v| v.parse().ok())

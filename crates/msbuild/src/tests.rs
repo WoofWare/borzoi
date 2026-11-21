@@ -614,6 +614,61 @@ fn a_batch_holding_an_unknown_key_may_strand_a_later_update() {
     assert!(p.items_uncertain, "{:?}", p.diagnostics);
 }
 
+/// An `Update` the walk does not certainly run may or may not join the
+/// batch. MSBuild skips the false `x:v;./x:v`, so `A.fs;A.fs` leaves with no
+/// batch pending, stranding `A.fs`, and `B.fs;A.fs` collides on it, stranding
+/// `B.fs` with `CompileFirst` until `B.fs` is included: MSBuild compiles
+/// `B.fs` first. Taken as joined, the false `Update` would leave a batch
+/// pending, and the walk would see no strand.
+#[test]
+fn an_update_the_walk_may_not_run_leaves_the_batch_unknown() {
+    let p = parse(
+        r#"<Project><ItemGroup>
+    <Compile Update="x:v;./x:v" Visible="false" Condition="'$(NeverSet)' == 'true'" />
+    <Compile Update="A.fs;A.fs" Link="x" />
+    <Compile Update="B.fs;A.fs" CompileOrder="CompileFirst" />
+    <Compile Include="C.fs;B.fs" />
+  </ItemGroup></Project>"#,
+    );
+    assert!(
+        p.items_uncertain || file_names(&p.items) == ["B.fs", "C.fs"],
+        "{:?}",
+        file_names(&p.items)
+    );
+}
+
+/// A lone fragment entering a batch known to be empty joins it, whatever
+/// its key, so the next operation flushes the batch: `Résumé.fs` leaves
+/// nothing behind, and the order is certain. MSBuild's final flush gives
+/// `B.fs` `CompileFirst`.
+#[test]
+fn a_lone_fragment_without_a_key_is_flushed_by_the_next_operation() {
+    let p = parse(
+        r#"<Project><ItemGroup>
+    <Compile Update="R&#xE9;sum&#xE9;.fs" Link="R&#xE9;sum&#xE9;.fs" />
+    <Compile Include="C.fs;B.fs" />
+    <Compile Update="A.fs;B.fs" CompileOrder="CompileFirst" />
+  </ItemGroup></Project>"#,
+    );
+    assert!(!p.items_uncertain, "{:?}", p.diagnostics);
+    assert_eq!(file_names(&p.items), ["B.fs", "C.fs"]);
+}
+
+/// MSBuild compares `src\A:B.fsproj` as written, after collapsing its `\`
+/// only when the build's working directory holds `src`: whether `Remove`
+/// finds it turns on where the build runs, so the list is not certain.
+#[test]
+#[cfg(not(windows))]
+fn a_verbatim_spelling_with_a_backslash_has_no_key() {
+    let p = parse(
+        r#"<Project><ItemGroup>
+    <ProjectReference Include="src\A:B.fsproj" />
+    <ProjectReference Remove="src/A:B.fsproj" />
+  </ItemGroup></Project>"#,
+    );
+    assert!(p.project_references_uncertain, "{:?}", p.project_references);
+}
+
 /// An `Update` the walk cannot expand may leave any key in the batch, so
 /// any fragment of the next `Update` may collide with one: `Beta.fs;Alpha`
 /// may strand `Beta.fs` with its `CompileOrder`. No compile order is
