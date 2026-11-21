@@ -366,7 +366,8 @@ pub fn cells() -> Vec<Cell> {
             "augmentation_head_with_constructor",
             "namespace CtorHead\n[<AutoOpen>]\ntype T() with end\n",
         ),
-        // Dotted, FCS imports the first segment: the walk declines.
+        // Dotted with a constructor, FCS imports the first segment, and the
+        // walk declines; a signature's dotted empty block imports nothing.
         one(
             "augmentation_head_dotted_with_constructor",
             "namespace CtorDotted\ntype One.Two() with end\n",

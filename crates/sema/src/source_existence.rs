@@ -1791,17 +1791,17 @@ impl FileWalk<'_> {
             return Ok(());
         }
         // A `with` head may declare its type rather than augment one: a
-        // signature's `type T with … end` (`[<Sealed>] type T with end`), and
-        // any `with` head that also declares a primary constructor (`type T()
-        // with end`, which FCS rejects and still imports, dotted or not). A
-        // dotted head declares its first segment, which the walk declines
-        // below (`DottedType`), except a signature's non-empty block, the
-        // shape of an augmentation of a qualified type. Each other is read as
-        // a type, whose row is a surplus where it augments.
+        // signature's `type T with … end` under a single-identifier head
+        // (`[<Sealed>] type T with end`), and any `with` head that also
+        // declares a primary constructor (`type T() with end`, which FCS
+        // rejects and still imports, dotted or not: a dotted one declares its
+        // first segment, which the walk declines below, `DottedType`). Each
+        // is read as a type, whose row is a surplus where it augments. A
+        // signature's dotted block declares nothing FCS imports
+        // (`signature_empty_with_block_dotted`).
         let single = defn.long_id().is_some_and(|li| li.idents().count() == 1);
         let may_declare = defn.implicit_ctor().is_some()
-            || (crate::resolve::is_signature_with_block(defn)
-                && (single || defn.members().next().is_none()));
+            || (crate::resolve::is_signature_with_block(defn) && single);
         if crate::resolve::is_any_augmentation(defn) && !may_declare {
             self.forms.insert(Form::Augmentation);
             return Ok(());

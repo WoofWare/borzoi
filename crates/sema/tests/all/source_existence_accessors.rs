@@ -61,6 +61,10 @@ const UNREAD: &[(&str, &str)] = &[
     ),
     ("TypeDefn::constraints", "a constraint declares no entity"),
     (
+        "TypeDefn::members",
+        "members declare no entity; extension members are A's ExtensionNames'",
+    ),
+    (
         "UnionCase::attributes",
         "an exception's attributes are `ExceptionDefnDecl::attributes`'; an attribute on its \
          case moves no entity fact (an exception lends nothing and keeps its written name), \
