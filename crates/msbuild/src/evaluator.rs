@@ -5345,6 +5345,20 @@ fn gate_may_skip_property_writes(
             if is_write(element) {
                 return true;
             }
+            if element.tag_name().name().eq_ignore_ascii_case("Choose") {
+                // A nested `<Choose>` reaches its arms up to the first one
+                // taken for certain.
+                for arm in element.children().filter(Node::is_element) {
+                    if inert(arm) {
+                        continue;
+                    }
+                    pending.push(arm);
+                    if taken(arm) {
+                        break;
+                    }
+                }
+                continue;
+            }
             pending.extend(element.children().filter(Node::is_element));
         }
         false
@@ -5653,8 +5667,14 @@ fn evaluate_condition_with_exemptions(
             // relative to the entry project, not to the group's file.
             let decided = |element: Node<'_, '_>| {
                 attribute(element, "Condition").and_then(|condition| {
-                    let lower = condition.to_ascii_lowercase();
-                    if lower.contains("exists(") || lower.contains("hastrailingslash(") {
+                    // MSBuild takes space between a function's name and its
+                    // `(`, so the spelling is compared without any.
+                    let squeezed: String = condition
+                        .chars()
+                        .filter(|c| !c.is_whitespace())
+                        .collect::<String>()
+                        .to_ascii_lowercase();
+                    if squeezed.contains("exists(") || squeezed.contains("hastrailingslash(") {
                         return None;
                     }
                     directory_build::decision_from_certain_inputs(

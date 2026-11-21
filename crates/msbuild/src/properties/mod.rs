@@ -725,7 +725,11 @@ pub(crate) fn substitute_worlds(
 /// what it refuses or throws on, differs between the worlds of its startup
 /// directory, or it asks about more of the directory than the walk
 /// enumerates. Asked of every startup directory, whatever start the walk was
-/// given.
+/// given: a reader declining for it then declines wherever `main`'s walk,
+/// which took every segment as missing, may have declined on another throw
+/// in that world (the fixed-seed sweep's supplied starts find such points),
+/// at the price of a decline where the supplied start alone would not need
+/// one.
 pub(crate) fn expansion_turns_on_startup_directory(
     input: &str,
     props: &PropertyMap,

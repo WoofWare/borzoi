@@ -12818,6 +12818,105 @@ fn a_write_to_a_global_is_no_startup_decline() {
     assert!(p.rejection.is_none(), "{:#?}", p.rejection);
 }
 
+/// `Exists ('marker')`, spaced, reads the file system as `Exists('marker')`
+/// does: a write it gates is never taken as dead.
+#[test]
+#[cfg(not(windows))]
+fn a_spaced_exists_gate_is_no_dead_write() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    std::fs::create_dir_all(root.join("sub")).unwrap();
+    std::fs::write(root.join("marker"), "").unwrap();
+    std::fs::write(
+        root.join("sub").join("X.props"),
+        r#"<Project><PropertyGroup Condition="'$(S)' == 'seg/a'"><A Condition="Exists ('marker')">bad</A></PropertyGroup></Project>"#,
+    )
+    .unwrap();
+    let source = r#"<Project><PropertyGroup><S>seg\a</S><A>true</A></PropertyGroup>
+  <Import Project="sub/X.props" />
+  <PropertyGroup Condition="$(A)"><Mid>m</Mid></PropertyGroup>
+  <PropertyGroup><After>yes</After></PropertyGroup></Project>"#;
+    let p = crate::parse_fsproj_with_imports(
+        &crate::ProjectFile::buffer(&root.join("Demo.fsproj"), source).unwrap(),
+        &HashMap::new(),
+        &HashMap::new(),
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(p.rejection.is_some(), "{:?}", p.property("After"));
+}
+
+/// A package `Update`'s metadatum under a gate on an inexact toolset read is
+/// one it may write: MSBuild strands `Beta;Alpha`'s `Beta` with `Version`
+/// `2.0` (it sets `MSBuildStartupDirectory`).
+#[test]
+fn a_metadatum_under_an_inexact_gate_may_be_written() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    let source = r#"<Project>
+  <ItemGroup>
+    <PackageReference Update="Alpha;Alpha" />
+    <PackageReference Update="Beta;Alpha">
+      <Version Condition="'$(MSBuildStartupDirectory)' != ''">2.0</Version>
+    </PackageReference>
+    <PackageReference Include="Alpha;Beta" Version="1.0" />
+  </ItemGroup>
+</Project>"#;
+    let p = crate::parse_fsproj_with_imports(
+        &crate::ProjectFile::buffer(&root.join("Demo.fsproj"), source).unwrap(),
+        &HashMap::new(),
+        &HashMap::new(),
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(
+        p.package_references_uncertain,
+        "{:#?}",
+        p.package_references
+    );
+}
+
+/// A nested `<Choose>` reaches only its first arm that may be taken: an
+/// `Otherwise` after a `When Condition="true"` is no write any start runs.
+#[test]
+#[cfg(not(windows))]
+fn a_write_past_a_nested_taken_arm_is_no_startup_decline() {
+    let p = parse(
+        r#"<Project><PropertyGroup>
+    <S>seg\a</S>
+    <U>$([System.IO.Path]::GetFileName('x'))</U>
+  </PropertyGroup>
+  <Choose>
+    <When Condition="'$(S)' == 'seg/a'">
+      <Choose>
+        <When Condition="true"><ItemGroup /></When>
+        <Otherwise><PropertyGroup><Z>1</Z></PropertyGroup></Otherwise>
+      </Choose>
+    </When>
+  </Choose>
+  <PropertyGroup><L>$(U.Length)</L><After>ok</After></PropertyGroup></Project>"#,
+    );
+    assert!(p.rejection.is_none(), "{:#?}", p.rejection);
+}
+
+/// An undecided group whose only `Update` is certainly skipped leaves the
+/// batch as it was: MSBuild orders `A.fs, B.fs` whether the group runs or
+/// not.
+#[test]
+fn an_undecided_group_of_skipped_updates_leaves_the_batch() {
+    let p = parse(
+        r#"<Project>
+  <ItemGroup Condition="'É' == 'é'"><Compile Update="Z.fs" Condition="false" Link="z" /></ItemGroup>
+  <ItemGroup>
+    <Compile Update="B.fs;A.fs" CompileOrder="CompileFirst" />
+    <Compile Include="A.fs;B.fs" />
+  </ItemGroup></Project>"#,
+    );
+    assert!(!p.items_uncertain, "{:#?}", p.diagnostics);
+}
+
 /// `Q` is `./seg/a//` where `seg` is a directory under MSBuild's startup
 /// directory, and `./seg/a/` elsewhere: the whole value's pass respells it
 /// only where `S`'s `\` survived. Each reader below that would act on one of

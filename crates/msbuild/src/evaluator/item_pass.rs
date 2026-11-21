@@ -716,6 +716,13 @@ fn evaluate_item_group(node: Node<'_, '_>, state: &mut State<'_>) {
 /// pending.
 fn doubt_update_batches_of(node: Node<'_, '_>, state: &mut State<'_>) {
     for child in node.children().filter(Node::is_element) {
+        // One MSBuild certainly skips is none of the batch's either way.
+        if matches!(
+            evaluate_item_condition_silent(child, state),
+            (CondGate::Skip, false)
+        ) {
+            continue;
+        }
         let batched = match package_item_kind_for_element(child) {
             Some(PackageItemKind::PackageReference) => Some("PackageReference"),
             Some(_) => None,
@@ -773,7 +780,18 @@ fn project_reference_group_risk(
 fn reference_gate_may_run(node: Node<'_, '_>, state: &State<'_>) -> bool {
     match evaluate_item_condition_silent(node, state).0 {
         CondGate::Run | CondGate::Unsupported => true,
-        CondGate::Skip => state.condition_reads_untrusted_value(node),
+        // An inexact read (an unseeded toolset property) is as doubtful as an
+        // untrusted one.
+        CondGate::Skip => {
+            state.condition_reads_untrusted_value(node)
+                || attribute(node, "Condition").is_some_and(|condition| {
+                    !directory_build::decided_from_certain_inputs(
+                        state,
+                        &condition,
+                        &state.entry_project_dir,
+                    )
+                })
+        }
     }
 }
 
