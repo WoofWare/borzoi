@@ -117,12 +117,13 @@ fn grade(oracle: &mut Oracle, writes: &str, body: &str, doubt: Doubt) -> Graded 
             .as_ref()
             .filter(|r| r.certainty == RejectionCertainty::Certain)
         {
-            assert_eq!(
-                code,
-                &code_of(&rejection.cause),
-                "MSBuild rejects with {code}, and the walk claims another refusal: {xml}\n\
-                 {rejection:#?}"
-            );
+            if let Some(expected) = code_of(&rejection.cause) {
+                assert_eq!(
+                    code, &expected,
+                    "MSBuild rejects with {code}, and the walk claims another refusal: {xml}\n\
+                     {rejection:#?}"
+                );
+            }
             let rejected = rejected.as_ref().expect("MSBuild rejects");
             assert_names_where_msbuild_points(&xml, rejected, rejection);
         }
@@ -203,9 +204,14 @@ fn assert_names_where_msbuild_points(
         .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | ':'))
         .collect();
     let at_attribute = xml[offset + name.len()..].starts_with('=') && !name.is_empty();
-    if let (true, borzoi_msbuild::RejectionCause::UsingTaskRegistration { attribute, .. }) =
-        (at_attribute, &rejection.cause)
-    {
+    let claimed = match &rejection.cause {
+        borzoi_msbuild::RejectionCause::UsingTaskRegistration { attribute, .. } => {
+            Some(attribute.as_str())
+        }
+        borzoi_msbuild::RejectionCause::IllegalCondition { .. } => Some("Condition"),
+        _ => None,
+    };
+    if let (true, Some(attribute)) = (at_attribute, claimed) {
         assert_eq!(
             &name, attribute,
             "MSBuild points at {name}, and the walk claims {attribute}: {xml}\n{rejection:#?}"
@@ -218,10 +224,12 @@ fn assert_names_where_msbuild_points(
 /// expression that throws, `MSB4022` for an attribute whose value the
 /// registration does not take, `MSB4069` for a parameter type it does not
 /// resolve, `MSB4067` for a body under no task factory, and the loader's
-/// message, which carries no code, for what the loader refuses.
-fn code_of(cause: &borzoi_msbuild::RejectionCause) -> String {
+/// message, which carries no code, for what the loader refuses. A condition
+/// MSBuild refuses has a code by why it does, which the cause does not carry
+/// (`condition_diff` grades conditions): `None`, its place alone graded.
+fn code_of(cause: &borzoi_msbuild::RejectionCause) -> Option<String> {
     use borzoi_msbuild::{LoadTimeError, RejectionCause};
-    match cause {
+    Some(match cause {
         RejectionCause::ThrowingExpression { .. } => "MSB4184".to_owned(),
         RejectionCause::UsingTaskParameterCollision { .. } => "MSB1025".to_owned(),
         RejectionCause::UsingTaskRegistration {
@@ -240,7 +248,9 @@ fn code_of(cause: &borzoi_msbuild::RejectionCause) -> String {
                 "not exactly one of `AssemblyName` and `AssemblyFile`" => "MSB4072",
                 "a `<ParameterGroup>` or `<Task>` without a `TaskFactory`" => "MSB4035",
                 other => {
-                    return format!("a loader refusal the differential does not expect: {other}");
+                    return Some(format!(
+                        "a loader refusal the differential does not expect: {other}"
+                    ));
                 }
             }
             .to_owned()
@@ -250,8 +260,9 @@ fn code_of(cause: &borzoi_msbuild::RejectionCause) -> String {
         {
             "MSB4067".to_owned()
         }
+        RejectionCause::IllegalCondition { .. } => return None,
         other => panic!("a refusal the registration differential does not expect: {other:?}"),
-    }
+    })
 }
 
 /// Where a value goes: `{v}` stands for it.
@@ -597,6 +608,30 @@ fn hand_picked_registrations() {
                 "",
                 "<ParameterGroup><A Required=\"bad\" /></ParameterGroup>\
                  <Task Evaluate=\"false$(Missing)\">$(Empty.Substring(1))</Task>",
+            ),
+            true,
+            Some(Certain),
+        ),
+        // A task MSBuild may stop at before a later task's condition, which
+        // it never evaluates.
+        (
+            format!(
+                "{}<UsingTask TaskName=\"Y\" AssemblyFile=\"y.dll\" Condition=\"1\" />",
+                inline_task(
+                    "",
+                    "<ParameterGroup><A ParameterType=\"Nope.Type\" /></ParameterGroup><Task>x</Task>"
+                ),
+            ),
+            true,
+            Some(Possible),
+        ),
+        // A task MSBuild may skip, and that registers whenever it does not,
+        // before a later refusal: MSBuild reaches the refusal either way.
+        (
+            format!(
+                "{}{}",
+                inline_task(&format!(" Condition=\"{UNDECIDED_TRUE}\""), "<Task>x</Task>"),
+                inline_task("", "<Task Evaluate=\"off\">x</Task>").replace("\"X\"", "\"Y\""),
             ),
             true,
             Some(Certain),
@@ -1044,8 +1079,19 @@ fn composite_document(rng: &mut SplitMix64) -> String {
     if rng.below(6) == 0 {
         attributes += &format!(" Override=\"{}\"", composite_value(rng));
     }
+    if rng.below(4) == 0 {
+        attributes += &format!(" Condition=\"{}\"", rng.pick(CONDITIONS));
+    }
     format!("<UsingTask{attributes}>{}</UsingTask>", children.concat())
 }
+
+/// The conditions a whole `<UsingTask>` draws: true, false, undecided by the
+/// walk, illegal, and one that throws.
+const CONDITIONS: &[&str] = &["true", "false", "'É' == 'é'", "1", "'$(P[9])' == ''"];
+
+/// [`COMPOSITE_WRITES`] with each doubted name holding only the value the walk
+/// holds.
+const COMPOSITE_HELD: &str = "<P>a</P><At>@</At><F>first</F><T>y</T>";
 
 /// The property writes every [`composite_sweep`] document makes.
 const COMPOSITE_WRITES: &str = "<P>a</P><At>@</At><At Condition=\"'É' == 'é'\">@</At>\
@@ -1073,7 +1119,13 @@ fn composite_sweep(seed: u64, cases: usize) -> Census {
             Doubt::None
         };
         let graded = grade(&mut oracle, COMPOSITE_WRITES, &body, doubt);
-        tally.unheld_value += usize::from(graded.msbuild_rejects && graded.walk.is_none());
+        if graded.msbuild_rejects && graded.walk.is_none() {
+            // Shown to rest on the doubted values: with `F` and `T` holding
+            // only what the walk holds, MSBuild evaluates, or the walk claims
+            // its rejection (`grade`).
+            grade(&mut oracle, COMPOSITE_HELD, &body, Doubt::None);
+            tally.unheld_value += 1;
+        }
         tally.msbuild_rejects += usize::from(graded.msbuild_rejects);
         match graded.walk {
             Some(RejectionCertainty::Certain) => tally.certain += 1,
