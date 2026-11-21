@@ -1,0 +1,22 @@
+# Generated; do not edit by hand. One line per graded item, sorted.
+# Regenerate with:
+#   BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-msbuild --test using_task_registration_diff composite_sweep_fixed_seed
+plain	owed
+value.blank	owed
+value.boolean-spelling	owed
+value.case-folding	owed
+value.item-expression	owed
+value.item-separator	owed
+value.long-value	owed
+value.number-spelling	owed
+value.option	owed
+value.option-after-line-break	owed
+value.overwritten-later	excluded: the registration reads a value after every property write: a value a later write puts back never reaches it
+value.padded	owed
+value.padded-option	owed
+value.path-separator	owed
+value.quoted-argument	owed
+value.reads-the-build	excluded: each value calls a property function in a property body, one the walk does not model there, which MSBuild may throw on and the walk does not judge yet (#1094)
+value.response-file	owed
+value.self-set-property	excluded: each value reads a property the build sets for itself, which the walk holds no value of: whether MSBuild refuses the value it holds is the judgement over the values a name may hold, which the walk does not make yet (#1051)
+value.version-spelling	owed

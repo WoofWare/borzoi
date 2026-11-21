@@ -328,6 +328,9 @@ fn assert_msbuild_refuses_alone(
         }
         _ => None,
     };
+    // The claimed task's `Condition`, as written: the construct is replayed
+    // under it, so that MSBuild refuses it only where it reaches it.
+    let gate = task_condition(xml, rejection.span.start);
     let (body, attribute) = match cause {
         // A throw is replayed where it was, under the task's condition and
         // the body's `Evaluate`, so that MSBuild throws there only if it
@@ -339,7 +342,10 @@ fn assert_msbuild_refuses_alone(
             let Some((body, attribute)) = alone(cause, raw.as_deref()) else {
                 panic!("a certain refusal the differential does not isolate: {cause:?}: {xml}");
             };
-            (body, attribute.to_owned())
+            (
+                body.replacen("<UsingTask ", &format!("<UsingTask{gate} "), 1),
+                attribute.to_owned(),
+            )
         }
     };
     // At the document's own path, so that what reads the project's name or
@@ -395,6 +401,27 @@ fn colliding_parameters(xml: &str, at: usize) -> String {
     format!("<{first_name} /><{second_name} />")
 }
 
+/// The ` Condition="…"` of the `<UsingTask>` holding the element starting at
+/// `at` in `xml`, as written, or nothing.
+fn task_condition(xml: &str, at: usize) -> String {
+    let document = borzoi_msbuild::document::parse(xml).expect("well-formed");
+    let root = document.root_element();
+    let Some(task) = document
+        .descendants()
+        .find(|node| node.is_element() && node.range().start == at)
+        .and_then(|element| {
+            element
+                .ancestors()
+                .find(|node| node.parent_element() == Some(root))
+        })
+    else {
+        return String::new();
+    };
+    raw_attribute(xml, task.range(), "Condition")
+        .map(|raw| format!(" Condition=\"{raw}\""))
+        .unwrap_or_default()
+}
+
 /// The `<UsingTask>` holding `expression`, which the walk claims MSBuild
 /// throws on in the element starting at `at` in `xml`, at its original site:
 /// the task's `Condition` kept, and the element reduced to the attribute (or,
@@ -420,9 +447,7 @@ fn throw_site(xml: &str, at: usize, expression: &str) -> (String, String) {
     } else {
         "parameter"
     };
-    let condition = raw_attribute(xml, task.range(), "Condition")
-        .map(|raw| format!(" Condition=\"{raw}\""))
-        .unwrap_or_default();
+    let condition = task_condition(xml, at);
     // The attribute of `element` whose value holds the expression, as
     // written.
     let holding = element
@@ -1070,6 +1095,18 @@ fn hand_picked_registrations() {
             true,
             Some(Certain),
         ),
+        // A task MSBuild does not register (its condition false), with a
+        // flag it would refuse, beside a task it refuses: a claim of the
+        // flag would be graded under that condition, and fail.
+        (
+            format!(
+                "<UsingTask TaskName=\"$(Empty)\" AssemblyFile=\"y.dll\" />{}",
+                inline_task(" Condition=\"false\"", "<Task Evaluate=\"off\">x</Task>")
+                    .replace("\"X\"", "\"Y\"")
+            ),
+            true,
+            Some(Certain),
+        ),
         // A parameter named as a project element is a parameter.
         (
             inline_task(
@@ -1409,17 +1446,49 @@ const HOSTS: &[&str] = &[
     "CurrentArchitecture",
 ];
 
-/// One value of an attribute, escaped for one.
-fn composite_value(rng: &mut SplitMix64) -> String {
-    let value = if rng.below(5) == 0 {
+/// One value of an attribute, escaped for one, and the hostile dimensions
+/// it was drawn from: an entry of the hostile value alphabet now and then
+/// (rendered over a plain value), else a special or plain value. `None` for
+/// a draw the composite cannot carry ([`EXCLUDED`], or a character XML has
+/// no spelling of).
+fn composite_draw(rng: &mut SplitMix64) -> Option<(String, Vec<Dimension>)> {
+    let plain = if rng.below(5) == 0 {
         *rng.pick(SPECIAL)
     } else {
         *rng.pick(PLAIN)
     };
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('"', "&quot;")
+    let drawn = match value::alphabet().sample(rng.next()) {
+        Some(entry) => hostile::Drawn::of(entry).map(|v| v.render(plain)),
+        None => hostile::Drawn::plain(plain.to_owned()),
+    };
+    if drawn
+        .hostile
+        .iter()
+        .any(|d| EXCLUDED.iter().any(|(excluded, _)| excluded == d))
+        || drawn.value.chars().any(|c| !hostile::xml::representable(c))
+    {
+        return None;
+    }
+    Some((
+        attribute_text(&drawn.value),
+        drawn.hostile.into_iter().collect::<Vec<_>>(),
+    ))
+}
+
+thread_local! {
+    /// The hostile dimensions the composite document being drawn has drawn.
+    static DRAWN: std::cell::RefCell<Vec<Dimension>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// One value of an attribute for [`composite_document`], escaped for one; a
+/// hostile dimension it draws is recorded in [`DRAWN`].
+fn composite_value(rng: &mut SplitMix64) -> String {
+    loop {
+        if let Some((value, hostile)) = composite_draw(rng) {
+            DRAWN.with(|drawn| drawn.borrow_mut().extend(hostile));
+            return value;
+        }
+    }
 }
 
 /// `value` most of the time, else a drawn one.
@@ -1530,13 +1599,17 @@ const COMPOSITE_WRITES: &str = "<P>a</P><At>@</At><At Condition=\"'É' == 'é'\"
 /// ([`composite_document`]), each graded ([`grade`]): a certain rejection
 /// must be MSBuild's, and name a construct MSBuild refuses alone.
 fn composite_sweep(seed: u64, cases: usize) -> Census {
+    let census = coverage::open(file!(), "using_task_composite", EXCLUDED);
     let mut oracle = Oracle::spawn();
     let mut rng = SplitMix64(seed);
     let mut tally = Census::default();
     for _ in 0..cases {
+        DRAWN.with(|drawn| drawn.borrow_mut().clear());
         let body: String = (0..1 + rng.below(2))
             .map(|_| composite_document(&mut rng))
             .collect();
+        let hostile: BTreeSet<Dimension> =
+            DRAWN.with(|drawn| drawn.borrow().iter().copied().collect());
         tally.cases += 1;
         // `F` and `T` are written under an undecided gate with a value other
         // than the one the walk holds: a rejection resting on MSBuild's is
@@ -1560,7 +1633,21 @@ fn composite_sweep(seed: u64, cases: usize) -> Census {
             Some(RejectionCertainty::Possible) => tally.possible += 1,
             None => {}
         }
+        census.reached(
+            &hostile,
+            match (graded.msbuild_rejects, graded.walk) {
+                (true, Some(RejectionCertainty::Certain)) => "rejects-claimed",
+                (true, Some(_)) => "rejects-perhaps",
+                (true, None) => "rejects-on-a-doubted-value",
+                (false, Some(_)) => "evaluates-withdrawn",
+                (false, None) => "evaluates-committed",
+            },
+        );
     }
+    census.finish(
+        "BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-msbuild --test \
+         using_task_registration_diff composite_sweep_fixed_seed",
+    );
     tally
 }
 
