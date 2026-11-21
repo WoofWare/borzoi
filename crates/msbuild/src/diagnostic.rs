@@ -325,8 +325,8 @@ pub enum RejectionCause {
     /// `TaskName` as written.
     UsingTaskParameterCollision {
         task: std::sync::Arc<str>,
-        first: String,
-        second: String,
+        first: std::sync::Arc<str>,
+        second: std::sync::Arc<str>,
     },
 }
 
