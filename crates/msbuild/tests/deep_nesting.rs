@@ -557,7 +557,9 @@ fn many_writes_of_one_name(width: usize) -> String {
 /// that reaches each group, or settling the names again for each, costs `n²`.
 /// And a group stops at the first write that reaches it
 /// ([`many_writes_of_one_name`]: one name settled, one write examined, however
-/// many there are). Counted, so no load on the machine moves it.
+/// many there are). Counted, so no load on the machine moves it: what is
+/// counted is the writes `PathOf::reaches` and the settling examine, not how
+/// it finds a name's writes (`cost`'s module docs).
 #[test]
 fn groups_ask_only_of_the_writes_they_read() {
     for (shape, per_group) in [
@@ -639,7 +641,9 @@ fn a_wide_undecided_choose_decides_each_when_once() {
 /// striking one read at a time builds one per read and value; and each built
 /// once, its bytes copied once, where rebuilding it per read copies the text
 /// once per read. From a hundred reads on, no value makes a version, so it
-/// tries all eight. Counted, so no load on the machine moves it.
+/// tries all eight. Counted, so no load on the machine moves it: what is
+/// counted is the texts `strike` builds and the bytes it copies, not how the
+/// reads it strikes are found (`cost`'s module docs).
 #[test]
 fn wide_unheld_reads_are_struck_in_one_pass() {
     for width in [1, 2, 10, 100, DEEP / 16, DEEP / 4] {

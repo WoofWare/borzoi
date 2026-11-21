@@ -3,6 +3,12 @@
 //! idle one, where a wall-clock time is not. Each count is kept only under
 //! `test` or the `test-support` feature, per thread, and read through
 //! `test_support::count_walk_costs`; elsewhere counting is a no-op.
+//!
+//! A count bounds the work the counted operation does, and nothing else: a
+//! test over it says that operation is linear, not that the walk around it
+//! is. Work a change adds outside a counted operation (a search before it, a
+//! lookup replaced by a scan) is not seen, so code that does such work on a
+//! path a test bounds counts it here, in a field of its own.
 
 /// The work one walk did, by kind.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
