@@ -360,6 +360,37 @@ pub fn cells() -> Vec<Cell> {
             "compiled_name",
             "namespace CN\n[<CompiledName(\"RenamedType\")>]\ntype T() = member _.X = 1\n[<CompiledName(\"RenamedModule\")>]\nmodule M =\n    let x = 1\n[<CompiledNameAttribute(@\"Verbatim\")>]\ntype V = { A: int }\n",
         ),
+        // FSharp.Core opens `Microsoft` at the root, so a rooted name may
+        // start at `FSharp`.
+        one(
+            "rooted_fsharp_core_shorthand",
+            "namespace Rooted\n[<global.FSharp.Core.CompiledName(\"Runtime\")>]\ntype Thing = { Field: int }\n[<global.FSharp.Core.AutoOpen>]\nmodule M =\n    let x = 1\n",
+        ),
+        // A signature's empty `with` block declares an opaque type, and its
+        // attributes are the type's.
+        Cell::new(
+            "signature_empty_with_block",
+            &[
+                (
+                    "Lib.fsi",
+                    "namespace W\n[<Sealed; AutoOpen>]\ntype T with end\n",
+                ),
+                ("Lib.fs", "namespace W\n[<Sealed>]\ntype T() = class end\n"),
+            ],
+        ),
+        Cell::new(
+            "signature_with_block_members",
+            &[
+                (
+                    "Lib.fsi",
+                    "namespace W\n[<Sealed; AutoOpen>]\ntype T with\n    member M: int\n    new: unit -> T\nend\n",
+                ),
+                (
+                    "Lib.fs",
+                    "namespace W\n[<Sealed>]\ntype T() =\n    member _.M = 1\n",
+                ),
+            ],
+        ),
         // A recursive group honours an exception's `[<CompiledName>]`.
         one(
             "compiled_name_exception_namespace_rec",

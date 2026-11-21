@@ -2725,14 +2725,21 @@ fn is_type_augmentation(defn: &TypeDefn) -> bool {
 /// definition with no representation. What a file declares of the types it
 /// augments (its extension names, its entity rows) reads every shape.
 pub(crate) fn is_any_augmentation(defn: &TypeDefn) -> bool {
-    is_type_augmentation(defn)
-        || defn.tuple_type_head().is_some()
-        || (defn.repr().is_none()
-            && defn
-                .syntax()
-                .children_with_tokens()
-                .filter_map(|el| el.into_token())
-                .any(|t| t.kind() == SyntaxKind::WITH_TOK))
+    is_type_augmentation(defn) || defn.tuple_type_head().is_some() || is_signature_with_block(defn)
+}
+
+/// Whether `defn` is a signature's `type T with … end`: a `with` directly on
+/// a definition with no representation. It augments `T`, or, with a
+/// single-identifier head, may declare it (an opaque type whose block is
+/// empty or holds its members), which FCS checks against the
+/// implementation.
+pub(crate) fn is_signature_with_block(defn: &TypeDefn) -> bool {
+    defn.repr().is_none()
+        && defn
+            .syntax()
+            .children_with_tokens()
+            .filter_map(|el| el.into_token())
+            .any(|t| t.kind() == SyntaxKind::WITH_TOK)
 }
 
 /// The sole identifier token of a single-segment type name (`type T`), or

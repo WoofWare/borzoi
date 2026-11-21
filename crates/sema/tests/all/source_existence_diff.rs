@@ -695,6 +695,13 @@ pub fn grade(cell: &Cell, fcs: &Fcs, ours: &SourceExistence) -> Result<String, S
             Some(Refusal::NamesUnreadCode),
             SourceExistence::Unread(ExistenceUnread::HashReference(_)),
         ) => return Ok("unread HashReference, a source names code".to_owned()),
+        // A walk that declines publishes no fact, whatever its reason: a
+        // producer may hold two reasons to decline, and the walk stops at
+        // the first. The reason is pinned; the isolated witnesses
+        // (`source_existence_domain`, the inventory) hold each reason exactly.
+        (Some(why), SourceExistence::Unread(reason)) => {
+            return Ok(format!("unread {reason:?}, the oracle refuses ({why:?})"));
+        }
         (Some(why), other) => {
             return Err(format!(
                 "{}: the oracle refuses A ({why:?}), and ours is {other:?}",

@@ -1790,7 +1790,13 @@ impl FileWalk<'_> {
             self.forms.insert(Form::TupleAugmentation);
             return Ok(());
         }
-        if crate::resolve::is_any_augmentation(defn) {
+        // A signature's `type T with … end` under a single-identifier head
+        // may declare `T` rather than augment it (`[<Sealed>] type T with
+        // end`): it is read as a type, whose row is a surplus where it
+        // augments.
+        let may_declare = crate::resolve::is_signature_with_block(defn)
+            && defn.long_id().is_some_and(|li| li.idents().count() == 1);
+        if crate::resolve::is_any_augmentation(defn) && !may_declare {
             self.forms.insert(Form::Augmentation);
             return Ok(());
         }
@@ -2076,11 +2082,10 @@ pub fn certify_by_spelling(files: &[&ProjectFile]) -> MarkerRoutes {
     let mut map = BTreeMap::new();
     for name in written {
         let (last, qualifier) = name.split_last().expect("written names are not empty");
-        // `global.` roots a fully qualified name: its qualifier must then be
-        // the whole namespace.
-        let (qualifier, rooted) = match qualifier.split_first() {
-            Some((first, rest)) if first == "global" => (rest, true),
-            _ => (qualifier, false),
+        // `global.` roots a name; what follows it is the qualifier.
+        let qualifier = match qualifier.split_first() {
+            Some((first, rest)) if first == "global" => rest,
+            _ => qualifier,
         };
         // `[<X>]` denotes a type named `X` or `XAttribute`: a type of A's own
         // of either name may be any marker's abbreviation.
@@ -2101,8 +2106,12 @@ pub fn certify_by_spelling(files: &[&ProjectFile]) -> MarkerRoutes {
             let full = m.full_name();
             let (type_name, ns) = full.split_last().expect("a full name is not empty");
             let spelled = last == type_name || format!("{last}Attribute") == *type_name;
+            // A rooted qualifier is read as an unrooted one: the root holds
+            // what the namespaces opened there hold (FSharp.Core opens
+            // `Microsoft`, so `global.FSharp.Core.X` names
+            // `Microsoft.FSharp.Core.X`), and certifying a marker FCS does not
+            // see costs only a surplus row, where certifying none loses one.
             let qualified = qualifier.len() <= ns.len()
-                && (!rooted || qualifier.len() == ns.len())
                 && ns[ns.len() - qualifier.len()..]
                     .iter()
                     .zip(qualifier)
