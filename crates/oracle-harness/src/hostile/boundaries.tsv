@@ -184,7 +184,7 @@ crates/msbuild/tests/element_contents_diff.rs	draws	element_contents=name+xml
 crates/msbuild/tests/escaping_diff.rs	pending	2
 crates/msbuild/tests/fsc_args_oracle_calibration.rs	not-applicable	hand-picked fixtures, each a build MSBuild and fsc are known to answer: the calibration of fsc_args, not a search
 crates/msbuild/tests/fsc_parameter_register.rs	not-applicable	it reads each verified SDK's own targets and generates no input
-crates/msbuild/tests/fsproj_assembly_name_perturbation_diff.rs	draws	assembly_name_values=value
+crates/msbuild/tests/fsproj_assembly_name_perturbation_diff.rs	draws	assembly_name_values=value;assembly_name_environment=env+name
 crates/msbuild/tests/fsproj_compile_order_generative_diff.rs	pending	2
 crates/msbuild/tests/fsproj_corpus.rs	pending	2
 crates/msbuild/tests/fsproj_default_targets_generative_diff.rs	pending	2
