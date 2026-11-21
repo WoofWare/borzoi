@@ -323,6 +323,63 @@ impl Site {
 /// (`properties::worlds::MAX_SEGMENTS`, six, plus one).
 const UNENUMERATED_SPLICES: usize = 7;
 
+/// The body of the indexer site's `U`: a name the walk holds no value of
+/// (through a function it does not model), whose value is long enough that
+/// every read of it the site writes succeeds in MSBuild.
+const UNHELD: &str = "$([System.IO.Path]::GetFileName('borzoi-unheld'))";
+
+/// The indexer site's `F`, reading `X.Split('/')[index]`: alone (`variant`
+/// 0), or beside `U` ([`UNHELD`]), read after the indexer (1), before it
+/// (2), or beside more relative paths than the walk enumerates (3). Every
+/// read of `U` succeeds in MSBuild, so that the indexer alone decides
+/// whether it throws: [`each_index_variant_throws_only_at_its_indexer`].
+fn index_body(variant: usize, index: usize) -> String {
+    match variant {
+        0 => format!("$(X.Split('/')[{index}])"),
+        1 => format!("$(X.Split('/')[{index}].Split('z$(U)')[0])"),
+        2 => format!("$(X.TrimStart('z$(U)').Split('/')[{index}])"),
+        _ => {
+            let splices: String = (0..UNENUMERATED_SPLICES)
+                .map(|i| format!("s{i}\\x$(Empty)"))
+                .collect();
+            format!("{splices}$(U.Substring(5))$(X.Split('/')[{index}])")
+        }
+    }
+}
+
+/// Each variant of the indexer site ([`index_body`]) is accepted by MSBuild
+/// where the index is inside the value's fields, and rejected where it is
+/// past their end: no read beside the indexer throws on its own.
+#[test]
+fn each_index_variant_throws_only_at_its_indexer() {
+    let mut world = World::new(3);
+    let project = world.fixture.root.join("proj-empty").join("Demo.fsproj");
+    for variant in 0..4 {
+        for (index, accepted) in [(0, true), (1, true), (2, false)] {
+            let mut writes = String::from("    <X>a/b</X>\n");
+            if variant != 0 {
+                writes.push_str(&format!("    <U>{UNHELD}</U>\n"));
+            }
+            writes.push_str(&format!(
+                "    <F>{}</F>\n",
+                xml_body(&index_body(variant, index))
+            ));
+            writes.push_str(AFTER);
+            let xml =
+                format!("<Project>\n  <PropertyGroup>\n{writes}  </PropertyGroup>\n</Project>\n");
+            let answer =
+                world.starts[0]
+                    .oracle
+                    .project(&xml, &["After".to_owned()], Some(&project), &[]);
+            assert_eq!(
+                answer.is_some(),
+                accepted,
+                "variant {variant}, index {index}: MSBuild accepts?\n{xml}"
+            );
+        }
+    }
+}
+
 /// The last write of a rejection-shaped point: unconditional, so the walk
 /// publishes it exactly where it claims MSBuild accepts the project.
 const AFTER: &str = "  </PropertyGroup>\n  <PropertyGroup>\n    <After>ok</After>\n";
@@ -341,23 +398,33 @@ fn gen_site_value(rng: &mut SplitMix64, root: &str, site: Site) -> String {
     }
 }
 
+/// The first segments [`gen_value`] writes beside the fixture's root. Those
+/// rooted at the host's `/` (`\tmp`, a UNC `\\…`, or a part a template
+/// roots) are probed on the host, so the answers the baseline records are
+/// host facts: [`host_rooted_names_are_the_facts_the_baseline_assumes`]
+/// pins each.
+const PREFIXES: &[&str] = &[
+    "/borzoi-missing",
+    "seg",
+    "obj",
+    ".",
+    "..",
+    "",
+    r"\\borzoi-missing",
+    r"\tmp",
+    r"\borzoi-missing",
+    "a",
+];
+
+/// The parts [`gen_value`] joins after the first segment.
+const PARTS: &[&str] = &["a", "seg", "..", "b c"];
+
 /// One generated value: a first segment, then parts joined by separators.
 fn gen_value(rng: &mut SplitMix64, root: &str) -> String {
-    let prefixes: Vec<String> = vec![
-        root.to_owned(),
-        "/borzoi-missing".into(),
-        "seg".into(),
-        "obj".into(),
-        ".".into(),
-        "..".into(),
-        String::new(),
-        r"\\srv".into(),
-        r"\tmp".into(),
-        r"\borzoi-missing".into(),
-        "a".into(),
-    ];
+    let prefixes: Vec<String> = std::iter::once(root.to_owned())
+        .chain(PREFIXES.iter().map(|prefix| (*prefix).to_owned()))
+        .collect();
     const SEPARATORS: &[&str] = &["\\", "/", "\\\\", "\\/", "%5c"];
-    const PARTS: &[&str] = &["a", "seg", "..", "b c"];
     let mut value = rng.pick(&prefixes).clone();
     for _ in 0..rng.below(4) {
         value.push_str(rng.pick(SEPARATORS));
@@ -367,6 +434,27 @@ fn gen_value(rng: &mut SplitMix64, root: &str) -> String {
         value.push_str(rng.pick(SEPARATORS));
     }
     value
+}
+
+/// Each name a generated value may root at the host's `/` is a directory
+/// there exactly when the baseline assumes it: `/tmp` is, every other is
+/// not. A host where this fails answers the fixed seed's points apart from
+/// the host that recorded the baseline.
+#[test]
+fn host_rooted_names_are_the_facts_the_baseline_assumes() {
+    let mut names: Vec<&str> = PREFIXES
+        .iter()
+        .chain(PARTS)
+        .map(|name| name.trim_start_matches(['/', '\\']))
+        .filter(|name| !name.is_empty() && *name != "." && *name != "..")
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    for name in names {
+        let present =
+            host_fs::metadata(std::path::Path::new("/").join(name)).is_ok_and(|m| m.is_dir());
+        assert_eq!(present, name == "tmp", "/{name}: a directory on this host?");
+    }
 }
 
 /// Templates a read site composes the value into: `{v}` stands for the
@@ -521,23 +609,14 @@ fn gen_point(
             // it, or beside more relative paths than the walk enumerates:
             // MSBuild may throw at the indexer in one world without reading
             // `U`, which the walk must not let `U` hide.
-            let body = match rng.below(4) {
-                0 => format!("$(X.Split('/')[{index}])"),
-                unheld => {
-                    writes.push_str("    <U>$([System.IO.Path]::GetFileName('x'))</U>\n");
-                    match unheld {
-                        1 => format!("$(X.Split('/')[{index}].Split('z$(U)')[1])"),
-                        2 => format!("$(X.TrimStart('z$(U)').Split('/')[{index}])"),
-                        _ => {
-                            let splices: String = (0..UNENUMERATED_SPLICES)
-                                .map(|i| format!("s{i}\\x$(Empty)"))
-                                .collect();
-                            format!("{splices}$(U.Substring(5))$(X.Split('/')[{index}])")
-                        }
-                    }
-                }
-            };
-            writes.push_str(&format!("    <F>{}</F>\n", xml_body(&body)));
+            let variant = rng.below(4);
+            if variant != 0 {
+                writes.push_str(&format!("    <U>{UNHELD}</U>\n"));
+            }
+            writes.push_str(&format!(
+                "    <F>{}</F>\n",
+                xml_body(&index_body(variant, index))
+            ));
             writes.push_str(AFTER);
             Read::Property("After")
         }
@@ -722,8 +801,11 @@ struct Census {
 struct Violation {
     /// The mode ([`MODES`], or `s:<start>` for a supplied startup directory).
     mode: String,
-    /// The labels of the starts whose answer contradicts it.
+    /// The labels of the starts the mode is held to whose answer contradicts
+    /// it: every one for a served mode, its own for a supplied one.
     starts: Vec<&'static str>,
+    /// The labels of every start of the point whose answer contradicts it.
+    contradicted_from: Vec<&'static str>,
     /// The failure message, against the first of them.
     message: String,
 }
@@ -810,6 +892,50 @@ fn encode_claim(claim: &Option<Vec<String>>) -> String {
     }
 }
 
+/// The starts of `graded` from which a claim `encoded` ([`encode_claim`])
+/// would be newly wrong where the baseline claimed `baseline`: those whose
+/// answer (in `answers`, by label) the baseline's claim agrees with, or where
+/// the baseline declined. A wrong claim is the baseline's to share only at
+/// a start where the baseline was wrong too.
+fn newly_wrong<'a>(
+    baseline: &str,
+    graded: &[&'a str],
+    answers: &[(&str, Option<Vec<String>>)],
+) -> Vec<&'a str> {
+    graded
+        .iter()
+        .copied()
+        .filter(|label| {
+            let answer = answers
+                .iter()
+                .find(|(start, _)| start == label)
+                .map(|(_, answer)| answer)
+                .expect("every graded start was asked");
+            !contradicted(baseline, &[answer])
+        })
+        .collect()
+}
+
+/// A claim wrong at a start where the baseline was right is new there, even
+/// where the baseline was wrong at another start.
+#[test]
+fn a_claim_is_shared_with_the_baseline_only_where_the_baseline_was_wrong() {
+    let answers = [
+        ("cwd-empty", Some(vec!["seg\\".to_owned()])),
+        ("cwd-full", Some(vec!["seg/".to_owned()])),
+        ("cwd-obj", None),
+    ];
+    let both = ["cwd-empty", "cwd-full"];
+    // The baseline's `seg\` is right from `cwd-empty`, wrong from `cwd-full`.
+    assert_eq!(newly_wrong("=|seg\\\\", &both, &answers), ["cwd-empty"]);
+    assert!(newly_wrong("=|seg\\\\", &["cwd-full"], &answers).is_empty());
+    // A baseline wrong at both shares both; one that declined shares none.
+    assert!(newly_wrong("=|x", &both, &answers).is_empty());
+    assert_eq!(newly_wrong("-", &both, &answers), both);
+    // A commit where MSBuild rejects is wrong.
+    assert!(newly_wrong("=|x", &["cwd-obj"], &answers).is_empty());
+}
+
 /// Whether the claim `encoded` ([`encode_claim`]) is one MSBuild contradicts
 /// from a start whose answer is in `answers`: it commits where MSBuild
 /// rejects, or a value MSBuild does not hold.
@@ -878,6 +1004,18 @@ fn grade(world: &mut World, point: &Point) -> Seen {
         }
         message.map(|message| (labels, message))
     };
+    if !matches!(point.read, Read::Identities) {
+        assert_eq!(
+            with_imports
+                .as_ref()
+                .and_then(|parsed| claim(parsed, None, point.read)),
+            served_reads
+                .as_ref()
+                .and_then(|(parsed, _)| claim(parsed, None, point.read)),
+            "probing the walk moved its claim (with imports left, probed right)\n{}",
+            context("served")
+        );
+    }
     let mut served = false;
     let mut violations = Vec::new();
     let mut seed_guesses = Vec::new();
@@ -906,7 +1044,7 @@ fn grade(world: &mut World, point: &Point) -> Seen {
         let Some(ours) = ours else {
             continue;
         };
-        if mode != "served pure" {
+        if mode == "served with imports" {
             served = true;
         }
         if moved && !own_backslash {
@@ -915,6 +1053,7 @@ fn grade(world: &mut World, point: &Point) -> Seen {
         if let Some((starts, message)) = contradicting(&ours, &point.starts, mode) {
             violations.push(Violation {
                 mode: key.to_owned(),
+                contradicted_from: starts.clone(),
                 starts,
                 message,
             });
@@ -942,9 +1081,12 @@ fn grade(world: &mut World, point: &Point) -> Seen {
         supplied += 1;
         let mode = format!("supplied with {label}");
         if let Some((starts, message)) = contradicting(&ours, &[start], &mode) {
+            let (contradicted_from, _) = contradicting(&ours, &point.starts, &mode)
+                .expect("a claim contradicted from one start is contradicted from the point's");
             violations.push(Violation {
                 mode: format!("s:{label}"),
                 starts,
+                contradicted_from,
                 message,
             });
         }
@@ -1435,78 +1577,74 @@ fn fixed_seed_points_do_not_depend_on_where_the_fixture_is() {
 fn fixed_seed_sweep_regresses_nothing_main_answers() {
     let mut world = World::new(FIXED_SEED);
     let root = world.fixture.root_text().to_owned();
-    let dump = std::env::var_os("BORZOI_PATH_FIXUP_DUMP").map(PathBuf::from);
     let env = environment_text(&world.fixture);
-    if let Some(dump) = &dump {
-        std::fs::create_dir_all(dump).unwrap();
+    let points = fixed_seed_points(&world.fixture);
+    if let Some(dump) = std::env::var_os("BORZOI_PATH_FIXUP_DUMP").map(PathBuf::from) {
+        std::fs::create_dir_all(&dump).unwrap();
         std::fs::write(dump.join("env.txt"), &env).unwrap();
+        for (key, point) in &points {
+            dump_point(&dump, key, point, &root);
+        }
+        // `tools/path-fixup-baseline.sh` asks for the points alone: grading
+        // them against the baseline it is about to replace says nothing.
+        if std::env::var_os("BORZOI_PATH_FIXUP_DUMP_ONLY").is_some() {
+            return;
+        }
     }
     let baseline = read_baseline();
     let (mut pins, mut regressed, mut stale) = (Vec::new(), Vec::new(), Vec::new());
     let mut violations = 0usize;
     // The claims `main` made wrongly that the walk under test does not.
     let mut righted = 0usize;
-    for (key, point) in fixed_seed_points(&world.fixture) {
+    for (key, point) in &points {
         let (source, site) = (point.source, point.site);
-        if let Some(dump) = &dump {
-            dump_point(dump, &key, &point, &root);
-        }
-        let seen = grade(&mut world, &point);
+        let seen = grade(&mut world, point);
         violations += seen.violations.len();
-        let hash = point_fingerprint(&point, &root, &env);
-        let Some(row) = baseline.get(&key).filter(|row| row.hash == hash) else {
-            stale.push(key);
+        let hash = point_fingerprint(point, &root, &env);
+        let Some(row) = baseline.get(key).filter(|row| row.hash == hash) else {
+            stale.push(key.clone());
             continue;
         };
-        let answers_of = |mode: &str| -> Vec<&Option<Vec<String>>> {
-            match mode.strip_prefix("s:") {
-                None => seen.theirs.iter().collect(),
-                Some(label) => point
-                    .starts
-                    .iter()
-                    .zip(&seen.theirs)
-                    .filter(|(start, _)| world.starts[**start].label == label)
-                    .map(|(_, answer)| answer)
-                    .collect(),
-            }
-        };
-        // The baseline's claims are in `{ROOT}`/`{UEXT}` spelling, and so are
-        // the answers it is held to.
-        let placeheld_answers = |mode: &str| -> Vec<Option<Vec<String>>> {
-            answers_of(mode)
-                .into_iter()
-                .map(|answer| placeheld(answer, &root))
-                .collect()
-        };
+        // Each start's answer, in the `{ROOT}`/`{UEXT}` spelling the
+        // baseline's claims are in.
+        let answers: Vec<(&str, Option<Vec<String>>)> = point
+            .starts
+            .iter()
+            .zip(&seen.theirs)
+            .map(|(&start, answer)| (world.starts[start].label, placeheld(answer, &root)))
+            .collect();
         righted += row
             .claims
             .iter()
             .filter(|(mode, claim)| {
-                let answers = placeheld_answers(mode);
-                contradicted(claim, &answers.iter().collect::<Vec<_>>())
+                let graded: Vec<&str> = match mode.strip_prefix("s:") {
+                    None => answers.iter().map(|(label, _)| *label).collect(),
+                    Some(label) => vec![label],
+                };
+                newly_wrong(claim, &graded, &answers).len() < graded.len()
                     && !seen.violations.iter().any(|ours| ours.mode == **mode)
             })
             .count();
-        for Violation {
-            mode,
-            starts,
-            message,
-        } in &seen.violations
-        {
-            let answers = placeheld_answers(mode);
-            let answers: Vec<&Option<Vec<String>>> = answers.iter().collect();
-            let main_claim = row.claims.get(mode).map_or("-", String::as_str);
-            if contradicted(main_claim, &answers) {
-                // With the starts that contradict it: a claim no start holding
-                // no segment contradicts is one only the startup directory
-                // moves (#993).
+        for violation in &seen.violations {
+            let main_claim = row.claims.get(&violation.mode).map_or("-", String::as_str);
+            let newly = newly_wrong(main_claim, &violation.starts, &answers);
+            if newly.is_empty() {
+                // With every start whose answer contradicts the claim: one no
+                // start holding no segment contradicts is wrong only where
+                // the startup directory moves it (#993).
                 pins.push((
-                    format!("{key} {mode}"),
-                    format!("{source:?}/{site:?} from {}", starts.join(",")),
+                    format!("{key} {}", violation.mode),
+                    format!(
+                        "{source:?}/{site:?} from {}",
+                        violation.contradicted_from.join(",")
+                    ),
                 ));
             } else {
                 regressed.push(format!(
-                    "{key} {mode} (main claims {main_claim}): {message}"
+                    "{key} {} (main claims {main_claim}), newly wrong from {}: {}",
+                    violation.mode,
+                    newly.join(","),
+                    violation.message
                 ));
             }
         }
@@ -1516,13 +1654,24 @@ fn fixed_seed_sweep_regresses_nothing_main_answers() {
          {righted} of main's wrong claims the walk does not make",
         pins.len()
     );
+    // A row no point visits is coverage the sweep lost without saying so.
+    let generated: std::collections::HashSet<&str> =
+        points.iter().map(|(key, _)| key.as_str()).collect();
+    let mut unvisited: Vec<&str> = baseline
+        .keys()
+        .map(String::as_str)
+        .filter(|key| !generated.contains(key))
+        .collect();
+    unvisited.sort_unstable();
     assert!(
-        stale.is_empty(),
-        "the baseline does not hold {} of the points this sweep generates (first {}): \\
-         regenerate it with `bash tools/path-fixup-baseline.sh $(git merge-base HEAD \\
-         origin/main)`",
+        stale.is_empty() && unvisited.is_empty(),
+        "the baseline does not hold {} of the points this sweep generates (first {:?}), and \
+         holds {} it does not generate (first {:?}): regenerate it with \\
+         `bash tools/path-fixup-baseline.sh $(git merge-base HEAD origin/main)`",
         stale.len(),
-        stale[0]
+        stale.first(),
+        unvisited.len(),
+        unvisited.first()
     );
     assert!(
         regressed.is_empty(),

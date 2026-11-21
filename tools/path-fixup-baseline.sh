@@ -30,16 +30,19 @@ cleanup() {
 trap cleanup EXIT
 
 echo "dumping the fixed seed's points" >&2
-(cd "$root" && BORZOI_PATH_FIXUP_DUMP="$dump" nix develop -c \
+# The sweep writes every point and returns, grading nothing: the baseline it
+# would grade against is the one this script replaces.
+(cd "$root" && BORZOI_PATH_FIXUP_DUMP="$dump" BORZOI_PATH_FIXUP_DUMP_ONLY=1 nix develop -c \
   cargo test -p borzoi-msbuild --test path_fixup_expansion_diff \
   fixed_seed_sweep_regresses_nothing_main_answers -- --exact --nocapture) >"$work/dump.log" 2>&1 || {
-  # The sweep fails on a stale baseline after it has dumped every point;
-  # anything else is a failure of its own.
-  if ! grep -q "the baseline does not hold" "$work/dump.log"; then
-    cat "$work/dump.log" >&2
-    exit 1
-  fi
+  cat "$work/dump.log" >&2
+  exit 1
 }
+if [ ! -s "$dump/env.txt" ]; then
+  cat "$work/dump.log" >&2
+  echo "the sweep dumped no points (was the test filtered out?)" >&2
+  exit 1
+fi
 
 echo "walking them at $rev" >&2
 git -C "$root" worktree add --detach "$base" "$rev" >/dev/null
