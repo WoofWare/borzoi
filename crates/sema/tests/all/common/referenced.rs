@@ -150,10 +150,8 @@ pub fn parse_cell(cell: &GraphCell) -> Vec<Parse> {
 /// Write `cell` out and compile its reference libraries through the
 /// project-graph oracle.
 pub fn prepare(cell: &GraphCell) -> PreparedCell {
-    cell.prepare(framework_references(), &mut |line| {
-        invoke_fcs_dump_graph(line)
-    })
-    .unwrap_or_else(|e| panic!("prepare {}: {e}", cell.assembly_name))
+    cell.prepare(framework_references(), &mut invoke_fcs_dump_graph)
+        .unwrap_or_else(|e| panic!("prepare {}: {e}", cell.assembly_name))
 }
 
 /// Ask the oracle what a dependant reads of `cell`'s producer, and check the

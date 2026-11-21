@@ -7557,10 +7557,12 @@ let private rawSignatureOf (data: obj) =
 // reports what a dependant reads of a project from source.
 //
 // Each request is answered from fresh state ([`usesProjectGraphBatchCore`]):
-// every checker's caches are dropped before it, and a type provider, whose
+// the checker's caches are dropped before it, and a type provider, whose
 // design-time assembly the CLR never unloads, is refused as a reference
 // ([`dllAssembly`]). No request reads XML documentation, so FCS's
-// path-keyed documentation cache, which nothing clears, reaches no answer.
+// path-keyed documentation cache, which nothing clears, reaches no answer;
+// and every framework reference is named (`--noframework`), so the
+// framework resolver's per-directory choice reaches none either.
 // ---------------------------------------------------------------------------
 
 /// One reference of a graph project, in its place in the reference order.
@@ -9606,11 +9608,11 @@ let private usesProjectGraphBatchCore () =
             // Nothing an earlier request read is reused, whatever the op.
             // FCS's caches are keyed by options and by a file's path and
             // timestamp (the background compiler's builders, the
-            // process-wide assembly reader and imported CCU caches, the
-            // framework resolver's per-directory choice), so a source or DLL
-            // rewritten with its timestamp unchanged would otherwise be
-            // answered, or compiled against, from what was read before.
-            forgetEveryCheck ()
+            // process-wide assembly reader and imported CCU caches), so a
+            // source or DLL rewritten with its timestamp unchanged would
+            // otherwise be answered, or compiled against, from what was read
+            // before.
+            checker.InvalidateAll()
             match op with
             | "check" -> JsonSerializer.Serialize(respondGraphCheck checker root, compact)
             | "compile" -> JsonSerializer.Serialize(respondGraphCompile checker root, compact)
@@ -9644,8 +9646,8 @@ let private usesProjectGraphBatch () =
     // FCS keeps the assemblies it read in a small strong cache and a weak
     // one, so whether a later request meets an earlier one's reader would
     // depend on the collector. Holding every reader strongly makes the
-    // oracle's answers depend only on its own clearing (`forgetEveryCheck`
-    // per request). Read when FCS's binary reader first loads, so set first.
+    // oracle's answers depend only on its own clearing (`InvalidateAll` per
+    // request). Read when FCS's binary reader first loads, so set first.
     Environment.SetEnvironmentVariable("FSharp_StronglyHeldBinaryReaderCacheSize", "1000000")
     let mutable captured: exn option = None
     let worker =
