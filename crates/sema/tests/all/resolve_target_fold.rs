@@ -550,3 +550,22 @@ val y: int
         );
     }
 }
+
+/// A project's own `System.Runtime.CompilerServices.ExtensionAttribute` is
+/// the marker to a dependant, which takes another assembly's type for it by
+/// its path: its extension names hold the member it marks even against an
+/// env that indexes no copy of the BCL's.
+#[test]
+fn a_project_marker_at_the_marker_path_names_its_members_in_any_env() {
+    let sources = vec![(
+        "Ext.fs".to_owned(),
+        "namespace System.Runtime.CompilerServices\n\
+         type ExtensionAttribute() =\n    inherit System.Attribute()\n\
+         [<Extension>]\n\
+         type E =\n    [<Extension>]\n    static member Shout(s: string) = 1L\n"
+            .to_owned(),
+    )];
+    let files = project_files(&sources);
+    let names = resolve_project_files(&files, &AssemblyEnv::default()).extension_names();
+    assert!(names.may_have("Shout", false), "{names:?}");
+}

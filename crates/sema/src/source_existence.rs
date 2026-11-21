@@ -1790,11 +1790,14 @@ impl FileWalk<'_> {
             self.forms.insert(Form::TupleAugmentation);
             return Ok(());
         }
-        // A signature's `type T with … end` under a single-identifier head
+        // Under a single-identifier head, a signature's `type T with … end`
         // may declare `T` rather than augment it (`[<Sealed>] type T with
-        // end`): it is read as a type, whose row is a surplus where it
+        // end`), and so may a `with` head that also declares a primary
+        // constructor (`type T() with end`, which FCS rejects and still
+        // imports): either is read as a type, whose row is a surplus where it
         // augments.
-        let may_declare = crate::resolve::is_signature_with_block(defn)
+        let may_declare = (crate::resolve::is_signature_with_block(defn)
+            || defn.implicit_ctor().is_some())
             && defn.long_id().is_some_and(|li| li.idents().count() == 1);
         if crate::resolve::is_any_augmentation(defn) && !may_declare {
             self.forms.insert(Form::Augmentation);

@@ -26,6 +26,7 @@ attribute_target_return_on_entities	certified: exact []; unknown: covers surplus
 attribute_target_return_on_signature_val	certified: exact [SignaturePair]; unknown: exact [SignaturePair]
 attribute_targets	certified: exact []; unknown: covers surplus(prefix 0, entity 0, lends 2, auto-open 0) [UncertainAttribute]
 augmentation_constructor	certified: exact, FCS rejects []; unknown: exact, FCS rejects [] [FCS: FS3192,FS871,FS1,FS696]
+augmentation_head_with_constructor	certified: exact, FCS rejects []; unknown: exact, FCS rejects [UncertainAttribute] [FCS: FS10,FS10,FS929,FS912]
 augmentation_of_local_exception	certified: exact []; unknown: exact []
 augmentation_of_single_case_abbreviation	certified: exact [AbbreviationOrUnion]; unknown: exact [AbbreviationOrUnion]
 augmentation_of_single_case_abbreviation_generic	certified: exact [AbbreviationOrUnion]; unknown: exact [AbbreviationOrUnion]

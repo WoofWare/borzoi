@@ -197,6 +197,8 @@ fn fcs_row(e: &borzoi_oracle_harness::assembly_entities::FcsEntity) -> PickledEn
     use borzoi_assembly::existence::PickledEntityKind;
     use borzoi_oracle_harness::assembly_entities::FcsEntityKind;
     PickledEntityRow {
+        // FCS's view spells the namespace dotted, so a quoted segment holding
+        // a `.` is misread as two (#1116): such a cell fails, never passes.
         namespace: if e.namespace.is_empty() {
             Vec::new()
         } else {

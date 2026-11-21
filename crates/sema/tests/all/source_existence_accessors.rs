@@ -61,10 +61,6 @@ const UNREAD: &[(&str, &str)] = &[
     ),
     ("TypeDefn::constraints", "a constraint declares no entity"),
     (
-        "TypeDefn::implicit_ctor",
-        "a primary constructor declares no entity",
-    ),
-    (
         "TypeDefn::members",
         "members declare no entity; extension members are A's ExtensionNames'",
     ),

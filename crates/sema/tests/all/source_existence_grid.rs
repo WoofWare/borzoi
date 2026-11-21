@@ -360,6 +360,12 @@ pub fn cells() -> Vec<Cell> {
             "compiled_name",
             "namespace CN\n[<CompiledName(\"RenamedType\")>]\ntype T() = member _.X = 1\n[<CompiledName(\"RenamedModule\")>]\nmodule M =\n    let x = 1\n[<CompiledNameAttribute(@\"Verbatim\")>]\ntype V = { A: int }\n",
         ),
+        // A `with` head that also declares a primary constructor: FCS
+        // rejects it and still imports the type, flags and all.
+        one(
+            "augmentation_head_with_constructor",
+            "namespace CtorHead\n[<AutoOpen>]\ntype T() with end\n",
+        ),
         // FSharp.Core opens `Microsoft` at the root, so a rooted name may
         // start at `FSharp`.
         one(

@@ -261,6 +261,21 @@ fn container_may_hold_accessor_extensions(entity: &Entity) -> bool {
             .any(|m| matches!(m, Member::Property(_) | Member::Event(_)))
 }
 
+/// The markers a marker question asks about that FCS classifies by path for
+/// another assembly's type (`classifyValAttrib` / `classifyEntityAttrib`'s
+/// BCL branch): `[<Extension>]`, and `[<Obsolete>]` of the rejected-use
+/// question. A type at one of these paths may denote that marker whether or
+/// not the env indexes a copy of it ([`AssemblyEnv::may_denote_marker`]).
+/// FSharp.Core's markers are classified only from FSharp.Core itself, so no
+/// other assembly's type at their path is one.
+const PATH_CLASSIFIED_MARKERS: &[(&[&str], &str)] = &[
+    (
+        &["System", "Runtime", "CompilerServices"],
+        "ExtensionAttribute",
+    ),
+    (&["System"], "ObsoleteAttribute"),
+];
+
 /// An F# entity an attribute may name, as far as what the attribute denotes
 /// ([`AssemblyEnv::may_denote_marker`]).
 #[derive(Debug, Clone, Copy)]
@@ -5524,9 +5539,11 @@ impl AssemblyEnv {
     /// - Any other entity is its own type, which FCS takes for a well-known
     ///   attribute by its **path** when it lives in another assembly
     ///   (`resolveAttribPath`, `TypedTreeOps.Attributes.fs`): so it may
-    ///   denote the target exactly when a type `is_target` picks out sits at
-    ///   the same path here. Inside its own assembly FCS reads no path, so
-    ///   the answer over-approximates there.
+    ///   denote the target when its path is one FCS classifies
+    ///   ([`PATH_CLASSIFIED_MARKERS`]), whether or not the env indexes a copy
+    ///   of that type, or when a type `is_target` picks out sits at the same
+    ///   path here. Inside its own assembly FCS reads no path, so the answer
+    ///   over-approximates there.
     pub(crate) fn may_denote_marker(
         &self,
         candidate: MarkerCandidate<'_>,
@@ -5535,7 +5552,10 @@ impl AssemblyEnv {
         match candidate {
             MarkerCandidate::Abbreviation => true,
             MarkerCandidate::Type { container, name } => {
-                self.lookup_type(container, name, 0).is_some_and(is_target)
+                PATH_CLASSIFIED_MARKERS.iter().any(|(ns, type_name)| {
+                    *type_name == name
+                        && container.iter().map(String::as_str).eq(ns.iter().copied())
+                }) || self.lookup_type(container, name, 0).is_some_and(is_target)
             }
         }
     }
