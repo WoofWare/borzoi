@@ -1,6 +1,6 @@
 # Generated; do not edit by hand. One line per graded item, sorted.
 # Regenerate with:
-#   BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-msbuild --test fsproj_assembly_name_perturbation_diff hostile_environments_by_dimension
+#   BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-msbuild --test fsproj_assembly_name_perturbation_diff hostile_environments
 env.build-set-variable	owed
 env.case-variant-name	owed
 env.compiler-selector	owed

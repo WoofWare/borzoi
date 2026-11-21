@@ -186,13 +186,26 @@ pub fn build_environment() -> Vec<(String, String)> {
 ///
 /// # Panics
 ///
-/// When `DOTNET_ROOT` is not set, as it is in the devshell.
+/// When `DOTNET_ROOT` is not an absolute path, as it is in the devshell
+/// ([`host_in`]).
 pub fn dotnet_host() -> PathBuf {
     let root = build_environment()
         .into_iter()
-        .find_map(|(name, value)| (name == "DOTNET_ROOT").then_some(value))
-        .expect("DOTNET_ROOT names the .NET install the builds run (run under `nix develop`)");
-    Path::new(&root).join("dotnet")
+        .find_map(|(name, value)| (name == "DOTNET_ROOT").then_some(value));
+    host_in(root.as_deref()).unwrap_or_else(|e| panic!("{e} (run under `nix develop`)"))
+}
+
+/// The host in the .NET install `root`, or why there is none to launch: an
+/// unset, empty or relative root would leave the program's name to a lookup
+/// on `PATH` or in the working directory.
+fn host_in(root: Option<&str>) -> Result<PathBuf, String> {
+    match root {
+        Some(root) if Path::new(root).is_absolute() => Ok(Path::new(root).join("dotnet")),
+        Some(root) => Err(format!(
+            "DOTNET_ROOT is {root:?}, not an absolute path to the .NET install the builds run"
+        )),
+        None => Err("DOTNET_ROOT does not name the .NET install the builds run".to_string()),
+    }
 }
 
 /// `dotnet msbuild` in `dir`, as every build here starts: [`dotnet_host`]
@@ -821,25 +834,54 @@ mod tests {
 
     use super::{
         BUILD_ENVIRONMENT_NAMES, BuildInputs, FscArgsRequest, InputError, dotnet_host, fsc_args,
-        msbuild_command, scratch_dir,
+        host_in, msbuild_command, scratch_dir,
     };
 
     /// Every build starts from one command: the host itself, not a launcher
-    /// on `PATH`, and only the build environment's variables and the
-    /// caller's.
+    /// on `PATH`. The build it starts sees the caller's variable, and not a
+    /// variable of this process off the build environment's list
+    /// (`CARGO_MANIFEST_DIR`, which cargo sets for a test it runs).
     #[test]
     fn every_build_starts_from_the_host_under_the_closed_environment() {
+        let inherited = "CARGO_MANIFEST_DIR";
+        assert!(
+            std::env::var_os(inherited).is_some() && !BUILD_ENVIRONMENT_NAMES.contains(&inherited),
+            "the test needs a variable of its own off the build environment's list"
+        );
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("Probe.proj"), "<Project/>").unwrap();
         let inputs = BuildInputs::new().env("LANG", "Evil").unwrap();
-        let cmd = msbuild_command(std::path::Path::new("/"), &inputs);
+        let mut cmd = msbuild_command(tmp.path(), &inputs);
         assert_eq!(cmd.get_program(), dotnet_host().as_os_str());
-        assert!(dotnet_host().is_absolute());
-        for (name, _) in cmd.get_envs() {
-            let name = name.to_str().unwrap();
-            assert!(
-                BUILD_ENVIRONMENT_NAMES.contains(&name) || name == "LANG",
-                "{name} reaches the build"
-            );
+        cmd.args([
+            "-nologo",
+            "-getProperty:LANG",
+            &format!("-getProperty:{inherited}"),
+            "Probe.proj",
+        ]);
+        let out = crate::BoundedCommand::new(cmd)
+            .timeout(std::time::Duration::from_secs(300))
+            .run_ok("reading the build's view of its environment");
+        let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(json["Properties"]["LANG"], "Evil");
+        assert_eq!(
+            json["Properties"][inherited], "",
+            "{inherited} reached the build"
+        );
+    }
+
+    /// The host is launched by an absolute path, never looked up: an unset,
+    /// empty or relative `DOTNET_ROOT` is refused.
+    #[test]
+    fn the_host_is_named_by_an_absolute_path() {
+        assert_eq!(
+            host_in(Some("/opt/dotnet")),
+            Ok(std::path::PathBuf::from("/opt/dotnet/dotnet"))
+        );
+        for root in [None, Some(""), Some("dotnet"), Some("./share/dotnet")] {
+            assert!(host_in(root).is_err(), "{root:?}");
         }
+        assert!(dotnet_host().is_absolute());
     }
     use std::collections::BTreeSet;
 

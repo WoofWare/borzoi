@@ -1670,28 +1670,10 @@ fn deep_hostile_values() {
     );
 }
 
-/// Every [`hostile_environment_cases`] case graded, beside
-/// [`plain_variable_case`], recording what became of each dimension in the
-/// census `assembly_name_environment`.
-#[test]
-#[ignore = "every hostile environment and every hostile name as a variable: one restore each"]
-fn deep_hostile_environment() {
-    if census_stands_aside() {
-        return;
-    }
-    let work: Vec<(Case, Option<Dimension>)> = hostile_environment_cases()
-        .into_iter()
-        .map(|(case, dimension)| (case, Some(dimension)))
-        .chain([(plain_variable_case(), None)])
-        .collect();
-    grade_environment_census(&work);
-}
-
 /// Grade `work` on a few threads, recording each case's outcome under its
 /// dimension (`None` for the harness's own) in the census
 /// `assembly_name_environment`, and fail on any failure or on a dimension
-/// the census owes and no case reached. The manifest has one regeneration
-/// command, the default test's, whichever test checks it.
+/// the census owes and no case reached ([`census_outcome`]).
 fn grade_environment_census(work: &[(Case, Option<Dimension>)]) {
     let census = coverage::open(
         file!(),
@@ -1703,23 +1685,47 @@ fn grade_environment_census(work: &[(Case, Option<Dimension>)]) {
     );
     let graded = in_parallel(threads(), work.len(), |i| grade(&work[i].0));
     let mut failures = Vec::new();
-    for (outcome, (_, dimension)) in graded.into_iter().zip(work) {
-        match outcome {
-            Ok(outcome) => {
-                let outcome = format!("{outcome:?}");
-                census.reached(
-                    &dimension.iter().copied().collect(),
-                    outcome.split('(').next().unwrap_or_default(),
-                );
-            }
+    for (graded, (case, dimension)) in graded.into_iter().zip(work) {
+        match census_outcome(case, graded) {
+            Ok(outcome) => census.reached(&dimension.iter().copied().collect(), &outcome),
             Err(failure) => failures.push(failure),
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
     census.finish(
         "BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-msbuild \
-         --test fsproj_assembly_name_perturbation_diff hostile_environments_by_dimension",
+         --test fsproj_assembly_name_perturbation_diff hostile_environments",
     );
+}
+
+/// What the census records of a graded environment case: its outcome's name,
+/// or a failure. An environment the harness could not lay out never reached
+/// the derivation, so it is a failure, not a reach: every hostile
+/// environment can be handed to an evaluation.
+fn census_outcome(case: &Case, graded: Result<Outcome, String>) -> Result<String, String> {
+    match graded? {
+        Outcome::Inexpressible => Err(format!(
+            "{}: never reached the derivation (inexpressible)",
+            case.label()
+        )),
+        outcome => Ok(format!("{outcome:?}")
+            .split('(')
+            .next()
+            .unwrap_or_default()
+            .to_string()),
+    }
+}
+
+/// An inexpressible environment is a failure of the census, not a reach.
+#[test]
+fn an_inexpressible_environment_is_no_reach() {
+    let case = Case::variables(&[("Configuration", "")]);
+    assert!(census_outcome(&case, Ok(Outcome::Inexpressible)).is_err());
+    assert_eq!(
+        census_outcome(&case, Ok(Outcome::Declined("Value".into()))),
+        Ok("Declined".to_string())
+    );
+    assert!(census_outcome(&case, Err("x".into())).is_err());
 }
 
 /// Only names on the oracle's reviewed list reach a real restore or build:
@@ -2056,12 +2062,6 @@ fn every_admitted_input_can_be_set() {
 
 #[test]
 fn committed_names_survive_perturbation() {
-    // A focused run grades every case of its name, hostile environments'
-    // too; an unfocused one samples the rest of [`cases`].
-    let all = match only_name() {
-        Some(_) => only(certification_cases()),
-        None => cases(),
-    };
     let seed = std::env::var("BORZOI_FSC_NAME_SEED")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -2073,30 +2073,51 @@ fn committed_names_survive_perturbation() {
     eprintln!(
         "seed {seed:#x}, {sample} sampled cases (BORZOI_FSC_NAME_SEED, BORZOI_FSC_NAME_CASES)"
     );
+    run(&chosen(only_name().as_deref(), seed, sample));
+}
+
+/// The cases a default run grades. Focused on `name`, every case that sets
+/// it, hostile environments' too, unsampled; otherwise the must-commit and
+/// must-decline points of [`cases`] and `sample` of the rest, drawn by
+/// `seed`.
+fn chosen(name: Option<&str>, seed: u64, sample: usize) -> Vec<Case> {
+    if name.is_some() {
+        return only_named(certification_cases(), name)
+            .unwrap_or_else(|e| panic!("BORZOI_FSC_NAME_ONLY: {e}"));
+    }
     let mut rng = SplitMix64(seed);
-    let (mut chosen, mut rest): (Vec<Case>, Vec<Case>) = all
+    let (mut chosen, mut rest): (Vec<Case>, Vec<Case>) = cases()
         .into_iter()
         .partition(|c| c.must_commit.is_some() || c.must_decline);
     for _ in 0..sample.min(rest.len()) {
         let i = rng.below(rest.len());
         chosen.push(rest.swap_remove(i));
     }
-    run(&chosen);
+    chosen
 }
 
-/// A bounded hostile sample in every run: the first environment and the
-/// first variable name of each dimension, beside [`plain_variable_case`],
-/// held to the census `assembly_name_environment` (`deep_hostile_environment`
-/// grades every one).
+/// A focused run grades every case of its name, whatever the sample size.
 #[test]
-fn hostile_environments_by_dimension() {
+fn a_focused_run_grades_its_whole_selection() {
+    for name in ["FscToolExe", "LANG"] {
+        let all = only_named(certification_cases(), Some(name)).unwrap();
+        for sample in [0, 1, 40] {
+            let picked = chosen(Some(name), 1, sample);
+            assert_eq!(picked.len(), all.len(), "{name} at {sample}");
+        }
+    }
+}
+
+/// Every [`hostile_environment_cases`] case, in every run, beside
+/// [`plain_variable_case`], held to the census `assembly_name_environment`:
+/// one restore each, most declining without a build.
+#[test]
+fn hostile_environments() {
     if census_stands_aside() {
         return;
     }
-    let mut dimensions = BTreeSet::new();
     let work: Vec<(Case, Option<Dimension>)> = hostile_environment_cases()
         .into_iter()
-        .filter(|(_, dimension)| dimensions.insert(*dimension))
         .map(|(case, dimension)| (case, Some(dimension)))
         .chain([(plain_variable_case(), None)])
         .collect();
