@@ -333,8 +333,10 @@ struct Frame {
 const VAL_IS_EXTENSION_MEMBER: i64 = 0b1_0000_0000;
 
 /// The entity layer of the host pickle `pickled` and its extension rows, or
-/// why it cannot be read.
-pub(crate) fn pickled_rows(
+/// why it cannot be read. Public so a differential can read a signature that
+/// reaches it as raw streams rather than as a DLL (`fcs-dump`'s `referenced`
+/// op), in the currency [`Ecma335Assembly::existence_index`](crate::Ecma335Assembly::existence_index) reads a DLL in.
+pub fn pickled_rows(
     pickled: &PickledCcu,
 ) -> Result<(Vec<PickledEntityRow>, Vec<ExtensionRow>), String> {
     // Every entity's full logical path, so an attribute whose type the

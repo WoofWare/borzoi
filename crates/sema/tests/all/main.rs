@@ -106,6 +106,7 @@ mod overload_corpus_diff;
 mod overloads_oracle;
 mod project_half_matrix;
 mod record_label_gen_diff;
+mod referenced_oracle;
 mod reopened_namespace_grid;
 mod resolve_active_patterns;
 mod resolve_assembly;

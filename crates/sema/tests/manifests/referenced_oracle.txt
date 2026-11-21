@@ -1,0 +1,46 @@
+# Generated; do not edit by hand. One line per graded item, sorted.
+# Regenerate with:
+#   BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-sema --test all referenced_oracle::the_oracle_reads_every_cell
+abbreviations	found entities=5 extensions=0 auto-opens=[]; D1 held
+access	found entities=8 extensions=0 auto-opens=[]; D1 held
+assembly_auto_open	found entities=2 extensions=0 auto-opens=["AsmAO", "AsmAO.M"]; D1 held
+assembly_auto_open_local_namesake	found entities=6 extensions=0 auto-opens=[]; D1 held, auto-opens DLL ["N"] memory []
+assembly_name_dotted	found entities=2 extensions=0 auto-opens=[]; D1 held
+assembly_other_attribute	found entities=2 extensions=0 auto-opens=[]; D1 held
+auto_open_spellings	found entities=5 extensions=0 auto-opens=[]; D1 held
+compiled_name	found entities=3 extensions=0 auto-opens=[]; D1 held
+compiled_name_collision	found entities=2 extensions=0 auto-opens=[] [FCS: FS37]
+compiled_symbol	found entities=2 extensions=0 auto-opens=[]; D1 held
+defines	found entities=2 extensions=0 auto-opens=[]; D1 held
+exceptions	found entities=5 extensions=0 auto-opens=[]; D1 held
+extension_csharp_style	found entities=3 extensions=2 auto-opens=[]; D1 held
+extension_fsharp	found entities=2 extensions=3 auto-opens=[]; D1 held
+failing_type_error	found entities=3 extensions=0 auto-opens=[] [FCS: FS1]
+hash_reference_in_source	found entities=2 extensions=0 auto-opens=[]; D1 held
+headerless_exe	found entities=2 extensions=0 auto-opens=[]; D1 held
+intrinsic_augmentation	found entities=2 extensions=0 auto-opens=[]; D1 held
+lang_version_9	found entities=2 extensions=0 auto-opens=[]; D1 held
+line_directive	refused LineDirective
+line_directive_shaped_string	found entities=3 extensions=0 auto-opens=[]; D1 held
+module_abbreviation	found entities=2 extensions=0 auto-opens=[]; D1 held
+module_header	found entities=4 extensions=0 auto-opens=[]; D1 held
+module_nested_deep	found entities=5 extensions=0 auto-opens=[]; D1 held
+module_rec	found entities=5 extensions=0 auto-opens=[]; D1 held
+module_suffix	found entities=4 extensions=0 auto-opens=[]; D1 held
+names_unicode	found entities=4 extensions=0 auto-opens=[]; D1 held
+namespace	found entities=2 extensions=0 auto-opens=[]; D1 held
+namespace_dotted_and_fragments	found entities=7 extensions=0 auto-opens=[]; D1 held
+namespace_empty	found entities=2 extensions=0 auto-opens=[]; D1 held
+namespace_global	found entities=2 extensions=0 auto-opens=[]; D1 held
+namespace_quoted_segment_with_dot	found entities=3 extensions=0 auto-opens=[] [FCS: FS883]
+namespace_rec	found entities=3 extensions=0 auto-opens=[]; D1 held
+namespace_two_files	found entities=4 extensions=0 auto-opens=[]; D1 held
+rec_augmentation_alone	found entities=3 extensions=0 auto-opens=[]; D1 held
+rec_extension_alone	found entities=2 extensions=1 auto-opens=[]; D1 held
+reference_library	found entities=3 extensions=0 auto-opens=[]; D1 held
+signature_pair_hiding	found entities=3 extensions=0 auto-opens=[]; D1 held
+type_generic_and_measures	found entities=7 extensions=0 auto-opens=[]; D1 held
+type_kinds	found entities=9 extensions=0 auto-opens=[]; D1 held
+type_provider_assembly	refused ReadsDll
+type_provider_assembly_failing	refused MayReadDll
+undecodable_rec_extension_and_augmentation	unknown undecodable (osgn vals slot 9 was never linked by u_osgn_decl); D1 held

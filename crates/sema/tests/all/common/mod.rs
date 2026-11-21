@@ -25,6 +25,7 @@ pub mod member_hiding_corpus;
 pub mod module_value_corpus;
 pub mod overload_corpus;
 pub mod project_grade;
+pub mod referenced;
 pub mod scope_gen;
 pub mod tier_corpus;
 pub mod use_grade;
@@ -74,7 +75,7 @@ static BUILD_LOCK: Mutex<()> = Mutex::new(());
 
 /// The workspace root, two `..` jumps above the sema crate's `CARGO_MANIFEST_DIR`.
 /// `tools/fcs-dump` lives there.
-fn workspace_root() -> PathBuf {
+pub fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("crates/ parent")
@@ -300,25 +301,35 @@ pub fn try_invoke_fcs_dump_with_refs(
 
 /// The number of resident `fcs-dump` pools in this test binary; the child budget
 /// (`BORZOI_FCS_CHILDREN`, default three a pool) is split evenly between them,
-/// mirroring `cst`'s harness. Three: the single-file `file-batch` pool
+/// mirroring `cst`'s harness. Four: the single-file `file-batch` pool
 /// ([`fcs_file_batch_pool`]), the multi-file `uses-project` pool
-/// ([`fcs_project_batch_pool`]), and the legacy oracle's `file-batch` pool
+/// ([`fcs_project_batch_pool`]), the legacy oracle's `file-batch` pool
 /// ([`legacy_file_batch_pool`]), which spawns only for a check below the
-/// support floor.
-const FCS_POOLS: usize = 3;
+/// support floor, and the project-graph pool ([`fcs_graph_batch_pool`]).
+const FCS_POOLS: usize = 4;
 
 /// Process-wide cap on resident `fcs-dump` children, split evenly across the
 /// [`FCS_POOLS`] pools. Each child is a warm FCS/.NET process holding hundreds of
 /// MB and lives until the test binary exits, so the default is deliberately
 /// modest (and, like `cst`, a machine with sibling worktrees running their own
 /// suites should not be crowded out); override with `BORZOI_FCS_CHILDREN`.
+///
+/// # Panics
+///
+/// On a `BORZOI_FCS_CHILDREN` below [`FCS_POOLS`]: each pool keeps one child,
+/// so the cap could not hold, and exceeding it silently is no cap.
 fn fcs_children_budget() -> usize {
-    std::env::var("BORZOI_FCS_CHILDREN")
+    let budget = std::env::var("BORZOI_FCS_CHILDREN")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
         .filter(|n| *n > 0)
-        .unwrap_or(3 * FCS_POOLS)
-        .max(FCS_POOLS)
+        .unwrap_or(3 * FCS_POOLS);
+    assert!(
+        budget >= FCS_POOLS,
+        "BORZOI_FCS_CHILDREN={budget} is below the {FCS_POOLS} oracle pools this binary \
+         keeps a child each in; set it to at least {FCS_POOLS}"
+    );
+    budget
 }
 
 /// The lowest language version the current oracle's compiler supports
@@ -413,6 +424,18 @@ fn spawn_fcs_batch_child(
     subcommand: &'static str,
     timeout: Duration,
 ) -> BatchChild {
+    spawn_fcs_batch_child_with_env(oracle, subcommand, timeout, &[])
+}
+
+/// [`spawn_fcs_batch_child`], with `env` set in the child's environment
+/// beside what it inherits.
+fn spawn_fcs_batch_child_with_env(
+    oracle: Oracle,
+    subcommand: &'static str,
+    timeout: Duration,
+    env: &[(&'static str, &'static str)],
+) -> BatchChild {
+    let env = env.to_vec();
     let (variable, tool) = match oracle {
         Oracle::Current => ("BORZOI_FCS_DUMP", "fcs-dump"),
         Oracle::Legacy => ("BORZOI_FCS_DUMP_LEGACY", "fcs-dump-legacy"),
@@ -420,7 +443,7 @@ fn spawn_fcs_batch_child(
     let make: Box<dyn FnMut() -> Command + Send> = if let Some(bin) = std::env::var_os(variable) {
         Box::new(move || {
             let mut c = Command::new(&bin);
-            c.arg(subcommand);
+            c.arg(subcommand).envs(env.iter().copied());
             c
         })
     } else {
@@ -430,7 +453,7 @@ fn spawn_fcs_batch_child(
             .to_owned();
         Box::new(move || {
             let mut c = Command::new("dotnet");
-            c.arg(&dll).arg(subcommand);
+            c.arg(&dll).arg(subcommand).envs(env.iter().copied());
             c
         })
     };
@@ -545,6 +568,33 @@ pub fn try_invoke_fcs_dump_project_with_refs(
 fn fcs_project_batch_pool() -> &'static BatchPool {
     static P: OnceLock<BatchPool> = OnceLock::new();
     P.get_or_init(|| BatchPool::new(Oracle::Current, "uses-project-batch", PROJECT_TIMEOUT))
+}
+
+/// The resident project-graph oracle pool (`fcs-dump uses-project-graph-batch`,
+/// `borzoi_oracle_harness::project_graph`): each request checks, compiles or
+/// reads a graph of projects, so it keeps [`PROJECT_TIMEOUT`].
+fn fcs_graph_batch_pool() -> &'static BatchPool {
+    static P: OnceLock<BatchPool> = OnceLock::new();
+    P.get_or_init(|| BatchPool::new(Oracle::Current, "uses-project-graph-batch", PROJECT_TIMEOUT))
+}
+
+/// One request line to the project-graph oracle, and its response line,
+/// which may be a `BatchError` (the caller parses it with
+/// `borzoi_oracle_harness::project_graph::parse_response`).
+pub fn invoke_fcs_dump_graph(line: &str) -> String {
+    fcs_graph_batch_pool().request(line)
+}
+
+/// A project-graph oracle child of its own, outside the pool, with `env` set
+/// beside what it inherits: for a test that must know which requests one
+/// child has answered.
+pub fn spawn_fcs_graph_child(env: &[(&'static str, &'static str)]) -> BatchChild {
+    spawn_fcs_batch_child_with_env(
+        Oracle::Current,
+        "uses-project-graph-batch",
+        PROJECT_TIMEOUT,
+        env,
+    )
 }
 
 /// Run `fcs-dump uses-census-batch` over `paths` (any order; **each file is
