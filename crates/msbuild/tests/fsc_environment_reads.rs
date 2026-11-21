@@ -77,13 +77,6 @@ fn installed(sdk: &str) -> bool {
         .host_is_dir()
 }
 
-/// The platform this scan runs on, which keys every list of the pin: the
-/// binaries of one SDK version differ between platforms (their native code,
-/// their runtime's build).
-fn platform() -> String {
-    format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)
-}
-
 /// A version directory's name as numbers (`10.0.12`), or `None` for one
 /// with a prerelease label or another shape.
 fn version(name: &str) -> Option<Vec<u64>> {
@@ -167,12 +160,45 @@ fn files_under(dir: &Path, out: &mut Vec<PathBuf>) {
     walk(dir, &mut BTreeSet::new(), out);
 }
 
-/// Every MSBuild document under the SDK `sdk_dir` and among its verified
-/// workload manifests: each file whose root element is `Project`.
+/// The workload manifest files of the SDK `sdk`: those its grading recorded
+/// ([`verified_manifests`]), and those a plain project evaluated under it
+/// loads, which an SDK not yet graded has no record of.
+fn loaded_manifests(dotnet_root: &Path, sdk: &str) -> BTreeSet<String> {
+    let mut manifests: BTreeSet<String> = verified_manifests(sdk).map(str::to_string).collect();
+    // A plain project resolves the devshell's SDK; another one's loads are
+    // its record alone.
+    if sdk != devshell_sdk() {
+        return manifests;
+    }
+    let tmp = tempfile::TempDir::new().unwrap();
+    let dir = host_fs::canonicalize(tmp.path()).unwrap();
+    let project = dir.join("Probe.fsproj");
+    std::fs::write(
+        &project,
+        "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup>\
+         <TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>",
+    )
+    .unwrap();
+    let mut environment: std::collections::HashMap<String, String> =
+        build_environment().into_iter().collect();
+    environment.insert(
+        "MSBuildUserExtensionsPath".to_string(),
+        common::msbuild_user_extensions_path().to_string(),
+    );
+    let parsed =
+        common::assembly_name::evaluate(&project, &Default::default(), &environment, dotnet_root)
+            .expect("a plain project evaluates");
+    manifests.extend(parsed.workload_manifest_files);
+    manifests
+}
+
+/// Every MSBuild document under the SDK `sdk_dir` and among its workload
+/// manifests ([`loaded_manifests`]): each file whose root element is
+/// `Project`.
 fn sdk_documents(dotnet_root: &Path, sdk: &str) -> Vec<(PathBuf, String)> {
     let mut files = Vec::new();
     files_under(&dotnet_root.join("sdk").join(sdk), &mut files);
-    for manifest in verified_manifests(sdk) {
+    for manifest in loaded_manifests(dotnet_root, sdk) {
         files.push(dotnet_root.join("sdk-manifests").join(manifest));
     }
     files.sort();
@@ -386,13 +412,23 @@ fn conventional(s: &str) -> bool {
 }
 
 /// The strings of `bytes` between two NULs (ASCII) or two UTF-16 NULs, each
-/// [`conventional`].
-fn native_strings(bytes: &[u8], out: &mut BTreeSet<String>) {
-    for run in bytes.split(|b| *b == 0) {
-        if let Ok(s) = std::str::from_utf8(run)
-            && conventional(s)
+/// [`conventional`]; and into `prefixes`, the head before a format directive
+/// of each such string whose head is (`COREHOST_%s`: a name the code
+/// composes).
+fn native_strings(bytes: &[u8], out: &mut BTreeSet<String>, prefixes: &mut BTreeSet<String>) {
+    let mut formatted = |s: &str| {
+        if let Some((head, _)) = s.split_once('%')
+            && conventional(head)
         {
-            out.insert(s.to_string());
+            prefixes.insert(head.to_string());
+        }
+    };
+    for run in bytes.split(|b| *b == 0) {
+        if let Ok(s) = std::str::from_utf8(run) {
+            if conventional(s) {
+                out.insert(s.to_string());
+            }
+            formatted(s);
         }
     }
     for offset in 0..2 {
@@ -403,10 +439,11 @@ fn native_strings(bytes: &[u8], out: &mut BTreeSet<String>) {
             .map(|pair| u16::from_le_bytes(*pair))
             .collect();
         for run in units.split(|u| *u == 0) {
-            if let Ok(s) = String::from_utf16(run)
-                && conventional(&s)
-            {
-                out.insert(s);
+            if let Ok(s) = String::from_utf16(run) {
+                formatted(&s);
+                if conventional(&s) {
+                    out.insert(s);
+                }
             }
         }
     }
@@ -417,14 +454,25 @@ fn native_strings(bytes: &[u8], out: &mut BTreeSet<String>) {
 /// how many environment reads the IL scan found and could not resolve.
 fn tool_variables(dotnet_root: &Path, sdk: &str) -> (BTreeSet<String>, BTreeSet<String>) {
     let mut files = Vec::new();
-    let (runtime, fxr) = sdk_runtime(dotnet_root, sdk);
+    let (runtime, _) = sdk_runtime(dotnet_root, sdk);
     files_under(&dotnet_root.join("sdk").join(sdk), &mut files);
     files_under(&runtime, &mut files);
-    files_under(&fxr, &mut files);
+    // Every host resolver: the muxer picks one by its own rule, apart from
+    // the SDK's runtime.
+    files_under(&dotnet_root.join("host").join("fxr"), &mut files);
     files.push(host_fs::canonicalize(dotnet_root.join("dotnet")).expect("the dotnet muxer"));
-    files.sort();
     let mut variables = BTreeSet::new();
     let mut prefixes = BTreeSet::new();
+    // The `dotnet` a build runs is the one on its `PATH`; a script there (the
+    // Nix wrapper) is read by its interpreter, which reads its own variables,
+    // and reads the variables its text names.
+    if let Some((script, interpreter)) = launcher() {
+        for name in shell_references(&script) {
+            variables.insert(name.to_ascii_lowercase());
+        }
+        files.push(interpreter);
+    }
+    files.sort();
     let mut managed = Vec::new();
     let mut natives = 0;
     for file in &files {
@@ -434,7 +482,9 @@ fn tool_variables(dotnet_root: &Path, sdk: &str) -> (BTreeSet<String>, BTreeSet<
         if native(&bytes) {
             natives += 1;
             let mut strings = BTreeSet::new();
-            native_strings(&bytes, &mut strings);
+            let mut formatted = BTreeSet::new();
+            native_strings(&bytes, &mut strings, &mut formatted);
+            prefixes.extend(formatted.iter().map(|p| p.to_ascii_lowercase()));
             for s in strings {
                 if s.ends_with('_') && s.len() >= 4 {
                     prefixes.insert(s.to_ascii_lowercase());
@@ -463,6 +513,13 @@ fn tool_variables(dotnet_root: &Path, sdk: &str) -> (BTreeSet<String>, BTreeSet<
             variables.extend(strings("names"));
             variables.extend(strings("upper"));
             prefixes.extend(strings("prefixes"));
+            // MSBuild's engine reads properties by name in more ways than
+            // a call site shows (a getter it hands on as a delegate, say), and
+            // every variable is a property: take its every name-shaped string.
+            let file = assembly["file"].as_str().unwrap_or_default();
+            if msbuild_engine(Path::new(file)) {
+                variables.extend(strings("identifiers"));
+            }
         }
     }
     eprintln!(
@@ -475,6 +532,53 @@ fn tool_variables(dotnet_root: &Path, sdk: &str) -> (BTreeSet<String>, BTreeSet<
         "the scan found too little of the SDK {sdk}"
     );
     (variables, prefixes)
+}
+
+/// Whether `file` is one of MSBuild's own assemblies (`MSBuild.dll`,
+/// `Microsoft.Build*.dll`), whose every name-shaped string counts.
+fn msbuild_engine(file: &Path) -> bool {
+    let name = file
+        .file_name()
+        .map(|n| n.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    name == "msbuild.dll" || (name.starts_with("microsoft.build") && name.ends_with(".dll"))
+}
+
+/// The `dotnet` on the build environment's `PATH`, when it is a script: its
+/// text, and its interpreter (the `#!` line's program).
+fn launcher() -> Option<(String, PathBuf)> {
+    let path = build_environment()
+        .into_iter()
+        .find(|(name, _)| name == "PATH")
+        .map(|(_, value)| value)?;
+    let dotnet = std::env::split_paths(&path)
+        .map(|dir| dir.join("dotnet"))
+        .find(|candidate| candidate.host_is_file())?;
+    let text = host_fs::read_to_string(&dotnet).ok()?;
+    let line = text.lines().next()?.strip_prefix("#!")?;
+    let interpreter = PathBuf::from(line.split_whitespace().next()?);
+    assert!(
+        interpreter.is_absolute() && !interpreter.ends_with("env"),
+        "{}: an interpreter this scan does not resolve: {line:?}",
+        dotnet.display()
+    );
+    Some((text, interpreter))
+}
+
+/// The variables a shell script's text names (`$NAME`, `${NAME…}`).
+fn shell_references(script: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for (at, _) in script.match_indices('$') {
+        let rest = script[at + 1..].trim_start_matches('{');
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        if name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') {
+            out.insert(name);
+        }
+    }
+    out
 }
 
 /// The scan of the installed SDK `sdk`, once per run: one scan per SDK
@@ -503,6 +607,7 @@ fn scanned(sdk: &str) -> EnvironmentReads {
             property_prefixes,
             variables,
             variable_prefixes,
+            platforms: BTreeSet::from([borzoi_msbuild::fsc::current_platform()]),
         }
     })
     .clone()
@@ -581,7 +686,7 @@ fn header_platform(header: &str) -> &str {
 fn the_pinned_reads_are_each_sdk_s_own() {
     let file = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/fsc_environment_reads.txt");
     let sdks = sdks_to_pin();
-    let platform = platform();
+    let platform = borzoi_msbuild::fsc::current_platform();
     let text = host_fs::read_to_string(&file).unwrap_or_default();
     let pinned = sections(&text);
     let scans: BTreeMap<String, String> = sdks
@@ -725,21 +830,38 @@ fn the_scan_finds_the_known_reads() {
         "dotnet_cli_telemetry_optout",
         // the host
         "dotnet_root",
+        // MSBuild's engine, through a getter handed on as a delegate
+        "msbuildframeworktoolspath32",
     ] {
         assert!(
             reads.variables.contains(variable),
             "the build's tools read {variable}, but the scan did not find it"
         );
     }
+    // A launcher script's interpreter (bash, for the Nix wrapper) reads its
+    // own variables before the host runs.
+    if launcher().is_some() {
+        for variable in ["shellopts", "bash_env"] {
+            assert!(
+                reads.variables.contains(variable),
+                "the launcher's interpreter reads {variable}, but the scan did not find it"
+            );
+        }
+    }
     // What NuGet's restore files read, though no SDK file need.
     for name in ["ExcludeRestorePackageImports", "Language"] {
-        assert_eq!(
-            borzoi_msbuild::fsc::classify_variable(&devshell_sdk(), name),
-            Some(borzoi_msbuild::fsc::VariableClass::SdkRead),
-            "{name}"
+        assert!(
+            borzoi_msbuild::fsc::restore_file_read(name),
+            "NuGet's restore files read {name}"
         );
     }
-    for prefix in ["dotnet_", "complus_", "nugetpackagesourcecredentials_"] {
+    for prefix in [
+        "dotnet_",
+        "complus_",
+        "nugetpackagesourcecredentials_",
+        // the host's `COREHOST_%s`
+        "corehost_",
+    ] {
         assert!(
             reads.variable_prefixes.contains(prefix),
             "the build's tools read variables named {prefix}…, but the scan did not find it"

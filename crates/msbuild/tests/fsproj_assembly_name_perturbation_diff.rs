@@ -263,22 +263,22 @@ fn env_value(i: usize) -> &'static str {
     VALUES[i % VALUES.len()]
 }
 
-/// The SDKs whose environment reads the cases draw listed names from.
-fn graded_reads() -> Vec<&'static borzoi_msbuild::fsc::EnvironmentReads> {
-    verified_sdks().filter_map(environment_reads).collect()
+/// The SDK under grading: the devshell's, which every case's evaluation
+/// resolves ([`devshell_sdk`]), once per run.
+fn graded_sdk() -> &'static str {
+    static SDK: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    SDK.get_or_init(|| devshell_sdk().0)
 }
 
-/// How a variable named `name` classifies under every verified SDK: one
-/// class when they agree, else `None`.
+/// The reads of the SDK under grading, which the cases draw listed names
+/// from.
+fn graded_reads() -> Vec<&'static borzoi_msbuild::fsc::EnvironmentReads> {
+    environment_reads(graded_sdk()).into_iter().collect()
+}
+
+/// How a variable named `name` classifies under the SDK under grading.
 fn class_of(name: &str) -> Option<VariableClass> {
-    let classes: BTreeSet<String> = verified_sdks()
-        .filter_map(|sdk| classify_variable(sdk, name))
-        .map(|c| format!("{c:?}"))
-        .collect();
-    (classes.len() == 1).then(|| {
-        classify_variable(verified_sdks().next().expect("a verified SDK"), name)
-            .expect("classified")
-    })
+    classify_variable(graded_sdk(), name)
 }
 
 /// `count` of `names`, spread evenly over them.
@@ -1764,17 +1764,68 @@ fn committed_names_survive_perturbation() {
         let i = rng.below(rest.len());
         chosen.push(rest.swap_remove(i));
     }
-    // A bounded hostile sample beside them: the first environment and the
-    // first variable name of each dimension (`deep_hostile_environment`
-    // grades every one).
-    let mut dimensions = BTreeSet::new();
-    chosen.extend(
-        hostile_environment_cases()
-            .into_iter()
-            .filter(|(_, dimension)| dimensions.insert(*dimension))
-            .map(|(case, _)| case),
-    );
     run(&only(chosen));
+}
+
+/// A bounded hostile sample in every run: the first environment and the
+/// first variable name of each dimension, graded at once, held to the census
+/// `assembly_name_environment` (`deep_hostile_environment` grades every one).
+#[test]
+fn hostile_environments_by_dimension() {
+    let census = coverage::open(
+        file!(),
+        "assembly_name_environment",
+        &[(
+            Dimension::NonUtf8,
+            "the derivation takes the environment as UTF-8 text, as its caller reads it",
+        )],
+    );
+    let mut dimensions = BTreeSet::new();
+    let sample: Vec<(Case, Dimension)> = hostile_environment_cases()
+        .into_iter()
+        .filter(|(_, dimension)| dimensions.insert(*dimension))
+        .collect();
+    let plain = Case {
+        inert: true,
+        must_commit: Some("Demo".into()),
+        ..Case::variables(&[("BORZOI_PLAIN_VARIABLE", "plain")])
+    };
+    let work: Vec<(&Case, Option<Dimension>)> = sample
+        .iter()
+        .map(|(case, dimension)| (case, Some(*dimension)))
+        .chain([(&plain, None)])
+        .collect();
+    let next = AtomicUsize::new(0);
+    let graded = Mutex::new(Vec::new());
+    std::thread::scope(|scope| {
+        for _ in 0..4 {
+            scope.spawn(|| {
+                while let Some((case, dimension)) = work.get(next.fetch_add(1, Ordering::Relaxed)) {
+                    let outcome = grade(case);
+                    graded.lock().unwrap().push((outcome, *dimension));
+                }
+            });
+        }
+    });
+    let graded = graded.into_inner().unwrap();
+    let mut failures = Vec::new();
+    for (outcome, dimension) in graded {
+        match outcome {
+            Ok(outcome) => {
+                let outcome = format!("{outcome:?}");
+                census.reached(
+                    &dimension.into_iter().collect(),
+                    outcome.split('(').next().unwrap_or_default(),
+                );
+            }
+            Err(failure) => failures.push(failure),
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    census.finish(
+        "BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-msbuild \
+         --test fsproj_assembly_name_perturbation_diff hostile_environments_by_dimension",
+    );
 }
 
 #[test]

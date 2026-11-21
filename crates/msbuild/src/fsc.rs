@@ -30,7 +30,9 @@
 //! or a read by the SDK's tasks, MSBuild, NuGet, the CLI, the host or fsc.
 //! Both are listed per verified SDK, statically ([`environment_reads`], from
 //! `src/fsc_environment_reads.txt`, which `tests/fsc_environment_reads.rs`
-//! scans from the SDK and fails on until regenerated). A variable on either
+//! scans from the SDK and fails on until regenerated, on each platform: a
+//! platform's binaries differ, so the lists stand for one only once its own
+//! scan is pinned, and are the union of every scan). A variable on either
 //! list declines unless it is the toolchain's own ([`TOOLCHAIN_VARIABLES`],
 //! held fixed by the grading), an allowed property (held to its grammar), or
 //! graded inert ([`ALLOWED_ENVIRONMENT`]); every other variable is inert by
@@ -456,6 +458,16 @@ pub struct EnvironmentReads {
     /// Prefixes of the variables they read by a composed name (`dotnet_`,
     /// `complus_`, `nugetpackagesourcecredentials_`).
     pub variable_prefixes: BTreeSet<String>,
+    /// The platforms the lists were scanned on ([`current_platform`]'s
+    /// spelling): a platform's binaries differ from another's, so the lists
+    /// stand for a platform only once its own scan is among them.
+    pub platforms: BTreeSet<String>,
+}
+
+/// The platform this process runs on, as the pin keys its sections
+/// (`macos-aarch64`, `linux-x86_64`).
+pub fn current_platform() -> String {
+    format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)
 }
 
 /// The [`EnvironmentReads`] of each SDK in `src/fsc_environment_reads.txt`,
@@ -487,13 +499,16 @@ pub fn parse_environment_reads(text: &str) -> HashMap<String, EnvironmentReads> 
             .filter(|h| h.contains(' '))
         {
             let mut words = header.split(' ');
-            let (Some(sdk), Some(list), Some(_platform), None) =
+            let (Some(sdk), Some(list), Some(platform), None) =
                 (words.next(), words.next(), words.next(), words.next())
             else {
                 panic!("fsc_environment_reads.txt: bad header {line:?}");
             };
             current = Some((sdk.to_string(), list.to_string()));
-            all.entry(sdk.to_string()).or_default();
+            all.entry(sdk.to_string())
+                .or_default()
+                .platforms
+                .insert(platform.to_string());
             continue;
         }
         let (sdk, list) = current
@@ -513,9 +528,21 @@ pub fn parse_environment_reads(text: &str) -> HashMap<String, EnvironmentReads> 
 }
 
 /// What the SDK `sdk`'s files and its build's tools may read
-/// ([`EnvironmentReads`]), or `None` for an SDK whose reads are not pinned.
+/// ([`EnvironmentReads`]), or `None` for an SDK whose reads are not pinned
+/// for this platform.
 pub fn environment_reads(sdk: &str) -> Option<&'static EnvironmentReads> {
-    all_environment_reads().get(sdk)
+    reads_on(all_environment_reads(), sdk, &current_platform())
+}
+
+/// The reads of the SDK `sdk` in `all`, when they include a scan on
+/// `platform`.
+fn reads_on<'a>(
+    all: &'a HashMap<String, EnvironmentReads>,
+    sdk: &str,
+    platform: &str,
+) -> Option<&'a EnvironmentReads> {
+    all.get(sdk)
+        .filter(|reads| reads.platforms.contains(platform))
 }
 
 /// The SDKs whose reads are pinned.
@@ -2434,6 +2461,17 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// An SDK's reads stand for a platform only once a scan on it is among
+    /// them: another platform's binaries may read what this one's do not.
+    #[test]
+    fn reads_stand_only_for_a_scanned_platform() {
+        let all = super::parse_environment_reads(
+            "[9.0.100 variables linux-x86_64]\nshared\n[9.0.100 properties linux-x86_64]\nx\n",
+        );
+        assert!(super::reads_on(&all, "9.0.100", "linux-x86_64").is_some());
+        assert!(super::reads_on(&all, "9.0.100", "macos-aarch64").is_none());
     }
 
     /// An SDK whose reads are not pinned declines, whatever the environment,

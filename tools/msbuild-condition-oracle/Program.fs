@@ -165,7 +165,7 @@
 ///     steady state waits on this between batches.
 ///
 ///   {"op":"envReads","files":[path, ..]}
-///     -> {"assemblies":[{"file":s,"names":[..],"prefixes":[..],"upper":[..],
+///     -> {"assemblies":[{"file":s,"names":[..],"prefixes":[..],"upper":[..],"identifiers":[..],
 ///                        "envCalls":n,"unresolved":n}, ..]}
 ///     Not a differential: the environment variables each managed assembly
 ///     among `files` may read, from its IL (`respondEnvReads`), for
@@ -1767,8 +1767,9 @@ let private decode (il: byte[]) : Instruction list =
 /// argument and no field among them is unresolved: every string of its method
 /// counts, and it is counted. `upper` is every user string shaped like a
 /// conventional variable name (ASCII capitals, digits and `_`, two or more,
-/// one a letter), whatever reads it. `None` for a file that is not a managed
-/// assembly.
+/// one a letter), whatever reads it, and `identifiers` every user string
+/// shaped like an MSBuild property name, for a caller that takes an
+/// assembly's every one. `None` for a file that is not a managed assembly.
 let private envReadsOf (path: string) =
     use stream = File.OpenRead path
     use pe = new Reflection.PortableExecutable.PEReader(stream)
@@ -1942,6 +1943,15 @@ let private envReadsOf (path: string) =
                 |> Array.ofSeq
                prefixes = prefixes |> Seq.sort |> Array.ofSeq
                upper = userStrings |> Seq.filter conventional |> Seq.distinct |> Seq.sort |> Array.ofSeq
+               identifiers =
+                userStrings
+                |> Seq.filter (fun s ->
+                    s.Length > 0
+                    && (Char.IsAsciiLetter s[0] || s[0] = '_')
+                    && s |> Seq.forall (fun c -> Char.IsAsciiLetterOrDigit c || c = '_'))
+                |> Seq.distinct
+                |> Seq.sort
+                |> Array.ofSeq
                envCalls = envCalls
                unresolved = unresolved |}
 

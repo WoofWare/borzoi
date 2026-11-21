@@ -407,8 +407,9 @@ impl BuildInputs {
     /// whatever they are. Refuses one of [`INPUT_NAMES`] (set through
     /// [`Self::env`]), one of [`build_environment`]'s
     /// ([`BUILD_ENVIRONMENT_NAMES`], held fixed), one starting with a
-    /// [`MACHINERY`] prefix, one of [`SELECTORS`], and a name no variable
-    /// can have (empty, or holding `=` or NUL). Whatever it sets, the build's launch checks still
+    /// [`MACHINERY`] prefix, one of [`SELECTORS`], one some verified SDK reads
+    /// ([`read_by_the_sdk`]), and a name no variable can have (empty, or
+    /// holding `=` or NUL). Whatever it sets, the build's launch checks still
     /// decide whether fsc's arguments are the SDK compiler's.
     pub fn unlisted_env(mut self, name: &str, value: &str) -> Result<BuildInputs, InputError> {
         let refused = name.is_empty()
@@ -421,7 +422,8 @@ impl BuildInputs {
                 name.get(..prefix.len())
                     .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
             })
-            || SELECTORS.iter().any(|n| n.eq_ignore_ascii_case(name));
+            || SELECTORS.iter().any(|n| n.eq_ignore_ascii_case(name))
+            || read_by_the_sdk(name);
         if refused {
             return Err(InputError::Refused(name.to_string()));
         }
@@ -534,6 +536,40 @@ pub const SELECTORS: &[&str] = &[
     "RestoreSources",
     "SkipCompilerExecution",
 ];
+
+/// Whether some verified SDK's files or its build's tools read `name`, by the
+/// compiled-name derivation's pinned scan (`borzoi-msbuild`'s
+/// `src/fsc_environment_reads.txt`, read here as text: this crate is beneath
+/// that one): a name on one of its lists, or with one of its prefixes, on any
+/// platform, compared without case. Such a name is not unlisted.
+pub fn read_by_the_sdk(name: &str) -> bool {
+    static LISTS: OnceLock<(std::collections::HashSet<String>, Vec<String>)> = OnceLock::new();
+    let (names, prefixes) = LISTS.get_or_init(|| {
+        let text = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../msbuild/src/fsc_environment_reads.txt"
+        ));
+        let (mut names, mut prefixes) = (std::collections::HashSet::new(), Vec::new());
+        let mut prefixed = false;
+        for line in text.lines() {
+            if line.is_empty() || line == "#" || line.starts_with("# ") {
+                continue;
+            }
+            if line.starts_with('[') && line.ends_with(']') && line.contains(' ') {
+                prefixed = line.contains("-prefixes ");
+                continue;
+            }
+            if prefixed {
+                prefixes.push(line.to_string());
+            } else {
+                names.insert(line.to_string());
+            }
+        }
+        (names, prefixes)
+    });
+    let lower = name.to_ascii_lowercase();
+    names.contains(&lower) || prefixes.iter().any(|p| lower.starts_with(p.as_str()))
+}
 
 /// One [`fsc_args`] call.
 #[derive(Debug, Clone, Copy)]
@@ -941,14 +977,7 @@ mod tests {
     /// case), or one no variable can have.
     #[test]
     fn unlisted_variables_refuse_the_machinery() {
-        for name in [
-            "BORZOI_X",
-            "1FOO",
-            "A-B.C D",
-            "ProgramFiles(x86)",
-            "x\ny",
-            "_x",
-        ] {
+        for name in ["BORZOI_X", "1FOO", "A-B.C D", "x\ny", "_borzoi_x"] {
             assert!(
                 BuildInputs::new().unlisted_env(name, "v\n--out:x").is_ok(),
                 "{name:?}"
@@ -977,6 +1006,9 @@ mod tests {
             "LD_PRELOAD",
             "BASH_ENV",
             "BASH_FUNC_dotnet%%",
+            // Names the SDK's tools read, though no prefix or selector names them.
+            "ProgramFiles(x86)",
+            "MSBuildTreatWarningsAsErrors",
         ] {
             assert!(
                 matches!(
@@ -994,6 +1026,7 @@ mod tests {
             "DirectoryBuildTargetsPath",
             "RestoreAdditionalProjectSources",
             "SkipCompilerExecution",
+            "CustomBeforeDirectoryBuildProps",
         ] {
             assert!(
                 matches!(
