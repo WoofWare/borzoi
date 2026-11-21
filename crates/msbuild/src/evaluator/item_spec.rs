@@ -69,16 +69,63 @@ fn in_domain(identity: &str) -> bool {
 }
 
 /// The key two identities are compared by when a `Remove` or `Exclude`
-/// matches: `NormalizePathForComparisonNoThrow(identity, project_dir)`,
-/// case-folded. Two identities match exactly when their keys are equal.
+/// matches, and the key MSBuild's batch of `Update`s holds a fragment by:
+/// `NormalizePathForComparisonNoThrow(identity, project_dir)`, case-folded.
+/// Two identities match exactly when their keys are equal.
 ///
 /// `None` outside the domain.
 pub(super) fn comparison_key(identity: &str, project_dir: &Path) -> Option<String> {
     if !in_domain(identity) {
         return None;
     }
+    // A spelling MSBuild does not normalise (a `:`, a `|`, a quote, … in its
+    // file name: `FileUtilities.PathIsInvalid`) is compared as written,
+    // ignoring case: `NormalizePathForComparisonNoThrow` returns it
+    // unchanged. Written rooted, it may equal another identity's full path
+    // (`/tmp/a:b` and `/tmp/a:b/.`); written relative, it equals none, since
+    // every full path starts with `/`.
+    if crate::glob::compares_unnormalised(identity) {
+        return Some(identity.to_ascii_lowercase());
+    }
     let spelled = identity.replace('\\', "/");
     let mut key = full_path(spelled.trim_end_matches('/'), project_dir)?;
+    key.make_ascii_lowercase();
+    Some(key)
+}
+
+/// The key a batch of `Update`s holds a fragment by, comparing it with the
+/// other fragments and with the keys earlier `Update`s left
+/// (`item_pass::update_strands_late`): [`comparison_key`], and, under a
+/// project directory that is not ASCII, which .NET folds by a table of its
+/// own, a key for a relative identity that stays inside the directory: its
+/// spelling as written where MSBuild compares it so, else its normalised path
+/// behind the directory as written. Every such full-path key shares that
+/// prefix, and no spelling compared as written starts with `/`, so two of
+/// them are equal exactly when MSBuild's are. An absolute identity there, or
+/// one climbing out of the directory, has none.
+pub(super) fn batch_key(identity: &str, project_dir: &Path) -> Option<String> {
+    let dir = project_dir.to_str()?;
+    if dir.is_ascii() {
+        return comparison_key(identity, project_dir);
+    }
+    if !dir.starts_with('/') || !in_domain(identity) || identity.starts_with(['/', '\\']) {
+        return None;
+    }
+    if crate::glob::compares_unnormalised(identity) {
+        return Some(identity.to_ascii_lowercase());
+    }
+    let spelled = identity.replace('\\', "/");
+    let mut segments: Vec<&str> = Vec::new();
+    for segment in spelled.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                segments.pop()?;
+            }
+            other => segments.push(other),
+        }
+    }
+    let mut key = format!("{}/{}", dir.trim_end_matches('/'), segments.join("/"));
     key.make_ascii_lowercase();
     Some(key)
 }
@@ -211,6 +258,48 @@ mod tests {
     fn climbing_past_the_root_stays_at_the_root() {
         assert_eq!(key("../../../../x"), Some("/x".to_string()));
         assert_eq!(key("../../.."), Some("/".to_string()));
+    }
+
+    /// A spelling with a character invalid in a file name is keyed as
+    /// written: written rooted, it is the key of a spelling that normalises
+    /// to it; relative, it is no other spelling's key.
+    #[test]
+    fn a_spelling_msbuild_does_not_normalise_is_its_own_key() {
+        assert_eq!(key("/tmp/A:b"), Some("/tmp/a:b".to_string()));
+        assert_eq!(key("/tmp/A:b"), key("/tmp/a:b/."));
+        assert_eq!(key("a:b"), Some("a:b".to_string()));
+        assert_ne!(key("a:b"), key("./a:b"));
+        assert_ne!(key("a:b"), key("/root/Proj/a:b"));
+        assert_eq!(key("seg\\a:b"), Some("seg\\a:b".to_string()));
+    }
+
+    /// Under a non-ASCII project directory, relative identities that stay
+    /// inside it are keyed against each other; absolute ones and climbing
+    /// ones are not. Under an ASCII one, the batch key is the comparison key.
+    #[test]
+    fn batch_keys_compare_relative_identities_under_any_directory() {
+        let dir = Path::new("/r\u{f6}\u{f6}t");
+        let batch = |identity| batch_key(identity, dir);
+        assert_eq!(batch("a.fs"), batch("./sub/../A.fs"));
+        assert_eq!(batch("sub\\a.fs"), batch("sub/a.fs"));
+        assert_ne!(batch("a.fs"), batch("b.fs"));
+        assert!(batch("a.fs").is_some());
+        for identity in [
+            "/r\u{f6}\u{f6}t/a.fs",
+            "\\x",
+            "../r\u{f6}\u{f6}t/a.fs",
+            "a/../../b",
+        ] {
+            assert_eq!(batch(identity), None, "{identity:?}");
+        }
+        assert_eq!(batch("seg/A:b"), Some("seg/a:b".to_owned()));
+        for identity in ["a.fs", "/x/a.fs", "../a.fs", "a:b"] {
+            assert_eq!(
+                batch_key(identity, Path::new("/root/Proj")),
+                key(identity),
+                "{identity:?}"
+            );
+        }
     }
 
     #[test]

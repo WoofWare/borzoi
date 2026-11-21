@@ -561,6 +561,189 @@ fn compile_update_strand_without_a_pending_batch_declines() {
     assert!(p.items_uncertain, "{:?}", p.diagnostics);
 }
 
+/// MSBuild keys every fragment of a batched `Update`, so one whose key the
+/// walk cannot compute (`Ü.fs`, outside the ASCII domain) joins the batch
+/// like any other, and the fragments after it may join and strand too: here
+/// `./A.fs` is stranded, and the next `Update` collides on it, stranding
+/// `B.fs` with `CompileFirst`. No compile order is certain.
+#[test]
+fn a_fragment_without_a_key_does_not_end_the_batch() {
+    let src = r#"<Project>
+  <ItemGroup>
+    <Compile Update="&#xDC;.fs;./A.fs;S%3bq.fs" Visible="false" />
+    <Compile Update="B.fs;A.fs">
+      <CompileOrder>CompileFirst</CompileOrder>
+    </Compile>
+    <Compile Include="B.fs;C.fs" />
+    <Compile Update="B.fs" CompileOrder="CompileAfter" />
+  </ItemGroup>
+</Project>"#;
+    let p = parse(src);
+    assert!(p.items_uncertain, "{:?}", p.diagnostics);
+    // Within one spec: `Ü` and `Alpha` join, the second `Alpha` collides,
+    // and the first stays stranded with its override until `Alpha` is
+    // included. MSBuild gives it `2.0`.
+    let p = parse(
+        r#"<Project><ItemGroup>
+    <PackageReference Update="&#xDC;;Alpha;Alpha" VersionOverride="2.0" />
+    <PackageReference Include="Alpha" Version="1.0" />
+  </ItemGroup></Project>"#,
+    );
+    let alpha = p.package_references.iter().find(|r| r.id == "Alpha");
+    assert!(
+        p.package_references_uncertain
+            || alpha.is_some_and(|r| r.version_override.as_deref() == Some("2.0")),
+        "{:?}",
+        p.package_references
+    );
+}
+
+/// A batch that may hold a key the walk cannot compute may collide with any
+/// later fragment: after a lone `Ü.fs`, the next `Update` may strand
+/// `B.fs`, so no compile order is certain.
+#[test]
+fn a_batch_holding_an_unknown_key_may_strand_a_later_update() {
+    let src = r#"<Project>
+  <ItemGroup>
+    <Compile Update="&#xDC;.fs" Visible="false" />
+    <Compile Update="B.fs;&#xDC;.fs" CompileOrder="CompileFirst" />
+    <Compile Include="C.fs;B.fs" />
+  </ItemGroup>
+</Project>"#;
+    let p = parse(src);
+    assert!(p.items_uncertain, "{:?}", p.diagnostics);
+}
+
+/// An `Update` the walk cannot expand may leave any key in the batch, so
+/// any fragment of the next `Update` may collide with one: `Beta.fs;Alpha`
+/// may strand `Beta.fs` with its `CompileOrder`. No compile order is
+/// certain.
+#[test]
+fn an_update_the_walk_does_not_know_may_strand_a_later_one() {
+    let p = parse(
+        r#"<Project><PropertyGroup><P>$([System.Guid]::NewGuid())</P></PropertyGroup><ItemGroup>
+    <Compile Update="$(P)" Link="x" />
+    <Compile Update="Beta.fs;Alpha" CompileOrder="CompileFirst" />
+    <Compile Include="First.fs" />
+    <Compile Include="Beta.fs" />
+  </ItemGroup></Project>"#,
+    );
+    assert!(p.items_uncertain, "{:#?}", p.items);
+}
+
+/// An `Update` the walk cannot expand leaves the batch unknown without
+/// counting a strand of its own: a lone `Link`-only one moves no compile
+/// order.
+#[test]
+fn an_unexpandable_update_alone_strands_nothing() {
+    let p = parse(
+        r#"<Project><ItemGroup>
+    <Compile Include="Program.fs" />
+    <Compile Update="$([System.IO.Path]::GetFileName('src/Program.fs'))" Link="Display.fs" />
+  </ItemGroup></Project>"#,
+    );
+    assert!(!p.items_uncertain, "{:#?}", p.diagnostics);
+}
+
+/// MSBuild keys a spelling it does not normalise (`A.fs:x`) as written, so
+/// `A.fs:x` and `./A.fs:x` both join the batch, and the `Update` leaves only
+/// at the second `B.fs`, stranding the first with its `CompileFirst` until
+/// `B.fs` is included. MSBuild compiles `B.fs` first.
+#[test]
+fn a_spelling_msbuild_does_not_normalise_is_batched_as_written() {
+    let src = r#"<Project>
+  <ItemGroup>
+    <Compile Update="A.fs:x;./A.fs:x;B.fs;B.fs" Visible="false" CompileOrder="CompileFirst" />
+    <Compile Include="C.fs;B.fs" />
+  </ItemGroup>
+</Project>"#;
+    let p = parse(src);
+    assert!(
+        p.items_uncertain || file_names(&p.items) == ["B.fs", "C.fs"],
+        "{:?}",
+        file_names(&p.items)
+    );
+}
+
+/// An `Update` that leaves the batch removes its earlier fragments by their
+/// written text, so one already spelled as its key leaves the batch: the
+/// first `Update` strands nothing, `Abs` joins the second afresh, which then
+/// strands `Beta`, and the third collides on it, stranding `Alpha` with its
+/// `CompileOrder` until `Alpha` is included. MSBuild compiles `Alpha` first.
+#[test]
+#[cfg(not(windows))]
+fn a_fragment_spelled_as_its_key_leaves_the_batch_with_its_update() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    let abs = root.join("Abs.fs");
+    let source = format!(
+        r#"<Project><PropertyGroup><Abs>{}</Abs></PropertyGroup><ItemGroup>
+    <Compile Update="$(Abs);$(Abs)" Link="x" />
+    <Compile Update="$(Abs);Beta.fs;Beta.fs" Link="y" />
+    <Compile Update="Alpha.fs;Beta.fs" CompileOrder="CompileFirst" />
+    <Compile Include="First.fs" />
+    <Compile Include="Alpha.fs" />
+  </ItemGroup></Project>"#,
+        abs.display()
+    );
+    let p = crate::parse_fsproj_with_imports(
+        &crate::ProjectFile::buffer(&root.join("Demo.fsproj"), &source).unwrap(),
+        &HashMap::new(),
+        &HashMap::new(),
+        None,
+        None,
+    )
+    .unwrap();
+    let names: Vec<_> = p.items.iter().map(|i| i.include.clone()).collect();
+    assert!(
+        p.items_uncertain || names == [root.join("Alpha.fs"), root.join("First.fs")],
+        "{names:?}"
+    );
+}
+
+/// Under a project directory that is not ASCII, relative fragments are
+/// still keyed against each other: `Alpha;Alpha` strands `Alpha`, and the
+/// next `Update` collides on it, stranding `Beta.fs` with `CompileFirst`
+/// until `Beta.fs` is included. MSBuild compiles `Beta.fs` first.
+#[test]
+#[cfg(not(windows))]
+fn relative_fragments_are_batched_under_a_non_ascii_directory() {
+    let source = r#"<Project><ItemGroup>
+    <Compile Update="Alpha;Alpha" Link="x" />
+    <Compile Update="Beta.fs;Alpha" CompileOrder="CompileFirst" />
+    <Compile Include="First.fs" />
+    <Compile Include="Beta.fs" />
+  </ItemGroup></Project>"#;
+    let p = parse_fsproj(
+        &crate::ProjectFile::buffer(Path::new("/r\u{f6}\u{f6}t/proj/Demo.fsproj"), source)
+            .expect("a project path spelt as its full path"),
+        &HashMap::new(),
+        &HashMap::new(),
+    )
+    .expect("well-formed XML parses");
+    assert!(
+        p.items_uncertain || file_names(&p.items) == ["Beta.fs", "First.fs"],
+        "{:?}",
+        file_names(&p.items)
+    );
+    // Keyed, two distinct fragments collide with nothing: the order is
+    // certain.
+    let source = r#"<Project><ItemGroup>
+    <Compile Update="Alpha;Beta.fs" CompileOrder="CompileFirst" />
+    <Compile Include="First.fs" />
+    <Compile Include="Beta.fs" />
+  </ItemGroup></Project>"#;
+    let p = parse_fsproj(
+        &crate::ProjectFile::buffer(Path::new("/r\u{f6}\u{f6}t/proj/Demo.fsproj"), source)
+            .expect("a project path spelt as its full path"),
+        &HashMap::new(),
+        &HashMap::new(),
+    )
+    .expect("well-formed XML parses");
+    assert!(!p.items_uncertain, "{:?}", p.diagnostics);
+    assert_eq!(file_names(&p.items), ["First.fs", "Beta.fs"]);
+}
+
 #[test]
 fn compile_update_compile_order_keeps_original_order_within_bucket() {
     let src = r#"<Project>

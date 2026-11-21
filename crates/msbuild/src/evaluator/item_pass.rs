@@ -2583,7 +2583,7 @@ fn walk_package_reference(node: Node<'_, '_>, state: &mut State<'_>) {
 /// it ([`update_strands_late`]).
 #[derive(Debug, Default)]
 pub(super) struct UpdateBatchRun {
-    /// The comparison keys the batch holds.
+    /// The keys the batch holds ([`item_spec::batch_key`]).
     keys: HashSet<String>,
     /// Some fragment the batch may hold has no key the walk can compute, so
     /// any later fragment may collide with it.
@@ -2600,24 +2600,31 @@ pub(super) struct UpdateBatchRun {
 /// a condition-false `Update` too (probed).
 ///
 /// The mechanism is `LazyItemList.ComputeItems`. Consecutive `Update`s of one
-/// type join a batch keyed by full path (`NormalizePathForComparisonNoThrow`,
-/// `OrdinalIgnoreCase`). An `Update` leaves the batch at the first fragment
-/// holding an expansion character (`*`, `?`, `$(`, `@(`, `%`, in the escaped
-/// text) or one whose key the batch already holds. Leaving removes its earlier
-/// fragments by their text rather than their key, so they stay *stranded*,
-/// and is followed by a flush only when an earlier `Update` had joined
-/// (`pending`). A flush then applies the strands at once, to the items the
-/// `Update` itself reaches, which is harmless. Without one they stay until a
-/// later flush, past `Include`s and `Update`s in between: probed (dotnet 10),
-/// `Update="Alpha;Alpha"` then `Update="Beta;Alpha" VersionOverride="1.0"`
-/// then `Include="Alpha;Beta"` gives `Beta` the override.
+/// type join a batch keyed by `NormalizePathForComparisonNoThrow`, compared
+/// `OrdinalIgnoreCase` ([`item_spec::batch_key`]): a full path, or the spelling
+/// as written where that function refuses to normalise it. An `Update` leaves
+/// the batch at the first fragment holding an expansion character (`*`, `?`,
+/// `$(`, `@(`, `%`, in the escaped text) or one whose key the batch already
+/// holds. Leaving removes its earlier fragments by their text rather than
+/// their key: one spelled as its key leaves with it, and any other stays
+/// *stranded*. Leaving is followed by a flush only when an earlier `Update`
+/// had joined (`pending`). A flush then applies the strands at once, to the
+/// items the `Update` itself reaches, which is harmless. Without one they stay
+/// until a later flush, past `Include`s and `Update`s in between: probed
+/// (dotnet 10), `Update="Alpha;Alpha"` then `Update="Beta;Alpha"
+/// VersionOverride="1.0"` then `Include="Alpha;Beta"` gives `Beta` the
+/// override.
 ///
-/// So this answers true when an `Update` leaves the batch at its second
+/// So this answers true when an `Update` may leave the batch at its second
 /// fragment or later, with one of those before it strandable (its written text
-/// not its key, ignoring case) and no batch pending. It over-approximates, as the
-/// conservative reading: a fragment without a computable key may collide with
-/// anything, and an operation whose condition the walk cannot
-/// decide does not flush.
+/// not its key, ignoring case) and no batch pending. It over-approximates, as
+/// the conservative reading. A fragment without a computable key may collide
+/// with any key the batch holds, and leave one any later fragment collides
+/// with; from there on the batch may hold anything, and the spec may leave at
+/// every fragment. A spec the walk cannot expand leaves the batch unknown in
+/// the same way for the `Update`s after it; a strand of its own is not
+/// counted. An operation whose condition the walk cannot decide does not
+/// flush.
 fn update_strands_late(node: Node<'_, '_>, item_type: &str, state: &mut State<'_>) -> bool {
     let key = item_key(item_type);
     let (include, update) = (attribute(node, "Include"), attribute(node, "Update"));
@@ -2641,57 +2648,86 @@ fn update_strands_late(node: Node<'_, '_>, item_type: &str, state: &mut State<'_
     let expansion = expand_silent(update, state);
     let project_dir = state.entry_project_dir.clone();
     let run = state.update_batches.entry(key).or_default();
+    if expansion.had_issue() {
+        // A spec the walk cannot expand may join or leave anywhere: keep
+        // every key, take no batch as pending, and leave every later
+        // fragment free to collide.
+        run.unknown = true;
+        run.pending = false;
+        return false;
+    }
     let fragments: Vec<&str> = spec_fragments(expansion.value.ignoring_trust()).collect();
-    // Whether the walk cannot tell if the fragment it stopped at joined.
-    let mut undecided = false;
+    // From which fragment on the batch may hold a key the walk does not know.
+    let mut unknown_from = run.unknown.then_some(0);
     let mut left_at = None;
-    // Whether a fragment that joined is one leaving would strand: its written
-    // text is not its key, so removing it by text misses. (A spelling MSBuild
-    // compares unnormalised is its own key.)
+    // Whether a fragment before the current one is one leaving would strand:
+    // its written text is not its key, so removing it by text misses. (A
+    // spelling MSBuild compares unnormalised is its own key.)
     let mut strandable = false;
+    // Whether the spec may leave at a fragment after a strandable one.
+    let mut may_strand = false;
+    // The keys this spec added that leaving removes: those of fragments
+    // spelled as their key, which removing by text finds.
+    let mut removed_on_leaving = Vec::new();
     for (i, fragment) in fragments.iter().enumerate() {
         let expands = ["*", "?", "$(", "@(", "%"]
             .iter()
             .any(|marker| fragment.contains(marker));
-        let fragment_key = (!expands && !expansion.had_issue())
-            .then(|| item_spec::comparison_key(&fragment_identity(fragment), &project_dir))
+        let decoded = fragment_identity(fragment);
+        let fragment_key = (!expands)
+            .then(|| item_spec::batch_key(&decoded, &project_dir))
             .flatten();
-        let joins = match &fragment_key {
-            Some(fragment_key) => !run.unknown && run.keys.insert(fragment_key.clone()),
-            None => {
-                // A fragment without a key may have joined, and may collide
-                // with any later one.
-                if !expands {
-                    run.unknown = true;
-                    undecided = true;
-                }
-                false
-            }
-        };
-        if !joins {
+        let may_collide = unknown_from.is_some() || fragment_key.is_none();
+        if (expands || may_collide) && i > 0 && strandable {
+            may_strand = true;
+        }
+        if expands {
             left_at = Some(i);
             break;
         }
-        let decoded = fragment_identity(fragment);
-        strandable |= !crate::glob::compares_unnormalised(&decoded)
-            && fragment_key.is_some_and(|key| key != fragment.to_ascii_lowercase());
+        match fragment_key {
+            Some(fragment_key) => {
+                if unknown_from.is_none() && !run.keys.insert(fragment_key.clone()) {
+                    left_at = Some(i);
+                    break;
+                }
+                let stays = !crate::glob::compares_unnormalised(&decoded)
+                    && fragment_key != fragment.to_ascii_lowercase();
+                if !stays {
+                    removed_on_leaving.push(fragment_key);
+                }
+                strandable |= stays;
+            }
+            None => {
+                // MSBuild keys every fragment: one whose key the walk cannot
+                // compute joins, or collides with a key the batch holds, and
+                // from here on any later fragment may collide with it.
+                unknown_from.get_or_insert(i);
+                strandable = true;
+            }
+        }
+    }
+    if unknown_from.is_some() {
+        // Where the spec left, if it did, and so whether it flushed, are
+        // unknown: keep every key, take no batch as pending, and count any
+        // strand it may leave.
+        run.unknown = true;
+        run.pending = false;
+        return may_strand;
     }
     match left_at {
         None => {
             run.pending = true;
             false
         }
-        Some(i) if undecided => {
-            // It may have joined (no flush) or left (a flush, if pending): keep
-            // every key, take no batch as pending, and count a strand whether
-            // or not one was.
-            run.pending = false;
-            i > 0 && strandable
-        }
         Some(i) => {
             let strands_late = i > 0 && strandable && !run.pending;
             if run.pending {
                 *run = UpdateBatchRun::default();
+            } else {
+                for key in &removed_on_leaving {
+                    run.keys.remove(key);
+                }
             }
             strands_late
         }

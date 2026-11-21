@@ -50,7 +50,12 @@
 //!   spec and strands the fragments before (`LazyItemEvaluator.ComputeItems`
 //!   removes them under their written text, not their key), so they apply
 //!   again to items `Include`d after the `Update`. The evaluator declines
-//!   them, and the oracle sees the bug wherever it changes the order.
+//!   them, and the oracle sees the bug wherever it changes the order;
+//! - in a sweep of its own (`update_batches_match_msbuild`), runs of
+//!   consecutive `Update`s whose fragments repeat across specs, in spellings
+//!   that are and are not their own key (`:`-bearing ones among them, which
+//!   MSBuild keys as written), under an ASCII and a non-ASCII project
+//!   directory: the batch of `Update`s the walk follows across elements.
 //!
 //! Two of the files carry characters MSBuild escapes (a space and a `;`), so
 //! escapes meet every other dimension at once (stage F4). Escape spellings in
@@ -192,6 +197,17 @@ enum Spelling {
     /// `%41.fs`: the first character escaped. MSBuild stops batching an
     /// `Update` spec at an escaped fragment.
     Escaped,
+    /// `A.fs:v`: another item, never included, whose `:` MSBuild's
+    /// `NormalizePathForComparisonNoThrow` refuses, so it keys the spelling
+    /// as written. Only `Update` batches meet the three `Verbatim` spellings.
+    Verbatim,
+    /// `$(MSBuildProjectDirectory)/A.fs:v`: keyed as written, which is a
+    /// full path, so it is its own key and an `Update` leaving the batch
+    /// removes it.
+    VerbatimRooted,
+    /// `A.fs:v/.`: its file name is `.`, so MSBuild normalises it, to the
+    /// key [`Spelling::VerbatimRooted`] is written as.
+    VerbatimDotted,
 }
 
 impl Spelling {
@@ -206,6 +222,9 @@ impl Spelling {
             Spelling::Lower => name.to_ascii_lowercase(),
             Spelling::TrailingSlash => format!("{name}/"),
             Spelling::Escaped => format!("%{:02x}{}", name.as_bytes()[0], &name[1..]),
+            Spelling::Verbatim => format!("{name}:v"),
+            Spelling::VerbatimRooted => format!("$(MSBuildProjectDirectory)/{name}:v"),
+            Spelling::VerbatimDotted => format!("{name}:v/."),
         }
     }
 }
@@ -707,7 +726,19 @@ impl Drop for Laid {
     }
 }
 
+/// Where a case's project directory lies: `case<n>/proj`, or `caseÖ<n>/proj`,
+/// whose path .NET compares by its own case-folding table, not ASCII's.
+#[derive(Debug, Clone, Copy)]
+enum CaseDir {
+    Ascii,
+    NonAscii,
+}
+
 fn write_and_parse(fixture: &Fixture) -> (Laid, ParsedProject) {
+    write_and_parse_under(fixture, CaseDir::Ascii)
+}
+
+fn write_and_parse_under(fixture: &Fixture, dir: CaseDir) -> (Laid, ParsedProject) {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     let shared = shared();
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
@@ -721,7 +752,10 @@ fn write_and_parse(fixture: &Fixture) -> (Laid, ParsedProject) {
     std::fs::write(&props, fixture.sdk_props_xml()).expect("write Sdk.props");
     std::fs::write(&targets, fixture.sdk_targets_xml(&shared.order_target))
         .expect("write Sdk.targets");
-    let case_dir = shared.root.join(format!("case{n}"));
+    let case_dir = shared.root.join(match dir {
+        CaseDir::Ascii => format!("case{n}"),
+        CaseDir::NonAscii => format!("case\u{d6}{n}"),
+    });
     std::fs::create_dir_all(case_dir.join("proj")).expect("mkdir proj");
     let proj = case_dir.join("proj/Demo.fsproj");
     let project_xml = fixture.project_xml(&sdk);
@@ -772,7 +806,15 @@ fn write_and_parse(fixture: &Fixture) -> (Laid, ParsedProject) {
 /// The property body: certain ⇒ our compile order is MSBuild's, exactly.
 /// Returns whether the case was certain (i.e. the oracle ran).
 fn check_certain_implies_exact(fixture: &Fixture) -> Result<bool, TestCaseError> {
-    let (laid, parsed) = write_and_parse(fixture);
+    check_certain_implies_exact_under(fixture, CaseDir::Ascii)
+}
+
+/// [`check_certain_implies_exact`] with the project laid out under `dir`.
+fn check_certain_implies_exact_under(
+    fixture: &Fixture,
+    dir: CaseDir,
+) -> Result<bool, TestCaseError> {
+    let (laid, parsed) = write_and_parse_under(fixture, dir);
     if parsed.items_uncertain {
         return Ok(false);
     }
@@ -796,7 +838,8 @@ fn check_certain_implies_exact(fixture: &Fixture) -> Result<bool, TestCaseError>
     prop_assert_eq!(
         &ours,
         &theirs,
-        "claimed certain, but the compile order diverges.\n{}\nour diagnostics: {:#?}",
+        "claimed certain, but the compile order diverges ({:?} directory).\n{}\nour diagnostics: {:#?}",
+        dir,
         fixture.describe(),
         parsed.diagnostics
     );
@@ -832,6 +875,133 @@ fn certain_compile_order_matches_msbuild() {
         oracle_hits.get() > 0,
         "no generated case reached the MSBuild oracle — the property tested nothing"
     );
+}
+
+/// An `Update` spec over three files only, so fragments repeat within a spec
+/// and across consecutive specs, in spellings that are and are not their own
+/// key (`Rooted` and `VerbatimRooted` are; `Verbatim` is keyed as written,
+/// `VerbatimDotted` by the full path `VerbatimRooted` spells; the rest are
+/// keyed by a full path they do not spell), with an escaped fragment where the
+/// batch is left for certain. Under a non-ASCII directory the two rooted
+/// spellings are rare: the walk keys no absolute fragment there, so one
+/// leaves the batch unknown for the rest of the case.
+fn batch_update_spec_strategy(dir: CaseDir) -> impl Strategy<Value = UpdateSpec> {
+    let (common, rooted) = match dir {
+        CaseDir::Ascii => (1, 3),
+        CaseDir::NonAscii => (8, 1),
+    };
+    let spelling = prop_oneof![
+        4 * common => Just(Spelling::Bare),
+        rooted => Just(Spelling::Rooted),
+        common => Just(Spelling::DotSlash),
+        common => Just(Spelling::Lower),
+        common => Just(Spelling::Escaped),
+        common => Just(Spelling::Verbatim),
+        1 => Just(Spelling::VerbatimRooted),
+        common => Just(Spelling::VerbatimDotted),
+    ];
+    proptest::collection::vec((0..3usize, spelling), 2..5).prop_map(UpdateSpec::Files)
+}
+
+/// Runs of consecutive `Update`s (each writing `CompileOrder` or only other
+/// metadata) between `Include`s: MSBuild's batch of `Update`s, its strands
+/// and what removing a fragment by its text leaves, are what this sweeps.
+/// Every operation runs. Half the cases lay the project out under a
+/// directory that is not ASCII ([`CaseDir::NonAscii`]).
+fn batch_fixture_strategy() -> impl Strategy<Value = (Fixture, CaseDir)> {
+    prop_oneof![Just(CaseDir::Ascii), Just(CaseDir::NonAscii)]
+        .prop_flat_map(|dir| (batch_runs_strategy(dir), Just(dir)))
+}
+
+/// [`batch_fixture_strategy`]'s project under `dir`.
+fn batch_runs_strategy(dir: CaseDir) -> impl Strategy<Value = Fixture> {
+    let update = prop_oneof![
+        1 => (batch_update_spec_strategy(dir), (0..5usize))
+            .prop_map(|(spec, order)| ItemDecl::OrderUpdate {
+                spec,
+                order: OrderMeta {
+                    attr: Some(OrderValue::Lit(order)),
+                    children: Vec::new(),
+                },
+                cond: Cond::None,
+            }),
+        1 => batch_update_spec_strategy(dir)
+            .prop_map(|spec| ItemDecl::Boundary(Boundary::OtherMetadataUpdate(spec))),
+    ];
+    let include = (0..3usize).prop_map(|file| ItemDecl::Include {
+        item_type: ItemType::Compile,
+        spec: IncludeSpec::File(file, Spelling::Bare),
+        order: OrderMeta::default(),
+        cond: Cond::None,
+    });
+    let run = (
+        proptest::collection::vec(include.clone(), 0..2),
+        proptest::collection::vec(update, 2..6),
+        proptest::collection::vec(include, 1..3),
+    )
+        .prop_map(|(before, updates, after)| {
+            before
+                .into_iter()
+                .chain(updates)
+                .chain(after)
+                .collect::<Vec<_>>()
+        });
+    proptest::collection::vec(run, 1..4).prop_map(|runs| Fixture {
+        sdk_props: Vec::new(),
+        project: runs
+            .into_iter()
+            .map(|items| Group::Items {
+                cond: Cond::None,
+                items,
+            })
+            .collect(),
+        sdk_targets: Vec::new(),
+    })
+}
+
+/// [`certain_compile_order_matches_msbuild`] over runs of consecutive
+/// `Update`s ([`batch_fixture_strategy`]), where the walk models MSBuild's
+/// batch of them. Also requires that the walk commits on a twenty-fifth of
+/// the cases under each kind of directory, so the batch model is graded, not
+/// declined. (About a tenth commit under an ASCII directory and a
+/// thirteenth under the other: most runs strand something, which the walk
+/// declines.)
+#[test]
+fn update_batches_match_msbuild() {
+    let cases: u32 = std::env::var("BORZOI_COMPILE_ORDER_CASES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1000);
+    let mut runner = TestRunner::new(ProptestConfig {
+        cases,
+        source_file: Some(file!()),
+        ..ProptestConfig::default()
+    });
+    let hits = Mutex::new(HashMap::<&'static str, (u32, u32)>::new());
+    runner
+        .run(&batch_fixture_strategy(), |(fixture, dir)| {
+            let reached = check_certain_implies_exact_under(&fixture, dir)?;
+            let name = match dir {
+                CaseDir::Ascii => "ascii",
+                CaseDir::NonAscii => "non-ascii",
+            };
+            let mut hits = hits.lock().unwrap_or_else(|e| e.into_inner());
+            let (seen, committed) = hits.entry(name).or_default();
+            *seen += 1;
+            *committed += u32::from(reached);
+            Ok(())
+        })
+        .unwrap_or_else(|e| panic!("{e}"));
+    let hits = hits.into_inner().unwrap_or_else(|e| e.into_inner());
+    eprintln!("batch cases (seen, reached the oracle): {hits:?}");
+    for name in ["ascii", "non-ascii"] {
+        let (seen, committed) = hits.get(name).copied().unwrap_or_default();
+        assert!(
+            committed * 25 >= seen && committed > 0,
+            "only {committed} of {seen} batch cases under the {name} directory reached the \
+             MSBuild oracle"
+        );
+    }
 }
 
 /// The property above skips uncertain cases, so on its own it could rot into
