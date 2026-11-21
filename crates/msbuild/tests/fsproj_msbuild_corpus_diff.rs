@@ -1316,6 +1316,12 @@ fn render_package_reference_uncertainty_cause(cause: &PackageReferenceUncertaint
                  an update position-independently"
             )
         }
+        PackageReferenceUncertaintyCauseKind::UndecidedUpdateBatch { operation } => {
+            format!(
+                "<PackageReference> {operation:?} may or may not run, which changes MSBuild's \
+                 batch of Updates"
+            )
+        }
     };
     format!("{:?} {message}", cause.origin)
 }

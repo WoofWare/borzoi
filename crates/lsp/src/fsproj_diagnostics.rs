@@ -891,6 +891,12 @@ fn message(kind: &DiagnosticKind, discovery_failure: Option<&DiscoveryError>) ->
                  not claimed"
             )
         }
+        DiagnosticKind::UndecidedUpdateBatch { operation } => {
+            format!(
+                "`{operation}` may or may not run, and changes how MSBuild batches the \
+                 Updates before it either way — compile order not claimed"
+            )
+        }
         DiagnosticKind::SdkNotFound { name } => {
             format!(
                 "SDK '{name}' not found — check $DOTNET_ROOT and ~/.nuget/packages, \

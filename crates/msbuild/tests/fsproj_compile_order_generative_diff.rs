@@ -416,7 +416,8 @@ enum Group {
     /// An `<ItemGroup>` body written out verbatim: the hand-picked corners.
     Raw(&'static str),
     /// `Flip`, `on` unless an undecided write (true in MSBuild) makes it
-    /// `off`: what [`Cond::Flipped`] reads.
+    /// `off`: what [`Cond::Flipped`] reads. And `Src`, written `A.fs;A.fs`
+    /// under the same gate: unset to the walk.
     Flip,
 }
 
@@ -429,7 +430,7 @@ impl Group {
             Group::Flip => {
                 let _ = writeln!(
                     out,
-                    "  <PropertyGroup>\n    <Flip>on</Flip>\n    <Flip Condition=\"'É' == 'é'\">off</Flip>\n  </PropertyGroup>"
+                    "  <PropertyGroup>\n    <Flip>on</Flip>\n    <Flip Condition=\"'É' == 'é'\">off</Flip>\n    <Src Condition=\"'É' == 'é'\">A.fs;A.fs</Src>\n  </PropertyGroup>"
                 );
             }
             Group::CompileOrderDefault(value) => {
@@ -883,7 +884,12 @@ fn batch_update_spec_strategy() -> impl Strategy<Value = UpdateSpec> {
         1 => Just(Spelling::Lower),
         1 => Just(Spelling::Escaped),
     ];
-    proptest::collection::vec((0..3usize, spelling), 1..5).prop_map(UpdateSpec::Files)
+    prop_oneof![
+        9 => proptest::collection::vec((0..3usize, spelling), 1..5).prop_map(UpdateSpec::Files),
+        // `$(Src)`: `A.fs;A.fs` to MSBuild, and unset to the walk
+        // ([`Group::Flip`]).
+        1 => Just(UpdateSpec::Prop(0)),
+    ]
 }
 
 /// A gate in the batch sweep: mostly none, else one MSBuild certainly skips,
@@ -939,10 +945,20 @@ fn batch_fixture_strategy() -> impl Strategy<Value = Fixture> {
         order: OrderMeta::default(),
         cond: Cond::None,
     });
+    // Two distinct files after the `Update`s, so every committed case has an
+    // order to get wrong.
+    let after = (0..3usize, 1..3usize).prop_map(|(first, step)| {
+        [first, (first + step) % 3].map(|file| ItemDecl::Include {
+            item_type: ItemType::Compile,
+            spec: IncludeSpec::File(file, Spelling::Bare),
+            order: OrderMeta::default(),
+            cond: Cond::None,
+        })
+    });
     let run = (
-        proptest::collection::vec(include.clone(), 0..2),
+        proptest::collection::vec(include, 0..2),
         proptest::collection::vec(update, 2..6),
-        proptest::collection::vec(include, 1..3),
+        after,
     )
         .prop_map(|(before, updates, after)| {
             before
@@ -999,28 +1015,36 @@ fn update_batches_match_msbuild() {
 
 /// [`update_batches_match_msbuild`] skips the cases the walk declines, so on
 /// its own it could rot into grading (almost) nothing. Sample the strategy
-/// deterministically, our walk only, and require that a twentieth commit
-/// (29 of the 400 do: gated operations and strands decline the rest).
+/// deterministically, our walk only, and require that a fortieth commit to
+/// an order of two or more distinct files, one a wrong batch could get
+/// wrong (13 of the 400 do: gated operations, strands and the unset `$(Src)`
+/// decline the rest). The sample is fixed, so the count moves only with the
+/// walk or the generator.
 #[test]
 fn batch_cases_often_commit() {
     let mut runner = TestRunner::deterministic();
     let strategy = batch_fixture_strategy();
     let total = 400;
-    let mut certain = 0;
+    let mut observable = 0;
     for _ in 0..total {
         let fixture = strategy
             .new_tree(&mut runner)
             .expect("generate fixture")
             .current();
         let (_laid, parsed) = write_and_parse(&fixture);
-        if !parsed.items_uncertain {
-            certain += 1;
+        let distinct: std::collections::HashSet<String> = parsed
+            .items
+            .iter()
+            .map(|item| full_path(&item.include))
+            .collect();
+        if !parsed.items_uncertain && distinct.len() >= 2 {
+            observable += 1;
         }
     }
-    eprintln!("{certain}/{total} batch cases were certain");
+    eprintln!("{observable}/{total} batch cases committed to an order of distinct files");
     assert!(
-        certain * 20 >= total,
-        "only {certain}/{total} batch cases were certain"
+        observable * 40 >= total,
+        "only {observable}/{total} batch cases committed to an order of distinct files"
     );
 }
 

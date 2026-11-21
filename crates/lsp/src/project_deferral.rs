@@ -930,6 +930,10 @@ fn render_diagnostic_kind(kind: &DiagnosticKind) -> String {
             "a `<Compile Update=\"{update}\">` that MSBuild applies out of order (it stops \
              batching at `{fragment}`)"
         ),
+        DiagnosticKind::UndecidedUpdateBatch { operation } => format!(
+            "a `<Compile>` operation (`{operation}`) that MSBuild may or may not run, which \
+             changes when it applies the `Update`s before it"
+        ),
         DiagnosticKind::SdkNotFound { name } => {
             format!("the SDK `{name}` isn't installed where I can find it")
         }

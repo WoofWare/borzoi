@@ -668,7 +668,7 @@ fn evaluate_item_group(node: Node<'_, '_>, state: &mut State<'_>) {
     let gate_certain = attribute(node, "Condition").is_none_or(|condition| {
         directory_build::decided_from_certain_inputs(state, &condition, &state.entry_project_dir)
     });
-    let doubted = group_reads_untrusted || !gate_certain;
+    let doubted = !gate_certain;
     let gate = evaluate_item_condition(node, state);
     if group_condition_tainted {
         item_lists_tainted_by_group_condition.apply(state);
@@ -1044,14 +1044,10 @@ fn batched_item_type(node: Node<'_, '_>) -> Option<&'static str> {
     }
 }
 
-/// Decline `item_type`'s list at `node`, an element after which MSBuild's
-/// batch of `Update`s may apply something late that the walk does not follow.
+/// Decline `item_type`'s list at `node`, an `Update` that leaves MSBuild's
+/// batch of `Update`s stranding a fragment, which then applies late.
 fn note_batch_declined(node: Node<'_, '_>, item_type: &str, state: &mut State<'_>) {
-    let update = ["Update", "Include", "Remove"]
-        .into_iter()
-        .find_map(|name| attribute(node, name))
-        .unwrap_or_default()
-        .to_string();
+    let update = attribute(node, "Update").unwrap_or_default().to_string();
     if item_type == "Compile" {
         let previous = state.compile_context;
         state.compile_context = true;
@@ -1068,6 +1064,34 @@ fn note_batch_declined(node: Node<'_, '_>, item_type: &str, state: &mut State<'_
         state.package_context = true;
         state.note_package_uncertain(
             PackageReferenceUncertaintyCauseKind::DuplicateUpdateIdentity { id: update },
+            node.range(),
+        );
+        state.package_context = previous;
+    }
+}
+
+/// Decline `item_type`'s list at `node`, an operation MSBuild may or may not
+/// run, which leaves the batch of `Update`s in different states as it does
+/// ([`update_strands_late`]).
+fn note_undecided_update_batch(node: Node<'_, '_>, item_type: &str, state: &mut State<'_>) {
+    let operation = ["Update", "Include", "Remove"]
+        .into_iter()
+        .find_map(|name| attribute(node, name))
+        .unwrap_or_default()
+        .to_string();
+    if item_type == "Compile" {
+        let previous = state.compile_context;
+        state.compile_context = true;
+        state.push(
+            DiagnosticKind::UndecidedUpdateBatch { operation },
+            node.range(),
+        );
+        state.compile_context = previous;
+    } else {
+        let previous = state.package_context;
+        state.package_context = true;
+        state.note_package_uncertain(
+            PackageReferenceUncertaintyCauseKind::UndecidedUpdateBatch { operation },
             node.range(),
         );
         state.package_context = previous;
@@ -2697,25 +2721,32 @@ fn update_strands_late(node: Node<'_, '_>, item_type: &str, state: &mut State<'_
                 return false;
             }
             *run = UpdateBatchRun::default();
-            return runs == OperationRuns::Maybe;
+            if runs == OperationRuns::Maybe {
+                note_undecided_update_batch(node, item_type, state);
+            }
+            return false;
         }
     };
+    // An `Update` that may or may not run: where running it would leave the
+    // batch as it is and strand nothing (one that leaves at its first
+    // fragment with no batch pending), the two outcomes coincide; that needs
+    // a spec the walk reads as MSBuild does. Elsewhere the walk follows
+    // neither, and declines.
+    let exact = runs == OperationRuns::Always || rejection::operands_are_certain(state, update);
     let expansion = expand_silent(update, state);
+    let exact = exact && !expansion.had_issue();
     let project_dir = state.entry_project_dir.clone();
     let run = state.update_batches.entry(key).or_default();
     if runs == OperationRuns::Always {
         return feed_update_batch(run, &expansion, &project_dir);
     }
-    // An `Update` that may or may not run: where running it would leave the
-    // batch as it is and strand nothing (one that leaves at its first
-    // fragment with no batch pending), the two outcomes coincide. Elsewhere
-    // the walk follows neither, and declines.
     let mut ran = run.clone();
-    if !feed_update_batch(&mut ran, &expansion, &project_dir) && ran == *run {
+    if exact && !feed_update_batch(&mut ran, &expansion, &project_dir) && ran == *run {
         return false;
     }
     *run = UpdateBatchRun::default();
-    true
+    note_undecided_update_batch(node, item_type, state);
+    false
 }
 
 /// [`update_strands_late`] for an `Update` that runs, spelled `expansion`:

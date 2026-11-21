@@ -683,6 +683,66 @@ fn an_operation_the_walk_may_skip_may_flush_a_pending_batch() {
     }
 }
 
+/// An `Update` the walk may not reach is one whose two outcomes coincide
+/// only where the walk reads its spec as MSBuild does: `Spec` is empty to
+/// the walk and `Z.fs` to MSBuild, whose `Update` then collides on the
+/// pending `Z.fs` and flushes it, so `A.fs;A.fs` strands `A.fs` and
+/// MSBuild compiles `B.fs` first (probed, SDK 10.0.401).
+#[test]
+fn an_update_the_walk_may_not_reach_reads_its_spec_exactly() {
+    let p = parse_before_a_strand(
+        r#"<PropertyGroup><Spec Condition="'É' == 'é'">Z.fs</Spec></PropertyGroup>
+  <ItemGroup><Compile Update="Z.fs" Link="z" /></ItemGroup>
+  <ItemGroup Condition="'É' == 'é'"><Compile Update="$(Spec)" Link="s" /></ItemGroup>"#,
+    );
+    assert_b_first_or_declined(&p, "inexact spec");
+}
+
+/// A group gate the file system settles is settled: `Exists('absent')` is
+/// false, so the group cannot run whatever the untrusted `F` holds, and its
+/// `Update` changes nothing. The order is certain.
+#[test]
+#[cfg(not(windows))]
+fn a_group_the_file_system_rules_out_feeds_no_batch() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    let source = format!(
+        r#"<Project>{UNTRUSTED_F}
+  <ItemGroup Condition="Exists('absent') And '$(F)' == 'on'"><Compile Update="Z.fs" Link="z" /></ItemGroup>
+  <ItemGroup>
+    <Compile Update="B.fs;A.fs" CompileOrder="CompileFirst" />
+    <Compile Include="A.fs;B.fs" />
+  </ItemGroup></Project>"#
+    );
+    let p = crate::parse_fsproj_with_imports(
+        &crate::ProjectFile::buffer(&root.join("Demo.fsproj"), &source).unwrap(),
+        &HashMap::new(),
+        &HashMap::new(),
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(!p.items_uncertain, "{:#?}", p.diagnostics);
+    assert_eq!(file_names(&p.items), ["A.fs", "B.fs"]);
+}
+
+/// An operation that may or may not flush a pending batch is declined as
+/// such, not as a strand: no `Update` stranded anything.
+#[test]
+fn an_undecided_flush_is_no_strand() {
+    let p = parse_before_a_strand(
+        r#"<ItemGroup><Compile Update="Z.fs" Link="z" /><Compile Remove="Q.fs" Condition="'$(F)' == 'off'" /></ItemGroup>"#,
+    );
+    assert!(
+        p.diagnostics.iter().any(|d| matches!(
+            &d.kind,
+            DiagnosticKind::UndecidedUpdateBatch { operation } if operation == "Q.fs"
+        )),
+        "{:?}",
+        p.diagnostics
+    );
+}
+
 /// An undecided group whose only `Update` is certainly skipped leaves the
 /// batch as it was: MSBuild orders `A.fs, B.fs` whether the group runs or
 /// not.
