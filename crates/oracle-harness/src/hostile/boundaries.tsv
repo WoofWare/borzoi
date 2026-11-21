@@ -85,6 +85,7 @@ crates/cst/tests/all/print_roundtrip/generate.rs	pending	3
 crates/cst/tests/all/print_roundtrip/mod.rs	pending	3
 crates/cst/tests/all/print_roundtrip/names.rs	pending	3
 crates/cst/tests/all/print_roundtrip/statements.rs	pending	3
+crates/cst/tests/all/print_roundtrip/typed.rs	not-applicable	its inputs are typed borzoi-print trees and the text graded is what the printer writes for them, so a mutated file would grade no printing; the source mutations of the parser that reads such text are the cst parser harnesses'
 crates/cst/tests/all/recovery_sweep.rs	pending	3
 crates/cst/tests/all/shape_sensitivity.rs	pending	3
 crates/cst/tests/all/token_table_reference.rs	pending	3

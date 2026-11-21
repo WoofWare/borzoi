@@ -14,13 +14,13 @@ use borzoi_cst::language_version::FcsStage;
 use borzoi_print::names::{Ident, InfixOperator, LongIdent, Operator, ValueName};
 use borzoi_print::print_impl_file;
 use borzoi_print::tree::{
-    AndBang, Binding, BindingHead, Comp, CompClause, CompItem, Const, Context, Expr, ImplFile,
-    InBuilder, InCollection, LetBang, LetBindings, ListBody, ListComp, ModuleDecl, Pat, Stmt,
-    StmtExpr, UseBang, UseName,
+    AliasPat, AndBang, AsAlias, Binding, BindingHead, Comp, CompClause, CompItem, Const, Context,
+    Expr, ImplFile, InBuilder, InCollection, LetBang, LetBindings, ListBody, ListComp, MatchClause,
+    ModuleBindings, ModuleDecl, Pat, Stmt, StmtExpr, UseBang, UseName,
 };
 use borzoi_print::vec::Vec1;
 use borzoi_print::version::{
-    Available, LanguageFeature, LanguageVersion, Preview, V4_7, V5_0, V8_0, V10_0, Version,
+    Available, LanguageFeature, LanguageVersion, Preview, V4_7, V5_0, V6_0, V8_0, V10_0, Version,
 };
 
 use super::check::{check_failures, check_report};
@@ -36,14 +36,14 @@ fn name<V: Version>(s: &str) -> Expr<V> {
     Expr::Name(LongIdent::single(ident(s)))
 }
 
-fn var(s: &str) -> Pat {
+fn var<V: Version>(s: &str) -> Pat<V> {
     Pat::Name(LongIdent::single(ident(s)))
 }
 
 /// `let x () = e`.
 fn let_x<V: Version>(e: Expr<V>) -> ImplFile<V> {
-    ImplFile::AnonModule(vec![ModuleDecl::Let(LetBindings::NonRec(Box::new(
-        Binding {
+    ImplFile::AnonModule(vec![ModuleDecl::Let(
+        ModuleBindings::new(LetBindings::NonRec(Box::new(Binding {
             attributes: Vec::new(),
             is_inline: false,
             head: BindingHead::Function {
@@ -52,8 +52,9 @@ fn let_x<V: Version>(e: Expr<V>) -> ImplFile<V> {
                 params: Vec1::new(Pat::Const(Const::Unit), Vec::new()),
             },
             body: e,
-        },
-    )))])
+        })))
+        .expect("a module's group"),
+    )])
 }
 
 /// `builder { body }`.
@@ -231,6 +232,30 @@ fn cases() -> Vec<(LanguageFeature, GateCase)> {
                 }))),
             )
         }),
+        (
+            LanguageFeature::NonVariablePatternsToRightOfAsPatterns,
+            || {
+                // `match a with (_) as (_) -> ()`.
+                let alias = AliasPat::new(Available, Pat::Wildcard).expect("not a variable");
+                gate_is_exact::<V6_0>(
+                    LanguageFeature::NonVariablePatternsToRightOfAsPatterns,
+                    &let_x(Expr::Match {
+                        scrutinee: Box::new(name("a")),
+                        clauses: Vec1::new(
+                            MatchClause {
+                                pat: Pat::As {
+                                    pat: Box::new(Pat::Wildcard),
+                                    alias: AsAlias::Pat(alias),
+                                },
+                                guard: None,
+                                result: Expr::Const(Const::Unit),
+                            },
+                            Vec::new(),
+                        ),
+                    }),
+                )
+            },
+        ),
         (LanguageFeature::UseBangBindingValueDiscard, || {
             gate_is_exact::<V10_0>(
                 LanguageFeature::UseBangBindingValueDiscard,

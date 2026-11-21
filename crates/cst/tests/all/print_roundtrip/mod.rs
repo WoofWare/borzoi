@@ -5,9 +5,9 @@
 //! `t` exactly. A generated tree is checked at `preview` too, as every later
 //! version must read it the same way; and each gated construct is checked
 //! against the version below its gate, where FCS must reject it ([`gates`]).
-//! Trees written over [`check`]'s typed names (the gates, and the statement
-//! table, [`statements`]) are type-checked as well: F#'s checker refuses some
-//! of what parses, and must accept them all.
+//! Trees written over [`check`]'s typed names (the gates, the statement table,
+//! [`statements`], and trees drawn for a type, [`typed`]) are type-checked as
+//! well: F#'s checker refuses some of what parses, and must accept them all.
 //! FCS is the authority on what the text means, read in the normalised currency
 //! the parser differential compares in. A printer bug that FCS reads differently from the
 //! tree, or rejects, fails here; so does a value the tree's types admit that F#
@@ -32,6 +32,7 @@ mod generate;
 mod lower;
 mod names;
 mod statements;
+mod typed;
 
 use std::collections::HashSet;
 use std::io::Write as _;
