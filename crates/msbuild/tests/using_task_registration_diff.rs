@@ -288,13 +288,6 @@ fn alone(
             ),
             "",
         ),
-        RejectionCause::ThrowingExpression { expression } => (
-            format!(
-                "<UsingTask TaskName=\"{}\" AssemblyFile=\"y.dll\" />",
-                attribute_text(expression)
-            ),
-            "TaskName",
-        ),
         RejectionCause::IllegalCondition { condition } => (
             format!(
                 "<UsingTask TaskName=\"X\" AssemblyFile=\"y.dll\" Condition=\"{}\" />",
@@ -335,8 +328,19 @@ fn assert_msbuild_refuses_alone(
         }
         _ => None,
     };
-    let Some((body, attribute)) = alone(cause, raw.as_deref()) else {
-        panic!("a certain refusal the differential does not isolate: {cause:?}: {xml}");
+    let (body, attribute) = match cause {
+        // A throw is replayed where it was, under the task's condition and
+        // the body's `Evaluate`, so that MSBuild throws there only if it
+        // evaluates the expression there.
+        borzoi_msbuild::RejectionCause::ThrowingExpression { expression } => {
+            throw_site(xml, rejection.span.start, expression)
+        }
+        _ => {
+            let Some((body, attribute)) = alone(cause, raw.as_deref()) else {
+                panic!("a certain refusal the differential does not isolate: {cause:?}: {xml}");
+            };
+            (body, attribute.to_owned())
+        }
     };
     // At the document's own path, so that what reads the project's name or
     // directory reads what it did there.
@@ -358,7 +362,7 @@ fn assert_msbuild_refuses_alone(
              {alone}\nclaimed in {xml}"
         );
     }
-    if let Some(name) = attribute_at(&alone, &rejected) {
+    if let Some(name) = attribute_at(&alone, &rejected).filter(|_| !attribute.is_empty()) {
         assert_eq!(
             name, attribute,
             "the walk claims MSBuild refuses {cause:?}, and alone it points at {name}: \
@@ -391,12 +395,94 @@ fn colliding_parameters(xml: &str, at: usize) -> String {
     format!("<{first_name} /><{second_name} />")
 }
 
+/// The `<UsingTask>` holding `expression`, which the walk claims MSBuild
+/// throws on in the element starting at `at` in `xml`, at its original site:
+/// the task's `Condition` kept, and the element reduced to the attribute (or,
+/// for a body, the text) holding it, the body's `Evaluate` kept. And the
+/// attribute it is, empty for a body's text.
+fn throw_site(xml: &str, at: usize, expression: &str) -> (String, String) {
+    let document = borzoi_msbuild::document::parse(xml).expect("well-formed");
+    let element = document
+        .descendants()
+        .find(|node| node.is_element() && node.range().start == at)
+        .expect("the throw's span starts at an element");
+    // Elements by where they stand, not their names (a parameter may be
+    // named `UsingTask` or `Task`): the task is the project's child.
+    let root = document.root_element();
+    let task = element
+        .ancestors()
+        .find(|node| node.parent_element() == Some(root))
+        .expect("the throw is in a `<UsingTask>`");
+    let role = if element == task {
+        "UsingTask"
+    } else if element.parent_element() == Some(task) {
+        "Task"
+    } else {
+        "parameter"
+    };
+    let condition = raw_attribute(xml, task.range(), "Condition")
+        .map(|raw| format!(" Condition=\"{raw}\""))
+        .unwrap_or_default();
+    // The attribute of `element` whose value holds the expression, as
+    // written.
+    let holding = element
+        .attributes()
+        .find(|attribute| attribute.value().contains(expression))
+        .map(|attribute| {
+            let name = attribute.name().to_owned();
+            let raw = raw_attribute(xml, element.range(), &name).expect("written");
+            (name, raw)
+        });
+    let body = match (role, holding) {
+        ("UsingTask", Some((name, raw))) => match name.as_str() {
+            "TaskName" => {
+                format!("<UsingTask TaskName=\"{raw}\" AssemblyFile=\"y.dll\"{condition} />")
+            }
+            "AssemblyFile" => {
+                format!("<UsingTask TaskName=\"X\" AssemblyFile=\"{raw}\"{condition} />")
+            }
+            "AssemblyName" => {
+                format!("<UsingTask TaskName=\"X\" AssemblyName=\"{raw}\"{condition} />")
+            }
+            "Condition" => {
+                format!("<UsingTask TaskName=\"X\" AssemblyFile=\"y.dll\" Condition=\"{raw}\" />")
+            }
+            other => format!(
+                "<UsingTask TaskName=\"X\" AssemblyFile=\"y.dll\" {other}=\"{raw}\"{condition} />"
+            ),
+        },
+        ("Task", Some((name, raw))) => {
+            format!("<UsingTask {INLINE}{condition}><Task {name}=\"{raw}\">x</Task></UsingTask>")
+        }
+        ("Task", None) => format!(
+            "<UsingTask {INLINE}{condition}>{}</UsingTask>",
+            &xml[element.range()]
+        ),
+        (_, Some((name, raw))) => format!(
+            "<UsingTask {INLINE}{condition}><ParameterGroup><{} {name}=\"{raw}\" />\
+             </ParameterGroup><Task>x</Task></UsingTask>",
+            element.tag_name().name()
+        ),
+        (other, None) => {
+            panic!("a throw the walk claims in `<{other}>`, held by none of it: {xml}")
+        }
+    };
+    let attribute = element
+        .attributes()
+        .find(|attribute| attribute.value().contains(expression))
+        .map(|attribute| attribute.name().to_owned())
+        .unwrap_or_default();
+    (body, attribute)
+}
+
 /// `xml` without its `<UsingTask>` elements (any prefix), the rest as
 /// written.
 fn without_using_tasks(xml: &str) -> String {
     let document = borzoi_msbuild::document::parse(xml).expect("well-formed");
+    // The project's own children: a parameter may be named `UsingTask` too.
     let mut ranges: Vec<std::ops::Range<usize>> = document
-        .descendants()
+        .root_element()
+        .children()
         .filter(|node| node.is_element() && node.tag_name().name() == "UsingTask")
         .map(|node| node.range())
         .collect();
@@ -962,6 +1048,37 @@ fn hand_picked_registrations() {
             true,
             Some(Certain),
         ),
+        // A body MSBuild does not expand, its `Evaluate` false, beside a task
+        // it refuses: a claim of the body's throw would be graded where the
+        // throw is, under that `Evaluate`, and fail.
+        (
+            format!(
+                "<PropertyGroup><P>a</P></PropertyGroup>\
+                 <UsingTask TaskName=\"$(Empty)\" AssemblyFile=\"y.dll\" />{}",
+                inline_task("", "<Task Evaluate=\"false\">$(P[9])</Task>").replace("\"X\"", "\"Y\"")
+            ),
+            true,
+            Some(Certain),
+        ),
+        // A body under an `Evaluate` MSBuild refuses is never expanded: the
+        // refusal is the flag's, not the body's throw.
+        (
+            format!(
+                "<PropertyGroup><P>a</P></PropertyGroup>{}",
+                inline_task("", "<Task Evaluate=\"System.String\">$(P[9])</Task>")
+            ),
+            true,
+            Some(Certain),
+        ),
+        // A parameter named as a project element is a parameter.
+        (
+            inline_task(
+                "",
+                "<ParameterGroup><UsingTask Required=\"bad\" /></ParameterGroup><Task>x</Task>",
+            ),
+            true,
+            Some(Certain),
+        ),
         // Names the loader refuses alone (MSB5016 for the dot): no registry
         // collision besides, which renaming one would not fix.
         (
@@ -1322,7 +1439,7 @@ fn mostly(rng: &mut SplitMix64, value: &str) -> String {
 fn composite_document(rng: &mut SplitMix64) -> String {
     let mut children = Vec::new();
     if rng.below(3) != 0 {
-        let mut names = vec!["A", "B", "a", "A"];
+        let mut names = vec!["A", "B", "a", "A", "UsingTask"];
         let count = 1 + rng.below(3);
         let mut parameters = String::new();
         for _ in 0..count {
