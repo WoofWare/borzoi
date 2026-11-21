@@ -1151,7 +1151,7 @@ fn a_feature_switch_refusal_names_its_route() {
 }
 
 /// A registration the walk only doubts claims nothing of the value: the
-/// cause says MSBuild may be unable to register it, not that it cannot.
+/// cause says MSBuild may refuse to register it, not that it does.
 #[test]
 fn a_possible_registration_refusal_claims_nothing_of_the_value() {
     let cause = borzoi_msbuild::RejectionCause::UsingTaskRegistration {
@@ -1160,8 +1160,8 @@ fn a_possible_registration_refusal_claims_nothing_of_the_value() {
         value: "System.TimeSpan".into(),
     };
     let possible = render_rejection_cause(&cause, false);
-    assert!(possible.contains("may be unable to register"), "{possible}");
+    assert!(possible.contains("may refuse to register"), "{possible}");
     assert!(!possible.contains("cannot"), "{possible}");
     let certain = render_rejection_cause(&cause, true);
-    assert!(certain.contains("cannot register"), "{certain}");
+    assert!(certain.contains("refuses to register"), "{certain}");
 }
