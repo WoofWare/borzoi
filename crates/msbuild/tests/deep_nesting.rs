@@ -513,40 +513,73 @@ fn many_groups_on_one_path(width: usize) -> String {
 
 /// A `<When>` the walk cannot decide holding `width` sibling `<Choose>`s,
 /// each with a write and an item group reading a name, so that every group
-/// stands in arms of its own and every sibling's write may reach it.
+/// stands in arms of its own and every sibling's write may reach it. `P0`
+/// holds a value the walk doubts in the final table, so each group's
+/// judgement asks whether the walk's write of it reaches the group
+/// (`PathOf::reaches`).
 fn many_groups_on_sibling_paths(width: usize) -> String {
     let chooses: String = (0..width)
         .map(|i| {
             format!(
                 "<Choose><When Condition=\"'É' == 'Ê'\"><PropertyGroup><P{i}>x</P{i}></PropertyGroup>\
-                 <ItemGroup><I Include=\"$(P0)\" /></ItemGroup></When></Choose>"
+                 <ItemGroup Condition=\"'$(P0)' == 'y'\"><I Include=\"a\" /></ItemGroup></When></Choose>"
             )
         })
         .collect();
-    format!("<Choose><When Condition=\"'É' == 'é'\">{chooses}</When></Choose>")
+    format!(
+        "<PropertyGroup><P0>y</P0><P0 Condition=\"'É' == 'é'\">y</P0></PropertyGroup>\
+         <Choose><When Condition=\"'É' == 'é'\">{chooses}</When></Choose>"
+    )
+}
+
+/// A `<When>` the walk cannot decide writing `P0` `width` times, and one item
+/// group after it whose condition reads `P0`, which holds a value the walk
+/// doubts in the final table: the group asks whether a write of `P0` reaches
+/// it, and the first does.
+fn many_writes_of_one_name(width: usize) -> String {
+    let writes: String = (0..width)
+        .map(|i| format!("<PropertyGroup><P0>x{i}</P0></PropertyGroup>"))
+        .collect();
+    format!(
+        "<PropertyGroup><P0>y</P0><P0 Condition=\"'É' == 'é'\">y</P0></PropertyGroup>\
+         <Choose><When Condition=\"'É' == 'é'\">{writes}\
+         <ItemGroup Condition=\"'$(P0)' == 'y'\"><I Include=\"a\" /></ItemGroup></When></Choose>"
+    )
 }
 
 /// The groups of [`many_groups_on_one_path`] and of
 /// [`many_groups_on_sibling_paths`] ask only of the names they read whether a
-/// write reaches them: four times the width costs about four times the time,
-/// where gathering every write that reaches each group costs sixteen. Timed
-/// as a ratio, as [`wide_unheld_reads_are_struck_in_one_pass`] is.
+/// write reaches them (`PathOf::reaches`), and which names written on the
+/// path are not certain is settled once for the walk. With `n` writes and `n`
+/// groups, the walk examines each written name once to settle it, and each
+/// sibling group examines the one write of the one name it reads (`P0`): `n`
+/// writes examined on one path, `2n` on sibling paths. Gathering every write
+/// that reaches each group, or settling the names again for each, costs `n²`.
+/// And a group stops at the first write that reaches it
+/// ([`many_writes_of_one_name`]: one name settled, one write examined, however
+/// many there are). Counted, so no load on the machine moves it: what is
+/// counted is the writes `PathOf::reaches` and the settling examine, not how
+/// it finds a name's writes (`cost`'s module docs).
 #[test]
 fn groups_ask_only_of_the_writes_they_read() {
-    for shape in [many_groups_on_one_path, many_groups_on_sibling_paths] {
-        let time = |width: usize| {
-            let body = shape(width);
-            let start = std::time::Instant::now();
-            evaluate_project(body);
-            start.elapsed()
-        };
-        time(100);
-        let narrow = time(400);
-        let wide = time(1_600);
-        let ratio = wide.as_secs_f64() / narrow.as_secs_f64().max(1e-6);
-        assert!(
-            ratio < 10.0,
-            "4× the groups took {ratio:.1}× the time ({narrow:?} → {wide:?})"
+    for (shape, per_group) in [
+        (many_groups_on_one_path as fn(usize) -> String, 1),
+        (many_groups_on_sibling_paths, 2),
+    ] {
+        for width in [1, 2, 100, 400] {
+            let examined = walk_costs(shape(width)).path_writes_examined;
+            assert_eq!(
+                examined,
+                per_group * width as u64,
+                "{width} groups examined {examined} writes"
+            );
+        }
+    }
+    for width in [1, 2, 100, 400] {
+        let examined = walk_costs(many_writes_of_one_name(width)).path_writes_examined;
+        assert_eq!(
+            examined, 2,
+            "{width} writes of one name: {examined} examined"
         );
     }
 }
@@ -567,9 +600,9 @@ fn wide_undecided_choose(width: usize) -> String {
     format!("<Choose>{whens}</Choose>")
 }
 
-/// The `<When>` gates `rejection::arm_is_dead` decides over `body`, on a 2 MiB
-/// stack.
-fn arm_gate_decisions(body: String) -> u64 {
+/// The work the walk does over `body` ([`borzoi_msbuild::test_support::WalkCosts`]),
+/// on a 2 MiB stack.
+fn walk_costs(body: String) -> borzoi_msbuild::test_support::WalkCosts {
     on_small_stack("parse_fsproj", move || {
         let source = format!("<Project>{body}</Project>");
         let (_, costs) = borzoi_msbuild::test_support::count_walk_costs(|| {
@@ -581,7 +614,7 @@ fn arm_gate_decisions(body: String) -> u64 {
             )
             .expect("well-formed XML evaluates")
         });
-        costs.arm_gate_decisions
+        costs
     })
 }
 
@@ -593,7 +626,7 @@ fn arm_gate_decisions(body: String) -> u64 {
 #[test]
 fn a_wide_undecided_choose_decides_each_when_once() {
     for width in [1, 2, 500, 2_000] {
-        let decisions = arm_gate_decisions(wide_undecided_choose(width));
+        let decisions = walk_costs(wide_undecided_choose(width)).arm_gate_decisions;
         assert_eq!(
             decisions, width as u64,
             "{width} arms took {decisions} decisions"
@@ -601,26 +634,52 @@ fn a_wide_undecided_choose_decides_each_when_once() {
     }
 }
 
-/// The rejection judgement strikes each read of [`wide_unheld_reads`] with a
-/// value in one pass over the text, so four times the width costs about four
-/// times the time; striking one read at a time over the whole text costs
-/// sixteen. Timed as a ratio of two runs on one machine, which a loaded
-/// machine slows alike.
+/// The rejection judgement strikes every read of [`wide_unheld_reads`] with
+/// a value at once, in one pass over the text (`condition::strike`): one
+/// struck text per value it tries (`condition::RETURNED`'s eight, stopping at
+/// the first on which MSBuild does not throw), whatever the width, where
+/// striking one read at a time builds one per read and value; and each built
+/// once, its bytes copied once, where rebuilding it per read copies the text
+/// once per read. From a hundred reads on, no value makes a version, so it
+/// tries all eight. Counted, so no load on the machine moves it: what is
+/// counted is the texts `strike` builds and the bytes it copies, not how the
+/// reads it strikes are found (`cost`'s module docs).
 #[test]
 fn wide_unheld_reads_are_struck_in_one_pass() {
-    let time = |width: usize| {
+    for width in [1, 2, 10, 100, DEEP / 16, DEEP / 4] {
         let body = wide_unheld_reads(width);
-        let start = std::time::Instant::now();
-        evaluate_project(body);
-        start.elapsed()
-    };
-    // Warm the allocator and the code once before timing.
-    time(DEEP / 16);
-    let narrow = time(DEEP / 4);
-    let wide = time(DEEP);
-    let ratio = wide.as_secs_f64() / narrow.as_secs_f64().max(1e-6);
-    assert!(
-        ratio < 10.0,
-        "4× the width took {ratio:.1}× the time ({narrow:?} → {wide:?})"
-    );
+        let costs = walk_costs(body.clone());
+        assert!(
+            (1..=8).contains(&costs.strikes),
+            "{width} reads took {} struck texts",
+            costs.strikes
+        );
+        if width >= 100 {
+            assert_eq!(
+                costs.strikes, 8,
+                "{width} reads took {} struck texts",
+                costs.strikes
+            );
+            // Exactly: each of the eight texts copies the expression's text
+            // around the reads once, and the value once per read
+            // (`condition::RETURNED`'s eight are 18 bytes in all), so a copy
+            // the count misses, or one it makes twice, moves it.
+            let around = "$([MSBuild]::VersionLessThan('', '1.0'))".len() as u64;
+            assert_eq!(
+                costs.struck_bytes,
+                8 * around + 18 * width as u64,
+                "{width} reads copied {} bytes",
+                costs.struck_bytes
+            );
+        }
+        // Each struck text is built once, no longer than twice the text it
+        // strikes (a value is at most five bytes, a read at least four).
+        assert!(
+            costs.struck_bytes <= costs.strikes * 2 * body.len() as u64,
+            "{width} reads copied {} bytes over {} struck texts of a {}-byte body",
+            costs.struck_bytes,
+            costs.strikes,
+            body.len()
+        );
+    }
 }

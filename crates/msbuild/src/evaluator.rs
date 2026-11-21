@@ -1489,6 +1489,7 @@ impl PathOf {
     fn reaches(&self, name: &str) -> bool {
         self.writes.borrow().writes.get(name).is_some_and(|writes| {
             writes.iter().any(|arms| {
+                crate::cost::count(|costs| costs.path_writes_examined += 1);
                 arms.iter().all(|(choose, arm)| {
                     self.arms
                         .iter()

@@ -346,7 +346,10 @@ impl State<'_> {
                 .borrow()
                 .writes
                 .keys()
-                .filter(|name| !directory_build::is_certain(self, name))
+                .filter(|name| {
+                    crate::cost::count(|costs| costs.path_writes_examined += 1);
+                    !directory_build::is_certain(self, name)
+                })
                 .cloned()
                 .collect();
             written.writes.borrow_mut().settled = Some(std::rc::Rc::new(names));
