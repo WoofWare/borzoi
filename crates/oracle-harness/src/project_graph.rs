@@ -553,12 +553,14 @@ pub struct ReferencedRefusal {
 /// FCS does with the request, never about a subject.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize)]
 pub enum RefusalCause {
-    /// FCS reads the target from its DLL, not from source: its assembly data
-    /// is `Unavailable` and its check passed (a type provider).
+    /// FCS reads the target, or a project the target reads from source, from
+    /// its DLL: its assembly data is `Unavailable` and its check passed (a
+    /// type provider). The detail names the project.
     ReadsDll,
-    /// The target's check fails and FCS built it no assembly data. FCS
-    /// answers `Unavailable` alike for that and for a type provider, and may
-    /// then read the target's DLL, so which it is cannot be told.
+    /// The target's check fails, or that of a project it reads from source,
+    /// and FCS built it no assembly data. FCS answers `Unavailable` alike for
+    /// that and for a type provider, and may then read the project's DLL, so
+    /// which it is cannot be told. The detail names the project.
     MayReadDll,
     /// A source may hold a line directive, which moves what FCS reports
     /// (`fcs-dump`'s `refuseUndescribedSources`): the compile D1 compares
@@ -953,6 +955,18 @@ impl ProjectGraphFixture {
         framework: &[PathBuf],
         from_dll: &BTreeMap<PlainName, PathBuf>,
     ) -> GraphRequest {
+        self.try_request(check, framework, from_dll)
+            .expect("a fixture's request is well formed")
+    }
+
+    /// [`ProjectGraphFixture::request`], or why the request type has no such
+    /// request (a project named like one of `framework`'s assemblies, say).
+    pub fn try_request(
+        &self,
+        check: &PlainName,
+        framework: &[PathBuf],
+        from_dll: &BTreeMap<PlainName, PathBuf>,
+    ) -> Result<GraphRequest, String> {
         let projects: Vec<GraphProject> = self
             .closure(check)
             .into_iter()
@@ -960,7 +974,7 @@ impl ProjectGraphFixture {
             .chain(std::iter::once(check.clone()))
             .map(|q| self.graph_project(&q, framework, from_dll))
             .collect();
-        GraphRequest::new(projects, check.clone()).expect("a fixture's request is well formed")
+        GraphRequest::new(projects, check.clone())
     }
 
     /// The `compile` request for `name`, every project of its closure
@@ -972,12 +986,23 @@ impl ProjectGraphFixture {
         framework: &[PathBuf],
         compiled: &BTreeMap<PlainName, PathBuf>,
     ) -> CompileRequest {
+        self.try_compile_request(name, framework, compiled)
+            .expect("a fixture's compile request is well formed")
+    }
+
+    /// [`ProjectGraphFixture::compile_request`], or why the request type has
+    /// no such request.
+    pub fn try_compile_request(
+        &self,
+        name: &PlainName,
+        framework: &[PathBuf],
+        compiled: &BTreeMap<PlainName, PathBuf>,
+    ) -> Result<CompileRequest, String> {
         for q in self.closure(name) {
             assert!(compiled.contains_key(&q), "{name} needs {q} compiled first");
         }
         let project = self.graph_project(name, framework, compiled);
         compile_request_line(&project, &self.root.join("out").join(name.as_str()))
-            .expect("a fixture's compile request is well formed")
     }
 }
 
@@ -1085,7 +1110,7 @@ impl GraphCell {
         let fixture = ProjectGraphFixture::materialise(projects)?;
         let mut compiled = BTreeMap::new();
         for lib in &libs {
-            let line = fixture.compile_request(lib, framework, &compiled);
+            let line = fixture.try_compile_request(lib, framework, &compiled)?;
             let out: CompileResponse = parse_response(&round_trip(line.as_line()))
                 .map_err(|e| format!("compile reference library {lib}: {e:?}"))?;
             let dll = out.output.ok_or_else(|| {
@@ -1096,6 +1121,10 @@ impl GraphCell {
             })?;
             compiled.insert(lib.clone(), dll);
         }
+        // Every request the cell will make, made once here, so a cell the
+        // request type has no request for is refused now, not when used.
+        fixture.try_request(&consumer, framework, &compiled)?;
+        fixture.try_compile_request(&self.assembly_name, framework, &compiled)?;
         Ok(PreparedCell {
             fixture,
             framework: framework.to_vec(),
@@ -1533,6 +1562,10 @@ mod tests {
         assert_eq!(producer["sources"], serde_json::json!(sources));
         let bad = GraphCell::library(name(CELL_CONSUMER), vec![file("A.fs", "module A\n")]);
         assert!(bad.prepare(&core(), &mut |_| unreachable!()).is_err());
+        // A producer named like a framework assembly has no request.
+        let framework = [core(), vec![PathBuf::from("/fw/System.Runtime.dll")]].concat();
+        let clash = GraphCell::library(name("System.Runtime"), vec![file("A.fs", "module A\n")]);
+        assert!(clash.prepare(&framework, &mut |_| unreachable!()).is_err());
     }
 
     #[test]

@@ -7662,6 +7662,10 @@ let private parseGraphProject (e: JsonElement) : GraphProject =
         ->
         ()
     | _ -> failwithf "%s: language version %A is not <major>.<minor>" where langVersion
+    // A number this compiler does not know would be checked under options FCS
+    // rewrites, and the answer misattributed to the request's other fields.
+    if not (fcsRecognisesLanguageVersion langVersion) then
+        failwithf "%s: language version %s is not one this compiler knows" where langVersion
     let sources =
         strictArray (where + " sources") (required where "sources" fields)
         |> List.map (absolutePath (where + " source"))
@@ -9459,11 +9463,12 @@ let private assemblyEntitiesOf (checkResults: FSharpCheckFileResults) (file: str
 /// directive (`LineDirective`); FCS resolved an assembly the request does not
 /// name (`UnnamedReference`).
 ///
-/// `target` and the projects it reads from source are checked first, alone,
-/// and its assembly data read: FCS reads a project whose data is
-/// `Unavailable` from its DLL, so `check`'s own check would try to open a file
-/// the request does not name. Only a target FCS reads from source is then
-/// read through `check`.
+/// `target` and the projects it reads from source are checked first, each
+/// alone and after those it reads, and each one's assembly data read: FCS
+/// reads a project whose data is `Unavailable` from its DLL, so a dependant's
+/// check would try to open a file the request does not name. The refusal
+/// names the project. Only a target FCS reads from source, through projects
+/// it reads from source, is then read through `check`.
 let private respondGraphReferenced (checker: FSharpChecker) (root: JsonElement) =
     let graph = parseGraphCheckWith [ "target" ] root
     let target =
@@ -9481,54 +9486,57 @@ let private respondGraphReferenced (checker: FSharpChecker) (root: JsonElement) 
         failwithf "invariant: %s exists, so a project reference could be read from disk" unwrittenRoot
     let built, outputOf = graphOptions graph
     let producer = graph.ById.[target]
-    let producerResults, releaseProducer =
-        checkProjectNowWith false checker built.[target] "fcs-dump-graph-referenced"
-    let failed =
-        producerResults.Diagnostics
-        |> Array.exists (fun d -> d.Severity = FSharp.Compiler.Diagnostics.FSharpDiagnosticSeverity.Error)
-    let signature =
+    // The target and every project it reads from source, each once however
+    // many paths reach it, in dependency order (each after the projects it
+    // reads): `graph.Order` is that order for all of `check`'s.
+    let inClosure = System.Collections.Generic.HashSet<string>()
+    let rec visit (p: GraphProject) =
+        if inClosure.Add p.Id then
+            for r in p.References do
+                match r with
+                | ProjectRef q -> visit graph.ById.[q]
+                | Dll _ -> ()
+    visit producer
+    let reached = graph.Order |> List.filter (fun p -> inClosure.Contains p.Id)
+    // Each is checked alone, after those it reads, and its assembly data
+    // read: FCS reads a project whose data is `Unavailable` from its DLL, so
+    // a dependant's check would try to open a file the request does not
+    // name. Each was checked against exactly the references the request
+    // names, so the target's signature describes that environment and no
+    // other.
+    let mutable answer = None
+    for p in reached do
+        let results, release = checkProjectNowWith false checker built.[p.Id] "fcs-dump-graph-referenced"
         try
-            // The target, and every project it reads from source, was checked
-            // against exactly the references the request names: its
-            // signature describes that environment and no other. Each project
-            // once, however many paths reach it.
-            let reached = ResizeArray<GraphProject>()
-            let seen = System.Collections.Generic.HashSet<string>()
-            let rec visit (p: GraphProject) =
-                if seen.Add p.Id then
-                    reached.Add p
-                    for r in p.References do
-                        match r with
-                        | ProjectRef q -> visit graph.ById.[q]
-                        | Dll _ -> ()
-            visit producer
-            for p in reached do
-                let results =
-                    if p.Id = target then
-                        producerResults
-                    else
-                        checker.ParseAndCheckProject(built.[p.Id], userOpName = "fcs-dump-graph-referenced")
-                        |> Async.RunSynchronously
-                requireResolvedSet graph p results
-            match assemblyData checker built.[target] (outputOf target) with
-            | Ok(Some data) -> rawSignatureOf data
+            requireResolvedSet graph p results
+            let failed =
+                results.Diagnostics
+                |> Array.exists (fun d -> d.Severity = FSharp.Compiler.Diagnostics.FSharpDiagnosticSeverity.Error)
+            match assemblyData checker built.[p.Id] (outputOf p.Id) with
+            | Ok(Some data) ->
+                if p.Id = target then
+                    answer <- Some(rawSignatureOf data, results.Diagnostics)
             | Ok None when failed ->
-                // FCS answers `Unavailable` alike for a type-provider target
+                // FCS answers `Unavailable` alike for a type-provider project
                 // (its own attribute, or a reference's alias of it) and for
                 // one whose assembly data failed to build
                 // (`IncrementalBuild.fs`, `tcAssemblyDataOpt`), and then may
-                // read the target from disk: which it is cannot be told.
+                // read it from disk: which it is cannot be told.
                 raise (
                     OracleRefusal(
                         "MayReadDll",
-                        sprintf "project %s: FCS may read it from its DLL: its check fails, and FCS built it no assembly data" target
+                        sprintf "project %s: FCS may read it from its DLL: its check fails, and FCS built it no assembly data" p.Id
                     )
                 )
             | Ok None ->
-                raise (OracleRefusal("ReadsDll", sprintf "project %s: FCS reads it from its DLL, not from source" target))
-            | Error why -> failwithf "project %s: cannot read its assembly data: %s" target why
+                raise (OracleRefusal("ReadsDll", sprintf "project %s: FCS reads it from its DLL, not from source" p.Id))
+            | Error why -> failwithf "project %s: cannot read its assembly data: %s" p.Id why
         finally
-            releaseProducer ()
+            release ()
+    let signature, producerDiagnostics =
+        match answer with
+        | Some answer -> answer
+        | None -> failwithf "invariant: target %s is not in its own closure" target
     let checkedResults, release =
         checkProjectNowWith false checker built.[graph.Check.Id] "fcs-dump-graph-referenced"
     try
@@ -9549,7 +9557,7 @@ let private respondGraphReferenced (checker: FSharpChecker) (root: JsonElement) 
                ExtensionMembers = view.ExtensionMembers
                ReadErrors = view.ReadErrors
                Signature = signature
-               Diagnostics = producerResults.Diagnostics |> Array.map projectDiagnostic |} |}
+               Diagnostics = producerDiagnostics |> Array.map projectDiagnostic |} |}
     finally
         release ()
 

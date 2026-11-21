@@ -181,24 +181,11 @@ pub(crate) fn pickle_extension_failures(
     let mut failures = Vec::new();
     for m in members {
         let at = place(&m.namespace, &m.enclosing);
-        // FCS's view reads a property as marked when any one of its
-        // accessors is, and then lists every accessor; the pickle marks only
-        // the accessor that carries the attribute. Where every row need not be
-        // read (a project from source), a marked sibling accessor stands for
-        // an accessor FCS lists under its property.
-        let property = (!every_row_read && m.style == ExtensionStyle::Csharp)
-            .then(|| {
-                ["get_", "set_"]
-                    .iter()
-                    .find_map(|p| m.logical_name.strip_prefix(p))
-            })
-            .flatten();
         let found = ours.get(&at).is_some_and(|rows| {
             rows.iter().any(|(names, instance)| {
-                (names.contains(&m.logical_name)
+                names.contains(&m.logical_name)
                     && names.contains(&m.compiled_name)
-                    && (m.style != ExtensionStyle::Fsharp || *instance == Some(m.is_instance)))
-                    || property.is_some_and(|p| names.iter().any(|n| n == p))
+                    && (m.style != ExtensionStyle::Fsharp || *instance == Some(m.is_instance))
             })
         });
         if !found {

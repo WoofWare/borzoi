@@ -301,12 +301,14 @@ pub fn try_invoke_fcs_dump_with_refs(
 
 /// The number of resident `fcs-dump` pools in this test binary; the child budget
 /// (`BORZOI_FCS_CHILDREN`, default three a pool) is split evenly between them,
-/// mirroring `cst`'s harness. Four: the single-file `file-batch` pool
+/// mirroring `cst`'s harness. Five: the single-file `file-batch` pool
 /// ([`fcs_file_batch_pool`]), the multi-file `uses-project` pool
 /// ([`fcs_project_batch_pool`]), the legacy oracle's `file-batch` pool
 /// ([`legacy_file_batch_pool`]), which spawns only for a check below the
-/// support floor, and the project-graph pool ([`fcs_graph_batch_pool`]).
-const FCS_POOLS: usize = 4;
+/// support floor, the project-graph pool ([`fcs_graph_batch_pool`]), and the
+/// one project-graph child a test may hold of its own
+/// ([`with_fcs_graph_child`]).
+const FCS_POOLS: usize = 5;
 
 /// Process-wide cap on resident `fcs-dump` children, split evenly across the
 /// [`FCS_POOLS`] pools. Each child is a warm FCS/.NET process holding hundreds of
@@ -585,16 +587,26 @@ pub fn invoke_fcs_dump_graph(line: &str) -> String {
     fcs_graph_batch_pool().request(line)
 }
 
-/// A project-graph oracle child of its own, outside the pool, with `env` set
-/// beside what it inherits: for a test that must know which requests one
-/// child has answered.
-pub fn spawn_fcs_graph_child(env: &[(&'static str, &'static str)]) -> BatchChild {
-    spawn_fcs_batch_child_with_env(
+/// Run `f` on a project-graph oracle child of its own, outside the pool,
+/// with `env` set beside what it inherits: for a test that must know which
+/// requests one child has answered. One such child lives at a time in the
+/// process (the budget's fifth share, [`FCS_POOLS`]), ended cleanly once `f`
+/// returns.
+pub fn with_fcs_graph_child<T>(
+    env: &[(&'static str, &'static str)],
+    f: impl FnOnce(&mut BatchChild) -> T,
+) -> T {
+    static ONE: Mutex<()> = Mutex::new(());
+    let _one = ONE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut child = spawn_fcs_batch_child_with_env(
         Oracle::Current,
         "uses-project-graph-batch",
         PROJECT_TIMEOUT,
         env,
-    )
+    );
+    let answer = f(&mut child);
+    child.finish(Duration::from_secs(10));
+    answer
 }
 
 /// Run `fcs-dump uses-census-batch` over `paths` (any order; **each file is

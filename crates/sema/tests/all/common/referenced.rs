@@ -238,9 +238,10 @@ fn sorted(mut rows: Rows) -> Rows {
     rows
 }
 
-/// One entity as both sides are compared. FCS's view cannot tell a quoted
-/// namespace segment holding a `.` from two segments, so namespaces are
-/// compared dotted, as FCS spells them.
+/// One entity as both sides are compared, field by field. FCS's view cannot
+/// tell a quoted namespace segment holding a `.` from two segments, so the
+/// namespace alone is compared dotted, as FCS spells it.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct EntityLine<'a> {
     namespace: String,
     enclosing: &'a [String],
@@ -252,59 +253,36 @@ struct EntityLine<'a> {
     extension: bool,
 }
 
-impl std::fmt::Display for EntityLine<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{} | {} | {} ({}) | {} | public={} auto_open={} extension={}",
-            self.namespace,
-            self.enclosing.join("+"),
-            self.logical,
-            self.compiled,
-            self.kind,
-            self.public,
-            self.auto_open,
-            self.extension
-        )
-    }
-}
-
 /// The decoded rows name exactly the entities FCS's view lists, and every
 /// extension member it lists is a decoded row.
 fn hold_to_fcs_view(name: &str, rows: &Rows, found: &ReferencedFound) {
-    let mut theirs: Vec<String> = found
+    let mut theirs: Vec<EntityLine<'_>> = found
         .entities
         .iter()
-        .map(|e| {
-            EntityLine {
-                namespace: e.namespace.clone(),
-                enclosing: &e.enclosing,
-                logical: &e.logical_name,
-                compiled: &e.compiled_name,
-                kind: format!("{:?}", e.kind).to_lowercase(),
-                public: e.access == FcsAccess::Public,
-                auto_open: e.auto_open,
-                extension: e.extension,
-            }
-            .to_string()
+        .map(|e| EntityLine {
+            namespace: e.namespace.clone(),
+            enclosing: &e.enclosing,
+            logical: &e.logical_name,
+            compiled: &e.compiled_name,
+            kind: format!("{:?}", e.kind).to_lowercase(),
+            public: e.access == FcsAccess::Public,
+            auto_open: e.auto_open,
+            extension: e.extension,
         })
         .collect();
-    let mut decoded: Vec<String> = rows
+    let mut decoded: Vec<EntityLine<'_>> = rows
         .entities
         .iter()
         .filter(|r| r.kind != PickledEntityKind::Namespace)
-        .map(|r| {
-            EntityLine {
-                namespace: r.namespace.join("."),
-                enclosing: &r.enclosing,
-                logical: &r.logical_name,
-                compiled: &r.compiled_name,
-                kind: format!("{:?}", r.kind).to_lowercase(),
-                public: r.public,
-                auto_open: r.auto_open,
-                extension: r.extension,
-            }
-            .to_string()
+        .map(|r| EntityLine {
+            namespace: r.namespace.join("."),
+            enclosing: &r.enclosing,
+            logical: &r.logical_name,
+            compiled: &r.compiled_name,
+            kind: format!("{:?}", r.kind).to_lowercase(),
+            public: r.public,
+            auto_open: r.auto_open,
+            extension: r.extension,
         })
         .collect();
     theirs.sort();

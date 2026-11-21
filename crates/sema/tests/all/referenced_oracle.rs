@@ -31,7 +31,7 @@ use borzoi_oracle_harness::project_graph::{
 
 use crate::common::corpus_manifest::{check_manifest, regenerate};
 use crate::common::referenced::{D1, Reading, Unknown, View, parse_cell, prepare, read};
-use crate::common::{invoke_fcs_dump_graph, spawn_fcs_graph_child};
+use crate::common::{invoke_fcs_dump_graph, with_fcs_graph_child};
 
 fn plain(s: &str) -> PlainName {
     PlainName::new(s).expect("a plain name")
@@ -236,6 +236,18 @@ fn cells() -> Vec<(&'static str, GraphCell)> {
             "compiled_name_collision",
             one(
                 "namespace Collide\n[<CompiledName(\"Same\")>]\ntype A = { X: int }\ntype Same = { Y: int }\n",
+            ),
+        ),
+        (
+            "module_path_with_plus",
+            one(
+                "namespace Plus\nmodule A =\n    module B =\n        type T = int\nmodule ``A+B`` =\n    type U = int\n",
+            ),
+        ),
+        (
+            "extension_csharp_style_getter_named_method",
+            one(
+                "namespace ExtGet\nopen System.Runtime.CompilerServices\n[<Extension>]\ntype Exts =\n    [<Extension>]\n    static member Foo(s: string) = s\n    [<Extension>]\n    static member get_Foo(s: string) = s\n",
             ),
         ),
         (
@@ -639,11 +651,11 @@ fn the_cell_parse_reads_the_branches_fcs_reads() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// Ask `child` about the producer at `path` twice, the file rewritten in
-/// between with its modification time put back, and a fresh child about the
-/// second text: the two answers to the second text must agree. Returns the
-/// three answers: `child`'s first and second, and the fresh child's.
-fn same_path_probe(child: &mut BatchChild) -> (String, String, String) {
+/// Ask one child, spawned with `env`, about a producer twice, its source
+/// rewritten in between with its modification time put back, and then a
+/// fresh child about the second text. Returns the three answers: the first
+/// child's two, and the fresh child's.
+fn same_path_probe(env: &[(&'static str, &'static str)]) -> (String, String, String) {
     let first = "namespace Probe\ntype First = { X: int }\n";
     let second = "namespace Probe\ntype Second = { Y: int }\n";
     let cell = GraphCell::library(plain("Probe"), files(&[("Lib.fs", first)]));
@@ -653,15 +665,17 @@ fn same_path_probe(child: &mut BatchChild) -> (String, String, String) {
     let stamp = std::fs::metadata(path)
         .and_then(|m| m.modified())
         .expect("the source's modification time");
-    let a1 = child.request(&line);
-    std::fs::write(path, second).expect("rewrite the source");
-    std::fs::File::options()
-        .write(true)
-        .open(path)
-        .and_then(|f| f.set_modified(stamp))
-        .expect("put the modification time back");
-    let a2 = child.request(&line);
-    let fresh = spawn_fcs_graph_child(&[]).request(&line);
+    let (a1, a2) = with_fcs_graph_child(env, |child: &mut BatchChild| {
+        let a1 = child.request(&line);
+        std::fs::write(path, second).expect("rewrite the source");
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .and_then(|f| f.set_modified(stamp))
+            .expect("put the modification time back");
+        (a1, child.request(&line))
+    });
+    let fresh = with_fcs_graph_child(&[], |child: &mut BatchChild| child.request(&line));
     (a1, a2, fresh)
 }
 
@@ -691,7 +705,7 @@ fn a_planted_cross_request_cache_is_caught() {
             found.diagnostics.clone(),
         )
     };
-    let (a1, a2, fresh) = same_path_probe(&mut spawn_fcs_graph_child(&[]));
+    let (a1, a2, fresh) = same_path_probe(&[]);
     assert_ne!(
         decode(&a1),
         decode(&fresh),
@@ -702,15 +716,99 @@ fn a_planted_cross_request_cache_is_caught() {
         decode(&fresh),
         "the oracle answered a rewritten source from an earlier request"
     );
-    let (p1, p2, planted_fresh) = same_path_probe(&mut spawn_fcs_graph_child(&[(
-        "BORZOI_FCS_DUMP_PLANT",
-        "referenced-cache",
-    )]));
+    let (p1, p2, planted_fresh) = same_path_probe(&[("BORZOI_FCS_DUMP_PLANT", "referenced-cache")]);
     assert_eq!(p1, p2, "the planted cache answered the second request");
     assert_ne!(
         decode(&p2),
         decode(&planted_fresh),
         "the probe does not see a planted cross-request cache"
+    );
+}
+
+/// A project the producer reads from source that FCS would read from its
+/// DLL instead (here a type provider, two levels down) refuses the request,
+/// naming that project, rather than letting the producer's check meet a DLL
+/// the request does not name. Each graph shape the request type admits is
+/// refused or answered, never an oracle error.
+#[test]
+fn a_type_provider_project_below_the_producer_is_refused() {
+    let framework: Vec<Reference> = framework_references()
+        .iter()
+        .cloned()
+        .map(Reference::Dll)
+        .collect();
+    let source = |label: &str, text: &str| crate::common::temp_fs_file(label, text);
+    let project = |id: &str, sources: Vec<PathBuf>, refs: &[&str]| GraphProject {
+        id: plain(id),
+        assembly_name: plain(id),
+        target: Target::Library,
+        lang_version: LangVersion::F10,
+        sources,
+        defines: Vec::new(),
+        references: framework
+            .iter()
+            .cloned()
+            .chain(refs.iter().map(|r| Reference::Project(plain(r))))
+            .collect(),
+    };
+    let request = GraphRequest::new(
+        vec![
+            project(
+                "Provider",
+                vec![source(
+                    "referenced_tp_below",
+                    "namespace Provider\n[<assembly: Microsoft.FSharp.Core.CompilerServices.TypeProviderAssembly>]\ndo ()\ntype T = int\n",
+                )],
+                &[],
+            ),
+            project(
+                "Producer",
+                vec![source(
+                    "referenced_tp_producer",
+                    "namespace Producer\ntype Ab = Provider.T\n",
+                )],
+                &["Provider"],
+            ),
+            project(
+                "Consumer",
+                vec![source(
+                    "referenced_tp_consumer",
+                    "module Consumer.Use\nlet x = 1\n",
+                )],
+                &["Provider", "Producer"],
+            ),
+        ],
+        plain("Consumer"),
+    )
+    .expect("a valid graph request");
+    let line = request
+        .referenced_line(&plain("Producer"))
+        .expect("the consumer references the producer");
+    let answer = parse_response::<ReferencedResponse>(&invoke_fcs_dump_graph(&line));
+    assert!(
+        matches!(
+            &answer,
+            Ok(ReferencedResponse::Refused(r))
+                if r.cause == RefusalCause::ReadsDll && r.detail.contains("Provider")
+        ),
+        "{answer:?}"
+    );
+}
+
+/// A language version the compiler does not know is refused as such, before
+/// FCS checks anything under it.
+#[test]
+fn an_unknown_language_version_is_refused() {
+    let cell = GraphCell {
+        lang_version: LangVersion::new(99, 0),
+        ..one("namespace N\ntype T = int\n")
+    };
+    let prepared = prepare(&cell);
+    let answer =
+        parse_response::<ReferencedResponse>(&invoke_fcs_dump_graph(&prepared.referenced_line()));
+    assert!(
+        matches!(&answer, Err(ResponseError::Refused(why)) if why.contains("language version")),
+        "{answer:?}"
     );
 }
 
