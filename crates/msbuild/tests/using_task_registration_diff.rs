@@ -180,20 +180,32 @@ fn attribute_text(value: &str) -> String {
 
 /// A `<UsingTask>` holding the construct `cause` names and nothing else
 /// MSBuild refuses, and the attribute it is: what MSBuild must refuse, alone,
-/// for the walk's claim that it refuses the construct to hold. `None` for a
-/// cause this differential does not isolate.
-fn alone(cause: &borzoi_msbuild::RejectionCause) -> Option<(String, &'static str)> {
+/// for the walk's claim that it refuses the construct to hold. A refused
+/// attribute is replayed as written (`raw`, the source text of the attribute
+/// in the element the rejection spans), so MSBuild expands it as it did in
+/// the document, not the walk's expansion of it. `None` for a cause this
+/// differential does not isolate.
+fn alone(
+    cause: &borzoi_msbuild::RejectionCause,
+    raw: Option<&str>,
+) -> Option<(String, &'static str)> {
     use borzoi_msbuild::RejectionCause;
     Some(match cause {
         RejectionCause::UsingTaskRegistration {
             attribute, value, ..
         } => {
-            // An attribute written empty is the loader's to refuse; one that
-            // expands to empty is the registration's.
-            let v = if value.is_empty() {
-                "$(Empty)".to_owned()
-            } else {
-                attribute_text(value)
+            // An attribute written empty is the loader's to refuse, and a
+            // `TaskFactory` not written is one MSBuild reads as empty: one
+            // that expands to empty is the registration's.
+            let v = match raw {
+                Some(raw) if !raw.is_empty() => raw.to_owned(),
+                _ => {
+                    assert!(
+                        value.is_empty(),
+                        "{attribute} is not written, and holds {value:?}"
+                    );
+                    "$(Empty)".to_owned()
+                }
             };
             match attribute.as_str() {
                 "TaskName" => (
@@ -285,7 +297,13 @@ fn assert_msbuild_refuses_alone(
              attribute: {xml}\n{rejection:#?}"
         );
     }
-    let Some((body, attribute)) = alone(cause) else {
+    let raw = match cause {
+        borzoi_msbuild::RejectionCause::UsingTaskRegistration { attribute, .. } => {
+            raw_attribute(xml, rejection.span.clone(), attribute)
+        }
+        _ => None,
+    };
+    let Some((body, attribute)) = alone(cause, raw.as_deref()) else {
         panic!("a certain refusal the differential does not isolate: {cause:?}: {xml}");
     };
     let tmp = tempfile::TempDir::new().unwrap();
@@ -315,6 +333,32 @@ fn assert_msbuild_refuses_alone(
              {alone}\nclaimed in {xml}"
         );
     }
+}
+
+/// The source text of the attribute `name` of the element `span` starts in
+/// `xml`, as written (escaped), if it has one.
+fn raw_attribute(xml: &str, span: std::ops::Range<usize>, name: &str) -> Option<String> {
+    let element = &xml[span];
+    // The start tag ends at the first `>` outside an attribute's quotes.
+    let mut quote = None;
+    let mut end = element.len();
+    for (at, c) in element.char_indices() {
+        match quote {
+            Some(open) if c == open => quote = None,
+            Some(_) => {}
+            None if c == '"' || c == '\'' => quote = Some(c),
+            None if c == '>' => {
+                end = at;
+                break;
+            }
+            None => {}
+        }
+    }
+    let tag = &element[..end];
+    let at = tag.find(&format!(" {name}="))? + name.len() + 2;
+    let open = tag[at..].chars().next()?;
+    let rest = &tag[at + 1..];
+    Some(rest[..rest.find(open)?].to_owned())
 }
 
 /// The attribute MSBuild's rejection of `xml` points at, if it points at one.
