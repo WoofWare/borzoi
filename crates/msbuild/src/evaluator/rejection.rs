@@ -1146,39 +1146,6 @@ const PARAMETER_TYPES: &[&str] = &[
     "Microsoft.Build.Framework.ITaskItem[]",
 ];
 
-/// Whether MSBuild expands `raw` to a value that is not empty, without
-/// throwing, whatever the names it reads hold. Bare property references
-/// alone never throw, but the values they stand for may hold anything, an
-/// item list's opening among them, which MSBuild expands with the text around
-/// it once properties are expanded (`$(At)(Nothing)`, `At` holding `@`, is
-/// `@(Nothing)`, which is empty). So it holds where literal text begins the
-/// value with a character that no item list can take in (not `@`, as nothing
-/// comes before it), or ends it with one (not `)`, as nothing comes after
-/// it). One scan over `raw`.
-fn certainly_not_empty(raw: &str) -> bool {
-    if raw.contains("@(") {
-        return false;
-    }
-    let (mut first, mut last, mut count) = (None, None, 0);
-    for expression in properties::expression_texts(raw) {
-        if !properties::is_referenceable_name(&expression[2..expression.len() - 1]) {
-            return false;
-        }
-        let at = expression.as_ptr() as usize - raw.as_ptr() as usize;
-        first.get_or_insert(at);
-        last = Some(at + expression.len());
-        count += 1;
-    }
-    // An opener without its close is not a reference, and not one MSBuild
-    // need read as literal text.
-    if raw.matches("$(").count() != count {
-        return false;
-    }
-    let begins = first != Some(0) && raw.chars().next().is_some_and(|c| c != '@');
-    let ends = last != Some(raw.len()) && raw.chars().next_back().is_some_and(|c| c != ')');
-    begins || ends
-}
-
 /// What MSBuild's registration of a task makes of a value.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Registered {
@@ -1220,23 +1187,25 @@ enum Registered {
 /// `using_task_texts_are_judged_where_msbuild_expands_them`), and its
 /// `Condition` is judged as one. MSBuild reports the first step it refuses,
 /// so a step is reached for certain only past every earlier step the walk is
-/// certain MSBuild passes: a refusal after one MSBuild may stop at is a
+/// certain MSBuild passes, an earlier task's among them
+/// (`State::registrations_pass`): a value it holds for certain that the
+/// registration takes. A refusal after a step MSBuild may stop at is a
 /// rejection whose cause the walk cannot name, so it is only possible.
 fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
-    let task = attribute(node, "TaskName").unwrap_or_default().into_owned();
+    let task: std::sync::Arc<str> = attribute(node, "TaskName").unwrap_or_default().into();
     // Whether MSBuild reaches the next step for certain: not past a construct
-    // before the task it may already have stopped at, an earlier task's step
-    // among them.
-    let mut reach = reached && state.rejection.is_none();
-    // `rule` judges the value; `non_empty` says it takes any value that is
-    // not empty, which the walk may know of a value it does not hold.
+    // before the task it may already have stopped at, nor past an earlier
+    // task it may not have registered.
+    let mut reach = reached && state.rejection.is_none() && state.registrations_pass;
+    // The step of `raw`, judged by `rule`; whether MSBuild certainly passes
+    // it narrows `reach`. Returns the value as the walk holds it.
     let step = |state: &mut State<'_>,
                 reach: &mut bool,
                 raw: &str,
                 span: Range<usize>,
                 attribute_name: &str,
-                rule: Option<&dyn Fn(&str) -> Registered>,
-                non_empty: bool| {
+                rule: Option<&dyn Fn(&str) -> Registered>|
+     -> Option<String> {
         judge_unwalked_text(state, raw, *reach, span.clone());
         let value = registration_value(raw, state);
         let passes = match (&value, rule) {
@@ -1250,12 +1219,17 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
             ) => rule.is_none_or(|rule| {
                 rule("True") == Registered::Takes && rule("False") == Registered::Takes
             }),
-            _ => non_empty && certainly_not_empty(raw),
+            _ => false,
+        };
+        let certain = match &value {
+            RegistrationValue::Certain(value) => Some(value.clone()),
+            _ => None,
         };
         if let Some(rule) = rule {
             judge_registered(state, &task, raw, value, span, attribute_name, rule, *reach);
         }
         *reach &= passes;
+        certain
     };
     let non_empty = |value: &str| {
         if value.is_empty() {
@@ -1318,7 +1292,6 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
             node.range(),
             "TaskName",
             Some(&non_empty),
-            true,
         );
     }
     let factory_raw = attribute(node, "TaskFactory");
@@ -1331,10 +1304,9 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
             node.range(),
             "TaskFactory",
             (!children.is_empty() || others).then_some(&factory as &dyn Fn(&str) -> Registered),
-            false,
         );
     }
-    match (
+    let _ = match (
         attribute(node, "AssemblyFile"),
         attribute(node, "AssemblyName"),
     ) {
@@ -1345,7 +1317,6 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
             node.range(),
             "AssemblyFile",
             Some(&non_empty),
-            true,
         ),
         (_, Some(raw)) => step(
             state,
@@ -1354,42 +1325,36 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
             node.range(),
             "AssemblyName",
             Some(&non_empty),
-            true,
         ),
-        _ => {}
-    }
+        _ => None,
+    };
     if let Some(body) = children.last().filter(|child| named(child, "Task")) {
         let body_reached = match attribute(*body, "Evaluate") {
             None => Some(reach),
             Some(evaluate) => {
-                step(
+                let reach_before = reach;
+                let held = step(
                     state,
                     &mut reach,
                     &evaluate,
                     body.range(),
                     "Evaluate",
                     (!evaluate.is_empty()).then_some(&boolean as &dyn Fn(&str) -> Registered),
-                    false,
                 );
-                let (value, issues) = properties::substitute(&evaluate, &state.lookup);
-                // Its trust is judged just below, name by name. MSBuild reads
-                // the flag as expanded, escapes and all (`%66alse` is no
-                // `false`; probed, `msbuild-condition-oracle`, SDK 10.0.401).
-                let value = value.ignoring_trust().as_escaped().to_owned();
-                // An item list MSBuild expands into it the walk does not.
-                if !issues.is_empty()
-                    || !operands_are_certain(state, &evaluate)
-                    || value.contains("@(")
-                    || value.contains("%(")
-                {
-                    Some(false)
-                } else if value
-                    .trim_matches(|c: char| c.is_whitespace() || c == '\0')
-                    .eq_ignore_ascii_case("false")
-                {
-                    None
-                } else {
-                    Some(reach)
+                // MSBuild reads the flag as expanded, escapes and all
+                // (`%66alse` is no `false`; probed, `msbuild-condition-oracle`,
+                // SDK 10.0.401), so the value the step holds for certain
+                // decides whether it expands the body; any other, perhaps.
+                match held {
+                    Some(value)
+                        if value
+                            .trim_matches(|c: char| c.is_whitespace() || c == '\0')
+                            .eq_ignore_ascii_case("false") =>
+                    {
+                        None
+                    }
+                    Some(_) => Some(reach_before && reach),
+                    None => Some(false),
                 }
             }
         };
@@ -1436,7 +1401,6 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
                         parameter.range(),
                         name,
                         (!raw.is_empty()).then_some(rule),
-                        false,
                     );
                 }
             }
@@ -1444,7 +1408,7 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
                 state.note_rejection(
                     certain_if(reach),
                     RejectionCause::UsingTaskParameterCollision {
-                        task: task.clone(),
+                        task: std::sync::Arc::clone(&task),
                         first: loader::qname(parameters[first]).to_owned(),
                         second: loader::qname(parameter).to_owned(),
                     },
@@ -1457,9 +1421,10 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
     }
     for name in ["Runtime", "Architecture", "Override"] {
         if let Some(raw) = attribute(node, name) {
-            step(state, &mut reach, &raw, node.range(), name, None, false);
+            step(state, &mut reach, &raw, node.range(), name, None);
         }
     }
+    state.registrations_pass = reach;
 }
 
 /// Judge `value`, as the walk holds it (written `raw_text`), of `attribute_name` of the
@@ -1471,7 +1436,7 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
 #[allow(clippy::too_many_arguments)]
 fn judge_registered(
     state: &mut State<'_>,
-    task: &str,
+    task: &std::sync::Arc<str>,
     raw_text: &str,
     value: RegistrationValue,
     span: Range<usize>,
@@ -1508,7 +1473,7 @@ fn judge_registered(
     state.note_rejection(
         certainty,
         RejectionCause::UsingTaskRegistration {
-            task: task.to_owned(),
+            task: std::sync::Arc::clone(task),
             attribute: attribute_name.to_owned(),
             value,
         },
