@@ -257,13 +257,11 @@ pub enum FscArgsDecline {
 pub struct InputName(String);
 
 /// The names a caller may set, compared without case (as MSBuild compares
-/// property names): the project properties, the ordinary shell variables and
-/// the CLI switches the differentials vary. A positive list, so no caller can
-/// reach the toolchain, the compiler, the restore or MSBuild's machinery
-/// through a name nobody thought to refuse. `borzoi-msbuild`'s assembly-name
-/// grader holds it to the names that derivation admits. A grader of an
-/// environment rule sets names on no list through
-/// [`BuildInputs::unlisted_env`].
+/// property names): the project properties and the ordinary shell variables
+/// the differentials vary. A positive list, so no caller can reach the
+/// toolchain, the compiler, the restore or MSBuild's machinery through a name
+/// nobody thought to refuse. `borzoi-msbuild`'s assembly-name grader holds it
+/// to the names that derivation admits.
 pub const INPUT_NAMES: &[&str] = &[
     "AssemblyName",
     "Authors",
@@ -329,28 +327,7 @@ pub enum InputError {
     /// A value the command line or the environment cannot carry verbatim: a
     /// global's `;`, `,`, `"` or line break, or a NUL in either.
     Unpassable { name: String, value: String },
-    /// A name [`BuildInputs::unlisted_env`] refuses: one of
-    /// [`INPUT_NAMES`], one no variable can have, or one of [`MACHINERY`].
-    Refused(String),
 }
-
-/// The prefixes of the variables [`BuildInputs::unlisted_env`] refuses,
-/// compared without case (as a tool on Windows compares names): the host's
-/// and the runtime's knobs, NuGet's and MSBuild's switches, the dynamic
-/// loader's, and bash's start-up file and imported functions, any of which
-/// may choose what the build runs. A grader whose subject commits under one,
-/// needing it built, has found its failure.
-pub const MACHINERY: &[&str] = &[
-    "DOTNET_",
-    "COMPLUS_",
-    "CORECLR_",
-    "NUGET_",
-    "MSBUILD",
-    "DYLD_",
-    "LD_",
-    "BASH_ENV",
-    "BASH_FUNC_",
-];
 
 /// What a caller sets for a build beyond the tree: global properties (`-p:`)
 /// and environment variables, over [`build_environment`]. Built only through
@@ -392,48 +369,6 @@ impl BuildInputs {
             });
         }
         self.env.push((name, value.to_string()));
-        Ok(self)
-    }
-
-    /// With the environment variable `name` set to `value`, where `name` is on
-    /// no list: for a grader of an environment rule, whose subject claims a
-    /// variable it does not list is inert, and which must set such names
-    /// whatever they are. Refuses one of [`INPUT_NAMES`] (set through
-    /// [`Self::env`]), one of [`build_environment`]'s
-    /// ([`BUILD_ENVIRONMENT_NAMES`], held fixed), one starting with a
-    /// [`MACHINERY`] or [`SELECTORS`] prefix, and a name no variable can have
-    /// (empty, or holding `=` or NUL). Whatever it sets, the build's launch
-    /// checks still decide whether fsc's arguments are the SDK compiler's.
-    pub fn unlisted_env(mut self, name: &str, value: &str) -> Result<BuildInputs, InputError> {
-        let refused = name.is_empty()
-            || name.contains(['=', '\0'])
-            || INPUT_NAMES.iter().any(|n| n.eq_ignore_ascii_case(name))
-            || BUILD_ENVIRONMENT_NAMES
-                .iter()
-                .any(|n| n.eq_ignore_ascii_case(name))
-            || MACHINERY.iter().chain(SELECTORS).any(|prefix| {
-                name.get(..prefix.len())
-                    .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
-            });
-        if refused {
-            return Err(InputError::Refused(name.to_string()));
-        }
-        if value.contains('\0') {
-            return Err(InputError::Unpassable {
-                name: name.to_string(),
-                value: value.to_string(),
-            });
-        }
-        let taken = self
-            .globals
-            .iter()
-            .chain(&self.env)
-            .any(|(n, _)| n.0.eq_ignore_ascii_case(name));
-        if taken {
-            return Err(InputError::Repeated(name.to_string()));
-        }
-        self.env
-            .push((InputName(name.to_string()), value.to_string()));
         Ok(self)
     }
 
@@ -499,35 +434,6 @@ impl BuildInputs {
         Ok(name)
     }
 }
-
-/// The prefixes of the properties [`BuildInputs::unlisted_env`] refuses as
-/// variables, each compared without case: those that choose the compiler,
-/// the targets and imports, the restore's inputs or outputs, where the build
-/// writes, or whether fsc runs, which [`INPUT_NAMES`] leaves off for that
-/// reason. Each family by its prefix (the SDK's `CustomBefore…`/`CustomAfter…`
-/// and `Import…` hooks, NuGet's `Restore…` switches), since a list of the
-/// names the SDK has today is short of the next SDK's. Refusing a name only
-/// keeps it from a build, so the prefixes may refuse more than they must. A
-/// grader whose subject commits under one, needing it built, has found its
-/// failure.
-pub const SELECTORS: &[&str] = &[
-    "BaseIntermediateOutputPath",
-    "BaseOutputPath",
-    "CustomAfter",
-    "CustomBefore",
-    "DirectoryBuild",
-    "DirectoryPackages",
-    "DotnetFsc",
-    "FSharp",
-    "Fsc",
-    "Import",
-    "IntermediateOutputPath",
-    "NuGet",
-    "OutDir",
-    "OutputPath",
-    "Restore",
-    "SkipCompilerExecution",
-];
 
 /// One [`fsc_args`] call.
 #[derive(Debug, Clone, Copy)]
@@ -928,89 +834,6 @@ mod tests {
                 .env("OtherFlags", "--out:x\n-o:y")
                 .is_ok()
         );
-    }
-
-    /// A name on no list can be set, but not one of the listed inputs, one
-    /// the build environment holds fixed, one choosing the machinery (in any
-    /// case), or one no variable can have.
-    #[test]
-    fn unlisted_variables_refuse_the_machinery() {
-        for name in ["BORZOI_X", "1FOO", "A-B.C D", "x\ny", "_borzoi_x"] {
-            assert!(
-                BuildInputs::new().unlisted_env(name, "v\n--out:x").is_ok(),
-                "{name:?}"
-            );
-        }
-        for name in [
-            "",
-            "A=B",
-            "A\0B",
-            "AssemblyName",
-            "assemblyname",
-            "PATH",
-            "path",
-            "HOME",
-            "TMPDIR",
-            "RestoreSources",
-            "DOTNET_ROOT",
-            "dotnet_host_path",
-            "COMPlus_gcServer",
-            "CORECLR_PROFILER",
-            "NUGET_PACKAGES",
-            "MSBuildSDKsPath",
-            "MSBUILDDEBUGONSTART",
-            "DYLD_INSERT_LIBRARIES",
-            "LD_PRELOAD",
-            "BASH_ENV",
-            "BASH_FUNC_dotnet%%",
-        ] {
-            assert!(
-                matches!(
-                    BuildInputs::new().unlisted_env(name, "v"),
-                    Err(InputError::Refused(_))
-                ),
-                "{name:?}"
-            );
-        }
-        // What chooses the toolchain, refused by either API in any case.
-        for name in [
-            "FscToolExe",
-            "fsctoolexe",
-            "FSharpBuildAssemblyFile",
-            "DirectoryBuildTargetsPath",
-            "RestoreAdditionalProjectSources",
-            "SkipCompilerExecution",
-            "CustomBeforeDirectoryBuildProps",
-            "customafterdirectorybuildprops",
-            "ImportUserLocationsByWildcardBeforeMicrosoftCommonProps",
-            "RestoreNoCache",
-            "IntermediateOutputPath",
-            "OutDir",
-        ] {
-            assert!(
-                matches!(
-                    BuildInputs::new().unlisted_env(name, "x"),
-                    Err(InputError::Refused(_))
-                ),
-                "{name} unlisted"
-            );
-            assert!(
-                matches!(
-                    BuildInputs::new().env(name, "x"),
-                    Err(InputError::NotAnInput(_))
-                ),
-                "{name} listed"
-            );
-        }
-        let repeated = BuildInputs::new()
-            .unlisted_env("BORZOI_X", "a")
-            .unwrap()
-            .unlisted_env("borzoi_x", "b");
-        assert_eq!(repeated, Err(InputError::Repeated("borzoi_x".to_string())));
-        assert!(matches!(
-            BuildInputs::new().unlisted_env("BORZOI_X", "a\0b"),
-            Err(InputError::Unpassable { .. })
-        ));
     }
 
     /// Several real builds at once, as a parallel differential runs them: each

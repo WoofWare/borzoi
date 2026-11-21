@@ -166,13 +166,16 @@ enum Place {
     /// declare after the restore.
     RestoreMetadata,
     /// The environment variables [`Case::variables`], each set as the build's
-    /// (through [`BuildInputs::env`] for a name on the oracle's list, else
-    /// [`BuildInputs::unlisted_env`]) and handed to the evaluation. One the
-    /// oracle refuses, or a second spelling of a name already set, is handed
-    /// to the evaluation alone ([`split_variables`]), and a commit under it
-    /// is a failure unless it is the toolchain's, which the grading holds
-    /// fixed. A commit under variables the derivation admits as inert by
-    /// name ([`claims_inert`]) is held to the plain project's arguments too.
+    /// (through [`BuildInputs::env`]) and handed to the evaluation. One the
+    /// oracle does not take (a name off its list, or a second spelling of a
+    /// name already set) is handed to the evaluation alone
+    /// ([`split_variables`]), so it never reaches a real restore or build,
+    /// and a commit under it is a failure unless it is the toolchain's,
+    /// which the grading holds fixed. A commit under variables none of which
+    /// is an allowed property ([`held_to_plain_arguments`]) must be answered
+    /// and hand fsc the plain project's arguments. The source holds a
+    /// warning ([`WARNING_SOURCE`]), so fsc speaks whatever language it
+    /// prints its banner in (#1129).
     Variables,
 }
 
@@ -256,19 +259,28 @@ fn env_value(i: usize) -> &'static str {
     VALUES[i % VALUES.len()]
 }
 
-/// Whether `case` sets only variables the derivation admits as inert by
-/// name, [`ALLOWED_ENVIRONMENT`] (compared without case, as the derivation
-/// compares them): a build under them must hand fsc exactly what the plain
-/// project's build hands it, not only the same `-o:`.
-fn claims_inert(case: &Case) -> bool {
+/// Whether a commit under `case` must hand fsc exactly what the plain
+/// project's build hands it, not only the same `-o:`: a [`Place::Variables`]
+/// case none of whose variables is an allowed property (compared without
+/// case, as MSBuild compares them), which alone may move fsc's arguments.
+/// Decided by what may move them, not by the list of variables the
+/// derivation calls inert, so a variable it admits by mistake is compared
+/// too.
+fn held_to_plain_arguments(case: &Case) -> bool {
     case.place == Place::Variables
-        && !case.variables.is_empty()
         && case.variables.iter().all(|(name, _)| {
-            ALLOWED_ENVIRONMENT
+            !ALLOWED_PROPERTIES
                 .iter()
-                .any(|allowed| allowed.eq_ignore_ascii_case(name))
+                .any(|(allowed, _)| allowed.eq_ignore_ascii_case(name))
         })
 }
+
+/// The source of a [`Place::Variables`] case's project: it compiles, with
+/// warning FS0020, which fsc reports by its code in every culture, so the
+/// oracle has fsc's sign of having run even where the banner it reads is
+/// translated (#1129). The source is not on fsc's command line, so the
+/// arguments are still the plain project's.
+const WARNING_SOURCE: &str = "module A\nlet x = 1\nx + 1\n";
 
 /// One case per entry of the hostile environment alphabet (`hostile::env`),
 /// its variables set together, and one per entry of the hostile file-name
@@ -914,7 +926,12 @@ fn lay_out(case: &Case, dir: &Path) -> Option<(std::path::PathBuf, BuildInputs)>
         Place::RestoreProps | Place::RestoreItem => {}
         Place::RestoreMetadata => std::fs::write(dir.join("readme.txt"), "").unwrap(),
     }
-    std::fs::write(dir.join("A.fs"), "module A\nlet x = 1\n").unwrap();
+    let source = if case.place == Place::Variables {
+        WARNING_SOURCE
+    } else {
+        "module A\nlet x = 1\n"
+    };
+    std::fs::write(dir.join("A.fs"), source).unwrap();
     let project = dir.join("Demo.fsproj");
     let text = format!(
         "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup>\
@@ -1107,7 +1124,7 @@ fn restore(project: &Path, inputs: &BuildInputs) {
         .unwrap_or_else(|e| panic!("restoring {}: {e}", project.display()));
 }
 
-/// The variables of `case` the oracle refuses to set, which the evaluation
+/// The variables of `case` the oracle does not take, which the evaluation
 /// alone is handed.
 fn unsettable(case: &Case) -> Vec<(String, String)> {
     split_variables(case)
@@ -1115,27 +1132,23 @@ fn unsettable(case: &Case) -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
-/// `case`'s variables, in order, as the build's inputs where the oracle sets
-/// them (through [`BuildInputs::env`] for a name on its list, else
-/// [`BuildInputs::unlisted_env`]), and the rest: one the oracle refuses, and
-/// a second spelling of a name already set (which a build's environment
-/// holds, and the oracle does not take twice). `None` when a value cannot be
+/// `case`'s variables, in order, as the build's inputs where the oracle takes
+/// them ([`BuildInputs::env`]: a name on its reviewed list), and the rest: a
+/// name off the list, and a second spelling of a name already set (which a
+/// build's environment holds, and the oracle does not take twice). The rest
+/// reach the evaluation alone, never a real restore or build: a name off the
+/// list may choose what the build imports. `None` when a value cannot be
 /// carried.
 fn split_variables(case: &Case) -> Option<(BuildInputs, Vec<(String, String)>)> {
     let mut inputs = BuildInputs::new();
     let mut rest = Vec::new();
     for (name, value) in &case.variables {
-        let set = match inputs.clone().env(name, value) {
-            Err(InputError::NotAnInput(_)) => inputs.clone().unlisted_env(name, value),
-            other => other,
-        };
-        match set {
+        match inputs.clone().env(name, value) {
             Ok(next) => inputs = next,
-            Err(InputError::Refused(_) | InputError::Repeated(_)) => {
+            Err(InputError::NotAnInput(_) | InputError::Repeated(_)) => {
                 rest.push((name.clone(), value.clone()));
             }
             Err(InputError::Unpassable { .. }) => return None,
-            Err(e) => panic!("{}: {e:?}", case.label()),
         }
     }
     Some((inputs, rest))
@@ -1314,12 +1327,12 @@ fn grade(case: &Case) -> Result<Outcome, String> {
                     ));
                 }
             }
-            if claims_inert(case) {
+            if held_to_plain_arguments(case) {
                 let ours = normalised_arguments(&build, dir);
                 let plain = plain_arguments();
                 if ours != plain {
                     return Err(format!(
-                        "{}: a variable admitted as inert moved fsc's arguments\nplain:\n{plain}\nwith it:\n{ours}",
+                        "{}: a variable that is no allowed property moved fsc's arguments\nplain:\n{plain}\nwith it:\n{ours}",
                         case.label()
                     ));
                 }
@@ -1330,10 +1343,12 @@ fn grade(case: &Case) -> Result<Outcome, String> {
                 .insert(build.msbuild_directory.clone());
             Ok(Outcome::Agreed)
         }
-        Err(decline) if case.must_commit.is_some() => Err(format!(
-            "{}: committed {name:?}, but the oracle did not answer: {decline:?}",
-            case.label()
-        )),
+        Err(decline) if case.must_commit.is_some() || held_to_plain_arguments(case) => {
+            Err(format!(
+                "{}: committed {name:?}, but the oracle did not answer: {decline:?}",
+                case.label()
+            ))
+        }
         Err(FscArgsDecline::NoBuild(why) | FscArgsDecline::Unanswered(why)) => {
             let first = why.first().map(String::as_str).unwrap_or_default();
             eprintln!(
@@ -1382,32 +1397,71 @@ fn plain_arguments() -> String {
         .clone()
 }
 
+/// How many cases are graded at once: `BORZOI_FSC_NAME_THREADS`, else 4.
+fn threads() -> usize {
+    let threads = std::env::var("BORZOI_FSC_NAME_THREADS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(4);
+    assert!(threads > 0, "BORZOI_FSC_NAME_THREADS must be at least 1");
+    threads
+}
+
 /// Grade `cases` on a few threads; the census, and every failure.
 fn grade_all(cases: &[Case]) -> (BTreeMap<(Place, Outcome), usize>, Vec<String>) {
+    let mut census = BTreeMap::new();
+    let mut failures = Vec::new();
+    let graded = in_parallel(threads(), cases.len(), |i| grade(&cases[i]));
+    for (case, graded) in cases.iter().zip(graded) {
+        match graded {
+            Ok(outcome) => *census.entry((case.place, outcome)).or_insert(0) += 1,
+            Err(failure) => failures.push(failure),
+        }
+    }
+    (census, failures)
+}
+
+/// `f` of each index below `count`, on `threads` threads at most, in index
+/// order: the one pool every grading path runs its cases on.
+fn in_parallel<R: Send>(threads: usize, count: usize, f: impl Fn(usize) -> R + Sync) -> Vec<R> {
     let next = AtomicUsize::new(0);
-    let results = Mutex::new((BTreeMap::new(), Vec::new()));
+    let out = Mutex::new(Vec::with_capacity(count));
     std::thread::scope(|scope| {
-        let threads: usize = std::env::var("BORZOI_FSC_NAME_THREADS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(4);
-        assert!(threads > 0, "BORZOI_FSC_NAME_THREADS must be at least 1");
         for _ in 0..threads {
             scope.spawn(|| {
                 loop {
                     let i = next.fetch_add(1, Ordering::Relaxed);
-                    let Some(case) = cases.get(i) else { break };
-                    let graded = grade(case);
-                    let mut results = results.lock().unwrap();
-                    match graded {
-                        Ok(outcome) => *results.0.entry((case.place, outcome)).or_insert(0) += 1,
-                        Err(failure) => results.1.push(failure),
+                    if i >= count {
+                        break;
                     }
+                    let r = f(i);
+                    out.lock().unwrap().push((i, r));
                 }
             });
         }
     });
-    results.into_inner().unwrap()
+    let mut out = out.into_inner().unwrap();
+    out.sort_by_key(|(i, _)| *i);
+    assert_eq!(out.len(), count, "a case went ungraded");
+    out.into_iter().map(|(_, r)| r).collect()
+}
+
+/// The pool runs no more at once than it is given threads, and answers in
+/// order.
+#[test]
+fn the_pool_keeps_to_its_thread_count() {
+    for threads in [1, 3] {
+        let (active, most) = (AtomicUsize::new(0), AtomicUsize::new(0));
+        let out = in_parallel(threads, 24, |i| {
+            let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+            most.fetch_max(now, Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            active.fetch_sub(1, Ordering::SeqCst);
+            i
+        });
+        assert_eq!(out, (0..24).collect::<Vec<_>>());
+        assert!(most.load(Ordering::SeqCst) <= threads, "{threads}");
+    }
 }
 
 /// One case per hostile property value of the shared library
@@ -1502,6 +1556,9 @@ fn deep_hostile_values() {
 #[test]
 #[ignore = "every hostile environment and every hostile name as a variable: one restore each"]
 fn deep_hostile_environment() {
+    if census_stands_aside() {
+        return;
+    }
     let work: Vec<(Case, Option<Dimension>)> = hostile_environment_cases()
         .into_iter()
         .map(|(case, dimension)| (case, Some(dimension)))
@@ -1528,25 +1585,14 @@ fn grade_environment_census(work: &[(Case, Option<Dimension>)], update: &str) {
             "the derivation takes the environment as UTF-8 text, as its caller reads it",
         )],
     );
-    let next = AtomicUsize::new(0);
-    let graded = Mutex::new(Vec::new());
-    std::thread::scope(|scope| {
-        for _ in 0..4 {
-            scope.spawn(|| {
-                while let Some((case, dimension)) = work.get(next.fetch_add(1, Ordering::Relaxed)) {
-                    let outcome = grade(case);
-                    graded.lock().unwrap().push((outcome, *dimension));
-                }
-            });
-        }
-    });
+    let graded = in_parallel(threads(), work.len(), |i| grade(&work[i].0));
     let mut failures = Vec::new();
-    for (outcome, dimension) in graded.into_inner().unwrap() {
+    for (outcome, (_, dimension)) in graded.into_iter().zip(work) {
         match outcome {
             Ok(outcome) => {
                 let outcome = format!("{outcome:?}");
                 census.reached(
-                    &dimension.into_iter().collect(),
+                    &dimension.iter().copied().collect(),
                     outcome.split('(').next().unwrap_or_default(),
                 );
             }
@@ -1555,6 +1601,78 @@ fn grade_environment_census(work: &[(Case, Option<Dimension>)], update: &str) {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
     census.finish(update);
+}
+
+/// Only names on the oracle's reviewed list reach a real restore or build:
+/// every other variable a case sets (an SDK import selector such as
+/// `LanguageTargets`, a hostile environment's) is handed to the evaluation
+/// alone, where a commit under it fails the case.
+#[test]
+fn variables_off_the_oracle_list_never_reach_the_build() {
+    let selector = Case::variables(&[("LanguageTargets", "/nonexistent/borzoi/Evil.targets")]);
+    let all: Vec<Case> = cases()
+        .into_iter()
+        .chain(
+            hostile_environment_cases()
+                .into_iter()
+                .map(|(case, _)| case),
+        )
+        .chain([selector.clone()])
+        .filter(|case| case.place == Place::Variables)
+        .collect();
+    for case in &all {
+        let Some((inputs, rest)) = split_variables(case) else {
+            continue;
+        };
+        for (name, _) in inputs.env_vars() {
+            assert!(
+                INPUT_NAMES.iter().any(|n| n.eq_ignore_ascii_case(&name)),
+                "{}: {name} reaches the build",
+                case.label()
+            );
+        }
+        assert_eq!(
+            inputs.env_vars().len() + rest.len(),
+            case.variables.len(),
+            "{}",
+            case.label()
+        );
+    }
+    assert_eq!(
+        unsettable(&selector),
+        vec![(
+            "LanguageTargets".to_string(),
+            "/nonexistent/borzoi/Evil.targets".to_string()
+        )]
+    );
+}
+
+/// A commit under variables none of which is an allowed property is held to
+/// the plain project's arguments, whatever list the derivation keeps them
+/// on: a name it might admit by mistake (`WarningLevel`), one it admits as
+/// inert (`LANG`), and two together. A case setting an allowed property, in
+/// any case, may move them.
+#[test]
+fn variables_that_are_no_allowed_property_are_held_to_the_plain_arguments() {
+    for variables in [
+        &[("WarningLevel", "5")][..],
+        &[("LANG", "Evil")],
+        &[("LANG", "Evil"), ("WarningLevel", "5")],
+    ] {
+        assert!(
+            held_to_plain_arguments(&Case::variables(variables)),
+            "{variables:?}"
+        );
+    }
+    for variables in [
+        &[("AssemblyName", "Evil")][..],
+        &[("LANG", "Evil"), ("assemblyname", "Evil")],
+    ] {
+        assert!(
+            !held_to_plain_arguments(&Case::variables(variables)),
+            "{variables:?}"
+        );
+    }
 }
 
 /// Every variable the grading's own builds run under is one the derivation
@@ -1569,21 +1687,35 @@ fn the_grading_environment_is_admitted() {
     }
 }
 
-/// `cases`, but for those `BORZOI_FSC_NAME_ONLY` (a name) leaves out.
+/// The name `BORZOI_FSC_NAME_ONLY` selects, if any.
+fn only_name() -> Option<String> {
+    std::env::var("BORZOI_FSC_NAME_ONLY").ok()
+}
+
+/// `cases`, but for those `BORZOI_FSC_NAME_ONLY` (a name) leaves out
+/// ([`only_named`]).
 fn only(cases: Vec<Case>) -> Vec<Case> {
-    only_named(cases, std::env::var("BORZOI_FSC_NAME_ONLY").ok().as_deref())
+    only_named(cases, only_name().as_deref())
         .unwrap_or_else(|e| panic!("BORZOI_FSC_NAME_ONLY: {e}"))
 }
 
-/// `cases`, but for those that set no name `name` (as the case's name, or one
-/// of its variables'), when one is given. Selecting nothing is a mistake, so
-/// it is an error rather than a run that grades nothing.
+/// `cases` when no name is given. Given `name`, the cases of `cases` and of
+/// [`hostile_environment_cases`] that set it (as the case's name, or one of
+/// its variables'), so a focused run reaches a hostile environment's variable
+/// too; the census tests leave such a run to this selection, as a census is
+/// checked only whole. Selecting nothing is a mistake, so it is an error
+/// rather than a run that grades nothing.
 fn only_named(cases: Vec<Case>, name: Option<&str>) -> Result<Vec<Case>, String> {
     let Some(name) = name else {
         return Ok(cases);
     };
     let kept: Vec<Case> = cases
         .into_iter()
+        .chain(
+            hostile_environment_cases()
+                .into_iter()
+                .map(|(case, _)| case),
+        )
         .filter(|c| c.name == name || c.variables.iter().any(|(n, _)| n == name))
         .collect();
     if kept.is_empty() {
@@ -1592,17 +1724,36 @@ fn only_named(cases: Vec<Case>, name: Option<&str>) -> Result<Vec<Case>, String>
     Ok(kept)
 }
 
-/// Selecting a variable's name keeps the cases that set it, and selecting a
-/// name no case sets is an error.
+/// Selecting a variable's name keeps the cases that set it, a hostile
+/// environment's variable among them, and selecting a name no case sets is
+/// an error.
 #[test]
 fn a_variable_is_selected_by_its_name() {
-    let kept = only_named(cases(), Some("LANG")).unwrap();
-    assert!(!kept.is_empty());
-    assert!(
-        kept.iter()
-            .all(|c| c.variables.iter().any(|(n, _)| n == "LANG"))
-    );
+    for name in ["LANG", "FscToolExe"] {
+        let kept = only_named(cases(), Some(name)).unwrap();
+        assert!(!kept.is_empty(), "{name}");
+        assert!(
+            kept.iter()
+                .all(|c| c.variables.iter().any(|(n, _)| n == name)),
+            "{name}"
+        );
+    }
     assert!(only_named(cases(), Some("BORZOI_NO_CASE_SETS_THIS")).is_err());
+}
+
+/// Whether a census test is to stand aside: a focused run
+/// (`BORZOI_FSC_NAME_ONLY`) grades its selection through
+/// [`committed_names_survive_perturbation`], and a census is checked only
+/// whole.
+fn census_stands_aside() -> bool {
+    let focused = only_name().is_some();
+    if focused {
+        eprintln!(
+            "BORZOI_FSC_NAME_ONLY is set: committed_names_survive_perturbation grades the \
+             selected cases, and the census needs an unfiltered run"
+        );
+    }
+    focused
 }
 
 fn run(cases: &[Case]) {
@@ -1672,6 +1823,9 @@ fn committed_names_survive_perturbation() {
 /// grades every one).
 #[test]
 fn hostile_environments_by_dimension() {
+    if census_stands_aside() {
+        return;
+    }
     let mut dimensions = BTreeSet::new();
     let work: Vec<(Case, Option<Dimension>)> = hostile_environment_cases()
         .into_iter()
