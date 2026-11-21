@@ -1796,7 +1796,18 @@ impl FoldState {
             .and_then(|(_, sig)| sig.sig_screen.as_deref());
         self.preceding
             .extend_with(surface, names, paired_screen, slot.partner);
-        self.ext.absorb(&surface.extension_names());
+        // A paired signature's declarations reach later files only once its
+        // implementation is checked (FCS adds the signature to the
+        // environment later files read at the implementation's slot), so its
+        // extension names join the union there, before the implementation's
+        // own. An unpaired signature's join at its own slot, which can only
+        // decline more.
+        if let Some((_, sig)) = slot.paired_signature {
+            self.ext.absorb(&sig.extension_names());
+        }
+        if !(matches!(&slot.file.file, SourceFile::Sig(_)) && slot.partner.is_some()) {
+            self.ext.absorb(&surface.extension_names());
+        }
         // An unpaired headerless implementation: its values live under the
         // implicit filename module, which sema's export model cannot address
         // — shadow the path so a colliding assembly member defers rather

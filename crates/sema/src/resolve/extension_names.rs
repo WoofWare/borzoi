@@ -460,7 +460,7 @@ enum AugmentationMember {
 /// both groups, an `override` counts as an instance name, and a shape FCS
 /// rejects in an augmentation still names its name.
 fn augmentation_member(m: &MemberDefn) -> AugmentationMember {
-    use borzoi_cst::syntax::MemberLeading;
+    use borzoi_cst::syntax::{MemberLeading, MemberSigLeading};
     let group = match m {
         MemberDefn::Member(mm) if mm.leading_keyword() == MemberLeading::StaticMember => {
             Group::Static
@@ -469,9 +469,23 @@ fn augmentation_member(m: &MemberDefn) -> AugmentationMember {
         MemberDefn::GetSetMember(g) if g.is_static() => Group::Static,
         MemberDefn::AutoProperty(a) if a.is_static() => Group::Static,
         MemberDefn::GetSetMember(_) | MemberDefn::AutoProperty(_) => Group::Instance,
+        // A signature's member: `static` makes it a static, anything else
+        // (`member`, `abstract`, `override`, `default`) an instance member.
+        // A constructor joins no group ([`member_head`]).
+        MemberDefn::MemberSig(ms) => match ms.leading_keyword() {
+            MemberSigLeading::Static
+            | MemberSigLeading::StaticMember
+            | MemberSigLeading::StaticAbstract
+            | MemberSigLeading::StaticAbstractMember => Group::Static,
+            MemberSigLeading::Member
+            | MemberSigLeading::Abstract
+            | MemberSigLeading::AbstractMember
+            | MemberSigLeading::Override
+            | MemberSigLeading::Default
+            | MemberSigLeading::New => Group::Instance,
+        },
         MemberDefn::AbstractSlot(_)
         | MemberDefn::ValField(_)
-        | MemberDefn::MemberSig(_)
         | MemberDefn::Inherit(_)
         | MemberDefn::Interface(_)
         | MemberDefn::LetBindings(_)
@@ -541,6 +555,12 @@ fn member_head(m: &MemberDefn) -> MemberHead {
         MemberDefn::AutoProperty(a) => token(a.ident()),
         MemberDefn::AbstractSlot(s) => token(s.val_sig().and_then(|v| v.ident())),
         MemberDefn::ValField(v) => token(v.ident()),
+        // `new: … -> T`, a signature's constructor, has no identifier.
+        MemberDefn::MemberSig(ms)
+            if ms.leading_keyword() == borzoi_cst::syntax::MemberSigLeading::New =>
+        {
+            MemberHead::Constructor
+        }
         MemberDefn::MemberSig(ms) => token(ms.val_sig().and_then(|v| v.ident())),
         MemberDefn::Inherit(_) => MemberHead::Inherit,
         MemberDefn::LetBindings(_) | MemberDefn::Do(_) => MemberHead::Local,
@@ -624,6 +644,30 @@ mod tests {
         assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
         let n = file_extension_names(&parsed.root, false, &|_, _: MarkerQuestion| false);
         assert!(n.may_have("ContainsValue", false), "{n:?}");
+    }
+
+    /// A signature's members join the group their keyword names, and its
+    /// constructor joins none: a `new` names nothing, rather than making the
+    /// names unknowable.
+    #[test]
+    fn a_signature_augmentation_names_each_member_in_its_group() {
+        let parsed = borzoi_cst::parser::parse_sig(
+            "namespace N
+type T
+type T with
+    new: unit -> T
+    member I: int -> int
+    \
+             static member S: int -> int
+",
+        );
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+        let n = file_extension_names(&parsed.root, false, &|_, _: MarkerQuestion| false);
+        let (instance, statics) = known(&n);
+        assert!(instance.contains(&"I".to_owned()), "{n:?}");
+        assert!(!instance.contains(&"S".to_owned()), "{n:?}");
+        assert!(statics.contains(&"S".to_owned()), "{n:?}");
+        assert!(!statics.contains(&"I".to_owned()), "{n:?}");
     }
 
     #[test]

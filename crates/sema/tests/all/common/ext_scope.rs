@@ -59,6 +59,8 @@ pub struct Checked {
     pub unsound: Vec<String>,
     /// Per probed call, in order.
     pub calls: Vec<CallOutcome>,
+    /// Every error FCS reported, as `<file>: FS<code>`.
+    pub fcs_errors: Vec<String>,
 }
 
 /// The method a call's text names: the member accessed on a parenthesised
@@ -181,6 +183,7 @@ pub fn check_files(
     let _ = std::fs::remove_dir_all(&root);
 
     let mut unsound = Vec::new();
+    let mut fcs_errors = Vec::new();
     let mut fcs_at: Vec<Option<String>> = vec![None; probes.len()];
     for (idx, (types_json, binders_json)) in dumps.iter().enumerate() {
         let (path, source) = &sources[idx];
@@ -192,6 +195,11 @@ pub fn check_files(
             ));
             continue;
         };
+        fcs_errors.extend(
+            dump.errors
+                .iter()
+                .map(|e| format!("{path}: FS{:04}", e.code)),
+        );
         for (k, probe) in probes.iter().enumerate().filter(|(_, p)| p.file == idx) {
             fcs_at[k] = probe_range(source, probe).and_then(|r| {
                 dump.types
@@ -284,10 +292,12 @@ pub fn check_files(
         return Checked {
             unsound,
             calls: Vec::new(),
+            fcs_errors,
         };
     }
     Checked {
         unsound,
         calls: outcomes.into_iter().flatten().collect(),
+        fcs_errors,
     }
 }
