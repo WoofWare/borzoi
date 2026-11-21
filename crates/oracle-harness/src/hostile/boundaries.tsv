@@ -221,7 +221,7 @@ crates/msbuild/tests/sdk_paths_root_choice_diff.rs	pending	2
 crates/msbuild/tests/startup_directory_diff.rs	pending	2
 crates/msbuild/tests/taint_closure_metamorphic.rs	pending	2
 crates/msbuild/tests/toolset_seed_provenance.rs	pending	2
-crates/msbuild/tests/using_task_registration_diff.rs	draws	using_task_registration=value
+crates/msbuild/tests/using_task_registration_diff.rs	draws	using_task_composite=value;using_task_registration=value
 crates/msbuild/tests/workload_locator_diff.rs	pending	2
 crates/msbuild/tests/xml_nesting_pump.rs	pending	2
 crates/nuget/src/dgspec/xml_nesting_pump.rs	not-applicable	it pumps the nesting depth of fixed documents, which no spelling of their text changes; nuspec_diff and settings_diff draw the XML spellings
