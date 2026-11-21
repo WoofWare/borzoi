@@ -40,7 +40,10 @@ property function, no build code), which the generators assert. Callers set
 globals and environment variables only through `BuildInputs`, which refuses
 names that choose the toolchain, the compiler, the restore or MSBuild's
 machinery. The build's own environment is closed too: `build_environment`
-carries only `BUILD_ENVIRONMENT_NAMES`. `borzoi-msbuild`'s
+carries only `BUILD_ENVIRONMENT_NAMES`, and every build starts from
+`msbuild_command`, which launches the .NET host itself rather than a
+`dotnet` on `PATH` (the devshell's is a bash wrapper, which rewrites `PWD`,
+`OLDPWD` and `SHLVL`), so the build sees exactly the variables it is handed. `borzoi-msbuild`'s
 `fsc_args_oracle_calibration` holds the reading to real compiling builds
 (the arguments `-getItem` reports, and the file fsc writes).
 

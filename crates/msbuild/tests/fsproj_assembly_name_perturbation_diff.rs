@@ -43,7 +43,7 @@ use borzoi_oracle_harness::hostile::{Dimension, coverage};
 use borzoi_oracle_harness::hostile::{env as hostile_env, name as hostile_name};
 use borzoi_oracle_harness::msbuild_oracle::{
     BUILD_ENVIRONMENT_NAMES, BuildInputs, FscArgsDecline, FscArgsRequest, INPUT_NAMES, InputError,
-    build_environment, fsc_args,
+    build_environment, fsc_args, msbuild_command, msbuild_user_extensions_path,
 };
 use common::SplitMix64;
 use common::assembly_name::{self, Sdks};
@@ -275,6 +275,23 @@ fn held_to_plain_arguments(case: &Case) -> bool {
         })
 }
 
+/// Whether the grading holds the variable `name` fixed, so a commit under a
+/// value of it the oracle cannot build is counted ([`Outcome::HeldFixed`])
+/// rather than failed: the build environment's own names
+/// ([`BUILD_ENVIRONMENT_NAMES`]), `MSBuildUserExtensionsPath` (which MSBuild
+/// computes for itself), and the .NET host's and NuGet's `DOTNET_*` and
+/// `NUGET_*` families, which no case here builds under. Pinned here, apart
+/// from the derivation's `toolchain_variable`, so a variable the derivation
+/// comes to admit as the toolchain's by mistake fails rather than is excused.
+/// The families are as wide as the derivation's rule today; #1064 narrows
+/// that rule to exact names, and this list with it.
+fn held_fixed(name: &str) -> bool {
+    BUILD_ENVIRONMENT_NAMES.contains(&name)
+        || name == "MSBuildUserExtensionsPath"
+        || name.starts_with("DOTNET_")
+        || name.starts_with("NUGET_")
+}
+
 /// The source of a [`Place::Variables`] case's project: it compiles, with
 /// warning FS0020, which fsc reports by its code in every culture, so the
 /// oracle has fsc's sign of having run even where the banner it reads is
@@ -282,25 +299,32 @@ fn held_to_plain_arguments(case: &Case) -> bool {
 /// arguments are still the plain project's.
 const WARNING_SOURCE: &str = "module A\nlet x = 1\nx + 1\n";
 
+/// The name the hostile file-name templates are rendered on as variables.
+const PLAIN_VARIABLE: &str = "BorzoiVar";
+
 /// One case per entry of the hostile environment alphabet (`hostile::env`),
 /// its variables set together, and one per entry of the hostile file-name
-/// alphabet (`hostile::name`) rendered as a variable's name, each with the
-/// dimension it stands for. A name the environment cannot carry (empty, or
-/// holding `=` or NUL) or that is not UTF-8 has no case.
+/// alphabet (`hostile::name`) rendered on [`PLAIN_VARIABLE`] as a variable's
+/// name, each with the dimension it stands for. A template that renders the
+/// plain name (no draw of its dimension), a name the environment cannot
+/// carry (empty, or holding `=` or NUL) and one that is not UTF-8 have no
+/// case.
 fn hostile_environment_cases() -> Vec<(Case, Dimension)> {
     let mut out = Vec::new();
     for entry in hostile_env::alphabet().entries() {
         out.push((Case::variables(entry.value), entry.dimension));
     }
-    for (i, entry) in hostile_name::alphabet().entries().iter().enumerate() {
-        let rendered = entry.value.render("BorzoiVar", "");
-        let Some(name) = rendered.to_str() else {
-            continue;
-        };
-        if name.is_empty() || name.contains(['=', '\0']) {
+    for (i, entry) in hostile_name::as_text(PLAIN_VARIABLE, "")
+        .into_iter()
+        .enumerate()
+    {
+        if entry.value.is_empty() || entry.value.contains(['=', '\0']) {
             continue;
         }
-        out.push((Case::variables(&[(name, env_value(i))]), entry.dimension));
+        out.push((
+            Case::variables(&[(&entry.value, env_value(i))]),
+            entry.dimension,
+        ));
     }
     out
 }
@@ -1034,11 +1058,8 @@ fn library_dll() -> &'static [u8] {
              <ItemGroup><Compile Include=\"L.fs\" /></ItemGroup></Project>",
         )
         .unwrap();
-        let mut cmd = std::process::Command::new("dotnet");
-        cmd.current_dir(dir)
-            .args(["msbuild", "-nodeReuse:false", "-restore", "-t:Build"])
-            .env_clear()
-            .envs(build_environment());
+        let mut cmd = msbuild_command(dir, &BuildInputs::new());
+        cmd.args(["-nodeReuse:false", "-restore", "-t:Build"]);
         BoundedCommand::new(cmd)
             .timeout(std::time::Duration::from_secs(900))
             .run_ok("building the perturbed package's library");
@@ -1110,14 +1131,12 @@ fn stored_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
 /// would; a failed restore leaves the evaluation unrestored, which the
 /// derivation declines.
 fn restore(project: &Path, inputs: &BuildInputs) {
-    let mut cmd = std::process::Command::new("dotnet");
-    cmd.current_dir(project.parent().unwrap())
-        .args(["msbuild", "-nodeReuse:false", "-t:Restore"]);
+    let mut cmd = msbuild_command(project.parent().unwrap(), inputs);
+    cmd.args(["-nodeReuse:false", "-t:Restore"]);
     for (name, value) in inputs.globals() {
         cmd.arg(format!("-p:{name}={value}"));
     }
-    cmd.arg(project).env_clear().envs(build_environment());
-    cmd.envs(inputs.env_vars());
+    cmd.arg(project);
     BoundedCommand::new(cmd)
         .timeout(std::time::Duration::from_secs(900))
         .run()
@@ -1176,7 +1195,7 @@ fn ours_under(
     // hand it to our evaluation.
     environment.insert(
         "MSBuildUserExtensionsPath".to_string(),
-        common::msbuild_user_extensions_path().to_string(),
+        msbuild_user_extensions_path().to_string(),
     );
     environment.extend(inputs.env_vars());
     environment.extend(extra.iter().cloned());
@@ -1248,7 +1267,7 @@ fn grade(case: &Case) -> Result<Outcome, String> {
         ));
     }
     if !extra.is_empty() {
-        return if extra.iter().all(|(name, _)| toolchain_variable(name)) {
+        return if extra.iter().all(|(name, _)| held_fixed(name)) {
             Ok(Outcome::HeldFixed)
         } else {
             Err(format!(
@@ -1411,7 +1430,7 @@ fn threads() -> usize {
 fn grade_all(cases: &[Case]) -> (BTreeMap<(Place, Outcome), usize>, Vec<String>) {
     let mut census = BTreeMap::new();
     let mut failures = Vec::new();
-    let graded = in_parallel(threads(), cases.len(), |i| grade(&cases[i]));
+    let graded = in_parallel(grading_budget(), cases.len(), |i| grade(&cases[i]));
     for (case, graded) in cases.iter().zip(graded) {
         match graded {
             Ok(outcome) => *census.entry((case.place, outcome)).or_insert(0) += 1,
@@ -1421,20 +1440,66 @@ fn grade_all(cases: &[Case]) -> (BTreeMap<(Place, Outcome), usize>, Vec<String>)
     (census, failures)
 }
 
-/// `f` of each index below `count`, on `threads` threads at most, in index
-/// order: the one pool every grading path runs its cases on.
-fn in_parallel<R: Send>(threads: usize, count: usize, f: impl Fn(usize) -> R + Sync) -> Vec<R> {
+/// How many cases may be graded at once, shared by every caller that holds
+/// it: tests the harness runs side by side take their permits from one
+/// budget, so together they keep to it.
+struct Budget {
+    permits: usize,
+    free: Mutex<usize>,
+    freed: std::sync::Condvar,
+}
+
+impl Budget {
+    fn new(permits: usize) -> Budget {
+        assert!(permits > 0);
+        Budget {
+            permits,
+            free: Mutex::new(permits),
+            freed: std::sync::Condvar::new(),
+        }
+    }
+
+    /// `f`, run under one permit, waiting for one to come free.
+    fn hold<R>(&self, f: impl FnOnce() -> R) -> R {
+        struct Permit<'a>(&'a Budget);
+        impl Drop for Permit<'_> {
+            fn drop(&mut self) {
+                *self.0.free.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+                self.0.freed.notify_one();
+            }
+        }
+        let mut free = self.free.lock().unwrap_or_else(|e| e.into_inner());
+        while *free == 0 {
+            free = self.freed.wait(free).unwrap_or_else(|e| e.into_inner());
+        }
+        *free -= 1;
+        drop(free);
+        let _permit = Permit(self);
+        f()
+    }
+}
+
+/// The budget every grading path in this test binary shares:
+/// `BORZOI_FSC_NAME_THREADS` permits.
+fn grading_budget() -> &'static Budget {
+    static BUDGET: std::sync::OnceLock<Budget> = std::sync::OnceLock::new();
+    BUDGET.get_or_init(|| Budget::new(threads()))
+}
+
+/// `f` of each index below `count`, each under a permit of `budget`, in
+/// index order: the one pool every grading path runs its cases on.
+fn in_parallel<R: Send>(budget: &Budget, count: usize, f: impl Fn(usize) -> R + Sync) -> Vec<R> {
     let next = AtomicUsize::new(0);
     let out = Mutex::new(Vec::with_capacity(count));
     std::thread::scope(|scope| {
-        for _ in 0..threads {
+        for _ in 0..budget.permits.min(count) {
             scope.spawn(|| {
                 loop {
                     let i = next.fetch_add(1, Ordering::Relaxed);
                     if i >= count {
                         break;
                     }
-                    let r = f(i);
+                    let r = budget.hold(|| f(i));
                     out.lock().unwrap().push((i, r));
                 }
             });
@@ -1446,21 +1511,29 @@ fn in_parallel<R: Send>(threads: usize, count: usize, f: impl Fn(usize) -> R + S
     out.into_iter().map(|(_, r)| r).collect()
 }
 
-/// The pool runs no more at once than it is given threads, and answers in
-/// order.
+/// Two callers sharing a budget run no more at once, between them, than its
+/// permits, and each is answered in order.
 #[test]
-fn the_pool_keeps_to_its_thread_count() {
-    for threads in [1, 3] {
+fn callers_sharing_a_budget_keep_to_it() {
+    for permits in [1, 3] {
+        let budget = Budget::new(permits);
         let (active, most) = (AtomicUsize::new(0), AtomicUsize::new(0));
-        let out = in_parallel(threads, 24, |i| {
+        let work = |i: usize| {
             let now = active.fetch_add(1, Ordering::SeqCst) + 1;
             most.fetch_max(now, Ordering::SeqCst);
             std::thread::sleep(std::time::Duration::from_millis(2));
             active.fetch_sub(1, Ordering::SeqCst);
             i
+        };
+        std::thread::scope(|scope| {
+            let callers: Vec<_> = (0..2)
+                .map(|_| scope.spawn(|| in_parallel(&budget, 24, work)))
+                .collect();
+            for caller in callers {
+                assert_eq!(caller.join().unwrap(), (0..24).collect::<Vec<_>>());
+            }
         });
-        assert_eq!(out, (0..24).collect::<Vec<_>>());
-        assert!(most.load(Ordering::SeqCst) <= threads, "{threads}");
+        assert!(most.load(Ordering::SeqCst) <= permits, "{permits}");
     }
 }
 
@@ -1585,7 +1658,7 @@ fn grade_environment_census(work: &[(Case, Option<Dimension>)], update: &str) {
             "the derivation takes the environment as UTF-8 text, as its caller reads it",
         )],
     );
-    let graded = in_parallel(threads(), work.len(), |i| grade(&work[i].0));
+    let graded = in_parallel(grading_budget(), work.len(), |i| grade(&work[i].0));
     let mut failures = Vec::new();
     for (outcome, (_, dimension)) in graded.into_iter().zip(work) {
         match outcome {
@@ -1675,6 +1748,104 @@ fn variables_that_are_no_allowed_property_are_held_to_the_plain_arguments() {
     }
 }
 
+/// `value` as MSBuild reads it back: each `%` and two hexadecimal digits
+/// decoded to the byte they name (an environment variable's value is taken
+/// as escaped text, as a property written in a project is).
+fn unescaped(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = |b: u8| (b as char).to_digit(16);
+        let digits = (
+            bytes.get(i + 1).copied().and_then(hex),
+            bytes.get(i + 2).copied().and_then(hex),
+        );
+        match digits {
+            (Some(high), Some(low)) if bytes[i] == b'%' => {
+                out.push((high * 16 + low) as u8);
+                i += 3;
+            }
+            _ => {
+                out.push(bytes[i]);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).expect("the values decode to UTF-8")
+}
+
+/// The build sees each variable the derivation admits as inert by name
+/// exactly as a case sets it (as MSBuild reads its value back,
+/// [`unescaped`]): a commit under one is graded under the value
+/// the evaluation was handed, not one a launcher put in its place. Each
+/// name at each value, set together, but for the locale's (`LANG`, `LC_*`):
+/// .NET takes their values for a culture and stops when it cannot make one,
+/// so each is read alone, at a value that names none.
+#[test]
+fn the_build_sees_each_variable_as_set() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let dir = host_fs::canonicalize(tmp.path()).unwrap();
+    std::fs::write(dir.join("Probe.proj"), "<Project/>").unwrap();
+    let locale = |name: &str| name == "LANG" || name.starts_with("LC_");
+    let mut probes: Vec<(Vec<&str>, &str)> = VALUES
+        .iter()
+        .map(|value| {
+            let names = ALLOWED_ENVIRONMENT
+                .iter()
+                .copied()
+                .filter(|name| !locale(name))
+                .collect();
+            (names, *value)
+        })
+        .collect();
+    probes.extend(
+        ALLOWED_ENVIRONMENT
+            .iter()
+            .filter(|name| locale(name))
+            .map(|name| (vec![*name], "Evil")),
+    );
+    let mut failures = Vec::new();
+    for (names, value) in &probes {
+        let mut inputs = BuildInputs::new();
+        for name in names {
+            inputs = inputs.env(name, value).unwrap();
+        }
+        let mut cmd = msbuild_command(&dir, &inputs);
+        cmd.arg("-nologo");
+        for name in names {
+            cmd.arg(format!("-getProperty:{name}"));
+        }
+        cmd.arg("Probe.proj");
+        let out = BoundedCommand::new(cmd)
+            .timeout(std::time::Duration::from_secs(300))
+            .run_ok("reading the build's view of the environment");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        // One property is printed bare; several, as JSON.
+        let seen = |name: &str| -> Option<String> {
+            if names.len() == 1 {
+                return Some(stdout.trim_end_matches(['\r', '\n']).to_string());
+            }
+            let json: serde_json::Value =
+                serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("{e}: {stdout}"));
+            json["Properties"][name].as_str().map(str::to_string)
+        };
+        for name in names {
+            let seen = seen(name);
+            if seen.as_deref() != Some(unescaped(value).as_str()) {
+                failures.push(format!("{name} = {value:?}: the build saw {seen:?}"));
+            }
+        }
+    }
+    assert!(
+        ALLOWED_ENVIRONMENT
+            .iter()
+            .all(|name| probes.iter().any(|(names, _)| names.contains(name))),
+        "a name went unread"
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// Every variable the grading's own builds run under is one the derivation
 /// admits, so no case declines for the grading's environment alone.
 #[test]
@@ -1690,6 +1861,45 @@ fn the_grading_environment_is_admitted() {
 /// The name `BORZOI_FSC_NAME_ONLY` selects, if any.
 fn only_name() -> Option<String> {
     std::env::var("BORZOI_FSC_NAME_ONLY").ok()
+}
+
+/// Every case a run that records an SDK as graded must pass: [`cases`] and
+/// every hostile environment.
+fn certification_cases() -> Vec<Case> {
+    cases()
+        .into_iter()
+        .chain(
+            hostile_environment_cases()
+                .into_iter()
+                .map(|(case, _)| case),
+        )
+        .collect()
+}
+
+/// A run that records an SDK grades every hostile environment, and every
+/// case a focused run can select.
+#[test]
+fn the_certifying_sweep_grades_every_hostile_environment() {
+    let labels: BTreeSet<String> = certification_cases().iter().map(Case::label).collect();
+    for (case, _) in hostile_environment_cases() {
+        assert!(labels.contains(&case.label()), "{}", case.label());
+    }
+    for name in ["LANG", "FscToolExe"] {
+        for case in only_named(cases(), Some(name)).unwrap() {
+            assert!(labels.contains(&case.label()), "{}", case.label());
+        }
+    }
+}
+
+/// No hostile name renders the plain variable's name, which would be no
+/// draw of its dimension.
+#[test]
+fn every_hostile_name_is_a_draw() {
+    for (case, dimension) in hostile_environment_cases() {
+        for (name, _) in &case.variables {
+            assert_ne!(name, PLAIN_VARIABLE, "{dimension:?}");
+        }
+    }
 }
 
 /// `cases`, but for those `BORZOI_FSC_NAME_ONLY` (a name) leaves out
@@ -1843,10 +2053,12 @@ fn hostile_environments_by_dimension() {
 #[test]
 #[ignore = "every perturbation: about two thousand cases, most declined without a build"]
 fn deep_every_perturbation() {
-    let all = only(cases());
+    let all = only(certification_cases());
     run(&all);
     // A whole, passing run grades the devshell's SDK: record it.
-    if std::env::var_os("BORZOI_UPDATE_MANIFESTS").is_some() && all.len() == cases().len() {
+    if std::env::var_os("BORZOI_UPDATE_MANIFESTS").is_some()
+        && all.len() == certification_cases().len()
+    {
         let (sdk, manifests) = devshell_sdk();
         // The SDK recorded is the one whose MSBuild built every agreed case.
         let built_by = BUILT_BY.lock().unwrap().clone();
@@ -1978,7 +2190,7 @@ fn devshell_sdk() -> (String, std::collections::BTreeSet<String>) {
     let mut environment: HashMap<String, String> = build_environment().into_iter().collect();
     environment.insert(
         "MSBuildUserExtensionsPath".to_string(),
-        common::msbuild_user_extensions_path().to_string(),
+        msbuild_user_extensions_path().to_string(),
     );
     let parsed = assembly_name::evaluate(
         &project,

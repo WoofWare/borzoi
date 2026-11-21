@@ -178,6 +178,63 @@ pub fn build_environment() -> Vec<(String, String)> {
         .collect()
 }
 
+/// The .NET host every build here runs under: `dotnet` in
+/// [`build_environment`]'s `DOTNET_ROOT`, launched directly. A `dotnet` on
+/// `PATH` may be a launcher script (the devshell's is a bash wrapper), and a
+/// shell sets `PWD`, `OLDPWD` and `SHLVL` for itself before MSBuild reads
+/// them, so a variable a caller set would not be the one the build saw.
+///
+/// # Panics
+///
+/// When `DOTNET_ROOT` is not set, as it is in the devshell.
+pub fn dotnet_host() -> PathBuf {
+    let root = build_environment()
+        .into_iter()
+        .find_map(|(name, value)| (name == "DOTNET_ROOT").then_some(value))
+        .expect("DOTNET_ROOT names the .NET install the builds run (run under `nix develop`)");
+    Path::new(&root).join("dotnet")
+}
+
+/// `dotnet msbuild` in `dir`, as every build here starts: [`dotnet_host`]
+/// launched directly, under [`build_environment`] plus `inputs`' variables
+/// and nothing else. The caller adds the switches, `inputs`' globals among
+/// them, and the project.
+pub fn msbuild_command(dir: &Path, inputs: &BuildInputs) -> Command {
+    let mut cmd = Command::new(dotnet_host());
+    cmd.current_dir(dir).arg("msbuild").env_clear();
+    cmd.envs(build_environment());
+    cmd.envs(inputs.env_vars());
+    cmd
+}
+
+/// `MSBuildUserExtensionsPath` as the builds here compute it, probed once
+/// through [`msbuild_command`], so under exactly their environment: an
+/// evaluation compared with a build is handed it, as MSBuild computes it for
+/// itself rather than reading it from the environment.
+pub fn msbuild_user_extensions_path() -> &'static str {
+    static PATH: OnceLock<String> = OnceLock::new();
+    PATH.get_or_init(|| {
+        let dir = tempfile::TempDir::new().expect("a directory for the probe");
+        let stub = dir.path().join("Probe.proj");
+        std::fs::write(&stub, "<Project/>").expect("the probe project is written");
+        let mut cmd = msbuild_command(dir.path(), &BuildInputs::new());
+        cmd.args(["-nologo", "-getProperty:MSBuildUserExtensionsPath"])
+            .arg(&stub);
+        let out = BoundedCommand::new(cmd)
+            .timeout(Duration::from_secs(300))
+            .run_ok("probing MSBuildUserExtensionsPath");
+        let value = String::from_utf8(out.stdout)
+            .expect("the probe's output is UTF-8")
+            .trim()
+            .to_string();
+        assert!(
+            Path::new(&value).is_absolute() && !value.contains('\n'),
+            "the MSBuildUserExtensionsPath probe answered {value:?}, not one absolute path"
+        );
+        value
+    })
+}
+
 /// `path` with its `.` and `..` components folded away lexically, as MSBuild
 /// names a project it is handed, without resolving links.
 fn lexically_normal(path: &Path) -> PathBuf {
@@ -542,19 +599,17 @@ fn instrumented_build(
 
 /// The build [`fsc_args`] runs, before its loggers: `dotnet msbuild
 /// -nodeReuse:false -restore -t:Build` of `project`, in its directory, under
-/// `inputs`' globals, in [`build_environment`] plus `inputs`' variables.
+/// `inputs`' globals, through [`msbuild_command`].
 /// `-nodeReuse:false` keeps MSBuild from leaving worker nodes behind, which
 /// could hold the driver's pipes open; it changes nothing fsc is handed.
 fn build_command(project: &Path, inputs: &BuildInputs) -> Command {
-    let mut cmd = Command::new("dotnet");
-    cmd.current_dir(project.parent().expect("a project file has a directory"))
-        .args(["msbuild", "-nodeReuse:false", "-restore", "-t:Build"]);
+    let dir = project.parent().expect("a project file has a directory");
+    let mut cmd = msbuild_command(dir, inputs);
+    cmd.args(["-nodeReuse:false", "-restore", "-t:Build"]);
     for (name, value) in inputs.globals() {
         cmd.arg(format!("-p:{name}={value}"));
     }
-    cmd.arg(project).env_clear();
-    cmd.envs(build_environment());
-    cmd.envs(inputs.env_vars());
+    cmd.arg(project);
     cmd
 }
 
@@ -764,7 +819,28 @@ mod tests {
         }
     }
 
-    use super::{BuildInputs, FscArgsRequest, InputError, fsc_args, scratch_dir};
+    use super::{
+        BUILD_ENVIRONMENT_NAMES, BuildInputs, FscArgsRequest, InputError, dotnet_host, fsc_args,
+        msbuild_command, scratch_dir,
+    };
+
+    /// Every build starts from one command: the host itself, not a launcher
+    /// on `PATH`, and only the build environment's variables and the
+    /// caller's.
+    #[test]
+    fn every_build_starts_from_the_host_under_the_closed_environment() {
+        let inputs = BuildInputs::new().env("LANG", "Evil").unwrap();
+        let cmd = msbuild_command(std::path::Path::new("/"), &inputs);
+        assert_eq!(cmd.get_program(), dotnet_host().as_os_str());
+        assert!(dotnet_host().is_absolute());
+        for (name, _) in cmd.get_envs() {
+            let name = name.to_str().unwrap();
+            assert!(
+                BUILD_ENVIRONMENT_NAMES.contains(&name) || name == "LANG",
+                "{name} reaches the build"
+            );
+        }
+    }
     use std::collections::BTreeSet;
 
     #[test]
