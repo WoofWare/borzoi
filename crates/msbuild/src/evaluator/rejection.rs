@@ -1378,7 +1378,10 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
                     {
                         None
                     }
-                    Some(_) => Some(reached),
+                    Some(value) if parses_as_boolean(&value) => Some(reached),
+                    // A flag that is no boolean is refused before the body is
+                    // read (the step's refusal): MSBuild never expands it.
+                    Some(_) => None,
                     None => Some(false),
                 }
             }

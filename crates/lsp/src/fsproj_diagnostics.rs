@@ -1045,15 +1045,20 @@ fn rejection_message(cause: &RejectionCause, certain: bool) -> String {
             attribute,
             value,
         } => {
-            let (rejects, refuses) = if certain {
-                ("rejects", "refuses")
+            // A possible refusal rests on a value the walk holds that MSBuild
+            // may not read: it is named as one the attribute may hold.
+            if certain {
+                format!(
+                    "MSBuild rejects this project: a `<UsingTask>` of `{task}` has `{attribute}` \
+                     `{value}`, which it refuses to register — no evaluated value is trusted"
+                )
             } else {
-                ("may reject", "may refuse")
-            };
-            format!(
-                "MSBuild {rejects} this project: a `<UsingTask>` of `{task}` has `{attribute}` \
-                 `{value}`, which it {refuses} to register — no evaluated value is trusted"
-            )
+                format!(
+                    "MSBuild may reject this project: a `<UsingTask>` of `{task}` may have \
+                     `{attribute}` `{value}`, which it would refuse to register — no evaluated \
+                     value is trusted"
+                )
+            }
         }
         RejectionCause::UsingTaskParameterCollision {
             task,
@@ -1114,7 +1119,8 @@ mod tests {
     use tempfile::TempDir;
 
     /// A registration the walk only doubts claims nothing of the value: the
-    /// message says MSBuild may refuse to register it, not that it does.
+    /// message says the attribute may have it, and MSBuild would refuse it,
+    /// not that it has it and MSBuild does.
     #[test]
     fn a_possible_registration_refusal_claims_nothing_of_the_value() {
         let cause = RejectionCause::UsingTaskRegistration {
@@ -1123,9 +1129,17 @@ mod tests {
             value: "System.TimeSpan".into(),
         };
         let possible = rejection_message(&cause, false);
-        assert!(possible.contains("may refuse to register"), "{possible}");
-        assert!(!possible.contains("cannot"), "{possible}");
+        assert!(
+            possible.contains("may have `ParameterType` `System.TimeSpan`"),
+            "{possible}"
+        );
+        assert!(!possible.contains("has `ParameterType`"), "{possible}");
+        assert!(!possible.contains("refuses"), "{possible}");
         let certain = rejection_message(&cause, true);
+        assert!(
+            certain.contains("has `ParameterType` `System.TimeSpan`"),
+            "{certain}"
+        );
         assert!(certain.contains("refuses to register"), "{certain}");
     }
 
