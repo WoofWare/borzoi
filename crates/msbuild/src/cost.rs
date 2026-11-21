@@ -16,6 +16,8 @@ pub struct WalkCosts {
     pub path_writes_examined: u64,
     /// The texts `condition::strike` built, each in one pass over its text.
     pub strikes: u64,
+    /// The bytes `condition::strike` copied, building them.
+    pub struck_bytes: u64,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -25,6 +27,7 @@ thread_local! {
             arm_gate_decisions: 0,
             path_writes_examined: 0,
             strikes: 0,
+            struck_bytes: 0,
         })
     };
 }

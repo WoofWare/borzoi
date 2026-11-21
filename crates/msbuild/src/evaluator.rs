@@ -1488,8 +1488,8 @@ impl PathOf {
     /// names a judgement reads, so its cost is theirs, not the walk's.
     fn reaches(&self, name: &str) -> bool {
         self.writes.borrow().writes.get(name).is_some_and(|writes| {
-            crate::cost::count(|costs| costs.path_writes_examined += writes.len() as u64);
             writes.iter().any(|arms| {
+                crate::cost::count(|costs| costs.path_writes_examined += 1);
                 arms.iter().all(|(choose, arm)| {
                     self.arms
                         .iter()

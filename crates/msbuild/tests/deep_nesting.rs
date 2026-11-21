@@ -532,6 +532,21 @@ fn many_groups_on_sibling_paths(width: usize) -> String {
     )
 }
 
+/// A `<When>` the walk cannot decide writing `P0` `width` times, and one item
+/// group after it whose condition reads `P0`, which holds a value the walk
+/// doubts in the final table: the group asks whether a write of `P0` reaches
+/// it, and the first does.
+fn many_writes_of_one_name(width: usize) -> String {
+    let writes: String = (0..width)
+        .map(|i| format!("<PropertyGroup><P0>x{i}</P0></PropertyGroup>"))
+        .collect();
+    format!(
+        "<PropertyGroup><P0>y</P0><P0 Condition=\"'É' == 'é'\">y</P0></PropertyGroup>\
+         <Choose><When Condition=\"'É' == 'é'\">{writes}\
+         <ItemGroup Condition=\"'$(P0)' == 'y'\"><I Include=\"a\" /></ItemGroup></When></Choose>"
+    )
+}
+
 /// The groups of [`many_groups_on_one_path`] and of
 /// [`many_groups_on_sibling_paths`] ask only of the names they read whether a
 /// write reaches them (`PathOf::reaches`), and which names written on the
@@ -540,7 +555,9 @@ fn many_groups_on_sibling_paths(width: usize) -> String {
 /// sibling group examines the one write of the one name it reads (`P0`): `n`
 /// writes examined on one path, `2n` on sibling paths. Gathering every write
 /// that reaches each group, or settling the names again for each, costs `n²`.
-/// Counted, so no load on the machine moves it.
+/// And a group stops at the first write that reaches it
+/// ([`many_writes_of_one_name`]: one name settled, one write examined, however
+/// many there are). Counted, so no load on the machine moves it.
 #[test]
 fn groups_ask_only_of_the_writes_they_read() {
     for (shape, per_group) in [
@@ -555,6 +572,13 @@ fn groups_ask_only_of_the_writes_they_read() {
                 "{width} groups examined {examined} writes"
             );
         }
+    }
+    for width in [1, 2, 100, 400] {
+        let examined = walk_costs(many_writes_of_one_name(width)).path_writes_examined;
+        assert_eq!(
+            examined, 2,
+            "{width} writes of one name: {examined} examined"
+        );
     }
 }
 
@@ -612,19 +636,35 @@ fn a_wide_undecided_choose_decides_each_when_once() {
 /// a value at once, in one pass over the text (`condition::strike`): one
 /// struck text per value it tries (`condition::RETURNED`'s eight, stopping at
 /// the first on which MSBuild does not throw), whatever the width, where
-/// striking one read at a time builds one per read and value. From a hundred
-/// reads on, no value makes a version, so it tries all eight. Counted, so no
-/// load on the machine moves it.
+/// striking one read at a time builds one per read and value; and each built
+/// once, its bytes copied once, where rebuilding it per read copies the text
+/// once per read. From a hundred reads on, no value makes a version, so it
+/// tries all eight. Counted, so no load on the machine moves it.
 #[test]
 fn wide_unheld_reads_are_struck_in_one_pass() {
     for width in [1, 2, 10, 100, DEEP / 16, DEEP / 4] {
-        let strikes = walk_costs(wide_unheld_reads(width)).strikes;
+        let body = wide_unheld_reads(width);
+        let costs = walk_costs(body.clone());
         assert!(
-            (1..=8).contains(&strikes),
-            "{width} reads took {strikes} struck texts"
+            (1..=8).contains(&costs.strikes),
+            "{width} reads took {} struck texts",
+            costs.strikes
         );
         if width >= 100 {
-            assert_eq!(strikes, 8, "{width} reads took {strikes} struck texts");
+            assert_eq!(
+                costs.strikes, 8,
+                "{width} reads took {} struck texts",
+                costs.strikes
+            );
         }
+        // Each struck text is built once, no longer than twice the text it
+        // strikes (a value is at most five bytes, a read at least four).
+        assert!(
+            costs.struck_bytes <= costs.strikes * 2 * body.len() as u64,
+            "{width} reads copied {} bytes over {} struck texts of a {}-byte body",
+            costs.struck_bytes,
+            costs.strikes,
+            body.len()
+        );
     }
 }
