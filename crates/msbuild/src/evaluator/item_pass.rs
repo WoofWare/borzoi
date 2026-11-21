@@ -643,6 +643,13 @@ fn evaluate_item_group(node: Node<'_, '_>, state: &mut State<'_>) {
     if has_package_child {
         state.note_package_uncertain_if_condition_uses_sdk_taint(node);
     }
+    // Whether the walk decided the group's gate from certain inputs: one it
+    // decided on an inexact read (an unseeded toolset property) is as
+    // doubtful as one on a refused read.
+    let gate_certain = attribute(node, "Condition").is_none_or(|condition| {
+        let dir = state.entry_project_dir.clone();
+        directory_build::decided_from_certain_inputs(state, &condition, &dir)
+    });
     let gate = evaluate_item_condition(node, state);
     if group_condition_tainted {
         item_lists_tainted_by_group_condition.apply(state);
@@ -660,14 +667,15 @@ fn evaluate_item_group(node: Node<'_, '_>, state: &mut State<'_>) {
                 state.project_references_uncertain = true;
             }
             restore(state);
-            state.reach_doubted += usize::from(group_reads_untrusted);
+            let doubted = group_reads_untrusted || !gate_certain;
+            state.reach_doubted += usize::from(doubted);
             for child in node.children().filter(Node::is_element) {
                 walk_item_child(child, state);
             }
-            state.reach_doubted -= usize::from(group_reads_untrusted);
+            state.reach_doubted -= usize::from(doubted);
         }
         CondGate::Skip => {
-            if group_reads_untrusted {
+            if group_reads_untrusted || !gate_certain {
                 doubt_update_batches_of(node, state);
             }
             // Skipped only on an untrusted false: a hidden mutation may run

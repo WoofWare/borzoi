@@ -5316,9 +5316,15 @@ fn walk_property_child_inner(
 /// Whether the gate at `node` may skip a property write: one over a property,
 /// an import, or a `<PropertyGroup>`, `<ImportGroup>` or
 /// `<When>`/`<Otherwise>` arm holding one. An item group's or an item's skips
-/// none, nor does a group that holds no write, nor a write under a gate
-/// `dead` says no build takes.
-fn gate_may_skip_property_writes(node: Node<'_, '_>, dead: &dyn Fn(Node<'_, '_>) -> bool) -> bool {
+/// none, nor does a group that holds no write. `inert` names an element no
+/// build takes or one MSBuild discards (a gate decided false from certain
+/// inputs, a protected property), and `taken` an arm decided true so: arms
+/// after it are never reached.
+fn gate_may_skip_property_writes(
+    node: Node<'_, '_>,
+    inert: &dyn Fn(Node<'_, '_>) -> bool,
+    taken: &dyn Fn(Node<'_, '_>) -> bool,
+) -> bool {
     let is_write = |element: Node<'_, '_>| {
         element.tag_name().name().eq_ignore_ascii_case("Import")
             || element.parent_element().is_some_and(|parent| {
@@ -5328,12 +5334,12 @@ fn gate_may_skip_property_writes(node: Node<'_, '_>, dead: &dyn Fn(Node<'_, '_>)
                     .eq_ignore_ascii_case("PropertyGroup")
             })
     };
-    // Whether `scope` holds a write no dead gate encloses: an explicit walk,
-    // so that no depth of nesting costs stack.
+    // Whether `scope` holds a write no inert element encloses: an explicit
+    // walk, so that no depth of nesting costs stack.
     let holds_a_write = |scope: Node<'_, '_>| {
         let mut pending: Vec<Node<'_, '_>> = scope.children().filter(Node::is_element).collect();
         while let Some(element) = pending.pop() {
-            if dead(element) {
+            if inert(element) {
                 continue;
             }
             if is_write(element) {
@@ -5345,7 +5351,7 @@ fn gate_may_skip_property_writes(node: Node<'_, '_>, dead: &dyn Fn(Node<'_, '_>)
     };
     let name = node.tag_name().name();
     if is_write(node) {
-        return true;
+        return !inert(node);
     }
     if ["PropertyGroup", "ImportGroup"]
         .iter()
@@ -5353,12 +5359,31 @@ fn gate_may_skip_property_writes(node: Node<'_, '_>, dead: &dyn Fn(Node<'_, '_>)
     {
         return holds_a_write(node);
     }
-    // A `When` decides whether each later arm runs too, so its own arm and
-    // every later one count; an earlier arm was already false.
-    ["When", "Otherwise"]
+    if !["When", "Otherwise"]
         .iter()
         .any(|tag| name.eq_ignore_ascii_case(tag))
-        && std::iter::successors(Some(node), |arm| arm.next_sibling_element()).any(holds_a_write)
+    {
+        return false;
+    }
+    // A `When` decides whether each later arm runs too, so its own arm and
+    // every later one it may reach count; an earlier arm was already false.
+    if holds_a_write(node) {
+        return true;
+    }
+    for arm in std::iter::successors(node.next_sibling_element(), |arm| {
+        arm.next_sibling_element()
+    }) {
+        if inert(arm) {
+            continue;
+        }
+        if holds_a_write(arm) {
+            return true;
+        }
+        if taken(arm) {
+            break;
+        }
+    }
+    false
 }
 
 /// Result of evaluating a node's `Condition` attribute.
@@ -5622,12 +5647,43 @@ fn evaluate_condition_with_exemptions(
             ),
             current_file_dir,
         )
-        && gate_may_skip_property_writes(node, &|element| {
-            attribute(element, "Condition").is_some_and(|condition| {
-                directory_build::decision_from_certain_inputs(state, &condition, current_file_dir)
-                    == Some(false)
-            })
-        })
+        && {
+            // Decided from certain inputs, and asking nothing of the file
+            // system: an `Exists` in an imported file's property element is
+            // relative to the entry project, not to the group's file.
+            let decided = |element: Node<'_, '_>| {
+                attribute(element, "Condition").and_then(|condition| {
+                    let lower = condition.to_ascii_lowercase();
+                    if lower.contains("exists(") || lower.contains("hastrailingslash(") {
+                        return None;
+                    }
+                    directory_build::decision_from_certain_inputs(
+                        state,
+                        &condition,
+                        current_file_dir,
+                    )
+                })
+            };
+            let protected = |element: Node<'_, '_>| {
+                element.parent_element().is_some_and(|parent| {
+                    parent
+                        .tag_name()
+                        .name()
+                        .eq_ignore_ascii_case("PropertyGroup")
+                }) && state
+                    .protected
+                    .contains(&element.tag_name().name().to_ascii_lowercase())
+            };
+            gate_may_skip_property_writes(
+                node,
+                &|element| decided(element) == Some(false) || protected(element),
+                &|arm| {
+                    arm.tag_name().name().eq_ignore_ascii_case("Otherwise")
+                        || attribute(arm, "Condition").is_none()
+                        || decided(arm) == Some(true)
+                },
+            )
+        }
     {
         state.startup_directory_declined = true;
     }

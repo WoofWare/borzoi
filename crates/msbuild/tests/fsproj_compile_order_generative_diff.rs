@@ -140,6 +140,10 @@ enum Cond {
     /// A gate the walk takes on an untrusted true: `Flip` is `on` unless an
     /// undecided write (true in MSBuild) made it `off` ([`Group::Flip`]).
     Flipped,
+    /// A gate on a toolset property MSBuild sets: `'$(MSBuildStartupDirectory)'
+    /// == ''` is false there, and a walk that reads the property inexactly
+    /// must not take the gate as decided.
+    ToolsetEmpty,
 }
 
 impl Cond {
@@ -152,6 +156,7 @@ impl Cond {
             Cond::Undecided(true) => " Condition=\"'É' == 'é'\"".to_string(),
             Cond::Undecided(false) => " Condition=\"'É' != 'é'\"".to_string(),
             Cond::Flipped => " Condition=\"'$(Flip)' == 'on'\"".to_string(),
+            Cond::ToolsetEmpty => " Condition=\"'$(MSBuildStartupDirectory)' == ''\"".to_string(),
         }
     }
 }
@@ -876,8 +881,8 @@ fn batch_update_spec_strategy() -> impl Strategy<Value = UpdateSpec> {
 }
 
 /// A gate in the batch sweep: mostly none, else one MSBuild certainly skips,
-/// one the walk cannot decide either way, or one it takes on an untrusted
-/// true that MSBuild skips.
+/// one the walk cannot decide either way, or one it takes on an untrusted or
+/// inexact read that MSBuild skips.
 fn batch_cond_strategy() -> impl Strategy<Value = Cond> {
     prop_oneof![
         40 => Just(Cond::None),
@@ -885,6 +890,20 @@ fn batch_cond_strategy() -> impl Strategy<Value = Cond> {
         1 => Just(Cond::Undecided(true)),
         1 => Just(Cond::Undecided(false)),
         1 => Just(Cond::Flipped),
+        1 => Just(Cond::ToolsetEmpty),
+    ]
+}
+
+/// A run's group gate in the batch sweep: more often gated than an
+/// operation, since a skipped or doubted group's `Update`s are what move the
+/// batch apart from the walk's.
+fn batch_group_cond_strategy() -> impl Strategy<Value = Cond> {
+    prop_oneof![
+        6 => Just(Cond::None),
+        1 => Just(Cond::SwitchEq(false)),
+        1 => Just(Cond::Undecided(true)),
+        1 => Just(Cond::Flipped),
+        1 => Just(Cond::ToolsetEmpty),
     ]
 }
 
@@ -926,7 +945,7 @@ fn batch_fixture_strategy() -> impl Strategy<Value = Fixture> {
                 .chain(after)
                 .collect::<Vec<_>>()
         });
-    proptest::collection::vec((run, batch_cond_strategy()), 1..4).prop_map(|runs| Fixture {
+    proptest::collection::vec((run, batch_group_cond_strategy()), 1..4).prop_map(|runs| Fixture {
         sdk_props: Vec::new(),
         project: std::iter::once(Group::Flip)
             .chain(

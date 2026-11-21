@@ -1102,7 +1102,8 @@ fn expansions_hold_msbuilds_path_fixup() {
 /// so a spelling that changed their grammar would change the points, and the
 /// manifests would measure the host rather than the walk.
 fn fixture_parent() -> PathBuf {
-    let host = std::env::temp_dir();
+    // Checked as the documents spell it: canonical, past any symbolic link.
+    let host = host_fs::canonicalize(std::env::temp_dir()).unwrap_or_else(|_| std::env::temp_dir());
     let plain = host.to_str().is_some_and(|text| {
         text.chars()
             .all(|c| c.is_ascii_alphanumeric() || "/._-".contains(c))

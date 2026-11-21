@@ -12720,6 +12720,104 @@ fn an_unprobed_absolute_path_is_no_startup_decline() {
     assert!(p.rejection.is_none(), "{:#?}", p.rejection);
 }
 
+/// A write gated on the file system is never taken as dead: in an imported
+/// `sub/X.props`, a property's `Exists` is relative to the entry project,
+/// where `marker` is, so the startup-dependent group writes `A` where it
+/// runs, and coercing `A` rejects there.
+#[test]
+#[cfg(not(windows))]
+fn a_write_gated_on_exists_is_no_dead_write() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    std::fs::create_dir_all(root.join("sub")).unwrap();
+    std::fs::write(root.join("marker"), "").unwrap();
+    std::fs::write(
+        root.join("sub").join("X.props"),
+        r#"<Project><PropertyGroup Condition="'$(S)' == 'seg/a'"><A Condition="Exists('marker')">bad</A></PropertyGroup></Project>"#,
+    )
+    .unwrap();
+    let source = r#"<Project><PropertyGroup><S>seg\a</S></PropertyGroup>
+  <Import Project="sub/X.props" />
+  <PropertyGroup Condition="$(A)"><Mid>m</Mid></PropertyGroup>
+  <PropertyGroup><After>yes</After></PropertyGroup></Project>"#;
+    let p = crate::parse_fsproj_with_imports(
+        &crate::ProjectFile::buffer(&root.join("Demo.fsproj"), source).unwrap(),
+        &HashMap::new(),
+        &HashMap::new(),
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(p.rejection.is_some(), "{:?}", p.property("After"));
+}
+
+/// A group gated on a toolset property the walk reads inexactly may not
+/// run: MSBuild sets `MSBuildStartupDirectory`, skips the group, leaves
+/// nothing pending, and `B.fs` takes the stranded `CompileFirst`.
+#[test]
+fn an_update_under_an_inexact_toolset_gate_may_not_run() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    let source = r#"<Project>
+  <ItemGroup><Compile Update="A.fs;A.fs" Link="a" /></ItemGroup>
+  <ItemGroup Condition="'$(MSBuildStartupDirectory)' == ''"><Compile Update="Z.fs" Link="z" /></ItemGroup>
+  <ItemGroup>
+    <Compile Update="B.fs;A.fs" CompileOrder="CompileFirst" />
+    <Compile Include="A.fs;B.fs" />
+  </ItemGroup></Project>"#;
+    let p = crate::parse_fsproj_with_imports(
+        &crate::ProjectFile::buffer(&root.join("Demo.fsproj"), source).unwrap(),
+        &HashMap::new(),
+        &HashMap::new(),
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(p.items_uncertain || p.rejection.is_some(), "{:#?}", p.items);
+}
+
+/// Only the arms a `When` may reach count: a write behind a later
+/// `When Condition="false"` is none any start runs.
+#[test]
+#[cfg(not(windows))]
+fn a_write_in_an_unreachable_arm_is_no_startup_decline() {
+    let p = parse(
+        r#"<Project><PropertyGroup>
+    <S>seg\a</S>
+    <U>$([System.IO.Path]::GetFileName('x'))</U>
+  </PropertyGroup>
+  <Choose>
+    <When Condition="'$(S)' == 'seg/a'"><ItemGroup /></When>
+    <When Condition="false"><PropertyGroup><Z>1</Z></PropertyGroup></When>
+  </Choose>
+  <PropertyGroup><L>$(U.Length)</L><After>ok</After></PropertyGroup></Project>"#,
+    );
+    assert!(p.rejection.is_none(), "{:#?}", p.rejection);
+}
+
+/// A write MSBuild discards (a global outranks it) is none a startup gate
+/// skips.
+#[test]
+#[cfg(not(windows))]
+fn a_write_to_a_global_is_no_startup_decline() {
+    let source = r#"<Project><PropertyGroup>
+    <S>seg\a</S>
+    <U>$([System.IO.Path]::GetFileName('x'))</U>
+  </PropertyGroup>
+  <Choose>
+    <When Condition="'$(S)' == 'seg/a'"><PropertyGroup><Configuration>Release</Configuration></PropertyGroup></When>
+  </Choose>
+  <PropertyGroup><L>$(U.Length)</L><After>ok</After></PropertyGroup></Project>"#;
+    let p = crate::parse_fsproj(
+        &crate::ProjectFile::buffer(std::path::Path::new("/repo/proj/Demo.fsproj"), source)
+            .unwrap(),
+        &[("Configuration".to_owned(), "Debug".to_owned())].into(),
+        &HashMap::new(),
+    )
+    .unwrap();
+    assert!(p.rejection.is_none(), "{:#?}", p.rejection);
+}
+
 /// `Q` is `./seg/a//` where `seg` is a directory under MSBuild's startup
 /// directory, and `./seg/a/` elsewhere: the whole value's pass respells it
 /// only where `S`'s `\` survived. Each reader below that would act on one of
