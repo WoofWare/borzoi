@@ -18,7 +18,8 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::common::{ensure_fsharp_compiler_service_dll, fcs_dump_batch_child};
+use super::harness::{OracleFile, fcs_check_or_refusal};
+use crate::common::{ensure_fsharp_compiler_service_dll, fcs_dump_batch_child, host_fs};
 
 fn write(path: &Path, text: &str) {
     std::fs::create_dir_all(path.parent().expect("a parent")).expect("create dir");
@@ -89,4 +90,54 @@ fn an_answer_does_not_depend_on_earlier_requests() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A real project's reference rewritten in place, its modification time put
+/// back, between two of the harness's requests whose inputs may change is
+/// read as it is now: the harness puts each such request to a fresh child,
+/// which reads the reference as a fresh process would, however the request
+/// spells its path. Run in an ordinary directory, and in one shaped like a
+/// framework reference pack, whose assemblies FCS keeps by path alone.
+#[test]
+fn a_real_projects_reference_rewritten_in_place_is_read() {
+    let root = tempfile::TempDir::new().expect("temp dir");
+    let a = root.path().join("A.fs");
+    write(&a, "module A\nlet z = FSharp.Compiler.Text.Range.Zero\n");
+    let fcs = ensure_fsharp_compiler_service_dll();
+    let other = fcs
+        .parent()
+        .expect("the oracle's directory")
+        .join("FSharp.Core.dll");
+    let check = |lib: &Path| -> Vec<i32> {
+        fcs_check_or_refusal(std::slice::from_ref(&a), &[], &[lib], false, None, true)
+            .unwrap_or_else(|err| panic!("refused: {err}"))
+            .iter()
+            .flat_map(OracleFile::errors)
+            .map(|d| d.error_number)
+            .collect()
+    };
+    for home in [
+        root.path().join("lib"),
+        root.path()
+            .join("packs/Microsoft.NETCore.App.Ref/10.0.0/ref/net10.0"),
+    ] {
+        std::fs::create_dir_all(&home).expect("create the reference's directory");
+        let lib = home.join("Lib.dll");
+        std::fs::copy(&fcs, &lib).expect("copy the referenced assembly");
+        let stamp = host_fs::metadata(&lib)
+            .and_then(|m| m.modified())
+            .expect("modification time");
+        assert_eq!(
+            check(&lib),
+            Vec::<i32>::new(),
+            "{home:?}: the type resolves in the reference"
+        );
+        std::fs::copy(&other, &lib).expect("rewrite the referenced assembly");
+        host_fs::set_modified(&lib, stamp).expect("restore the modification time");
+        let second = check(&home.join(".").join("Lib.dll"));
+        assert!(
+            second.contains(&39),
+            "{home:?}: the rewritten reference does not hold the type: {second:?}"
+        );
+    }
 }

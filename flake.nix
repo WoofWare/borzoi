@@ -93,11 +93,18 @@
               # `include_str!`ed by `borzoi_nuget::dgspec`: the NuGet identities
               # its resolver commits for.
               nugetVerified = rel == "crates/nuget/src/dgspec/verified_nuget.txt";
+              # `include_str!`ed by `borzoi_msbuild::fsc`: the SDKs, and their
+              # workload manifests, its compiled-name derivation was graded on.
+              fscVerified = rel == "crates/msbuild/src/fsc_verified_sdks.txt";
               # `include_str!`ed by `borzoi-astgen`: the language-feature table
               # the generator reads.
               featureTable = rel == "crates/cst/language-features.tsv";
+              # `include_str!`ed by `borzoi_oracle_harness::hostile`: the table
+              # of generators and the seed corpus of review findings.
+              hostileTables = rel == "crates/oracle-harness/src/hostile/boundaries.tsv"
+                || rel == "crates/oracle-harness/src/hostile/seed.tsv";
             in
-            (cargoSource || statsSite || nugetVerified || featureTable) && (repoFilter path type);
+            (cargoSource || statsSite || nugetVerified || fscVerified || featureTable || hostileTables) && (repoFilter path type);
         };
 
       # `doCheck = false`: the crate build does not run `cargo test`. The

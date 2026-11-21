@@ -461,72 +461,110 @@ enum AugmentationMember {
 /// rejects in an augmentation still names its name.
 fn augmentation_member(m: &MemberDefn) -> AugmentationMember {
     use borzoi_cst::syntax::MemberLeading;
-    let named = |tok: Option<borzoi_cst::syntax::SyntaxToken>, group| match tok {
-        Some(t) => AugmentationMember::Named(id_text(&t).to_string(), group),
-        None => AugmentationMember::Unnamed,
+    let group = match m {
+        MemberDefn::Member(mm) if mm.leading_keyword() == MemberLeading::StaticMember => {
+            Group::Static
+        }
+        MemberDefn::Member(_) => Group::Instance,
+        MemberDefn::GetSetMember(g) if g.is_static() => Group::Static,
+        MemberDefn::AutoProperty(a) if a.is_static() => Group::Static,
+        MemberDefn::GetSetMember(_) | MemberDefn::AutoProperty(_) => Group::Instance,
+        MemberDefn::AbstractSlot(_)
+        | MemberDefn::ValField(_)
+        | MemberDefn::MemberSig(_)
+        | MemberDefn::Inherit(_)
+        | MemberDefn::Interface(_)
+        | MemberDefn::LetBindings(_)
+        | MemberDefn::Do(_) => Group::Both,
     };
-    match m {
-        MemberDefn::Member(mm) => {
-            if mm.leading_keyword() == MemberLeading::New {
-                return AugmentationMember::Contributes;
-            }
-            let group = if mm.leading_keyword() == MemberLeading::StaticMember {
-                Group::Static
-            } else {
-                Group::Instance
-            };
-            match method_name(mm) {
-                Some(name) => AugmentationMember::Named(name, group),
-                None => AugmentationMember::Unnamed,
-            }
-        }
-        MemberDefn::GetSetMember(g) => {
-            let group = if g.is_static() {
-                Group::Static
-            } else {
-                Group::Instance
-            };
-            named(g.name().and_then(|n| n.idents().last()), group)
-        }
-        MemberDefn::AutoProperty(a) => {
-            let group = if a.is_static() {
-                Group::Static
-            } else {
-                Group::Instance
-            };
-            named(a.ident(), group)
-        }
-        MemberDefn::AbstractSlot(s) => named(s.val_sig().and_then(|v| v.ident()), Group::Both),
-        MemberDefn::ValField(v) => named(v.ident(), Group::Both),
-        MemberDefn::MemberSig(ms) => named(ms.val_sig().and_then(|v| v.ident()), Group::Both),
+    match member_head(m) {
+        MemberHead::Named(name) => AugmentationMember::Named(name, group),
+        MemberHead::Unnamed => AugmentationMember::Unnamed,
         // An `inherit` pulls the base's members in under names we cannot
         // enumerate.
-        MemberDefn::Inherit(_) => AugmentationMember::Unnamed,
+        MemberHead::Inherit => AugmentationMember::Unnamed,
         // Class-local bindings are lexically private; an interface
         // implementation's members are reachable only through the interface,
-        // never the receiver's own name group.
-        MemberDefn::Interface(_) | MemberDefn::LetBindings(_) | MemberDefn::Do(_) => {
+        // never the receiver's own name group; a constructor joins none.
+        MemberHead::Constructor | MemberHead::Local | MemberHead::Interface => {
             AugmentationMember::Contributes
         }
     }
 }
 
-/// A method member's name: the last segment of its head (`this.Name`), as
-/// its group spells it. An operator member (`static member (+.)`) joins under
-/// its compiled name (`op_PlusDot`), which is what `id_text` gives. `None`
-/// for an active-pattern head or any head the pass cannot read.
-fn method_name(mm: &borzoi_cst::syntax::MemberMethod) -> Option<String> {
-    let Pat::LongIdent(l) = mm.binding()?.pat()? else {
-        return None;
+/// What a member's head declares (#1100), read through one exhaustive match
+/// over the member's shape. A name is read only where every child of the
+/// head is accounted for ([`head_name`]): a head holding anything the match
+/// does not name (an active pattern, a named-field group) is `Unnamed`,
+/// never the name of some other child.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MemberHead {
+    /// The name the member joins its group under: an identifier, or an
+    /// operator's compiled name (`op_PlusDot`), which is what `id_text`
+    /// gives.
+    Named(String),
+    /// A member whose name the pass cannot read.
+    Unnamed,
+    /// `new (…) = …`.
+    Constructor,
+    /// `inherit Base(…)`.
+    Inherit,
+    /// A class `let` or `do`.
+    Local,
+    /// An interface implementation.
+    Interface,
+}
+
+fn member_head(m: &MemberDefn) -> MemberHead {
+    let token = |t: Option<borzoi_cst::syntax::SyntaxToken>| match t {
+        Some(t) => MemberHead::Named(id_text(&t).to_string()),
+        None => MemberHead::Unnamed,
     };
-    if l.syntax()
-        .children()
-        .any(|c| borzoi_cst::syntax::ActivePatName::can_cast(c.kind()))
-    {
-        return None;
+    match m {
+        MemberDefn::Member(mm) => {
+            if mm.leading_keyword() == borzoi_cst::syntax::MemberLeading::New {
+                return MemberHead::Constructor;
+            }
+            // `this.Name args`, or a bare name with no receiver.
+            match mm.binding().and_then(|b| b.pat()) {
+                Some(Pat::LongIdent(l)) => head_name(&l),
+                _ => MemberHead::Unnamed,
+            }
+        }
+        // `x.Name with get … and set …`: the head pattern, not
+        // `GetSetMember::name`, which is the long identifier alone (the
+        // receiver, for `x.(|A|_|)`).
+        MemberDefn::GetSetMember(g) => match g.head_pat() {
+            Some(l) => head_name(&l),
+            None => MemberHead::Unnamed,
+        },
+        MemberDefn::AutoProperty(a) => token(a.ident()),
+        MemberDefn::AbstractSlot(s) => token(s.val_sig().and_then(|v| v.ident())),
+        MemberDefn::ValField(v) => token(v.ident()),
+        MemberDefn::MemberSig(ms) => token(ms.val_sig().and_then(|v| v.ident())),
+        MemberDefn::Inherit(_) => MemberHead::Inherit,
+        MemberDefn::LetBindings(_) | MemberDefn::Do(_) => MemberHead::Local,
+        MemberDefn::Interface(_) => MemberHead::Interface,
     }
-    let tok = l.head()?.idents().last()?;
-    Some(id_text(&tok).to_string())
+}
+
+/// The name a member's head pattern (`this.Name args`, `x.Prop`) spells: the
+/// last segment of its long identifier, when the pattern's children are
+/// exactly that identifier, any explicit type parameters and argument
+/// patterns, none of which changes the name. Any other child (an active
+/// pattern's name, a named-field group) leaves the head unnamed.
+fn head_name(l: &borzoi_cst::syntax::LongIdentPat) -> MemberHead {
+    let Some(head) = l.head() else {
+        return MemberHead::Unnamed;
+    };
+    let accounted = 1 + usize::from(l.typar_decls().is_some()) + l.args().count();
+    if l.syntax().children().count() != accounted {
+        return MemberHead::Unnamed;
+    }
+    match head.idents().last() {
+        Some(t) => MemberHead::Named(id_text(&t).to_string()),
+        None => MemberHead::Unnamed,
+    }
 }
 
 enum MemberName {
@@ -539,28 +577,14 @@ enum MemberName {
 
 /// The name of the member an attribute decorates.
 fn member_name(m: &MemberDefn) -> MemberName {
-    let named = |tok: Option<borzoi_cst::syntax::SyntaxToken>| match tok {
-        Some(t) => MemberName::Named(id_text(&t).to_string()),
-        None => MemberName::Unnamed,
-    };
-    match m {
-        MemberDefn::Member(mm) => match method_name(mm) {
-            Some(name) => MemberName::Named(name),
-            // A constructor is no method of a named group.
-            None if mm.leading_keyword() == borzoi_cst::syntax::MemberLeading::New => {
-                MemberName::NotAMember
-            }
-            None => MemberName::Unnamed,
-        },
-        MemberDefn::GetSetMember(g) => named(g.name().and_then(|n| n.idents().last())),
-        MemberDefn::AutoProperty(a) => named(a.ident()),
-        MemberDefn::AbstractSlot(s) => named(s.val_sig().and_then(|v| v.ident())),
-        MemberDefn::ValField(v) => named(v.ident()),
-        MemberDefn::MemberSig(ms) => named(ms.val_sig().and_then(|v| v.ident())),
-        MemberDefn::LetBindings(_)
-        | MemberDefn::Do(_)
-        | MemberDefn::Inherit(_)
-        | MemberDefn::Interface(_) => MemberName::NotAMember,
+    match member_head(m) {
+        MemberHead::Named(name) => MemberName::Named(name),
+        MemberHead::Unnamed => MemberName::Unnamed,
+        // A constructor is no method of a named group.
+        MemberHead::Constructor
+        | MemberHead::Inherit
+        | MemberHead::Local
+        | MemberHead::Interface => MemberName::NotAMember,
     }
 }
 
@@ -641,6 +665,12 @@ mod tests {
         for (src, why) in [
             (
                 "module M\ntype T() =\n    member _.X = 1\ntype T with\n    member _.(|Big|_|) x = None\n",
+                NamesUnknowable::AugmentationMemberName,
+            ),
+            // A get/set property's active-pattern head: its long identifier
+            // is the receiver (#1100).
+            (
+                "module M\ntype T() =\n    member _.X = 1\ntype T with\n    member x.(|Big|_|) with get () = None\n",
                 NamesUnknowable::AugmentationMemberName,
             ),
             (

@@ -27,13 +27,30 @@
 //! that path. `Exists` is true of a directory and of a dangling link, neither
 //! of which an import loads, so either is still a rejection.
 //!
-//! A condition the walk evaluates to [`condition::Outcome::Illegal`] is a
-//! site too ([`judge_condition_rejection`]), and so is one MSBuild may evaluate
-//! where the walk does not: under a gate the walk could not decide from
-//! certain inputs ([`judge_unwalked`]), and every condition of the item pass,
-//! judged group by group ([`judge_deferred`]) because MSBuild evaluates an
-//! item's condition, and an `Include` item's metadata conditions, whatever
-//! its group's or its own gate holds.
+//! A condition is a site too ([`judge_condition_rejection`]): one the walk
+//! evaluates to [`condition::Outcome::Illegal`], or one whose evaluation stops
+//! at an operand MSBuild may throw on (a property function the walk does not
+//! model, reached on values it holds). So is one MSBuild may evaluate where
+//! the walk does not: under a gate the walk could not decide from certain
+//! inputs ([`judge_unwalked`]), and every condition of the item pass, judged
+//! group by group ([`judge_deferred`]) because MSBuild evaluates an item's
+//! condition, and an `Include` item's metadata conditions, whatever its
+//! group's or its own gate holds.
+//!
+//! So is a property function MSBuild throws on (an indexer out of range, a
+//! malformed `[MSBuild]::Version*` operand: [`properties::Issue::Throws`]) in
+//! text it evaluates: a property body, walked or not ([`judge_unwalked_body`]),
+//! an item's attributes and metadata, an item definition's
+//! ([`judge_throwing_expression`]). One the walk does not model in such text
+//! is no site yet (#1094): the SDK's own bodies call several on certain
+//! values; nor is one reading item metadata in a metadatum, which MSBuild
+//! hands the metadatum's value ([`judge_metadata_text`]). Nor is a throw on a
+//! value the walk holds none of (a write it refused to compute, a reserved
+//! name it does not seed), in a condition or a text: whether MSBuild's own
+//! value throws is the judgement over the values a name may hold, #1009's
+//! second stage. A leaf of a condition that reads such a name has none of
+//! MSBuild's booleans, so what comes after it is reached perhaps, and judged
+//! on the values held.
 //!
 //! **Certain.** A [`RejectionCertainty::Certain`] site is a claim the
 //! differentials grade, so it needs MSBuild to reach the construct for
@@ -55,9 +72,11 @@
 //! - an illegal condition must throw whatever the names it reaches that the
 //!   walk is not certain of hold, the stale channel included
 //!   ([`judge_condition_rejection`]): a syntax error, or an ill-typed operand
-//!   (MSB4086, a non-boolean scalar) reached, left to right, through operands
-//!   of certain value. What an operand MSBuild never reaches reads does not
-//!   matter.
+//!   (MSB4086, a non-boolean scalar) or a property function MSBuild throws on,
+//!   reached, left to right, through operands of certain value. What an
+//!   operand MSBuild never reaches reads does not matter;
+//! - a property function MSBuild throws on in text must read only names the
+//!   walk is certain of ([`judge_throwing_expression`]).
 //!
 //! Short of that, the same construct is a Possible site.
 //!
@@ -90,7 +109,7 @@
 //! SDK the walk cannot resolve: its resolver may decline one MSBuild resolves.
 //! The pure walker follows no import and judges none; it judges conditions.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
@@ -101,12 +120,13 @@ use crate::document::attribute;
 use crate::imports::normalise;
 use crate::{Rejection, RejectionCause, RejectionCertainty, UnloadableImport};
 
-use super::item_pass::expand_silent;
+use super::item_pass::{DeferredGroupKind, expand_silent, metadata_attribute};
 use super::observed::{self, EntryKind};
 use super::{
-    SdkResolution, State, condition, condition_exists, directory_build, import_dedup_key, loader,
-    properties, sdk_import_path, sdk_project_in_alphabet, sdk_project_under_root,
-    sdk_project_written_rooted, sdk_root_is_reparsed,
+    Arm, PathOf, SdkResolution, Speculation, State, collect_element_text, condition,
+    condition_exists, directory_build, import_dedup_key, loader, properties, sdk_import_path,
+    sdk_project_in_alphabet, sdk_project_under_root, sdk_project_written_rooted,
+    sdk_root_is_reparsed,
 };
 
 impl State<'_> {
@@ -192,6 +212,165 @@ pub(super) fn operands_are_certain(state: &State<'_>, text: &str) -> bool {
     properties::property_references(text).all(|name| directory_build::is_certain(state, name))
 }
 
+/// Whether the walk holds a value of `name` MSBuild may hold, as a Possible
+/// site asks: one it computed (bound), however it doubts it, or an undefined
+/// read it shows exact. A value the walk doubts is one MSBuild may hold among
+/// others: a write it skipped under a gate it could not decide adds one, and
+/// hidden content may have rewritten it, or not. A name the walk holds no
+/// value of and cannot show undefined is otherwise: `""` for a write it
+/// refused to compute, or for a reserved name it does not seed, is a value
+/// MSBuild need not hold at all, so what a function does on it says nothing of
+/// the build.
+pub(super) fn holds_a_value_msbuild_may(state: &State<'_>, name: &str) -> bool {
+    (state.lookup.is_bound(name) || state.undefined_read_is_exact(name))
+        && !state.speculatively_unheld(name)
+}
+
+impl State<'_> {
+    /// Where the conditions the walk evaluates now are MSBuild's: the
+    /// property pass's, an item definition group's, or another of the item
+    /// pass's ([`condition::Site`]).
+    pub(super) fn condition_site(&self) -> condition::Site {
+        match self.item_pass {
+            None => condition::Site::PropertyPass,
+            Some(DeferredGroupKind::ItemDefinitionGroup) => condition::Site::ItemDefinition,
+            Some(DeferredGroupKind::ItemGroup | DeferredGroupKind::UsingTask) => {
+                condition::Site::ItemPass
+            }
+        }
+    }
+
+    /// Whether the speculative walk of content the walk does not take
+    /// ([`State::speculation`]) leaves `name`'s value unknown.
+    pub(super) fn speculatively_unheld(&self, name: &str) -> bool {
+        self.speculation.as_ref().is_some_and(|speculation| {
+            let name = name.to_ascii_lowercase();
+            speculation.unheld.contains(&name)
+                || speculation
+                    .inherited
+                    .as_ref()
+                    .is_some_and(|inherited| inherited.unknown(&name))
+        })
+    }
+
+    /// Open a walk of content the walk does not take: what a write there
+    /// names ([`speculative_write`]) is unknown to what follows on that path,
+    /// until the outermost walk closes. MSBuild's value on that path is the
+    /// judgement over the values a name may hold (#1009's second stage); the
+    /// value the walk holds is not it.
+    fn open_speculation(&mut self) {
+        match &mut self.speculation {
+            Some(speculation) => speculation.depth += 1,
+            None => {
+                self.speculation = Some(Speculation {
+                    unheld: HashSet::new(),
+                    gained: Vec::new(),
+                    walk_written: std::rc::Rc::default(),
+                    arms: Vec::new(),
+                    inherited: None,
+                    depth: 1,
+                    dead_arms: 0,
+                });
+            }
+        }
+    }
+
+    /// Close one walk of content the walk does not take.
+    fn close_speculation(&mut self) {
+        let speculation = self.speculation.as_mut().expect("a speculation is open");
+        speculation.depth -= 1;
+        if speculation.depth == 0 {
+            self.speculation = None;
+        }
+    }
+
+    /// Where an item group from the walk the judgement makes now stands, for
+    /// it to be judged later ([`State::defer_judgement`]): the walk's writes,
+    /// shared and still filling until the walk closes, and the arms the
+    /// group is in.
+    pub(super) fn speculatively_written(&self) -> Option<PathOf> {
+        self.speculation.as_ref().map(|speculation| PathOf {
+            writes: speculation.walk_written.clone(),
+            arms: speculation.arms.as_slice().into(),
+        })
+    }
+
+    /// Record the write of `name` on the path the judgement walks now, in the
+    /// arms it walks.
+    fn record_write(&mut self, name: String) {
+        if let Some(speculation) = self.speculation.as_mut() {
+            let arms: std::rc::Rc<[Arm]> = speculation.arms.as_slice().into();
+            speculation
+                .walk_written
+                .borrow_mut()
+                .writes
+                .entry(name.clone())
+                .or_default()
+                .push(arms);
+        }
+        self.mark_unheld([name]);
+    }
+
+    /// Mark `names` unknown to what follows on the path the judgement walks
+    /// now. Their writes are recorded where they were made
+    /// ([`State::record_write`]).
+    fn mark_unheld(&mut self, names: impl IntoIterator<Item = String>) {
+        if let Some(speculation) = self.speculation.as_mut() {
+            for name in names {
+                if speculation.unheld.insert(name.clone()) {
+                    speculation.gained.push(name);
+                }
+            }
+        }
+    }
+
+    /// Judge, as [`judge_deferred`] does, an item group from content the walk
+    /// does not take, with `written` where it stands in that walk: the names
+    /// written on its path, before the group or after it, and in no arm of a
+    /// `<Choose>` another arm of which holds it, whose final value is still
+    /// not certain, since a certain write after the walk settles the value
+    /// MSBuild reads in the item pass. Which names are not certain is
+    /// computed once per walk, the table being final.
+    pub(super) fn judge_from_path(
+        &mut self,
+        written: Option<&PathOf>,
+        judge: impl FnOnce(&mut State<'_>),
+    ) {
+        let Some(written) = written else {
+            judge(self);
+            return;
+        };
+        if written.writes.borrow().settled.is_none() {
+            let names: HashSet<String> = written
+                .writes
+                .borrow()
+                .writes
+                .keys()
+                .filter(|name| !directory_build::is_certain(self, name))
+                .cloned()
+                .collect();
+            written.writes.borrow_mut().settled = Some(std::rc::Rc::new(names));
+        }
+        let saved = self.speculation.replace(Speculation {
+            unheld: HashSet::new(),
+            gained: Vec::new(),
+            walk_written: std::rc::Rc::default(),
+            arms: Vec::new(),
+            inherited: Some(written.clone()),
+            depth: 1,
+            dead_arms: 0,
+        });
+        judge(self);
+        self.speculation = saved;
+    }
+}
+
+/// On the path the judgement walks, the write at `node`, whose gate may hold:
+/// its name's value is unknown to what follows there.
+fn speculative_write(node: Node<'_, '_>, state: &mut State<'_>) {
+    state.record_write(node.tag_name().name().to_ascii_lowercase());
+}
+
 /// Whether the walk names the `Project` of the import at `node` from certain
 /// values ([`operands_are_certain`]), with nothing it leaves as text.
 pub(super) fn import_path_is_certain(node: Node<'_, '_>, state: &State<'_>) -> bool {
@@ -236,14 +415,21 @@ pub(super) fn import_failure_certainty(
 ///
 /// One whose evaluation stopped at an operand we cannot evaluate
 /// ([`condition::Outcome::Unsupported`]) is a Possible site where, on the
-/// values the walk holds, that operand may let MSBuild reach one it throws
-/// on.
+/// values the walk holds, that operand may throw itself (one we do not model,
+/// a property function included), or may let MSBuild reach one it throws on.
+/// An operand MSBuild evaluates without throwing, to a boolean we cannot
+/// compute (a string equality whose case folding we do not model), is no
+/// site of its own ([`condition::Throws::Never`]).
 ///
-/// A condition legal on the values the walk holds is no site, though one it
-/// reaches may throw on another value of a name the walk is not certain of
+/// A condition legal on the values the walk holds is judged too where it
+/// reads a name the walk is not certain of: a leaf on one has none of
+/// MSBuild's booleans, so an operand after it is reached perhaps, and a throw
+/// there on the values held is a Possible site
+/// ([`condition::may_throw_on_held`]). The leaf itself is judged on the value
+/// held, though it may throw on another value of the name
 /// ([`condition::Throws::Maybe`]): judging that withdraws every project the
 /// SDK's own conditions read such a name in, so it waits on knowing what
-/// values such a name may hold (#1009).
+/// values such a name may hold (#1009's second stage).
 pub(super) fn judge_condition_rejection(
     state: &mut State<'_>,
     condition: &str,
@@ -258,41 +444,171 @@ pub(super) fn judge_condition_rejection(
         exists: &exists,
         observer,
     });
-    match outcome {
-        condition::Outcome::True | condition::Outcome::False => return,
-        condition::Outcome::Unsupported => {
-            // Evaluation stopped at an operand we cannot evaluate, which may
-            // return a value that lets MSBuild reach one it throws on with
-            // the values the walk holds. What an operand past it reads from
-            // the file system may decide whether it throws, so the judgement
-            // probes as the evaluation would have.
-            if condition::may_throw(condition, &state.lookup, probes, &|_| false) {
-                state.note_rejection(
-                    RejectionCertainty::Possible,
-                    RejectionCause::IllegalCondition {
-                        condition: condition.to_owned(),
-                    },
-                    span,
-                );
-            }
-            return;
-        }
-        condition::Outcome::Illegal => {}
+    let doubted = |name: &str| !holds_a_value_msbuild_may(state, name);
+    let uncertain = |name: &str| !directory_build::is_certain(state, name);
+    if matches!(
+        outcome,
+        condition::Outcome::True | condition::Outcome::False
+    ) && !properties::property_references(condition).any(uncertain)
+    {
+        return;
     }
     // Reached only perhaps, it is Possible however its operands stand, and
     // judging them would only probe the file system for nothing.
-    let certainly = reached && {
-        let uncertain = |name: &str| !directory_build::is_certain(state, name);
-        condition::throws_whatever(condition, &state.lookup, probes, &uncertain)
+    let certainly = reached
+        && outcome == condition::Outcome::Illegal
+        && condition::throws_whatever(
+            condition,
+            &state.lookup,
+            probes,
+            state.condition_site(),
+            &uncertain,
+        );
+    // Short of that, evaluation threw, or stopped at an operand we cannot
+    // evaluate, which may throw, or return a value that lets MSBuild reach
+    // one it throws on with the values the walk holds. What an operand past
+    // it reads from the file system may decide whether it throws, so the
+    // judgement probes as the evaluation would have.
+    if certainly
+        || condition::may_throw_on_held(
+            condition,
+            &state.lookup,
+            probes,
+            state.condition_site(),
+            &uncertain,
+            &doubted,
+        )
+    {
+        state.note_rejection(
+            certain_if(certainly),
+            RejectionCause::IllegalCondition {
+                condition: condition.to_owned(),
+            },
+            span,
+        );
+    }
+}
+
+/// A `$(…)` MSBuild throws on, on the values the walk holds
+/// ([`properties::Issue::Throws`]).
+#[derive(Debug, Clone)]
+pub(super) struct Thrown {
+    /// The expression, as written.
+    pub(super) expression: String,
+    /// The names its evaluation read before it threw: what the throw rests
+    /// on.
+    reads: Vec<String>,
+}
+
+/// Every `$(…)` of `text` MSBuild throws on, on the values the walk holds
+/// ([`properties::Issue::Throws`]): for text MSBuild may evaluate where the
+/// walk does not. Expanded with the file system where the walk has it, as
+/// the walk's own expansions are, so a probe it makes is recorded.
+pub(super) fn throwing_expressions(text: &str, state: &State<'_>) -> Vec<Thrown> {
+    let (_, issues) = if state.follow_imports {
+        properties::substitute_with_fs(text, &state.lookup, state.observer)
+    } else {
+        properties::substitute(text, &state.lookup)
     };
-    let certainty = certain_if(certainly);
+    throws_in(&issues)
+}
+
+/// Every expression of an expansion's `issues` MSBuild throws on, on the
+/// values the expansion read ([`properties::Issue::Throws`]), in order.
+pub(super) fn throws_in(issues: &[properties::Issue]) -> Vec<Thrown> {
+    issues
+        .iter()
+        .filter_map(|issue| match issue {
+            properties::Issue::Throws { expression, reads } => Some(Thrown {
+                expression: expression.clone(),
+                reads: reads.clone(),
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Note the rejection MSBuild makes evaluating a text, at `span`, whose
+/// `$(…)` expressions `thrown` throw on the values the walk holds. `reached`:
+/// whether MSBuild evaluates the text for certain. MSBuild expands the whole
+/// text, and a throw anywhere in it rejects the project, so what an
+/// expression before a throwing one does is moot: it is certain where it is
+/// reached for certain and every name one of them read before it threw is
+/// certain ([`directory_build::is_certain`]).
+///
+/// Short of that it is Possible, where every name one of them read holds a
+/// value MSBuild may hold ([`holds_a_value_msbuild_may`]), or where one
+/// throws whatever its expressions on the names that do not return
+/// ([`condition::expression_throws_whatever_they_return`]). Any other throw on
+/// such a name is no site: the value held is none MSBuild need hold, and
+/// whether the function throws on MSBuild's own value is the judgement over
+/// the values a name may hold (#1009's second stage), as for a condition
+/// ([`condition::may_throw_on_held`]).
+pub(super) fn judge_throwing_expression(
+    state: &mut State<'_>,
+    thrown: Vec<Thrown>,
+    reached: bool,
+    span: Range<usize>,
+) {
+    let unheld = |name: &str| !holds_a_value_msbuild_may(state, name);
+    let (held, on_unheld): (Vec<Thrown>, Vec<Thrown>) = thrown
+        .into_iter()
+        .partition(|thrown| !thrown.reads.iter().any(|name| unheld(name)));
+    let certain = held
+        .iter()
+        .find(|thrown| {
+            thrown
+                .reads
+                .iter()
+                .all(|name| directory_build::is_certain(state, name))
+        })
+        .filter(|_| reached)
+        .cloned();
+    // One that read a name the walk holds none of throws whatever that
+    // name's expressions return, perhaps: on each value tried, it throws on
+    // the rest.
+    let observer = state.follow_imports.then_some(state.observer);
+    let possible = || {
+        held.first().cloned().or_else(|| {
+            on_unheld.into_iter().find(|thrown| {
+                condition::expression_throws_whatever_they_return(
+                    &thrown.expression,
+                    &state.lookup,
+                    observer,
+                    &unheld,
+                )
+            })
+        })
+    };
+    let (certainty, thrown) = match certain {
+        Some(thrown) => (RejectionCertainty::Certain, thrown),
+        None => match possible() {
+            Some(thrown) => (RejectionCertainty::Possible, thrown),
+            None => return,
+        },
+    };
     state.note_rejection(
         certainty,
-        RejectionCause::IllegalCondition {
-            condition: condition.to_owned(),
+        RejectionCause::ThrowingExpression {
+            expression: thrown.expression,
         },
         span,
     );
+}
+
+/// Judge `text`, at `span`, which MSBuild evaluates as `reached` says and the
+/// walk does not, for an expression MSBuild throws on.
+fn judge_unwalked_text(state: &mut State<'_>, text: &str, reached: bool, span: Range<usize>) {
+    let expressions = throwing_expressions(text, state);
+    if !expressions.is_empty() {
+        judge_throwing_expression(state, expressions, reached, span);
+    }
+}
+
+/// Judge the body of the property write at `node`, which MSBuild evaluates
+/// as `reached` says and the walk does not ([`judge_unwalked_text`]).
+pub(super) fn judge_unwalked_body(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
+    judge_element_contents(state, node, reached, Contents::Text);
 }
 
 /// Judge the file whose root element is `root`, which the walk is entering,
@@ -406,9 +722,9 @@ fn judge_text(
             exists: &exists,
             observer,
         };
-        condition::evaluate_with_exists(text, &state.lookup, probes).outcome
+        condition::evaluate_at(text, &state.lookup, Some(probes), state.condition_site()).outcome
     } else {
-        condition::evaluate(text, &state.lookup).outcome
+        condition::evaluate_at(text, &state.lookup, None, state.condition_site()).outcome
     };
     judge_condition_rejection(state, text, outcome, exists_dir, reached, node.range());
     outcome
@@ -435,21 +751,40 @@ pub(super) fn judge_unwalked(node: Node<'_, '_>, dir: &Path, reached: bool, stat
             judge_condition(node, dir, reached, state);
         }
         "Choose" => judge_whens(node, 0, dir, reached, state),
+        // MSBuild evaluates these after every property write: from the
+        // property pass, judged in the item pass against the final table.
+        "ItemGroup" if state.item_pass.is_none() => {
+            state.defer_judgement(node, DeferredGroupKind::ItemGroup, reached);
+        }
+        "ItemDefinitionGroup" if state.item_pass.is_none() => {
+            state.defer_judgement(node, DeferredGroupKind::ItemDefinitionGroup, reached);
+        }
+        "UsingTask" if state.item_pass.is_none() => {
+            state.defer_judgement(node, DeferredGroupKind::UsingTask, reached);
+        }
         "ItemGroup" => judge_item_group(node, reached, state),
         "ItemDefinitionGroup" => judge_item_definition_group(node, reached, state),
         // A `<UsingTask>` resolves `Exists` against its own file's directory.
+        // MSBuild expands its attributes where it takes it.
         "UsingTask" => {
-            judge_condition(node, dir, reached, state);
+            let gate = judge_gate(node, dir, reached, state);
+            if let Some(inner) = gate.inner(reached) {
+                judge_using_task(node, inner, state);
+            }
         }
         _ => {}
     }
 }
 
 /// Judge the property writes of the `<PropertyGroup>` at `node`, which
-/// MSBuild evaluates as `reached` says. A write of a global property is
-/// discarded unevaluated, condition and all.
+/// MSBuild evaluates as `reached` says: each one's condition, and its body
+/// where the condition may hold. A write of a global property is discarded
+/// unevaluated, condition and all.
 pub(super) fn judge_properties(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
     let entry_dir = state.entry_project_dir.clone();
+    // Each write is judged on the path MSBuild takes: after the writes before
+    // it there.
+    state.open_speculation();
     for child in node.children().filter(Node::is_element) {
         if state
             .protected
@@ -457,8 +792,13 @@ pub(super) fn judge_properties(node: Node<'_, '_>, reached: bool, state: &mut St
         {
             continue;
         }
-        judge_condition(child, &entry_dir, reached, state);
+        // A write whose gate is certainly false there writes nothing.
+        if let Some(body_reached) = judge_gate(child, &entry_dir, reached, state).inner(reached) {
+            judge_unwalked_body(child, body_reached, state);
+            speculative_write(child, state);
+        }
     }
+    state.close_speculation();
 }
 
 /// Judge the imports' own conditions in the `<ImportGroup>` at `node`, which
@@ -482,22 +822,25 @@ pub(super) fn judge_whens(
 ) {
     let entry_dir = state.entry_project_dir.clone();
     let mut reach = Some(reached);
+    // Each branch starts from what the path held before the `<Choose>`; what
+    // follows it on the path, from what any of them wrote.
+    let mut written = HashSet::new();
     for when in node
         .children()
         .filter(|c| c.has_tag_name("When"))
         .skip(from)
     {
         let Some(at) = reach else {
-            return;
+            break;
         };
         match judge_gate(when, &entry_dir, at, state) {
             Judged::Decided(true) => {
-                judge_branch(when, dir, at, state);
+                written.extend(judge_branch(when, dir, at, state));
                 reach = None;
             }
             Judged::Decided(false) => {}
             Judged::Undecided => {
-                judge_branch(when, dir, false, state);
+                written.extend(judge_branch(when, dir, false, state));
                 reach = Some(false);
             }
         }
@@ -505,13 +848,154 @@ pub(super) fn judge_whens(
     if let Some(at) = reach
         && let Some(otherwise) = node.children().find(|c| c.has_tag_name("Otherwise"))
     {
-        judge_branch(otherwise, dir, at, state);
+        written.extend(judge_branch(otherwise, dir, at, state));
     }
+    state.mark_unheld(written);
+    state.arm_decisions.remove(&choose_key(node));
 }
 
 /// Judge what the `<When>` or `<Otherwise>` at `branch` holds, which MSBuild
-/// evaluates as `reached` says.
-pub(super) fn judge_branch(branch: Node<'_, '_>, dir: &Path, reached: bool, state: &mut State<'_>) {
+/// evaluates as `reached` says, from what the path held before it. The names
+/// it writes, which it leaves the path as it found it without.
+pub(super) fn judge_branch(
+    branch: Node<'_, '_>,
+    dir: &Path,
+    reached: bool,
+    state: &mut State<'_>,
+) -> HashSet<String> {
+    // Decided before the walk opens, on the path as it stands at the
+    // `<Choose>`.
+    let dead = arm_is_dead(branch, state);
+    state.open_speculation();
+    let choose = branch.parent_element().unwrap_or(branch);
+    let arm: Arm = (
+        (
+            std::ptr::from_ref(branch.document()) as usize,
+            choose.range().start,
+        ),
+        branch.range().start,
+    );
+    let mark = match state.speculation.as_mut() {
+        Some(speculation) => {
+            speculation.arms.push(arm);
+            speculation.dead_arms += usize::from(dead);
+            speculation.gained.len()
+        }
+        None => 0,
+    };
+    judge_branch_children(branch, dir, reached, state);
+    let mut written = HashSet::new();
+    if let Some(speculation) = state.speculation.as_mut() {
+        speculation.arms.pop();
+        speculation.dead_arms -= usize::from(dead);
+        for name in speculation.gained.drain(mark..) {
+            speculation.unheld.remove(&name);
+            written.insert(name);
+        }
+    }
+    state.close_speculation();
+    written
+}
+
+/// Whether MSBuild cannot take the `<When>` or `<Otherwise>` at `branch`, by
+/// the gates of its `<Choose>`, which MSBuild evaluates on the state before
+/// the `<Choose>`: an earlier `<When>`'s true, or its own false, each decided
+/// whatever the names the walk doubts hold, those the judged path writes
+/// included ([`State::reference_gate_decision`]). A refusal a clean write
+/// overwrote does not keep such a gate open, as it keeps an import point's
+/// ([`directory_build::decision_from_certain_inputs`]): the rejection
+/// judgement walks the arm all the same; [`super::item_pass`]'s reference
+/// check does not count what it defers from there.
+///
+/// Only an arm holding a `<ProjectReference>` is asked about, as only such an
+/// arm defers a group the check reads, so an arm with none probes nothing.
+/// The arms' fates are taken in one forward pass over the `<Choose>` per pass
+/// over its arms (`State::arm_decisions`, which [`judge_whens`] and
+/// `handle_choose` clear when the pass ends), as far as the arm asked about
+/// and no further, and a gate after one that holds whatever the doubted names
+/// hold is not evaluated, as MSBuild does not evaluate it: so a chain of `n`
+/// arms costs at most `n` decisions, and the read set gains no probe MSBuild
+/// does not make.
+fn arm_is_dead(branch: Node<'_, '_>, state: &mut State<'_>) -> bool {
+    if !branch.descendants().any(|node| {
+        node.is_element() && node.has_tag_name("ProjectReference") && node.has_attribute("Include")
+    }) {
+        return false;
+    }
+    // Once the walk has hidden content no arm is ruled out (a gate reading a
+    // doubted name settles nothing then, `State::reference_gate_decision`),
+    // and a gate decided on held values alone may itself rest on a value the
+    // hidden content rewrote, so none is probed: an arm counts as live, which
+    // costs at most a decline.
+    if state.walk_opaque.is_some() {
+        return false;
+    }
+    let Some(choose) = branch.parent_element() else {
+        return false;
+    };
+    let mut fates = state
+        .arm_decisions
+        .remove(&choose_key(choose))
+        .unwrap_or_default();
+    let from = fates.next;
+    for arm in choose
+        .children()
+        .filter(|arm| arm.is_element() && arm.range().start >= from)
+    {
+        let gate = attribute(arm, "Condition").filter(|_| arm.has_tag_name("When"));
+        let dead = fates.taken
+            || match gate {
+                Some(condition) => {
+                    crate::cost::count(|costs| costs.arm_gate_decisions += 1);
+                    match state.reference_gate_decision(&condition, None) {
+                        Some(true) => {
+                            fates.taken = true;
+                            false
+                        }
+                        Some(false) => true,
+                        None => false,
+                    }
+                }
+                None => false,
+            };
+        fates.dead.insert(arm.range().start, dead);
+        fates.next = arm.range().end;
+        if arm.id() == branch.id() {
+            break;
+        }
+    }
+    let dead = fates
+        .dead
+        .get(&branch.range().start)
+        .copied()
+        .unwrap_or(false);
+    state.arm_decisions.insert(choose_key(choose), fates);
+    dead
+}
+
+/// The arms of one `<Choose>` whose fates [`arm_is_dead`] has taken so far,
+/// in order.
+#[derive(Default)]
+pub(super) struct ArmFates {
+    /// Each arm's fate, by the offset of its `<When>` or `<Otherwise>`.
+    dead: HashMap<usize, bool>,
+    /// Whether an arm taken so far holds whatever the doubted names hold, so
+    /// that every later one is dead.
+    taken: bool,
+    /// The offset past the last arm taken so far.
+    next: usize,
+}
+
+/// The key of the `<Choose>` at `choose` in `State::arm_decisions`.
+pub(super) fn choose_key(choose: Node<'_, '_>) -> (usize, usize) {
+    (
+        std::ptr::from_ref(choose.document()) as usize,
+        choose.range().start,
+    )
+}
+
+/// [`judge_branch`] within its speculative walk.
+fn judge_branch_children(branch: Node<'_, '_>, dir: &Path, reached: bool, state: &mut State<'_>) {
     for child in branch.children().filter(Node::is_element) {
         judge_unwalked(child, dir, reached, state);
     }
@@ -525,6 +1009,545 @@ pub(super) fn judge_deferred(node: Node<'_, '_>, dir: &Path, reached: bool, stat
     judge_unwalked(node, dir, reached, state);
 }
 
+/// The attributes of a `<UsingTask>` MSBuild expands as it registers the
+/// task. Its `Condition` is judged as one, and it expands neither its
+/// `Label` nor `RequiredPlatform` nor `RequiredRuntime` (probed,
+/// `msbuild-condition-oracle`, SDK 10.0.401; `tests/condition_diff.rs`'s
+/// `using_task_texts_are_judged_where_msbuild_expands_them`).
+const USING_TASK_EXPANDED: &[&str] = &[
+    "TaskName",
+    "AssemblyFile",
+    "AssemblyName",
+    "TaskFactory",
+    "Architecture",
+    "Runtime",
+    "Override",
+];
+
+/// Judge what MSBuild expands of the `<UsingTask>` at `node` as it registers
+/// the task, which it does as `reached` says, for an expression it throws on:
+/// the attributes it expands ([`USING_TASK_EXPANDED`]), each parameter's
+/// `ParameterType`, `Required` and `Output`, the body's `Evaluate`, and the
+/// body itself (its text, CDATA included, and its elements' attributes; not
+/// its comments) unless `Evaluate` holds `false`, in any case and padding.
+/// Any other `Evaluate` MSBuild evaluates the body under or throws on, which
+/// rejects alike. A value the walk cannot vouch for leaves the body reached
+/// perhaps.
+fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
+    for name in USING_TASK_EXPANDED {
+        if let Some(text) = attribute(node, name) {
+            // MSBuild turns `AssemblyFile`'s own `\` into `/` before it expands
+            // it, where `\` is no separator (`ProjectUsingTaskElement.
+            // AssemblyFile`, `FixFilePath`), as an import's `Project`.
+            let text = if *name == "AssemblyFile" && std::path::MAIN_SEPARATOR != '\\' {
+                text.replace('\\', "/")
+            } else {
+                text.into_owned()
+            };
+            judge_unwalked_text(state, &text, reached, node.range());
+        }
+    }
+    for child in node.children().filter(Node::is_element) {
+        match child.tag_name().name() {
+            "ParameterGroup" => {
+                for parameter in child.children().filter(Node::is_element) {
+                    for name in ["ParameterType", "Required", "Output"] {
+                        if let Some(text) = attribute(parameter, name) {
+                            judge_unwalked_text(state, &text, reached, parameter.range());
+                        }
+                    }
+                }
+            }
+            "Task" => {
+                let body_reached = match attribute(child, "Evaluate") {
+                    None => Some(reached),
+                    Some(evaluate) => {
+                        judge_unwalked_text(state, &evaluate, reached, child.range());
+                        let (value, issues) = properties::substitute(&evaluate, &state.lookup);
+                        // Its trust is judged just below, name by name. MSBuild
+                        // reads the flag as expanded, escapes and all
+                        // (`%66alse` is no `false`; probed,
+                        // `msbuild-condition-oracle`, SDK 10.0.401).
+                        let value = value.ignoring_trust().as_escaped().to_owned();
+                        // An item list or metadatum MSBuild expands into it
+                        // the walk does not.
+                        if !issues.is_empty()
+                            || !operands_are_certain(state, &evaluate)
+                            || value.contains("@(")
+                            || value.contains("%(")
+                        {
+                            Some(false)
+                        } else if value
+                            // `Boolean.TryParse`'s padding: whitespace, as
+                            // `char.IsWhiteSpace` and Rust's `trim` both
+                            // classify it, and NUL.
+                            .trim_matches(|c: char| c.is_whitespace() || c == '\0')
+                            .eq_ignore_ascii_case("false")
+                        {
+                            None
+                        } else {
+                            Some(reached)
+                        }
+                    }
+                };
+                if let Some(body_reached) = body_reached {
+                    judge_element_contents(state, child, body_reached, Contents::Text);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// What MSBuild reads as the text of `element`, a property, a metadatum or
+/// an inline task body, unexpanded (`Utilities.GetXmlNodeInnerContents`),
+/// where the walk reproduces it: [`collect_element_text`] for text, CDATA
+/// sections and comments alone, else [`inner_xml`].
+pub(crate) fn element_inner_contents(element: Node<'_, '_>) -> Option<String> {
+    collect_element_text(element).or_else(|| inner_xml(element))
+}
+
+/// How the text of an element is judged.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Contents {
+    /// A property's body or an inline task's ([`judge_unwalked_text`]).
+    Text,
+    /// A metadatum's ([`judge_metadata_text`]).
+    Metadata,
+}
+
+/// Judge the text MSBuild reads of `element` ([`element_inner_contents`]),
+/// which it expands as `reached` says. Where the walk cannot reproduce that
+/// reading, an expression in it may throw on what the walk does not see: one
+/// may be spelt with a reference (`&#36;(…)`), may stand in an attribute,
+/// which serialized XML keeps, or may form across the markup an inner text
+/// drops, so any of those in the source is a possible rejection.
+fn judge_element_contents(
+    state: &mut State<'_>,
+    element: Node<'_, '_>,
+    reached: bool,
+    contents: Contents,
+) {
+    match (element_inner_contents(element), contents) {
+        (Some(text), Contents::Text) => {
+            judge_unwalked_text(state, &text, reached, element.range());
+        }
+        (Some(text), Contents::Metadata) => {
+            judge_metadata_text(state, &text, reached, element.range());
+        }
+        (None, _) => note_unread_contents(state, element_content_source(element), element.range()),
+    }
+}
+
+/// The source of `element`'s content: between its start tag and its end
+/// tag, so neither its own attributes, which MSBuild does not read as its
+/// text, nor its name. Empty for an empty element.
+fn element_content_source<'input>(element: Node<'_, 'input>) -> &'input str {
+    let source: &'input str = element.document().input_text();
+    let whole = &source[element.range()];
+    // The start tag ends at the first `>` outside an attribute's quotes; the
+    // end tag starts at the last `</`, as nothing follows it but its name.
+    let mut quote = None;
+    let mut start = None;
+    for (at, byte) in whole.bytes().enumerate() {
+        match quote {
+            Some(open) if byte == open => quote = None,
+            Some(_) => {}
+            None if matches!(byte, b'"' | b'\'') => quote = Some(byte),
+            None if byte == b'>' => {
+                start = Some(at + 1);
+                break;
+            }
+            None => {}
+        }
+    }
+    match (start, whole.rfind("</")) {
+        (Some(start), Some(end)) if start <= end => &whole[start..end],
+        _ => "",
+    }
+}
+
+/// Note what a text MSBuild reads, and the walk could not read as it does,
+/// may throw on: `source` is its markup as written. An expression may be
+/// spelt with a reference (`&#36;(…)`), may stand in an attribute, which
+/// serialized XML keeps, or may form across the markup an inner text drops,
+/// and across the whitespace nodes it drops with it: any of those in the
+/// source is a possible rejection.
+fn note_unread_contents(state: &mut State<'_>, source: &str, span: Range<usize>) {
+    let joined: String = without_markup(source)
+        .chars()
+        .filter(|c| !matches!(c, ' ' | '\t' | '\n' | '\r'))
+        .collect();
+    if source.contains("$(") || source.contains("&#") || joined.contains("$(") {
+        let expression = properties::expression_texts(source)
+            .next()
+            .unwrap_or(source)
+            .to_owned();
+        state.note_possible_rejection(RejectionCause::ThrowingExpression { expression }, span);
+    }
+}
+
+/// The text of `element`, which holds an element or a processing
+/// instruction, as MSBuild reads it (`Utilities.GetXmlNodeInnerContents`):
+/// its inner text where it starts with a CDATA section after any
+/// whitespace, else its inner XML as `XmlDocument` serializes it
+/// ([`serialize_inner_xml`]). `None` where it holds neither, which MSBuild
+/// reads otherwise, or where the walk does not reproduce that reading: a
+/// text whose line ends `roxmltree` folds and MSBuild's reader keeps, an
+/// `xml:space` scope, a CDATA section beside other text, a namespace
+/// declared or a prefix spelt, or a value serializing would spell as a
+/// reference. Held to MSBuild's reading by `tests/element_contents_diff.rs`.
+fn inner_xml(element: Node<'_, '_>) -> Option<String> {
+    if !element
+        .children()
+        .any(|child| child.is_element() || child.is_pi())
+    {
+        return None;
+    }
+    let source = element.document().input_text();
+    let body = &source[element.range()];
+    if body.contains("xml:space") || under_xml_space(element) {
+        return None;
+    }
+    let first = element
+        .children()
+        .find(|child| !(child.is_text() && is_whitespace_node(*child)));
+    if let Some(first) = first
+        && first.is_text()
+        && source[first.range()].trim_start().starts_with("<![CDATA[")
+    {
+        // The inner text: every text and CDATA section beneath it, joined,
+        // but for a whitespace node, which MSBuild's reader drops. `roxmltree`
+        // joins a CDATA section and the text beside it into one node, where
+        // MSBuild's reader sees a section and a text, either of which may be
+        // a whitespace node it drops, and folds line ends MSBuild's reader
+        // keeps: a node that is not one piece read as MSBuild reads it
+        // declines.
+        let mut text = String::new();
+        for descendant in element.descendants().filter(Node::is_text) {
+            if is_whitespace_node(descendant) {
+                continue;
+            }
+            #[allow(clippy::disallowed_methods)]
+            let value = descendant.text()?;
+            let raw = &source[descendant.range()];
+            let one_piece = match raw
+                .strip_prefix("<![CDATA[")
+                .and_then(|rest| rest.strip_suffix("]]>"))
+            {
+                Some(section) => section == value,
+                None => crate::document::text(descendant).is_some_and(|read| read == value),
+            };
+            if !one_piece {
+                return None;
+            }
+            text.push_str(value);
+        }
+        return Some(text);
+    }
+    let mut out = String::new();
+    for child in element.children() {
+        serialize_inner_xml(child, &mut out, 0, None)?;
+    }
+    Some(out)
+}
+
+/// How deeply [`serialize_inner_xml`] descends into an element's contents
+/// before it declines: it recurses once per element, and a body nested
+/// deeper than any task holds would otherwise take the stack.
+const MAX_TASK_BODY_DEPTH: usize = 64;
+
+/// `source` without its markup (every `<…>`, CDATA delimiters included), so
+/// that text an element's tags separate is joined as an inner text joins it.
+fn without_markup(source: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    let mut rest = source;
+    while let Some(open) = rest.find('<') {
+        out.push_str(&rest[..open]);
+        rest = &rest[open..];
+        // A section's text is kept; a comment, a processing instruction and
+        // a tag end where their own syntax ends, a tag's `>` outside its
+        // attributes' quotes.
+        let (kept, end) = if let Some(after) = rest.strip_prefix("<![CDATA[") {
+            let end = after.find("]]>").unwrap_or(after.len());
+            (&after[..end], "<![CDATA[".len() + end + "]]>".len())
+        } else if let Some(after) = rest.strip_prefix("<!--") {
+            let end = after.find("-->").unwrap_or(after.len());
+            ("", "<!--".len() + end + "-->".len())
+        } else if let Some(after) = rest.strip_prefix("<?") {
+            let end = after.find("?>").unwrap_or(after.len());
+            ("", "<?".len() + end + "?>".len())
+        } else {
+            let mut quote = None;
+            let mut end = rest.len();
+            for (at, byte) in rest.bytes().enumerate() {
+                match quote {
+                    Some(open) if byte == open => quote = None,
+                    Some(_) => {}
+                    None if matches!(byte, b'"' | b'\'') => quote = Some(byte),
+                    None if byte == b'>' => {
+                        end = at + 1;
+                        break;
+                    }
+                    None => {}
+                }
+            }
+            ("", end)
+        };
+        out.push_str(kept);
+        rest = rest.get(end..).unwrap_or("");
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Whether `node` is in the scope of an `xml:space` attribute, under which
+/// MSBuild's reader keeps whitespace the walk would drop: the walk declines
+/// such a reading.
+fn under_xml_space(node: Node<'_, '_>) -> bool {
+    node.ancestors()
+        .any(|element| crate::document::xml_space(element).is_some())
+}
+
+/// Whether the text node `node` is a whitespace node MSBuild's reader drops:
+/// XML whitespace alone, no decimal reference spelling any of it.
+fn is_whitespace_node(node: Node<'_, '_>) -> bool {
+    let source = node.document().input_text();
+    let raw = &source[node.range()];
+    let is_xml_whitespace =
+        |text: &str| text.chars().all(|c| matches!(c, ' ' | '\t' | '\n' | '\r'));
+    crate::document::text(node).is_some_and(|value| is_xml_whitespace(&value))
+        && !raw
+            .match_indices("&#")
+            .any(|(at, _)| raw[at + 2..].starts_with(|c: char| c.is_ascii_digit()))
+}
+
+/// `node` written as `XmlTextWriter` writes it into an element's inner XML:
+/// an element as `<name a="v" />` or `<name a="v">…</name>` (`"` around
+/// every attribute value, its `&`, `<`, `>` and `"` as entities, the default
+/// namespace declared after them where `written_namespace`, the one the
+/// written XML already declares, is another), text with its `&`, `<` and
+/// `>` as entities, a whitespace node not at all, a comment as written, a
+/// processing instruction as `<?target data?>`. `None` where that is not
+/// certain (see [`inner_xml`]).
+fn serialize_inner_xml(
+    node: Node<'_, '_>,
+    out: &mut String,
+    depth: usize,
+    written_namespace: Option<&str>,
+) -> Option<()> {
+    if depth >= MAX_TASK_BODY_DEPTH {
+        return None;
+    }
+    let source = node.document().input_text();
+    let raw = &source[node.range()];
+    let escape = |text: &str, attribute: bool| {
+        let mut escaped = String::with_capacity(text.len());
+        for c in text.chars() {
+            match c {
+                '&' => escaped.push_str("&amp;"),
+                '<' => escaped.push_str("&lt;"),
+                '>' => escaped.push_str("&gt;"),
+                '"' if attribute => escaped.push_str("&quot;"),
+                '\n' if attribute => escaped.push_str("&#xA;"),
+                '\r' if attribute => escaped.push_str("&#xD;"),
+                '\t' | '\n' | '\r' => escaped.push(c),
+                c if c.is_control() => return None,
+                c => escaped.push(c),
+            }
+        }
+        Some(escaped)
+    };
+    if node.is_element() {
+        // A namespace declaration, which `roxmltree` keeps out of the
+        // attributes and `XmlDocument` keeps among them, in their order,
+        // even where it declares what is in scope already.
+        let declares = super::loader::attribute_names(node)
+            .iter()
+            .any(|name| *name == "xmlns" || name.starts_with("xmlns:"));
+        // An element in a namespace it inherits (the project's own, as most
+        // `.targets` declare) is serialized with that declaration after its
+        // attributes, where the inner XML has not declared it yet; one that
+        // declares a namespace or spells a prefix declines, and so does one
+        // in none beneath one in some (which would take `xmlns=""`).
+        let name = node.tag_name().name();
+        let unprefixed = raw[1..].starts_with(name)
+            && raw[1 + name.len()..]
+                .starts_with(|c: char| c.is_whitespace() || c == '>' || c == '/');
+        let namespace = node.tag_name().namespace();
+        if declares || !unprefixed || (namespace.is_none() && written_namespace.is_some()) {
+            return None;
+        }
+        out.push('<');
+        out.push_str(name);
+        for attr in node.attributes() {
+            if attr.namespace().is_some() {
+                return None;
+            }
+            let value = attribute(node, attr.name())?;
+            out.push(' ');
+            out.push_str(attr.name());
+            out.push_str("=\"");
+            out.push_str(&escape(&value, true)?);
+            out.push('"');
+        }
+        if let Some(namespace) = namespace
+            && written_namespace != Some(namespace)
+        {
+            out.push_str(" xmlns=\"");
+            out.push_str(&escape(namespace, true)?);
+            out.push('"');
+        }
+        if node.children().next().is_none() && raw.ends_with("/>") {
+            out.push_str(" />");
+        } else {
+            out.push('>');
+            // An element of text, CDATA sections and comments alone is read
+            // piece by piece, a CDATA section kept as one.
+            match crate::document::element_content(node) {
+                Some(contents) => {
+                    for content in contents {
+                        match content {
+                            crate::document::Content::Text {
+                                whitespace: true, ..
+                            } => {}
+                            crate::document::Content::Text { value, .. } => {
+                                out.push_str(&escape(&value, false)?);
+                            }
+                            crate::document::Content::CData(text) => {
+                                out.push_str("<![CDATA[");
+                                out.push_str(text);
+                                out.push_str("]]>");
+                            }
+                            crate::document::Content::Comment(text) => {
+                                out.push_str("<!--");
+                                out.push_str(text);
+                                out.push_str("-->");
+                            }
+                        }
+                    }
+                }
+                None => {
+                    for child in node.children() {
+                        serialize_inner_xml(child, out, depth + 1, namespace)?;
+                    }
+                }
+            }
+            out.push_str("</");
+            out.push_str(name);
+            out.push('>');
+        }
+    } else if node.is_text() {
+        if is_whitespace_node(node) {
+            return Some(());
+        }
+        out.push_str(&escape(&crate::document::text(node)?, false)?);
+    } else if node.is_comment() {
+        out.push_str(raw);
+    } else if let Some(instruction) = node.pi() {
+        // Written from its target and data, a space between them however
+        // the source spaced them, or none.
+        out.push_str("<?");
+        out.push_str(instruction.target);
+        out.push(' ');
+        out.push_str(instruction.value.unwrap_or(""));
+        out.push_str("?>");
+    }
+    Some(())
+}
+
+/// Judge each metadatum of the item or item definition at `node` written as
+/// an attribute, read as MSBuild reads one (`item_pass::metadata_attribute`),
+/// which MSBuild expands as `reached` says.
+fn judge_metadata_attributes(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
+    for attr in node.attributes() {
+        if attr.namespace().is_none()
+            && item_attribute(node, attr.name()) == ItemAttribute::Metadata
+        {
+            match metadata_attribute(node, &attr) {
+                Some(text) => judge_metadata_text(state, &text, reached, node.range()),
+                // An XML fragment the walk does not read as MSBuild does.
+                None => {
+                    let value = crate::document::attribute(node, attr.name()).unwrap_or_default();
+                    note_unread_contents(state, &value, node.range());
+                }
+            }
+        }
+    }
+}
+
+/// What an attribute of an item is to MSBuild's evaluation
+/// (`tests/condition_diff.rs`'s `where_msbuild_evaluates_a_text`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ItemAttribute {
+    /// Not expanded at evaluation: the condition (judged as one), a label,
+    /// the operations only a target runs, the `MatchOnMetadata` options
+    /// (parsed as written), and an operation's attribute the item's own
+    /// operation does not read.
+    Unexpanded,
+    /// The item's operation: an `Include` and its `Exclude`, a `Remove` and
+    /// its `MatchOnMetadata`, an `Update`.
+    Operation,
+    /// A metadatum of an `Include` or an `Update`, or of an item definition.
+    Metadata,
+}
+
+/// What the attribute `name` of the item or item definition at `node` is to
+/// MSBuild, by the item's operation: `LazyItemEvaluator.ProcessItemElement`
+/// builds an `Include`, else a `Remove`, else an `Update`, and each build
+/// expands only its own attributes. A reserved name in another case is no
+/// metadatum but a loader error ([`loader`]), so the names are matched as
+/// MSBuild spells them.
+fn item_attribute(node: Node<'_, '_>, name: &str) -> ItemAttribute {
+    let operation = ["Include", "Remove", "Update"]
+        .into_iter()
+        .find(|operation| attribute(node, operation).is_some());
+    match (operation, name) {
+        (
+            _,
+            "Condition"
+            | "Label"
+            | "KeepMetadata"
+            | "RemoveMetadata"
+            | "KeepDuplicates"
+            | "MatchOnMetadataOptions",
+        ) => ItemAttribute::Unexpanded,
+        (Some("Include"), "Include" | "Exclude")
+        | (Some("Remove"), "Remove" | "MatchOnMetadata")
+        | (Some("Update"), "Update") => ItemAttribute::Operation,
+        (_, "Include" | "Exclude" | "Remove" | "Update" | "MatchOnMetadata") => {
+            ItemAttribute::Unexpanded
+        }
+        // A `Remove` builds no metadata: one written on it is never expanded
+        // (probed, `msbuild-condition-oracle`, SDK 10.0.401).
+        (Some("Remove"), _) => ItemAttribute::Unexpanded,
+        _ => ItemAttribute::Metadata,
+    }
+}
+
+/// Judge `text`, the value of an item's or item definition's metadatum
+/// ([`judge_unwalked_text`]), but for an expression that reads item metadata
+/// (`%(…)`): MSBuild expands a metadatum's metadata references into it before
+/// its properties (escaped, so no expression's extent moves), and the walk's
+/// expansion leaves them as text, so a throw it finds there is not MSBuild's.
+/// An item list (`@(…)`) is expanded after the properties, so a function
+/// reads it as written, as the walk does (`<M>$([MSBuild]::VersionEquals('@(J)',
+/// '1.0'))</M>` throws whatever `J` holds; probed, `msbuild-condition-oracle`,
+/// SDK 10.0.401).
+fn judge_metadata_text(state: &mut State<'_>, text: &str, reached: bool, span: Range<usize>) {
+    let expressions: Vec<Thrown> = throwing_expressions(text, state)
+        .into_iter()
+        .filter(|thrown| !thrown.expression.contains("%("))
+        .collect();
+    // A metadatum's value substituted into the text may move where an
+    // expression starts or ends (`%(M)` holding `$(`), so a throw the walk
+    // finds in such text is MSBuild's perhaps.
+    let reached = reached && !text.contains("%(");
+    if !expressions.is_empty() {
+        judge_throwing_expression(state, expressions, reached, span);
+    }
+}
+
 /// Judge the `<ItemGroup>` at `node`, which MSBuild reaches as `reached` says.
 /// MSBuild evaluates each item's condition whatever the group's holds, and an
 /// `Include` item's metadata conditions whatever the item's holds; an
@@ -532,11 +1555,31 @@ pub(super) fn judge_deferred(node: Node<'_, '_>, dir: &Path, reached: bool, stat
 /// item metadata (`%(…)`) or an item list (`@(…)`) is evaluated item by item,
 /// so not at all when the `Include` names no item: then its conditions are
 /// only possibly evaluated.
+///
+/// It expands an item's operation (an `Include` and its `Exclude`, a `Remove`
+/// and its `MatchOnMetadata`, an `Update`) whatever the group's and the item's
+/// conditions hold, and an `Include` item's metadata, child or attribute, as
+/// it evaluates their conditions, but not under a false condition of the
+/// metadatum's own; an `Update`'s metadata only where the update applies,
+/// which the walk does not know here (`tests/condition_diff.rs`'s
+/// `where_msbuild_evaluates_a_text`).
 fn judge_item_group(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
     let entry_dir = state.entry_project_dir.clone();
     judge_condition(node, &entry_dir, reached, state);
     for item in node.children().filter(Node::is_element) {
         judge_condition(item, &entry_dir, reached, state);
+        // Design-time evaluation expands the operation whatever the group's
+        // or the item's condition holds.
+        for attr in item.attributes() {
+            if attr.namespace().is_none()
+                && item_attribute(item, attr.name()) == ItemAttribute::Operation
+                && let Some(text) = attribute(item, attr.name())
+            {
+                // MSBuild reads a metadata reference in an operation as
+                // written, as the walk does (`expand_metadata`).
+                judge_unwalked_text(state, &text, reached, item.range());
+            }
+        }
         if let Some(sure) = loader::remove_matching_more_than_items(item) {
             state.note_rejection(
                 certain_if(reached && sure),
@@ -546,21 +1589,45 @@ fn judge_item_group(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
                 item.range(),
             );
         }
-        let reads_items = |text: &str| text.contains("%(") || text.contains("@(");
-        let per_item = item.attributes().any(|a| reads_items(a.value()))
+        // Read as MSBuild reads each value (a metadatum attribute read again
+        // as XML, `&lt;![CDATA[%]]&gt;(Identity)` being `%(Identity)`); one the
+        // walk cannot read counts as reading.
+        let reads_items =
+            |text: Option<&str>| text.is_none_or(|text| text.contains("%(") || text.contains("@("));
+        let attribute_reads = |node: Node<'_, '_>, attr: &roxmltree::Attribute<'_, '_>| {
+            if item_attribute(node, attr.name()) == ItemAttribute::Metadata {
+                reads_items(metadata_attribute(node, attr).as_deref())
+            } else {
+                reads_items(attribute(node, attr.name()).as_deref())
+            }
+        };
+        let per_item = item.attributes().any(|a| attribute_reads(item, &a))
             || item.children().filter(Node::is_element).any(|metadata| {
-                // Text the reader declines (a CDATA section) counts as reading.
-                let text: Option<String> = metadata
-                    .descendants()
-                    .filter(|n| n.is_text())
-                    .map(crate::document::text)
-                    .collect();
-                text.is_none_or(|t| reads_items(&t))
-                    || metadata.attributes().any(|a| reads_items(a.value()))
+                reads_items(element_inner_contents(metadata).as_deref())
+                    || metadata
+                        .attributes()
+                        .any(|a| reads_items(attribute(metadata, a.name()).as_deref()))
             });
         let metadata_reached = reached && attribute(item, "Include").is_some() && !per_item;
+        // An `Update`'s metadata is expanded only where the update applies,
+        // which the walk does not know here: reached perhaps. One under a
+        // gate certainly false applies nowhere.
+        let ruled_out = |node: Node<'_, '_>| {
+            attribute(node, "Condition").is_some_and(|condition| {
+                directory_build::decision_from_certain_inputs(state, &condition, &entry_dir)
+                    == Some(false)
+            })
+        };
+        if attribute(item, "Include").is_none() && (ruled_out(node) || ruled_out(item)) {
+            continue;
+        }
+        judge_metadata_attributes(item, metadata_reached, state);
         for metadata in item.children().filter(Node::is_element) {
-            judge_condition(metadata, &entry_dir, metadata_reached, state);
+            if let Some(value_reached) =
+                judge_gate(metadata, &entry_dir, metadata_reached, state).inner(metadata_reached)
+            {
+                judge_element_contents(state, metadata, value_reached, Contents::Metadata);
+            }
         }
     }
 }
@@ -579,8 +1646,13 @@ fn judge_item_definition_group(node: Node<'_, '_>, reached: bool, state: &mut St
         else {
             continue;
         };
+        judge_metadata_attributes(definition, metadata_reached, state);
         for metadata in definition.children().filter(Node::is_element) {
-            judge_condition(metadata, &entry_dir, metadata_reached, state);
+            if let Some(value_reached) =
+                judge_gate(metadata, &entry_dir, metadata_reached, state).inner(metadata_reached)
+            {
+                judge_element_contents(state, metadata, value_reached, Contents::Metadata);
+            }
         }
     }
 }
@@ -606,7 +1678,13 @@ fn decision_but_for_opacity(
         observer,
     });
     let unknown = |name: &str| !certain_but_for_opacity(state, name);
-    condition::decide_without(condition, &state.lookup, probes, &unknown)
+    condition::decide_without(
+        condition,
+        &state.lookup,
+        probes,
+        state.condition_site(),
+        &unknown,
+    )
 }
 
 /// Whether the gate at `node` holds in no build but one hidden content steers.

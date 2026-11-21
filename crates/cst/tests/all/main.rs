@@ -47,6 +47,7 @@ mod parser_diff_atomic_app;
 mod parser_diff_bare_member_grid;
 mod parser_diff_base;
 mod parser_diff_begin_end;
+mod parser_diff_brace_body_grid;
 mod parser_diff_brack_index;
 mod parser_diff_class_do;
 mod parser_diff_coercion;

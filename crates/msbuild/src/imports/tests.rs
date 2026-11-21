@@ -24,6 +24,48 @@ fn pairs(diags: &[Diagnostic]) -> Vec<(ImplicitImportKind, PathBuf)> {
         .collect()
 }
 
+/// A `MSBuild.rsp` beside MSBuild, else one beside the project, else the
+/// nearest `Directory.Build.rsp` from the project's directory up, as MSBuild's
+/// command line finds them; none is `Absent`, and a path without a root, or no
+/// MSBuild directory, is never probed.
+#[test]
+fn the_nearest_auto_response_file_is_found() {
+    use super::find_auto_response_file;
+    use crate::AutoResponseFile;
+    let tmp = TempDir::new().unwrap();
+    let project = tmp.path().join("a").join("b").join("Demo.fsproj");
+    let msbuild = tmp.path().join("sdk");
+    fs::create_dir_all(project.parent().unwrap()).unwrap();
+    fs::create_dir_all(&msbuild).unwrap();
+    let find = |project: &Path| find_auto_response_file(project, Some(&msbuild), &Observer::new());
+    assert_eq!(find(&project), AutoResponseFile::Absent);
+    fs::write(tmp.path().join("Directory.Build.rsp"), "-p:A=B").unwrap();
+    fs::write(tmp.path().join("a").join("Directory.Build.rsp"), "").unwrap();
+    assert_eq!(
+        find(&project),
+        AutoResponseFile::Present(tmp.path().join("a").join("Directory.Build.rsp"))
+    );
+    let msbuild_rsp = project.parent().unwrap().join("MSBuild.rsp");
+    fs::write(&msbuild_rsp, "-p:A=B").unwrap();
+    assert_eq!(
+        find(&project),
+        AutoResponseFile::Present(msbuild_rsp),
+        "a project-local MSBuild.rsp is read too"
+    );
+    let beside_msbuild = msbuild.join("MSBuild.rsp");
+    fs::write(&beside_msbuild, "-p:AssemblyName=Shared").unwrap();
+    assert_eq!(
+        find(&project),
+        AutoResponseFile::Present(beside_msbuild),
+        "MSBuild reads the one beside itself first"
+    );
+    assert_eq!(find(Path::new("Demo.fsproj")), AutoResponseFile::Unread);
+    assert_eq!(
+        find_auto_response_file(&project, None, &Observer::new()),
+        AutoResponseFile::Unread
+    );
+}
+
 #[test]
 fn empty_tree_yields_no_diagnostics() {
     let tmp = TempDir::new().unwrap();

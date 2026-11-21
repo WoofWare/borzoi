@@ -164,7 +164,7 @@ jobs:
       # an intra-doc link that a build without the feature cannot resolve.
       - name: Lint and document the test-support crates without it
         run: |
-          for crate in borzoi-assembly borzoi-msbuild borzoi-sema; do
+          for crate in borzoi-assembly borzoi-msbuild borzoi-sema borzoi; do
             nix develop --command cargo clippy -p "$crate" --lib -- -D warnings
             nix develop --command env RUSTDOCFLAGS="-D warnings" cargo doc -p "$crate" --no-deps --document-private-items
           done
@@ -193,6 +193,15 @@ jobs:
         run: |
           nix develop --command cargo test -p borzoi-cst --test all accessor_coverage:: \
             -- --skip accessor_fixtures_match_fcs
+
+      # Every generator in the workspace has a row in the hostile-value
+      # library's table saying which hostile kinds it draws, or why none
+      # applies (crates/oracle-harness/src/hostile/coverage.rs). The check
+      # reads every crate's sources, so it belongs to no one crate's change
+      # filter: a new generator in any crate can break it.
+      - name: Check every generator declares its hostile kinds
+        run: |
+          nix develop --command cargo test -p borzoi-oracle-harness --lib hostile::
 
   fcs-dump:
     name: Build fcs-dump
@@ -572,6 +581,19 @@ jobs:
         # prose version of these numbers was wrong for a year and sent a plan
         # stage to wait on a lever worth 1.5% of what the comment claimed.
         run: bash tools/ci/corpus-sweeps.sh sdk-chain-attribution
+
+      - name: Soak the rejection judgement at a fresh seed
+        if: steps.gate.outputs.run == 'true'
+        # `rejection_generative_diff`'s two soaks: generated projects and
+        # conditions at a fresh seed, graded against MSBuild like their
+        # fixed-seed twins. A failure prints the seed that reproduces it.
+        run: bash tools/ci/corpus-sweeps.sh rejection-soak
+
+      - name: Soak the element-contents differential at a fresh seed
+        if: steps.gate.outputs.run == 'true'
+        # Generated property, metadata and inline-task contents, each held
+        # to the text MSBuild reads of it. A failure prints the seed.
+        run: bash tools/ci/corpus-sweeps.sh element-contents-soak
 
       - name: Report the slowest tests
         if: ${{ !cancelled() && steps.gate.outputs.run == 'true' }}

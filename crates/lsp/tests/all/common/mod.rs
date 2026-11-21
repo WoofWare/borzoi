@@ -183,6 +183,41 @@ fn ensure_fcs_dump_built() -> &'static Path {
         .as_path()
 }
 
+/// Write the user config NuGet itself writes under `home` where there is none
+/// (its package source is nuget.org), and the folders it sits in. The NuGet
+/// settings model declines where there is no user config, so a fixture whose
+/// restore must go ahead seeds the one NuGet would have written.
+pub fn seed_user_nuget_config(home: &Path) {
+    let folder = home.join(".nuget").join("NuGet");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(
+        folder.join("NuGet.Config"),
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<configuration>\n  <packageSources>\n    \
+         <add key=\"nuget.org\" value=\"https://api.nuget.org/v3/index.json\" \
+         protocolVersion=\"3\" />\n  </packageSources>\n</configuration>\n",
+    )
+    .unwrap();
+}
+
+/// Assert that the host's NuGet home holds a user config. A test that runs
+/// the server under the host's own environment, as a user's editor does,
+/// calls this first. The NuGet settings model declines where there is no
+/// user config (NuGet writes one on its first run, and the model does not
+/// write), so on a host where no NuGet command has run, such a test would
+/// fail on a restore that never started and not say why.
+pub fn assert_host_has_a_user_nuget_config() {
+    let environment = std::env::vars_os().collect();
+    let home = borzoi_nuget::settings::nuget_home(&environment)
+        .expect("the host has no home NuGet can use");
+    let config = home.join(".nuget").join("NuGet").join("NuGet.Config");
+    assert!(
+        config.host_is_file(),
+        "{} is not there, so the NuGet settings model declines and no restore runs. NuGet \
+         writes the file on its first run: `dotnet nuget list source` makes it.",
+        config.display()
+    );
+}
+
 pub fn project_dir() -> PathBuf {
     workspace_root().join("tools").join("fcs-dump")
 }
@@ -383,6 +418,14 @@ pub fn runtime_project_state_in(
 /// A configured `fcs-dump` [`Command`] for `subcommand`, honouring
 /// `BORZOI_FCS_DUMP` (a pre-built binary) or the build-once `.dll` run via
 /// `dotnet`. The caller wires stdin/stdout/env as needed.
+/// The directory of the `fcs-dump` [`fcs_dump_command`] runs, which holds the
+/// assemblies it ships with.
+pub fn fcs_dump_dir() -> PathBuf {
+    let bin = std::env::var_os("BORZOI_FCS_DUMP")
+        .map_or_else(|| ensure_fcs_dump_built().to_path_buf(), PathBuf::from);
+    bin.parent().expect("fcs-dump's directory").to_path_buf()
+}
+
 pub fn fcs_dump_command(subcommand: &str) -> Command {
     if let Some(bin) = std::env::var_os("BORZOI_FCS_DUMP") {
         let mut c = Command::new(bin);

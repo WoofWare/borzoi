@@ -42,12 +42,12 @@ use borzoi_msbuild::{
     SdkResolveError, parse_fsproj,
 };
 use common::{
-    CONTROLLED_PROPERTY_NAMES, SplitMix64, gen_bool_expr, gen_expand_value, gen_grammar_value,
-    parse_fsproj_with_imports, soak_parameters,
+    CONTROLLED_PROPERTY_NAMES, SplitMix64, gen_bool_expr, gen_expand_value,
+    gen_grammar_value_spelled, parse_fsproj_with_imports, soak_parameters,
 };
 
 /// A condition MSBuild evaluates to `true` and the walker cannot evaluate.
-const UNDECIDABLE: &str = "$([System.String]::IsNullOrWhiteSpace(''))";
+const UNDECIDABLE: &str = "'É' == 'é'";
 /// A property body MSBuild evaluates and the walker refuses (`Substring` is
 /// outside the modelled members), so it stores no value.
 const REFUSED_BODY: &str = "$(Configuration.Substring(0,1))";
@@ -154,7 +154,7 @@ fn gen_body(rng: &mut SplitMix64, names: &[&'static str]) -> String {
         2..=3 => format!("$({name})"),
         4 => format!("{}$({name})", rng.pick(LITERALS)),
         5 => format!("$({name}.Length)"),
-        6 => gen_grammar_value(rng),
+        6 => gen_grammar_value_spelled(rng),
         _ => gen_expand_value(rng),
     }
 }
@@ -1142,6 +1142,96 @@ fn a_project_reference_gated_on_a_refused_name_is_not_certain() {
         "MSBuild computes `Bar` and skips the group; we captured {:?} as certain",
         project.project_references
     );
+}
+
+/// #1098: a `ProjectReference` reading a name refused twice (a refused write,
+/// then a refused write under a gate reading it) is not dropped from a list
+/// published as certain. Every expression is one MSBuild evaluates and the
+/// walk does not; `fsproj_project_reference_read_diff`'s
+/// `a_reference_reading_a_refused_name_is_no_certain_omission` holds the shape
+/// to MSBuild's items.
+#[test]
+fn a_project_reference_reading_a_twice_refused_name_is_not_dropped() {
+    let project = pure_evaluate(
+        r#"<Project>
+  <PropertyGroup>
+    <TargetFramework>$(Configuration)</TargetFramework>
+  </PropertyGroup>
+  <PropertyGroup>
+    <TargetFramework>$([System.String]::Copy('net8.0'))</TargetFramework>
+  </PropertyGroup>
+  <PropertyGroup>
+    <TargetFramework Condition="'$(TargetFramework)' == ''">$([System.String]::Copy('x'))</TargetFramework>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="$(TargetFramework.Length).fsproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="$(Configuration.Length).fsproj" />
+  </ItemGroup>
+</Project>"#,
+    );
+    assert!(
+        project.project_references_uncertain,
+        "MSBuild references `$(TargetFramework.Length).fsproj`; we captured {:?} as certain",
+        project.project_references
+    );
+    // The same read of a name the walk holds no value of, or holds one it
+    // doubts, by each route: dropped or kept, the list is not certain.
+    for (label, text) in [
+        (
+            "single",
+            r#"<Project>
+  <PropertyGroup><TF>$([System.String]::Copy('net8.0'))</TF></PropertyGroup>
+  <ItemGroup><ProjectReference Include="$(TF.Length).fsproj" /></ItemGroup>
+</Project>"#,
+        ),
+        (
+            "single-cond",
+            r#"<Project>
+  <PropertyGroup><TF Condition="'É' == 'é'">$([System.String]::Copy('net8.0'))</TF></PropertyGroup>
+  <ItemGroup><ProjectReference Include="$(TF.Length).fsproj" /></ItemGroup>
+</Project>"#,
+        ),
+        (
+            "twice-uncond",
+            r#"<Project>
+  <PropertyGroup><TF>$([System.String]::Copy('net8.0'))</TF></PropertyGroup>
+  <PropertyGroup><TF>$([System.String]::Copy('x'))</TF></PropertyGroup>
+  <ItemGroup><ProjectReference Include="$(TF.Length).fsproj" /></ItemGroup>
+</Project>"#,
+        ),
+        (
+            "twice-cond-a",
+            r#"<Project>
+  <PropertyGroup><TF>$([System.String]::Copy('net8.0'))</TF></PropertyGroup>
+  <PropertyGroup><TF Condition="'$(TF)' == ''">a</TF></PropertyGroup>
+  <ItemGroup><ProjectReference Include="$(TF.Length).fsproj" /></ItemGroup>
+</Project>"#,
+        ),
+        (
+            "twice-cond-refused",
+            r#"<Project>
+  <PropertyGroup><TF>$([System.String]::Copy('net8.0'))</TF></PropertyGroup>
+  <PropertyGroup><TF Condition="'$(TF)' == ''">$([System.String]::Copy('x'))</TF></PropertyGroup>
+  <ItemGroup><ProjectReference Include="$(TF.Length).fsproj" /></ItemGroup>
+</Project>"#,
+        ),
+        (
+            "undecided-a",
+            r#"<Project>
+  <PropertyGroup><TF Condition="'É' == 'é'">a</TF></PropertyGroup>
+  <ItemGroup><ProjectReference Include="$(TF.Length).fsproj" /></ItemGroup>
+</Project>"#,
+        ),
+    ] {
+        let project = pure_evaluate(text);
+        assert!(
+            project.project_references_uncertain,
+            "{label}: MSBuild references `$(TF.Length).fsproj`; we captured {:?} as certain",
+            project.project_references
+        );
+    }
 }
 
 /// The other side of #780's gate fix: a refused name that a later clean write

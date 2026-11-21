@@ -34,10 +34,8 @@ const MAY_HOLD: usize = 32 << 20;
 /// A condition MSBuild evaluates to `true`, [`CONDITION_BYTES`] long, that the
 /// walk cannot evaluate.
 fn long_undecidable_condition() -> String {
-    format!(
-        "$([System.String]::IsNullOrWhiteSpace('{}'))",
-        " ".repeat(CONDITION_BYTES)
-    )
+    let padding = " ".repeat(CONDITION_BYTES);
+    format!("'É{padding}' == 'é{padding}'")
 }
 
 fn properties() -> String {

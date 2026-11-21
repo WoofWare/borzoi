@@ -50,12 +50,19 @@
 //!   `NUGET_PACKAGES`, if set non-empty, is absolute; on Linux
 //!   `NUGET_COMMON_APPLICATION_DATA`, which moves the machine-wide folder, is
 //!   absolute if set non-empty.
+//! - **User config.** `<home>/.nuget/NuGet/NuGet.Config` is a regular file.
+//!   Where there is none NuGet writes a default one, and throws where it
+//!   cannot (a home that cannot be created or written), which is known only
+//!   by writing.
 //! - **Which files.** NuGet decides which spelling of `nuget.config` it loads
 //!   from what it believes of the file system's case sensitivity, a belief it
 //!   probes once per process. A folder holding a config file is admitted only
 //!   where that belief cannot matter: on macOS every spelling must name one
 //!   file (a case-insensitive volume), and on Linux the spellings present must
-//!   be distinct files. In the two folders NuGet lists, every candidate (a
+//!   be distinct files. A spelling is present as NuGet's `File.Exists` says:
+//!   anything that is not a directory, a link to nothing included, so a
+//!   present spelling that is no regular file is loaded, and declines. In the
+//!   two folders NuGet lists, every candidate (a
 //!   regular file whose name ends in `.config` in any case) must end in
 //!   `.config` or `.Config`, which both platforms' patterns match, must not be
 //!   named `NuGet.Config` in any case, and must sort the same ignoring case as
@@ -128,10 +135,14 @@ const DEFAULT_FILE_NAME: &str = "NuGet.Config";
 pub trait SettingsFs {
     /// [`std::fs::metadata`]: what `path` names, following symlinks.
     fn metadata(&self, path: &Path) -> std::io::Result<Metadata>;
+    /// [`std::fs::symlink_metadata`]: what `path` names, a symlink itself
+    /// rather than what it points at: whether anything at all is at a path,
+    /// a link that resolves to nothing included.
+    fn link_metadata(&self, path: &Path) -> std::io::Result<Metadata>;
     /// The identity (device and inode) of the file `path` names, following
     /// symlinks, which tells two spellings of one file apart from two files.
-    /// Asked only of spellings [`Self::metadata`] found to be files, and only
-    /// where more than one is.
+    /// Asked only of spellings NuGet takes for config files (anything that is
+    /// not a directory), and only where more than one is.
     fn identity(&self, path: &Path) -> std::io::Result<(u64, u64)>;
     /// [`std::fs::read`], failing a path that names no regular file rather
     /// than opening it: a FIFO's open waits for a writer that may never come.
@@ -172,6 +183,14 @@ pub struct HostFs;
 impl SettingsFs for HostFs {
     fn metadata(&self, path: &Path) -> std::io::Result<Metadata> {
         let metadata = std::fs::metadata(path)?;
+        Ok(Metadata {
+            is_file: metadata.is_file(),
+            is_dir: metadata.is_dir(),
+        })
+    }
+
+    fn link_metadata(&self, path: &Path) -> std::io::Result<Metadata> {
+        let metadata = std::fs::symlink_metadata(path)?;
         Ok(Metadata {
             is_file: metadata.is_file(),
             is_dir: metadata.is_dir(),
@@ -557,7 +576,7 @@ pub struct GlobalPackagesFolder {
     pub origin: FolderOrigin,
     /// The config files NuGet loads, most significant first, as
     /// `ISettings.GetConfigFilePaths` lists them. The user config file is
-    /// always among them: NuGet writes a default one where there is none.
+    /// always among them: the model commits only where it exists.
     pub config_files: Vec<PathBuf>,
 }
 
@@ -587,6 +606,9 @@ pub enum GlobalPackagesFolderDecline {
     HomeUnknown,
     /// An environment variable NuGet reads holds a value outside the domain.
     Environment { name: &'static str },
+    /// There is no user config, which NuGet then writes, and throws where it
+    /// cannot: whether it can is known only by writing.
+    UserConfigAbsent { file: PathBuf },
     /// Which config files NuGet loads from this folder depends on what it
     /// believes of the file system, or the folder could not be listed.
     Folder { folder: PathBuf },
@@ -614,6 +636,11 @@ impl fmt::Display for GlobalPackagesFolderDecline {
             GlobalPackagesFolderDecline::Environment { name } => {
                 write!(f, "{name} holds a value outside the modelled domain")
             }
+            GlobalPackagesFolderDecline::UserConfigAbsent { file } => write!(
+                f,
+                "there is no user config {}, which NuGet would write",
+                file.display()
+            ),
             GlobalPackagesFolderDecline::Folder { folder } => write!(
                 f,
                 "which config files NuGet loads from {} cannot be predicted",
@@ -668,9 +695,6 @@ pub fn nuget_home_with(
 struct ConfigFileRef {
     path: PathBuf,
     folder: PathBuf,
-    /// `false` for a user config NuGet will write: its default holds package
-    /// sources alone.
-    exists: bool,
 }
 
 /// The global packages folder restore uses for a project in `root` that sets
@@ -702,11 +726,7 @@ pub fn global_packages_folder_with(
     let files = config_files(root, &home, environment, fs)?;
     let mut parsed = Vec::with_capacity(files.len());
     for file in &files {
-        parsed.push(if file.exists {
-            read_config_file(&file.path, fs)?
-        } else {
-            SettingsFile::default()
-        });
+        parsed.push(read_config_file(&file.path, fs)?);
     }
     let config_files: Vec<PathBuf> = files.iter().map(|file| file.path.clone()).collect();
 
@@ -798,28 +818,29 @@ fn config_files(
             files.push(ConfigFileRef {
                 path,
                 folder: folder.to_owned(),
-                exists: true,
             });
         }
     }
 
     let user_folder = home.join(".nuget").join("NuGet");
     let user_file = user_folder.join(DEFAULT_FILE_NAME);
-    // NuGet writes a default config (package sources only) where there is
-    // none, and fails where it cannot.
-    let exists = match fs.metadata(&user_file) {
-        Ok(metadata) if metadata.is_file => true,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+    // NuGet writes a default config where there is none, and throws where
+    // it cannot. Whether it can is known only by writing, which a reader
+    // does not do, so a user config that is not there declines.
+    match fs.metadata(&user_file) {
+        Ok(metadata) if metadata.is_file => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(GlobalPackagesFolderDecline::UserConfigAbsent { file: user_file });
+        }
         _ => {
             return Err(GlobalPackagesFolderDecline::Folder {
                 folder: user_folder,
             });
         }
-    };
+    }
     files.push(ConfigFileRef {
         path: user_file,
         folder: user_folder.clone(),
-        exists,
     });
 
     let additional = user_folder.join("config");
@@ -827,7 +848,6 @@ fn config_files(
         files.push(ConfigFileRef {
             path: additional.join(name),
             folder: additional.clone(),
-            exists: true,
         });
     }
 
@@ -842,13 +862,32 @@ fn config_files(
         files.push(ConfigFileRef {
             path: machine_wide.join(name),
             folder: machine_wide.clone(),
-            exists: true,
         });
     }
     Ok(files)
 }
 
+/// Whether .NET's `File.Exists` holds of `path`, which is how NuGet decides
+/// that a spelling of the walk's config file is there: something is at the
+/// path, following symlinks or, where that fails, the symlink itself, and it
+/// is not a directory. So a FIFO, a socket, a device, a link to nothing and a
+/// loop of links are each a config file to NuGet, which then opens it.
+///
+/// The entry's own type first, so that the common answers (nothing, a regular
+/// file, a directory) take one query; only something else (a link, a FIFO) is
+/// followed, since a link to a directory is not a file.
+fn file_exists(path: &Path, fs: &dyn SettingsFs) -> bool {
+    match fs.link_metadata(path) {
+        Err(_) => false,
+        Ok(entry) if entry.is_file => true,
+        Ok(entry) if entry.is_dir => false,
+        Ok(_) => !fs.metadata(path).is_ok_and(|target| target.is_dir),
+    }
+}
+
 /// The config file NuGet loads from `folder` in its walk up from the root.
+/// A spelling NuGet takes for one and that is no regular file is still the
+/// one it loads: reading it then declines.
 fn walk_config_file(
     folder: &Path,
     fs: &dyn SettingsFs,
@@ -856,51 +895,70 @@ fn walk_config_file(
     let present: Vec<usize> = WALK_FILE_NAMES
         .iter()
         .enumerate()
-        .filter(|(_, name)| {
-            fs.metadata(&folder.join(name))
-                .is_ok_and(|metadata| metadata.is_file)
-        })
+        .filter(|(_, name)| file_exists(&folder.join(name), fs))
         .map(|(index, _)| index)
         .collect();
-    let Some(first) = present.first() else {
+    if present.is_empty() {
         return Ok(None);
-    };
-    let unpredictable = || GlobalPackagesFolderDecline::Folder {
-        folder: folder.to_owned(),
-    };
+    }
     // A spelling whose identity cannot be had cannot be said to be the same
     // file as the others, nor another one.
-    let same_file = || same_file(folder, &present, fs).ok_or_else(unpredictable);
-    if cfg!(target_os = "macos") {
-        // NuGet believes a macOS volume case-insensitive and looks for
-        // `NuGet.Config` alone; that agrees with every belief only where all
-        // three spellings name one file.
-        if present.len() != WALK_FILE_NAMES.len() || !same_file()? {
-            return Err(unpredictable());
-        }
-        Ok(Some(folder.join(DEFAULT_FILE_NAME)))
-    } else {
-        // NuGet believes a Linux volume case-sensitive and takes the first
-        // spelling present; on a case-insensitive one every spelling is
-        // present and names one file, and the belief may differ.
-        if present.len() > 1 && same_file()? {
-            return Err(unpredictable());
-        }
-        Ok(Some(folder.join(WALK_FILE_NAMES[*first])))
+    let identities = || {
+        present
+            .iter()
+            .map(|index| fs.identity(&folder.join(WALK_FILE_NAMES[*index])).ok())
+            .collect::<Option<Vec<_>>>()
+    };
+    match walk_spelling(cfg!(target_os = "macos"), &present, identities) {
+        Some(name) => Ok(Some(folder.join(name))),
+        None => Err(GlobalPackagesFolderDecline::Folder {
+            folder: folder.to_owned(),
+        }),
     }
 }
 
-/// Whether the spellings of [`WALK_FILE_NAMES`] at the indices `present`, in
-/// `folder`, all name one file; `None` where an identity cannot be had.
-fn same_file(folder: &Path, present: &[usize], fs: &dyn SettingsFs) -> Option<bool> {
-    if !cfg!(unix) {
-        return Some(false);
+/// The spelling NuGet loads from a folder of the walk, whatever it believes
+/// of the file system's case sensitivity, or `None` where that belief
+/// decides. `present` holds the indices into [`WALK_FILE_NAMES`] of the
+/// spellings NuGet takes for a config file there, at least one, and
+/// `identities` answers with the identity of each in that order, or `None`
+/// where one cannot be had. It is asked only where the answer needs it.
+fn walk_spelling(
+    macos: bool,
+    present: &[usize],
+    identities: impl FnOnce() -> Option<Vec<(u64, u64)>>,
+) -> Option<&'static str> {
+    if macos {
+        // NuGet believes a macOS volume case-insensitive and looks for
+        // `NuGet.Config` alone; that agrees with every belief only where all
+        // three spellings name one file.
+        if present.len() != WALK_FILE_NAMES.len() {
+            return None;
+        }
+        let identities = identities()?;
+        identities
+            .windows(2)
+            .all(|pair| pair[0] == pair[1])
+            .then_some(DEFAULT_FILE_NAME)
+    } else {
+        // NuGet believes a Linux volume case-sensitive and takes the first
+        // spelling present; on a case-insensitive one every spelling is
+        // present and names one file, and the belief may differ. Two
+        // spellings of one file are outside the domain however many are
+        // present: a third that is another file does not say which of the
+        // two a NuGet of another belief opens.
+        if present.len() > 1 {
+            let identities = identities()?;
+            let repeated = identities
+                .iter()
+                .enumerate()
+                .any(|(at, identity)| identities[at + 1..].contains(identity));
+            if repeated {
+                return None;
+            }
+        }
+        Some(WALK_FILE_NAMES[*present.first()?])
     }
-    let identities = present
-        .iter()
-        .map(|index| fs.identity(&folder.join(WALK_FILE_NAMES[*index])).ok())
-        .collect::<Option<Vec<_>>>()?;
-    Some(identities.windows(2).all(|pair| pair[0] == pair[1]))
 }
 
 /// The names of the config files NuGet loads from a folder it lists (the
@@ -1080,6 +1138,88 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod walk_spelling_tests {
+    use super::*;
+
+    /// Every folder of the walk, as the spellings present in it and which of
+    /// them name one file, on both platforms. The model commits to a spelling
+    /// only inside its stated domain: on macOS all three spellings name one
+    /// file, and it is `NuGet.Config`; on Linux no two spellings present name
+    /// one file, and it is the first present.
+    #[test]
+    fn the_walk_commits_to_a_spelling_only_in_its_domain() {
+        // Each spelling is absent (0) or one of three files.
+        for code in 0..4usize.pow(3) {
+            let files = [code % 4, code / 4 % 4, code / 16];
+            let present: Vec<usize> = (0..3).filter(|index| files[*index] != 0).collect();
+            if present.is_empty() {
+                continue;
+            }
+            let identities: Vec<(u64, u64)> = present
+                .iter()
+                .map(|index| (0, files[*index] as u64))
+                .collect();
+            let distinct = present.iter().enumerate().all(|(at, index)| {
+                present[at + 1..]
+                    .iter()
+                    .all(|other| files[*other] != files[*index])
+            });
+            let one_file =
+                present.len() == 3 && present.iter().all(|index| files[*index] == files[0]);
+            for macos in [false, true] {
+                let expected = if macos {
+                    one_file.then_some(DEFAULT_FILE_NAME)
+                } else {
+                    distinct.then(|| WALK_FILE_NAMES[present[0]])
+                };
+                assert_eq!(
+                    walk_spelling(macos, &present, || Some(identities.clone())),
+                    expected,
+                    "macos {macos}, spellings {files:?}"
+                );
+                // With no identity to be had, a commit is one that needed none.
+                let blind = walk_spelling(macos, &present, || None);
+                assert!(
+                    blind.is_none() || (blind == expected && !macos && present.len() == 1),
+                    "macos {macos}, spellings {files:?}: {blind:?} with no identity"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod user_config_tests {
+    use super::*;
+
+    /// Where there is no user config NuGet writes one, and throws where it
+    /// cannot: the model, which does not write, declines rather than commit
+    /// to the folder of a default it cannot know NuGet wrote. The home is a
+    /// folder of the test's own that is not there, so that nothing of the
+    /// host's decides what the model finds at it.
+    #[test]
+    fn a_user_config_nuget_would_have_to_write_declines() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let base = std::fs::canonicalize(tmp.path()).unwrap();
+        let project = base.join("project");
+        std::fs::create_dir(&project).unwrap();
+        let home = base.join("home");
+        let environment: BTreeMap<OsString, OsString> = [(
+            OsString::from("DOTNET_CLI_HOME"),
+            home.clone().into_os_string(),
+        )]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            global_packages_folder(&project, &environment),
+            Err(GlobalPackagesFolderDecline::UserConfigAbsent {
+                file: home.join(".nuget").join("NuGet").join(DEFAULT_FILE_NAME)
+            })
+        );
+    }
+}
+
 #[cfg(all(test, unix))]
 mod fifo_tests {
     use super::*;
@@ -1098,6 +1238,53 @@ mod fifo_tests {
             for name in ["NuGet.Config", "linked.config"] {
                 let error = HostFs.read(&dir.join(name)).unwrap_err();
                 assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput, "{name}");
+            }
+        });
+    }
+
+    /// NuGet asks `File.Exists` of each spelling of the walk's config file,
+    /// which holds of anything at the path that is not a directory, a link
+    /// that resolves to nothing included, and then loads the file: it waits
+    /// on a FIFO for a writer, and throws on a loop of links. So a folder
+    /// whose config file is such a thing is not a folder with no config
+    /// file: the walk declines the folder, or names the file, whose read
+    /// then declines. Asked of the walk alone, so that no config file of the
+    /// host's, above the temporary directory or machine-wide, has a say.
+    #[test]
+    fn a_walk_config_file_that_exists_and_is_no_regular_file_declines() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let base = std::fs::canonicalize(tmp.path()).unwrap();
+        let mut folders = Vec::new();
+        for kind in ["fifo", "linked-fifo", "dangling", "loop"] {
+            let folder = base.join(kind).join("project");
+            std::fs::create_dir_all(&folder).unwrap();
+            let file = folder.join(DEFAULT_FILE_NAME);
+            match kind {
+                "fifo" => make_fifo(&file),
+                "linked-fifo" => {
+                    make_fifo(&base.join(kind).join("pipe"));
+                    std::os::unix::fs::symlink(base.join(kind).join("pipe"), &file).unwrap();
+                }
+                "dangling" => {
+                    std::os::unix::fs::symlink(base.join(kind).join("nowhere"), &file).unwrap()
+                }
+                _ => std::os::unix::fs::symlink(DEFAULT_FILE_NAME, &file).unwrap(),
+            }
+            folders.push((kind, folder));
+        }
+        within_deadline("loading settings beside a FIFO", move || {
+            for (kind, folder) in folders {
+                let loaded = walk_config_file(&folder, &HostFs).and_then(|file| {
+                    file.map(|file| read_config_file(&file, &HostFs))
+                        .transpose()
+                });
+                match loaded {
+                    Err(GlobalPackagesFolderDecline::Folder { folder: declined })
+                        if declined == folder => {}
+                    Err(GlobalPackagesFolderDecline::ConfigFile { file, .. })
+                        if file.parent() == Some(folder.as_path()) => {}
+                    other => panic!("{kind}: {other:?}"),
+                }
             }
         });
     }

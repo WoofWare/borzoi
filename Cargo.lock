@@ -143,6 +143,7 @@ dependencies = [
 name = "borzoi"
 version = "0.1.0"
 dependencies = [
+ "borzoi",
  "borzoi-assembly",
  "borzoi-cst",
  "borzoi-msbuild",
@@ -274,6 +275,7 @@ dependencies = [
  "proc-macro2",
  "proptest",
  "roxmltree",
+ "serde",
  "serde_json",
  "tempfile",
 ]

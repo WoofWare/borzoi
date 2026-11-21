@@ -1,0 +1,13 @@
+# Generated; do not edit by hand. One line per graded item, sorted.
+# Regenerate with:
+#   BORZOI_UPDATE_MANIFESTS=1 cargo test -p borzoi-corpus-diff --test project_resolution fcs_dump_boundary:: -- --ignored
+plain	owed
+wire.blank-line	owed
+wire.duplicate-key	owed
+wire.missing-field	owed
+wire.multi-line	owed
+wire.not-an-object	owed
+wire.not-json	owed
+wire.trailing-unicode-whitespace	owed
+wire.unknown-field	owed
+wire.wrong-type	owed

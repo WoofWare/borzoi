@@ -14,7 +14,7 @@
 use super::*;
 
 /// A condition MSBuild evaluates to `true` and the walk cannot evaluate.
-const UNDECIDABLE: &str = "$([System.String]::IsNullOrWhiteSpace(''))";
+const UNDECIDABLE: &str = "'É' == 'é'";
 
 /// A `Directory.Build.*` file that contributes a property, a Compile item, a
 /// `ProjectReference` and a define.
@@ -307,7 +307,7 @@ fn a_doubted_file_s_own_imports_are_doubted_with_it() {
 #[test]
 fn a_later_import_of_a_doubted_file_is_doubted_too() {
     let tmp = tempfile::tempdir().unwrap();
-    let false_to_msbuild = "$([System.String]::IsNullOrWhiteSpace('no'))";
+    let false_to_msbuild = "'É' == 'Ê'";
     let block = COMMON_TARGETS_BLOCK.replace(
         "Condition=\"'$(ImportDirectoryBuildTargets)' == 'true' and exists('$(DirectoryBuildTargetsPath)')\"",
         &format!("Condition=\"{false_to_msbuild} and exists('$(DirectoryBuildTargetsPath)')\""),
@@ -386,7 +386,7 @@ fn a_doubted_point_through_a_link_and_dot_dot_doubts_the_file_msbuild_opens() {
 #[test]
 fn a_later_import_of_a_doubted_file_doubts_its_children_again() {
     let tmp = tempfile::tempdir().unwrap();
-    let false_to_msbuild = "$([System.String]::IsNullOrWhiteSpace('no'))";
+    let false_to_msbuild = "'É' == 'Ê'";
     let block = COMMON_TARGETS_BLOCK.replace(
         "Condition=\"'$(ImportDirectoryBuildTargets)' == 'true' and exists('$(DirectoryBuildTargetsPath)')\"",
         &format!("Condition=\"{false_to_msbuild} and exists('$(DirectoryBuildTargetsPath)')\""),
@@ -426,7 +426,7 @@ fn a_later_import_of_a_doubted_file_doubts_its_children_again() {
 #[test]
 fn walking_a_doubted_cycle_again_ends() {
     let tmp = tempfile::tempdir().unwrap();
-    let false_to_msbuild = "$([System.String]::IsNullOrWhiteSpace('no'))";
+    let false_to_msbuild = "'É' == 'Ê'";
     let block = COMMON_TARGETS_BLOCK.replace(
         "Condition=\"'$(ImportDirectoryBuildTargets)' == 'true' and exists('$(DirectoryBuildTargetsPath)')\"",
         &format!("Condition=\"{false_to_msbuild} and exists('$(DirectoryBuildTargetsPath)')\""),

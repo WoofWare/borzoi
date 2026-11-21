@@ -93,9 +93,16 @@ fold-counts = ["borzoi-sema/fold-counts"]
 # go-to-definition. In `default`, so it is on unless `--no-default-features`;
 # without it the source URL is surfaced for the client to open instead.
 sourcelink-fetch = ["dep:minreq"]
+# Test support for the integration tests (`observed::held_still`): a test
+# that counts what confirming its tree costs holds its fixture's ancestors'
+# stamps still, which concurrent tests move. Nothing the server does reads
+# it; the crate's dev-dependency on itself turns it on for `cargo test`.
+test-support = []
 
 [dev-dependencies]
 borzoi-oracle-harness.workspace = true
+# Self-reference turns on `test-support` for the integration tests.
+borzoi = { path = ".", default-features = false, features = ["test-support"] }
 # The metric-path walk the stats dashboard plots by, so a generator's
 # pinned metric namespace is read exactly as it is published.
 borzoi-stats.workspace = true

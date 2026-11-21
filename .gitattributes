@@ -5,11 +5,14 @@
 # twice rather than conflict. Name each file here by its literal path —
 # `every_merge_driver_manifest_is_keyed` checks each is keyed.
 crates/corpus-diff/manifests/project_corpus.txt merge=borzoi-manifest
+crates/corpus-diff/tests/manifests/hostile/fcs_dump_project.txt merge=borzoi-manifest
+crates/corpus-diff/tests/manifests/hostile/fcs_dump_wire.txt merge=borzoi-manifest
 crates/msbuild/tests/manifests/fsproj_msbuild_corpus_diff.txt merge=borzoi-manifest
 crates/msbuild/tests/manifests/restore_cone_fixtures.txt merge=borzoi-manifest
 crates/msbuild/tests/manifests/restore_cone_projects.txt merge=borzoi-manifest
 crates/msbuild/tests/manifests/restore_cone_reads_fixtures.txt merge=borzoi-manifest
 crates/msbuild/tests/manifests/restore_cone_reads_projects.txt merge=borzoi-manifest
+crates/msbuild/tests/manifests/rejection_projects_wrong.txt merge=borzoi-manifest
 crates/sema/tests/manifests/infer_corpus_diff.txt merge=borzoi-manifest
 crates/sema/tests/manifests/infer_corpus_dump.txt merge=borzoi-manifest
 crates/sema/tests/manifests/infer_check_order_pins.txt merge=borzoi-manifest
@@ -26,3 +29,6 @@ crates/cst/tests/manifests/recovery_sweep.txt merge=borzoi-manifest
 crates/cst/tests/manifests/decl_sequence_grid_streams.txt merge=borzoi-manifest
 crates/cst/tests/manifests/version_dependence_census.txt merge=borzoi-manifest
 crates/cst/tests/manifests/print_roundtrip_corpus.txt merge=borzoi-manifest
+crates/nuget/tests/manifests/hostile/settings.txt merge=borzoi-manifest
+crates/nuget/tests/manifests/hostile/nuspec.txt merge=borzoi-manifest
+crates/nuget/tests/manifests/hostile/compile_assets.txt merge=borzoi-manifest

@@ -65,7 +65,7 @@ pub struct Checked {
 /// receiver (`(asR x).get_Z(1)`), or else the identifier between the last `.`
 /// before the argument list and that list (`"abc".Equals(1)`).
 fn probe_method_name(text: &str) -> &str {
-    match text.find(").") {
+    let spelled = match text.find(").") {
         Some(q) => {
             let after = &text[q + 2..];
             &after[..after.find('(').expect("an argument list")]
@@ -74,7 +74,12 @@ fn probe_method_name(text: &str) -> &str {
             let head = &text[..text.find('(').expect("an argument list")];
             &head[head.rfind('.').expect("a method call") + 1..]
         }
-    }
+    };
+    // A backticked name is its text.
+    spelled
+        .strip_prefix("``")
+        .and_then(|s| s.strip_suffix("``"))
+        .unwrap_or(spelled)
 }
 
 /// The range of `probe`'s text on the line that binds `probe.binder`.

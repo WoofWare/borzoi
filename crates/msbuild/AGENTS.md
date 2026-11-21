@@ -58,7 +58,12 @@ toolset name such as `MSBuildSDKsPath` is a global like any other. The
 editable `Project` a design-time host loads (`"designTime": true` on
 `project`) also evaluates the items under a false gate, so it rejects every
 project a build rejects and more; the walk's rejection model is its rule, and
-`where_msbuild_evaluates_a_condition` pins where the two differ. The five
+`where_msbuild_evaluates_a_condition` pins where the two differ.
+`rejection_generative_diff.rs` holds that model to it over generated projects
+whose conditions and bodies MSBuild may throw on (hostile values, uncertain
+operands in every position), and the condition judgement to `eval` under
+every assignment of the uncertain names; the projects MSBuild rejects that the
+walk commits are counted and pinned by the open gap each is. The five
 differentials that ride on these ops:
 `condition_diff.rs`, `property_expr_diff.rs`,
 `fsproj_property_table_diff.rs`,
@@ -127,6 +132,35 @@ items left; the census pins where the executor stops on each cone.
 `fsproj_generic_items_generative_diff` holds the generic item tables the
 probe reads, metadata included, to the `itemsMeta` op on generated
 projects.
+What fsc is really handed comes from
+`borzoi_oracle_harness::msbuild_oracle::fsc_args` (`crates/oracle-harness/AGENTS.md`):
+use it rather than re-deriving an fsc input from evaluated values, since
+every hand re-derivation leaked. Its first consumer is
+`borzoi_msbuild::fsc::compiled_assembly_name`, the name of the assembly a
+project compiles to. It commits only over a positive domain: every property,
+item type, item metadata name, global and environment variable set from
+outside the .NET install is on one of its lists, and each allowed property's
+value matches its grammar; documents outside the install are literal and
+unconditional (#993, #1060). Widen the domain by adding a name to a list,
+never by subtracting a route. `fsproj_assembly_name_perturbation_diff`
+grades every listed name: it sets each one, everywhere it can be set, to
+line-break and option-shaped values, and holds each commit to fsc's `-o:`
+(its ignored `deep_every_perturbation` covers every case, and with
+`BORZOI_UPDATE_MANIFESTS=1` records the SDK and its workload manifests in
+`src/fsc_verified_sdks.txt`). A name goes on a list only together with its
+grading. The derivation's register is keyed by what fsc receives, not by
+where input comes from: `fsc::FSC_PARAMETERS` lists every parameter of the
+SDK's `<Fsc>` invocation, its whole expression and what feeds it, and
+`fsc::BUILD_TIME_SITES` every write the SDK's targets make to those at build
+time, each by its expression and every condition it runs under, with its
+gate. `fsc_parameter_register` reads every verified SDK's targets and fails
+on a parameter, an expression, a feed or a build-time site the register does
+not hold. A finding that names an input reaching fsc other than through a
+registered parameter and its sites means that test is wrong: fix the test
+first, then report. The module documentation tabulates the gates; the
+assets file's freshness is assumed, as the LSP's env assumes it (#1044).
+`fsc_name_census` (ignored, `BORZOI_FSC_NAME_CENSUS_ROOTS`) reports how much
+of a corpus the derivation commits for and every rule each project breaks.
 The workload locator SDKs (`sdk_resolver/workloads.rs`) have their own
 test-only oracle, `tools/workload-oracle`, which loads each installed SDK's
 workload resolver by reflection (on that SDK's runtime, so SDK 11's

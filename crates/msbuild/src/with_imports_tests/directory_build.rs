@@ -1087,12 +1087,15 @@ fn gated_out_implicit_props_import_does_not_seed_path_property() {
 /// A `Directory.Build.*` gate written under a condition the walker cannot
 /// decide leaves the import — and therefore the item set — unknown.
 ///
-/// `'$(X.Substring(0,1))' == 'a'` is ordinary MSBuild that we do not model.
-/// The oracle says it evaluates **true** (dotnet 10.0.301, 2026-08-01), so the
-/// real build writes the gate and acts on it; we skip the write and act on the
-/// default. Whichever way each side lands, the walker cannot claim the item set
-/// is exact — checklist entry 1, both directions.
-const UNDECIDABLE_TRUE: &str = "'$(X.Substring(0,1))' == 'a'";
+/// `'É' == 'é'` is ordinary MSBuild that we do not model: an equality whose
+/// case folding is outside ASCII. MSBuild evaluates it **true**, without
+/// throwing (`msbuild-condition-oracle`, SDK 10.0.401), so the real build
+/// writes the gate and acts on it; we skip the write and act on the default.
+/// Whichever way each side lands, the walker cannot claim the item set is
+/// exact — checklist entry 1, both directions. (A function we do not model
+/// would serve less well: MSBuild may throw on one, which withdraws the whole
+/// evaluation.)
+const UNDECIDABLE_TRUE: &str = "'É' == 'é'";
 
 #[test]
 fn an_undecided_gate_write_leaves_the_item_set_uncertain() {

@@ -46,6 +46,8 @@ steps=(
   "cst utf16-width"                  # ~10 s
   "msbuild msbuild-corpus"           # ~40 s
   "msbuild sdk-chain-attribution"    # ~1 s
+  "msbuild rejection-soak"           # ~1.5 min
+  "msbuild element-contents-soak"    # ~10 s
   "nuget nuget-soak"                 # ~15 s
   "nuget resolver-soak"              # ~50 s
   "sema resolve-corpus"              # ~20 s
@@ -107,6 +109,8 @@ run_step() { # name
     utf16-width) ignored --profile gate --test all utf16_width_invariance::corpus ;;
     msbuild-corpus) ignored --test fsproj_msbuild_corpus_diff ;;
     sdk-chain-attribution) ignored --test sdk_chain_decline_attribution ;;
+    rejection-soak) ignored --test rejection_generative_diff ;;
+    element-contents-soak) ignored --test element_contents_diff ;;
     nuget-soak) ignored --test all soak:: ;;
     resolver-soak) ignored --test all resolver_diff::randomised_soundness_soak ;;
     resolve-corpus) ignored --test all resolve_corpus_diff:: ;;

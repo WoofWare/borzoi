@@ -29,7 +29,8 @@ A Cargo workspace with ten crates under `crates/` and two tools:
 - `crates/spawn/` — `borzoi-spawn`: the one place a child process is spawned
   (`clippy.toml` bans `Command::{spawn,status,output}` everywhere else).
 - `crates/oracle-harness/` — `borzoi-oracle-harness`, test-only: resident
-  oracle children, exact manifests, the XML nesting pump.
+  oracle children, exact manifests, the XML nesting pump, the hostile-value
+  library.
 - `crates/print/` — `borzoi-print`: an owned F# syntax tree, typed by the
   language version it targets, and a reference printer for it.
 - `crates/sema/` — `borzoi-sema`: name resolution and type inference over the
@@ -59,6 +60,19 @@ commit to an answer, the reference must agree exactly; a decline makes no
 claim. `docs/continuous-measurements.md` has the split between gates and
 measurements.
 
+## A new generator needs a row
+
+`borzoi_oracle_harness::hostile` holds the strange inputs every generator
+should search (a file named `-o:Evil.dll`, a FIFO where a file is expected, a
+value holding `%0A--out:`), by the kind of input. Its table,
+`crates/oracle-harness/src/hostile/boundaries.tsv`, has a row for each
+generative differential and perturbation sweep under `crates/`, saying which
+hostile kinds the file draws or why none applies, and CI's lint job fails on a
+generator with no row. A review finding that needs a contrived input is
+answered by adding a dimension there, which every harness of that kind then
+owes, not by a fix at the one site. `crates/oracle-harness/AGENTS.md` has the
+rest.
+
 ## One test binary per crate
 
 `cst`, `sema`, `assembly`, `nuget` and `lsp` each have exactly one integration-test
@@ -81,7 +95,9 @@ Two things the single binary made sharp, both handled in
 - **A resident oracle child cannot serve concurrent callers**: its requests and
   responses are matched positionally. One `BatchChild` behind a mutex serialises
   the whole crate's suite, so `cst` drives a pool of them. The cap is a
-  process-wide budget, not per-pool.
+  process-wide budget, not per-pool. For the same reason `try_request` refuses,
+  unsent, a request that is blank or holds a line break
+  (`BatchFailure::NotOneLine`).
 
 Don't switch the runner to cargo-nextest: separate test binaries defeat the
 batching.

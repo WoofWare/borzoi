@@ -14,11 +14,27 @@
 //! [`evaluate_with_exists`] answers it from the file system, as the walk does.
 
 pub use crate::condition::{Eval, Judgement, MAX_CONDITION_NESTING, Outcome, Throws, evaluate};
+pub use crate::cost::WalkCosts;
+
+/// Run `walk` and count the work it did on this thread ([`WalkCosts`]), so
+/// that a test holds the walk's cost to a bound by counts, which no load on
+/// the machine moves.
+pub fn count_walk_costs<T>(walk: impl FnOnce() -> T) -> (T, WalkCosts) {
+    crate::cost::take();
+    let value = walk();
+    (value, crate::cost::take())
+}
 
 /// The condition module's `judge` with no file system: what MSBuild makes of
 /// `condition` without the values of the properties `uncertain` names.
 pub fn judge(condition: &str, props: &PropertyMap, uncertain: &dyn Fn(&str) -> bool) -> Judgement {
-    crate::condition::judge(condition, props, None, uncertain)
+    crate::condition::judge(
+        condition,
+        props,
+        None,
+        crate::condition::Site::ItemPass,
+        uncertain,
+    )
 }
 pub use crate::properties::MAX_EXPRESSION_NESTING;
 pub use crate::properties::escaping::{escape, unescape};
@@ -216,4 +232,49 @@ pub fn install_host_sdk_of(sdk_root: &std::path::Path) {
             )
         });
     install_host_sdk_dir(version_dir);
+}
+
+/// [`crate::fsc::compiled_assembly_name`] with the SDK whose version directory
+/// is `sdk`, and every workload manifest it loads, counted as graded, whether
+/// or not they are on [`crate::fsc::verified_sdks`] and
+/// [`crate::fsc::verified_manifests`]: the grading run grades them before it
+/// writes the list.
+pub fn compiled_assembly_name_grading(
+    sdk: &str,
+    project_path: &std::path::Path,
+    parsed: &crate::ParsedProject,
+    inputs: &crate::fsc::NameInputs<'_>,
+) -> crate::fsc::CompiledAssemblyName {
+    crate::fsc::compiled_assembly_name_graded(
+        project_path,
+        parsed,
+        inputs,
+        &|version| version == sdk,
+        &|_, _| true,
+    )
+}
+
+/// What the walk reads as the text of the first element in `xml` that
+/// MSBuild reads by its contents (a property, an item's or an item
+/// definition's metadatum written as an element, or a `<UsingTask>`'s
+/// `<Task>`), unexpanded, where it reproduces MSBuild's reading
+/// (`Utilities.GetXmlNodeInnerContents`); `None` where it declines, or where
+/// there is none. Held to MSBuild's by `tests/element_contents_diff.rs`.
+pub fn element_contents(xml: &str) -> Option<String> {
+    let document = crate::document::parse(xml).ok()?;
+    let named = |node: &roxmltree::Node<'_, '_>, names: &[&str]| {
+        node.is_element() && names.contains(&node.tag_name().name())
+    };
+    let element = document.root_element().descendants().find(|node| {
+        let Some(parent) = node.parent_element() else {
+            return false;
+        };
+        node.is_element()
+            && (named(&parent, &["PropertyGroup"])
+                || (named(node, &["Task"]) && named(&parent, &["UsingTask"]))
+                || parent
+                    .parent_element()
+                    .is_some_and(|group| named(&group, &["ItemGroup", "ItemDefinitionGroup"])))
+    })?;
+    crate::evaluator::element_inner_contents(element)
 }

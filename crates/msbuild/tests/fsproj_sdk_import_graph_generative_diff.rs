@@ -699,12 +699,14 @@ fn render_gated(case: &Case, site: GatedSite) -> String {
     let Some(g) = case.gated.filter(|g| g.site == site) else {
         return String::new();
     };
+    // `'$(GateX)É' == '$(GateX)é'` is true to MSBuild, which folds case outside
+    // ASCII, and throws on nothing; the walk does not fold it. A body of
     // `$(GateX.Substring(0,1))` is `a` to MSBuild; the walk computes no
     // `Substring`.
     let writes = match g.input {
         GateInput::UnderUndecidedCondition => "  <PropertyGroup>\n    <GateX>abc</GateX>\n    \
              <GateIn>off</GateIn>\n    \
-             <GateIn Condition=\"'$(GateX.Substring(0,1))' == 'a'\">on</GateIn>\n  \
+             <GateIn Condition=\"'$(GateX)É' == '$(GateX)é'\">on</GateIn>\n  \
              </PropertyGroup>\n"
             .to_owned(),
         GateInput::UnseededToolset => String::new(),
@@ -721,7 +723,7 @@ fn render_gated(case: &Case, site: GatedSite) -> String {
         GateInput::HiddenRewrite => "  <PropertyGroup>\n    <GateX>abc</GateX>\n    \
              <GateIn>off</GateIn>\n  </PropertyGroup>\n  \
              <Import Project=\"$(MSBuildProjectDirectory)/../gate-rewrite.props\" \
-             Condition=\"'$(GateX.Substring(0,1))' == 'a'\" />\n"
+             Condition=\"'$(GateX)É' == '$(GateX)é'\" />\n"
             .to_owned(),
     };
     let condition = match (g.input, g.taken) {
@@ -808,7 +810,7 @@ fn repeats_at(case: &Case, site: RepeatSite) -> String {
             let (hide, condition) = if r.is_hidden() {
                 (
                     "    <UndecidedX>abc</UndecidedX>\n",
-                    format!("Exists('{path}') and '$(UndecidedX.Substring(0,1))' == 'a'"),
+                    format!("Exists('{path}') and '$(UndecidedX)É' == '$(UndecidedX)é'"),
                 )
             } else {
                 ("", format!("Exists('{path}')"))
@@ -863,11 +865,11 @@ fn doubt_point(case: &Case, text: String) -> String {
     };
     match case.point_doubt {
         PointDoubt::Decided => text,
-        PointDoubt::GateTrue => gate("$([System.String]::IsNullOrWhiteSpace(''))"),
-        PointDoubt::GateFalse => gate("$([System.String]::IsNullOrWhiteSpace('no'))"),
+        PointDoubt::GateTrue => gate("'É' == 'é'"),
+        PointDoubt::GateFalse => gate("'É' == 'Ê'"),
         PointDoubt::GateOr => text.replace(
             &format!("exists('$({name})')\"/>"),
-            &format!("($([System.String]::IsNullOrWhiteSpace('')) Or exists('$({name})'))\"/>"),
+            &format!("('É' == 'é' Or exists('$({name})'))\"/>"),
         ),
         PointDoubt::PathRefused => {
             let combine =
@@ -921,7 +923,7 @@ fn render_stale_source(case: &Case) -> String {
                 "  <PropertyGroup>\n    <UndecidedX>abc</UndecidedX>\n    \
                  <UndecidedStale>{stale}</UndecidedStale>\n  </PropertyGroup>\n  \
                  <Import Project=\"$(MSBuildThisFileDirectory)Stale.props\" \
-                 Condition=\"'$(UndecidedX.Substring(0,1))' == 'a'\" />\n"
+                 Condition=\"'$(UndecidedX)É' == '$(UndecidedX)é'\" />\n"
             )
         }
         _ => String::new(),
@@ -933,11 +935,13 @@ fn render_undecided(case: &Case, site: UndecidedSite) -> String {
         return String::new();
     };
     let (name, value, _) = undecided_write(u);
-    // `$(UndecidedX.Substring(0,1))` is `a` to MSBuild; the walk computes no
-    // `Substring`.
+    // `'$(UndecidedX)É' == '$(UndecidedX)é'` is true to MSBuild, which folds
+    // case outside ASCII, and throws on nothing; the walk does not fold it. A
+    // body of `$(UndecidedX.Substring(0,1))` is `a` to MSBuild; the walk
+    // computes no `Substring`.
     let write = match u.how {
         UndecidedHow::UnderUndecidedCondition => format!(
-            "    <{name} Condition=\"'$(UndecidedX.Substring(0,1))' == 'a'\">{value}</{name}>\n"
+            "    <{name} Condition=\"'$(UndecidedX)É' == '$(UndecidedX)é'\">{value}</{name}>\n"
         ),
         UndecidedHow::RefusedThenOverwritten => format!(
             "    <{name}>$(UndecidedX.Substring(0,1))</{name}>\n    <{name}>{value}</{name}>\n"
@@ -1165,7 +1169,7 @@ fn render(case: &Case, sdk: &str) -> Rendered {
             sdk_props.push_str(
                 "  <PropertyGroup><UndecidedX>abc</UndecidedX></PropertyGroup>\n  \
                  <Import Project=\"$(MSBuildThisFileDirectory)Behind.props\" \
-                 Condition=\"'$(UndecidedX.Substring(0,1))' == 'a'\" />\n",
+                 Condition=\"'$(UndecidedX)É' == '$(UndecidedX)é'\" />\n",
             );
             sdk_files.push((
                 "Behind.props",
@@ -1243,7 +1247,7 @@ fn render(case: &Case, sdk: &str) -> Rendered {
             sdk_targets.push_str(
                 "  <PropertyGroup><UndecidedX>abc</UndecidedX></PropertyGroup>\n  \
                  <Import Project=\"$(MSBuildThisFileDirectory)Behind.targets\" \
-                 Condition=\"'$(UndecidedX.Substring(0,1))' == 'a'\" />\n",
+                 Condition=\"'$(UndecidedX)É' == '$(UndecidedX)é'\" />\n",
             );
             sdk_files.push((
                 "Behind.targets",

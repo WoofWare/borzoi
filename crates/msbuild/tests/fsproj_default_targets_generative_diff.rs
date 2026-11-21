@@ -40,7 +40,7 @@ const VALUES: [&str; 12] = [
     "$(P)x",
 ];
 /// A condition MSBuild accepts and this evaluator cannot decide.
-const UNDECIDABLE: &str = "$([System.String]::IsNullOrWhiteSpace(''))";
+const UNDECIDABLE: &str = "'É' == 'é'";
 
 fn default_targets(rng: &mut SplitMix64) -> String {
     if rng.below(3) == 0 {

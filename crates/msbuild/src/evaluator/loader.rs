@@ -204,7 +204,7 @@ fn qname<'input>(node: Node<'_, 'input>) -> &'input str {
 /// The qualified names of the attributes in `node`'s start tag, namespace
 /// declarations included, read from the source (`roxmltree` checked it is
 /// well formed).
-fn attribute_names<'input>(node: Node<'_, 'input>) -> Vec<&'input str> {
+pub(super) fn attribute_names<'input>(node: Node<'_, 'input>) -> Vec<&'input str> {
     let source = node.document().input_text();
     let tag = &source[node.range().start + 1..];
     let mut at = qname(node).len();

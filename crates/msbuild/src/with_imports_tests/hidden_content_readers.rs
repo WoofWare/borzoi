@@ -7,7 +7,7 @@ use super::*;
 use crate::{DefineConstantsUncertaintyCauseKind, ItemMetadataValue, PropertyRead};
 
 /// A condition MSBuild evaluates to `true` and the walk cannot evaluate.
-const UNDECIDABLE: &str = "$([System.String]::IsNullOrWhiteSpace(''))";
+const UNDECIDABLE: &str = "'É' == 'é'";
 
 fn hidden_import() -> String {
     format!("  <Import Project=\"Hidden.props\" Condition=\"{UNDECIDABLE}\" />\n")

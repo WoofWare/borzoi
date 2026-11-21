@@ -29,7 +29,7 @@ use common::case_axis::{CaseContext, non_ascii_lookalike, respell_case, respell_
 use common::{
     CONTROLLED_PROPERTY_NAMES, ExpandVerdict, Oracle, SplitMix64, breaks_inside_quote,
     check_expand_certain_implies_exact, gen_expand_props, gen_expand_value, gen_grammar_value,
-    respell_whitespace, soak_parameters,
+    gen_grammar_value_spelled, respell_whitespace, soak_parameters,
 };
 
 fn props(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
@@ -276,7 +276,8 @@ fn hand_picked_corners() {
             props(&[("V", "a-b-c")]),
             ExpandVerdict::Exact,
         ),
-        // Terminal array (`System.String[]`) and out-of-range index → declined.
+        // Terminal array (`System.String[]`) → declined; an out-of-range index
+        // → a throw MSBuild makes.
         (
             "$(V.Split('-'))",
             props(&[("V", "a-b")]),
@@ -285,15 +286,11 @@ fn hand_picked_corners() {
         (
             "$(V.Split('-')[9])",
             props(&[("V", "a-b")]),
-            ExpandVerdict::Partial,
+            ExpandVerdict::Throws,
         ),
-        // String indexer → char; out-of-range and `Char.Length` declined.
+        // String indexer → char; out-of-range → a throw; `Char.Length` declined.
         ("$(Foo[0])", props(&[("Foo", "abc")]), ExpandVerdict::Exact),
-        (
-            "$(Foo[9])",
-            props(&[("Foo", "abc")]),
-            ExpandVerdict::Partial,
-        ),
+        ("$(Foo[9])", props(&[("Foo", "abc")]), ExpandVerdict::Throws),
         (
             "$(Foo[0].Length)",
             props(&[("Foo", "abc")]),
@@ -638,6 +635,84 @@ fn hand_picked_corners() {
             props(&[]),
             ExpandVerdict::Partial,
         ),
+        // --- `IsNullOrWhiteSpace`, `IsOSUnixLike` and unquoted literals ------
+        // .NET's `Char.IsWhiteSpace` in ASCII; a string holding a character
+        // outside it decides nothing unless an ASCII one does.
+        (
+            "$([System.String]::IsNullOrWhiteSpace(''))",
+            props(&[]),
+            ExpandVerdict::Exact,
+        ),
+        (
+            "$([System.String]::IsNullOrWhiteSpace($(P)))",
+            props(&[("P", "%09%0B%0C%0D%0A ")]),
+            ExpandVerdict::Exact,
+        ),
+        (
+            "$([System.String]::IsNullOrWhiteSpace('$(P)'))",
+            props(&[("P", " x ")]),
+            ExpandVerdict::Exact,
+        ),
+        (
+            "$([System.String]::IsNullOrWhiteSpace('\u{a0}'))",
+            props(&[]),
+            ExpandVerdict::Partial,
+        ),
+        (
+            "$([System.String]::IsNullOrWhiteSpace('\u{a0}x'))",
+            props(&[]),
+            ExpandVerdict::Exact,
+        ),
+        ("$([MSBuild]::IsOSUnixLike())", props(&[]), osp),
+        (
+            "$(P.TrimStart(vV))",
+            props(&[("P", "Vv4.7.2")]),
+            ExpandVerdict::Exact,
+        ),
+        (
+            "$(P.TrimStart( vV ))",
+            props(&[("P", "v4.7.2")]),
+            ExpandVerdict::Exact,
+        ),
+        (
+            "$(P.Contains(ab))",
+            props(&[("P", "xaby")]),
+            ExpandVerdict::Exact,
+        ),
+        (
+            "$(P.Split(-)[0])",
+            props(&[("P", "a-b")]),
+            ExpandVerdict::Exact,
+        ),
+        // `null` is no string: MSBuild binds a null argument.
+        (
+            "$([System.String]::IsNullOrEmpty(null))",
+            props(&[]),
+            ExpandVerdict::Partial,
+        ),
+        (
+            "$(P.Contains(NULL))",
+            props(&[("P", "anullb")]),
+            ExpandVerdict::Partial,
+        ),
+        // Escaped, a literal we do not read.
+        (
+            "$(P.TrimStart(v%56))",
+            props(&[("P", "Vv4")]),
+            ExpandVerdict::Partial,
+        ),
+        // --- Throws (MSB4184): an indexer out of range, a malformed version ---
+        (
+            "$(P.Split(';')[3])",
+            props(&[("P", "a;b")]),
+            ExpandVerdict::Throws,
+        ),
+        ("$(P[9])x", props(&[("P", "abc")]), ExpandVerdict::Throws),
+        (
+            "$([MSBuild]::VersionLessThan('$(P)', '18.9'))",
+            props(&[("P", "")]),
+            ExpandVerdict::Throws,
+        ),
     ];
 
     let mut exact = 0;
@@ -650,7 +725,7 @@ fn hand_picked_corners() {
         );
         match got {
             ExpandVerdict::Exact => exact += 1,
-            ExpandVerdict::Partial => partial += 1,
+            ExpandVerdict::Partial | ExpandVerdict::Throws => partial += 1,
         }
     }
     // Sanity: the corner list exercises both branches (guards against the
@@ -680,7 +755,7 @@ fn fixed_seed_sweep() {
         let props = gen_expand_props(&mut rng);
         match check_expand_certain_implies_exact(&mut oracle, &value, &props) {
             ExpandVerdict::Exact => exact += 1,
-            ExpandVerdict::Partial => partial += 1,
+            ExpandVerdict::Partial | ExpandVerdict::Throws => partial += 1,
         }
     }
 
@@ -709,11 +784,11 @@ fn grammar_acceptance_sweep() {
     let mut partial = 0usize;
 
     for _ in 0..CASES {
-        let value = gen_grammar_value(&mut rng);
+        let value = gen_grammar_value_spelled(&mut rng);
         let props = gen_expand_props(&mut rng);
         match check_expand_certain_implies_exact(&mut oracle, &value, &props) {
             ExpandVerdict::Exact => exact += 1,
-            ExpandVerdict::Partial => partial += 1,
+            ExpandVerdict::Partial | ExpandVerdict::Throws => partial += 1,
         }
     }
 

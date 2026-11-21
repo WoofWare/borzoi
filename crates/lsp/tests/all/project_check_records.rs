@@ -18,6 +18,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::time::Duration;
 
 use serde_json::Value;
 
@@ -54,16 +55,39 @@ fn ask(
     ask_with_refs(child, oracle, paths, &[])
 }
 
-/// [`ask`], with `refs` referenced beside the SDK's own.
+/// [`ask`], with `refs` referenced beside the SDK's own: a fixture request.
 fn ask_with_refs(
     child: &mut borzoi_oracle_harness::BatchChild,
     oracle: &str,
     paths: &[&Path],
     refs: &[&Path],
 ) -> Result<Value, String> {
+    ask_with(child, oracle, paths, refs, false)
+}
+
+/// [`ask_with_refs`] for a real project's inputs, which may change during a
+/// run (`inputsMayChange`, the oracle's module doc): a request only a fresh
+/// child serves.
+fn ask_real(
+    child: &mut borzoi_oracle_harness::BatchChild,
+    oracle: &str,
+    paths: &[&Path],
+    refs: &[&Path],
+) -> Result<Value, String> {
+    ask_with(child, oracle, paths, refs, true)
+}
+
+fn ask_with(
+    child: &mut borzoi_oracle_harness::BatchChild,
+    oracle: &str,
+    paths: &[&Path],
+    refs: &[&Path],
+    inputs_may_change: bool,
+) -> Result<Value, String> {
     let request = serde_json::json!({
         "paths": paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
         "refs": refs.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+        "inputsMayChange": inputs_may_change,
     })
     .to_string();
     let line = child.request(&request);
@@ -191,11 +215,182 @@ fn an_unreadable_reference_is_refused() {
     }
 }
 
-/// A resident oracle reads a reference as it is now: one rewritten in place
-/// with its modification time put back is read again, as a fresh child would
-/// read it, however the request spells its path.
+/// A child serves a request whose inputs may change only as its first, and
+/// nothing after one: a later request of either kind is refused, and so is
+/// such a request after a fixture request. So an answer to such a request is
+/// the one a fresh process gives, whatever FCS and the CLR keep across
+/// requests (the oracle's module doc); the harnesses put each one to a fresh
+/// child.
 #[test]
-fn a_reference_rewritten_in_place_is_read() {
+fn a_request_whose_inputs_may_change_is_a_fresh_childs_only_one() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let a = dir.path().join("A.fs");
+    write(&a, "module A\nlet y = 1\n");
+    for oracle in ORACLES {
+        let mut child = fcs_dump_batch_child(oracle);
+        ask_real(&mut child, oracle, &[&a], &[])
+            .unwrap_or_else(|err| panic!("{oracle}: a fresh child's first request: {err}"));
+        match ask_real(&mut child, oracle, &[&a], &[]) {
+            Err(why) if why.contains("start a fresh child") => {}
+            other => panic!("{oracle}: a second request must be refused: {other:?}"),
+        }
+        match ask(&mut child, oracle, &[&a]) {
+            Err(why) if why.contains("start a fresh child") => {}
+            other => panic!("{oracle}: a fixture request after one must be refused: {other:?}"),
+        }
+
+        child.finish(Duration::from_secs(30));
+
+        let mut child = fcs_dump_batch_child(oracle);
+        check(&mut child, oracle, &[&a]);
+        match ask_real(&mut child, oracle, &[&a], &[]) {
+            Err(why) if why.contains("start a fresh child") => {}
+            other => panic!("{oracle}: one after a fixture request must be refused: {other:?}"),
+        }
+        check(&mut child, oracle, &[&a]);
+        child.finish(Duration::from_secs(30));
+    }
+}
+
+/// A request the oracle cannot read exactly is refused: a field it does not
+/// know (a misspelt `inputsMayChange`) or given twice, a mode flag that is
+/// not `true` or `false`, and a list holding something other than strings.
+/// So no caller's mistake selects a mode or a reference set it did not ask
+/// for, and a refused request leaves the child fresh.
+#[test]
+fn a_request_the_oracle_cannot_read_exactly_is_refused() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let a = dir.path().join("A.fs");
+    write(&a, "module A\nlet y = 1\n");
+    let paths = serde_json::json!([a.display().to_string()]);
+    // Each request's text, and what its refusal must name.
+    let cases: Vec<(String, &str)> = [
+        (r#""inputMayChange":true"#, "unknown field inputMayChange"),
+        (
+            r#""inputsMayChange":true,"inputsMayChange":false"#,
+            "field inputsMayChange given twice",
+        ),
+        (
+            r#""inputsMayChange":"true""#,
+            "inputsMayChange must be true or false",
+        ),
+        (
+            r#""inputsMayChange":1"#,
+            "inputsMayChange must be true or false",
+        ),
+        (
+            r#""inputsMayChange":null"#,
+            "inputsMayChange must be true or false",
+        ),
+        (
+            r#""exclusiveRefs":"true""#,
+            "exclusiveRefs must be true or false",
+        ),
+        (r#""refs":"Lib.dll""#, "refs: expected an array"),
+        (r#""refs":[1]"#, "refs: expected a string"),
+        (r#""defines":[null]"#, "defines: expected a string"),
+        (r#""langversion":8"#, "langversion: expected a string"),
+    ]
+    .into_iter()
+    .map(|(field, why)| (format!(r#"{{"paths":{paths},{field}}}"#), why))
+    .collect();
+    for oracle in ORACLES {
+        let mut child = fcs_dump_batch_child(oracle);
+        for (request, why) in &cases {
+            let line = child.request(request);
+            let v: Value = serde_json::from_str(&line).expect("a JSON response");
+            match v.get("BatchError").and_then(Value::as_str) {
+                Some(err) if err.contains(why) => {}
+                _ => panic!("{oracle}: {request} must be refused ({why}): {line}"),
+            }
+        }
+        ask_real(&mut child, oracle, &[&a], &[])
+            .unwrap_or_else(|err| panic!("{oracle}: the child is still fresh: {err}"));
+        child.finish(Duration::from_secs(30));
+    }
+}
+
+/// Every hostile spelling of a well-formed request (`hostile::wire`) is
+/// refused or means that request: the driver refuses what is not one line,
+/// and the oracle answers anything else with a refusal or with exactly the
+/// well-formed request's answer. So no spelling of a request is read as
+/// another request: a misspelt, repeated, mistyped or dropped field never
+/// selects a mode or a reference set the caller did not write.
+#[test]
+fn every_hostile_spelling_of_a_request_is_refused_or_means_it() {
+    use std::collections::BTreeSet;
+
+    use borzoi_oracle_harness::BatchFailure;
+    use borzoi_oracle_harness::hostile::{coverage, wire};
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let a = dir.path().join("A.fs");
+    write(&a, "module A\nlet y = 1\n");
+    // Every field a project-check request has, each at its default but
+    // `paths`, so that dropping one leaves the request it was.
+    let request = serde_json::json!({
+        "paths": [a.display().to_string()],
+        "refs": [],
+        "defines": [],
+        "langversion": null,
+        "exclusiveRefs": false,
+        "inputsMayChange": false,
+    });
+    let census = coverage::open(file!(), "project_check_requests", &[]);
+    let mutations = wire::mutations(&request);
+    for oracle in ORACLES {
+        let mut child = fcs_dump_batch_child(oracle);
+        let expected = child.request(&request.to_string());
+        assert!(
+            !expected.contains("\"BatchError\""),
+            "{oracle}: the well-formed request is answered: {expected}"
+        );
+        census.reached(&BTreeSet::new(), "answer");
+        for entry in mutations.entries() {
+            let hostile = BTreeSet::from([entry.dimension]);
+            // A request goes over the pipe as text: bytes that are not UTF-8
+            // are no request the driver can be handed.
+            let Ok(text) = std::str::from_utf8(&entry.value) else {
+                continue;
+            };
+            let outcome = match child.try_request(text) {
+                Err(BatchFailure::NotOneLine) => "driver-refuse",
+                Err(other) => panic!("{oracle}: {} ({text:?}): {other}", entry.why),
+                Ok(line) => {
+                    let v: Value = serde_json::from_str(&line).unwrap_or_else(|e| {
+                        panic!(
+                            "{oracle}: {} ({text:?}): unparseable ({e}): {line}",
+                            entry.why
+                        )
+                    });
+                    if v.get("BatchError").is_some() {
+                        "refuse"
+                    } else {
+                        assert_eq!(
+                            line, expected,
+                            "{oracle}: {} ({text:?}) is answered as another request",
+                            entry.why
+                        );
+                        "same-answer"
+                    }
+                }
+            };
+            census.reached(&hostile, outcome);
+        }
+        child.finish(Duration::from_secs(30));
+    }
+    census.finish(
+        "BORZOI_UPDATE_MANIFESTS=1 cargo test -p borzoi --test all \
+         project_check_records::every_hostile_spelling_of_a_request_is_refused_or_means_it",
+    );
+}
+
+/// A fixture reference rewritten in place breaks the precondition the
+/// fixture requests rest on (the oracle's module doc), so the next request
+/// naming it is refused, naming the path, rather than answered from what FCS
+/// kept of the old bytes. However the request spells the path.
+#[test]
+fn a_fixture_reference_rewritten_in_place_is_refused() {
     let dir = tempfile::tempdir().expect("temp dir");
     let a = dir.path().join("A.fs");
     write(&a, "module A\nlet z = FSharp.Compiler.Text.Range.Zero\n");
@@ -209,9 +404,6 @@ fn a_reference_rewritten_in_place_is_read() {
     for oracle in ORACLES {
         let mut child = resident(oracle);
         std::fs::copy(&fcs, &lib).expect("copy the referenced assembly");
-        let stamp = host_fs::metadata(&lib)
-            .and_then(|m| m.modified())
-            .expect("modification time");
         let first = ask_with_refs(&mut child, oracle, &[&a], &[&lib])
             .unwrap_or_else(|err| panic!("{oracle} refused: {err}"));
         assert_eq!(
@@ -220,13 +412,11 @@ fn a_reference_rewritten_in_place_is_read() {
             "{oracle}: the type resolves in the reference: {first}"
         );
         std::fs::copy(&other, &lib).expect("rewrite the referenced assembly");
-        host_fs::set_modified(&lib, stamp).expect("restore the modification time");
-        let second = ask_with_refs(&mut child, oracle, &[&a], &[&lib_respelled])
-            .unwrap_or_else(|err| panic!("{oracle} refused: {err}"));
-        assert!(
-            error_numbers(record(&second, "A.fs")).contains(&39),
-            "{oracle}: the rewritten reference does not hold the type: {second}"
-        );
+        match ask_with_refs(&mut child, oracle, &[&a], &[&lib_respelled]) {
+            Err(why)
+                if why.contains("reused a path") && why.contains(&lib.display().to_string()) => {}
+            other => panic!("{oracle}: a fixture reused a path, which must be refused: {other:?}"),
+        }
     }
 }
 

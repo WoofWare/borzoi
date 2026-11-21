@@ -104,6 +104,8 @@ use item_pass::{
 use property_reads::PropertyRead;
 #[cfg(any(test, feature = "test-support"))]
 use reads::{EvaluationReads, ReadProbe};
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use rejection::element_inner_contents;
 
 /// Maximum recursion depth for `<Import>` following. MSBuild itself
 /// caps at ~100; we pick a number well above any sane real-world
@@ -1149,6 +1151,19 @@ struct State<'r> {
     /// based, so it's independent of *how* a file was reached — a user file
     /// pulled in through the SDK's import chain is still judged by its path.
     in_sdk_subtree: bool,
+    /// Whether the walk is in a document outside the entry .NET SDK's version
+    /// directory and its workload manifests: the entry project, or one it
+    /// imports from outside the install. Writes made here are checked into
+    /// [`Self::foreign_write_failures`].
+    in_foreign_document: bool,
+    /// Surfaced on [`ParsedProject::foreign_write_failures`].
+    foreign_write_failures: std::collections::BTreeMap<String, Option<String>>,
+    /// Surfaced on [`ParsedProject::workload_manifests_outside_install`].
+    workload_manifests_outside_install: BTreeSet<PathBuf>,
+    /// Surfaced on [`ParsedProject::imported_sdk_files`].
+    imported_sdk_files: BTreeSet<PathBuf>,
+    /// Surfaced on [`ParsedProject::workload_manifest_files`].
+    workload_manifest_files: BTreeSet<String>,
     /// Directories under which a file counts as SDK-installed — one per resolved
     /// SDK *root's parent* (e.g. `…/Sdks/Microsoft.NET.Sdk`, which holds both
     /// `Sdk/Sdk.props` and `targets/…DefaultItems…`), canonicalised. A *set*
@@ -1168,8 +1183,10 @@ struct State<'r> {
     /// Whether a `<ProjectReference>` `Include` that may run in the real build
     /// went uncaptured — skipped on an untrusted gate, or one we could not
     /// evaluate. The list contract tolerates that (a missing edge never
-    /// fabricates one), so it does not raise
-    /// [`Self::project_references_uncertain`]; but a list *derived* from
+    /// fabricates one), so this alone does not raise
+    /// [`Self::project_references_uncertain`]; an `Include` whose value read a
+    /// name the walk doubts raises it as well, dropped or kept
+    /// (`item_pass::reads_a_doubted_name`). But a list *derived* from
     /// `@(ProjectReference)` is then incomplete, and a `Remove` driven by it can
     /// miss an item MSBuild removes. [`item_pass`]'s item-list view reads it.
     project_reference_includes_hidden: bool,
@@ -1283,9 +1300,21 @@ struct State<'r> {
     /// certain values, so that its failure to load is MSBuild's
     /// ([`rejection`]). Set for each explicit import, and `false` for any other.
     taken_import_path_certain: bool,
-    /// Set while the item pass runs: its conditions are judged group by group
-    /// ([`rejection::judge_deferred`]), not where the walk evaluates them.
-    in_item_pass: bool,
+    /// The kind of group the item pass replays, while it runs: its
+    /// conditions are judged group by group ([`rejection::judge_deferred`]),
+    /// not where the walk evaluates them, and each kind's conditions are
+    /// evaluated at its own [`condition::Site`].
+    item_pass: Option<DeferredGroupKind>,
+    /// While the rejection judgement walks content the walk does not take
+    /// ([`rejection::judge_branch`], [`rejection::judge_properties`]), or
+    /// judges an item group from it ([`State::defer_judgement`]): the names
+    /// written on that path before what it judges, whose value there the walk
+    /// does not hold. `None` outside one.
+    speculation: Option<Speculation>,
+    /// The `<When>` decisions of each `<Choose>` the judgement is judging the
+    /// arms of now, by the `<Choose>` (its document and offset), taken once on
+    /// the state before it ([`rejection::judge_branch`]).
+    arm_decisions: HashMap<(usize, usize), rejection::ArmFates>,
     /// The root each root-surfacing diagnostic stood for, by its index in
     /// `diagnostics`, captured when it was pushed. A diagnostic carries only a
     /// name, and that name's root may change later in the walk;
@@ -1395,6 +1424,90 @@ struct Expansion {
     /// property that is itself unpinned. Recorded when the value is stored
     /// as a property ([`Trust::unpinned`]).
     unpinned_root: Option<UnpinnedRoot>,
+    /// Every `$(…)` MSBuild throws on, on the values the expansion read
+    /// ([`rejection::throws_in`]); `had_unsupported` is set with any. A
+    /// rejection wherever MSBuild evaluates the text: the caller judges where.
+    throws: Vec<rejection::Thrown>,
+}
+
+/// The rejection judgement's walk of content the walk does not take
+/// ([`State::speculation`]).
+struct Speculation {
+    /// Lower-cased names written on the path, whose value there is unknown.
+    unheld: HashSet<String>,
+    /// The names [`Self::unheld`] gained, in order, so that a branch can undo
+    /// its own on leaving ([`rejection::judge_branch`]).
+    gained: Vec<String>,
+    /// Every write anywhere in the outermost walk, which the item groups
+    /// deferred from it share ([`State::defer_judgement`]): MSBuild evaluates
+    /// an item group after every property write on its path, those after the
+    /// group included.
+    walk_written: std::rc::Rc<std::cell::RefCell<PathWrites>>,
+    /// The `<Choose>` arms the walk is in now, outermost first.
+    arms: Vec<Arm>,
+    /// While an item group deferred from a walk is judged, where it stands
+    /// in that walk: a name written on its path there whose final value is
+    /// not certain is unknown to it ([`State::judge_from_path`]).
+    inherited: Option<PathOf>,
+    /// How many nested walks are open.
+    depth: usize,
+    /// How many of [`Self::arms`] MSBuild cannot take, by gates the walk
+    /// decides exactly on the state before their `<Choose>`
+    /// ([`rejection::judge_branch`]): an item group deferred from within one
+    /// holds no reference the build makes.
+    dead_arms: usize,
+}
+
+/// An arm of a `<Choose>` the judgement walks: the `<Choose>` (its document
+/// and offset) and the `<When>` or `<Otherwise>` (its offset). Two arms of
+/// one `<Choose>` are never both taken.
+type Arm = ((usize, usize), usize);
+
+/// The writes in one walk of content the walk does not take
+/// ([`Speculation::walk_written`]).
+#[derive(Default)]
+struct PathWrites {
+    /// Each name written, lower-cased, and the arms of each of its writes.
+    writes: HashMap<String, Vec<std::rc::Rc<[Arm]>>>,
+    /// The names written whose final value is not certain, computed once, in
+    /// the item pass, when the table is final.
+    settled: Option<std::rc::Rc<HashSet<String>>>,
+}
+
+/// Where an item group deferred from a walk of content the walk does not
+/// take stands in that walk: the walk's writes, and the arms the group is in.
+#[derive(Clone)]
+struct PathOf {
+    writes: std::rc::Rc<std::cell::RefCell<PathWrites>>,
+    arms: std::rc::Rc<[Arm]>,
+}
+
+impl PathOf {
+    /// Whether `name` (lower-cased) is written on the path of the group: in
+    /// no arm another arm of whose `<Choose>` holds the group. Asked of the
+    /// names a judgement reads, so its cost is theirs, not the walk's.
+    fn reaches(&self, name: &str) -> bool {
+        self.writes.borrow().writes.get(name).is_some_and(|writes| {
+            writes.iter().any(|arms| {
+                arms.iter().all(|(choose, arm)| {
+                    self.arms
+                        .iter()
+                        .all(|(other, other_arm)| other != choose || other_arm == arm)
+                })
+            })
+        })
+    }
+
+    /// Whether `name` (lower-cased) reaches the group with a final value that
+    /// is not certain ([`PathWrites::settled`], which must be computed).
+    fn unknown(&self, name: &str) -> bool {
+        self.writes
+            .borrow()
+            .settled
+            .as_ref()
+            .is_some_and(|settled| settled.contains(name))
+            && self.reaches(name)
+    }
 }
 
 impl Expansion {
@@ -1694,6 +1807,11 @@ impl<'r> State<'r> {
             sdk_files_imported_from_outside: BTreeSet::new(),
             compile_context: false,
             in_sdk_subtree: false,
+            in_foreign_document: true,
+            foreign_write_failures: std::collections::BTreeMap::new(),
+            workload_manifests_outside_install: BTreeSet::new(),
+            imported_sdk_files: BTreeSet::new(),
+            workload_manifest_files: BTreeSet::new(),
             sdk_tolerance_roots: Vec::new(),
             items_uncertain: false,
             define_constants_uncertainties: Vec::new(),
@@ -1725,7 +1843,9 @@ impl<'r> State<'r> {
             rejection: None,
             reach_doubted: 0,
             taken_import_path_certain: false,
-            in_item_pass: false,
+            item_pass: None,
+            speculation: None,
+            arm_decisions: HashMap::new(),
             diagnostic_roots: HashMap::new(),
         }
     }
@@ -2171,6 +2291,11 @@ impl<'r> State<'r> {
             locally_overridable,
             compile_context: _,
             in_sdk_subtree: _,
+            in_foreign_document: _,
+            foreign_write_failures,
+            workload_manifests_outside_install,
+            imported_sdk_files,
+            workload_manifest_files,
             sdk_tolerance_roots: _,
             items_uncertain,
             define_context: _,
@@ -2203,7 +2328,9 @@ impl<'r> State<'r> {
             rejection,
             reach_doubted: _,
             taken_import_path_certain: _,
-            in_item_pass: _,
+            item_pass: _,
+            speculation: _,
+            arm_decisions: _,
             diagnostic_roots: _,
         } = self;
         // Central Package Management opt-in: a versionless
@@ -2392,6 +2519,11 @@ impl<'r> State<'r> {
             foreign_definitions,
             workload_definitions,
             sdk_files_imported_from_outside,
+            foreign_write_failures,
+            workload_manifests_outside_install,
+            imported_sdk_files,
+            workload_manifest_files,
+            auto_response_file: crate::AutoResponseFile::Unread,
             hidden_content,
             rejection,
             diagnostics,
@@ -2761,6 +2893,11 @@ impl<'r> State<'r> {
     /// value (skipped under a gate, or refused after [`PropertyMap::unbind`]).
     /// A write that stores one goes through [`Self::write_property`].
     fn apply_property_provenance(&mut self, name: &str, provenance: PropertyProvenance) {
+        // A write that stored nothing holds a value only if it may have
+        // happened: one under a gate that decided against it holds none.
+        if provenance.is_doubtful() {
+            self.note_foreign_write(name, None);
+        }
         self.directory_build.note_write(name);
         let resolved = self.resolve_provenance(provenance);
         self.lookup.apply_provenance(name, resolved);
@@ -2770,9 +2907,34 @@ impl<'r> State<'r> {
     /// cannot enter the table without the write saying what it does to the
     /// name's trust.
     fn write_property(&mut self, name: &str, value: Escaped, provenance: PropertyProvenance) {
+        let held = (!provenance.is_doubtful()).then_some(&value);
+        self.note_foreign_write(name, held);
         self.directory_build.note_write(name);
         let resolved = self.resolve_provenance(provenance);
         self.lookup.write(name, value, resolved);
+    }
+
+    /// Check a write of `name` made in a document outside the install against
+    /// the grammar the compiled-name derivation holds the name to
+    /// ([`crate::fsc::grammar_of`]): the value it stored, or `None` when the
+    /// walk is not certain of it. Only the first failure of each name is kept,
+    /// and names the derivation does not admit are not looked at, so the record
+    /// stays as small as the lists however often a document writes.
+    fn note_foreign_write(&mut self, name: &str, value: Option<&Escaped>) {
+        if !self.in_foreign_document {
+            return;
+        }
+        let Some(grammar) = crate::fsc::grammar_of(name) else {
+            return;
+        };
+        let lower = name.to_ascii_lowercase();
+        if self.foreign_write_failures.contains_key(&lower) {
+            return;
+        }
+        let value = value.map(Escaped::unescape);
+        if !value.as_deref().is_some_and(|v| grammar.admits(v)) {
+            self.foreign_write_failures.insert(lower, value);
+        }
     }
 
     fn sdk_package_taint_for_raw(&self, raw: &str) -> Option<SdkPackagePropertyTaint> {
@@ -2781,6 +2943,66 @@ impl<'r> State<'r> {
 
     fn raw_uses_sdk_package_taint(&self, raw: &str) -> bool {
         self.sdk_package_taint_for_raw(raw).is_some()
+    }
+
+    /// The way the gate `condition` of a reference, its group or an arm of a
+    /// `<Choose>` around it decides whatever the names the walk doubts hold
+    /// (the reference gates' policy: unpinned or SDK-tainted, held as no value
+    /// it can show undefined, or written on the path the judgement walks), on
+    /// the values it holds, three-valued (`condition::decide_without`), `Exists`
+    /// resolved against `dir`, or, with none, probing nothing (an `Exists` leaf
+    /// then decides nothing): a gate MSBuild may not evaluate (a `<When>` after
+    /// one it takes) is decided with none, so the read set gains no probe
+    /// MSBuild does not make. A refusal a clean write overwrote leaves the
+    /// bound value deciding, as it does not for an import point
+    /// ([`directory_build::decision_from_certain_inputs`]). Once the walk has
+    /// hidden content, a doubted name it reads settles nothing
+    /// ([`Self::condition_is_decided_exactly`] says why).
+    fn reference_gate_decision(&self, condition: &str, dir: Option<&Path>) -> Option<bool> {
+        let unknown = |name: &str| {
+            self.trust_of(name).reference_is_untrusted()
+                || (!self.lookup.is_bound(name) && !self.undefined_read_is_exact(name))
+                || self.speculatively_unheld(name)
+        };
+        if self.walk_opaque.is_some() && properties::property_references(condition).any(unknown) {
+            return None;
+        }
+        let observer = self.observer;
+        let exists = dir.map(|dir| move |path: &str| condition_exists(observer, path, dir));
+        let probes = match (&exists, self.follow_imports) {
+            (Some(exists), true) => Some(condition::Probes { exists, observer }),
+            _ => None,
+        };
+        match condition::decide_without(
+            condition,
+            &self.lookup,
+            probes,
+            self.condition_site(),
+            &unknown,
+        ) {
+            condition::Decision::Decided(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    /// Whether `raw` reads a name whose value the real build may hold
+    /// otherwise than the walk: one it holds and doubts (unpinned or
+    /// SDK-tainted, [`Trust::reference_is_untrusted`]), or one it holds no
+    /// value of and cannot show undefined (a write it refused to compute,
+    /// [`Self::undefined_read_is_exact`]). Read off the text of an item's
+    /// spec ([`properties::item_spec_references`]), so that what the
+    /// expansion did with the name (stop at a function it does not model,
+    /// say) cannot hide the read, with the names a function reads without
+    /// naming them ([`condition::implicit_references`]).
+    fn raw_reads_a_doubted_name(&self, raw: &str) -> bool {
+        let doubted = |name: &str| {
+            self.trust_of(name).reference_is_untrusted()
+                || (!self.lookup.is_bound(name) && !self.undefined_read_is_exact(name))
+        };
+        let mut implicit = Vec::new();
+        condition::implicit_references(raw, &mut implicit);
+        properties::item_spec_references(raw).any(doubted)
+            || implicit.iter().any(|name| doubted(name))
     }
 
     /// The root to record for a value that read `name` while it was
@@ -3183,7 +3405,7 @@ impl<'r> State<'r> {
             _ => None,
         };
         matches!(
-            condition::decide_without(cond, &self.lookup, probes, &unknown),
+            condition::decide_without(cond, &self.lookup, probes, self.condition_site(), &unknown),
             condition::Decision::Decided(_)
         )
     }
@@ -3334,6 +3556,7 @@ impl<'r> State<'r> {
         };
         let mut had_undefined = false;
         let mut had_unsupported = false;
+        let throws = rejection::throws_in(&issues);
         let mut direct_undefined: Vec<String> = Vec::new();
         // The direct reads whose diagnostic doubted on every axis: the self-
         // append's own read did not doubt the define axis, so a root naming
@@ -3356,7 +3579,10 @@ impl<'r> State<'r> {
                     }
                     continue;
                 }
-                Issue::Unsupported { expression } => {
+                Issue::Unsupported { expression }
+                | Issue::ReturnsBoolean { expression }
+                | Issue::ReturnsValue { expression }
+                | Issue::Throws { expression, .. } => {
                     had_unsupported = true;
                     DiagnosticKind::UnsupportedPropertyExpression { expression }
                 }
@@ -3433,6 +3659,7 @@ impl<'r> State<'r> {
             had_undefined,
             had_unsupported,
             unpinned_root,
+            throws,
         }
     }
 
@@ -4120,8 +4347,54 @@ fn handle_choose(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State<
             }
             _ => None,
         };
+        // MSBuild may choose any of those branches, and evaluate the gates
+        // after this one: against the state before the `<Choose>`, as no
+        // branch has run when it does, so before the branches' writes are
+        // marked below. A later gate false whatever the uncertain names hold
+        // there rules its branch out, which a gate read after the marks would
+        // not.
+        for branch in &whens[first_unsure.unwrap_or(from)..=from] {
+            rejection::judge_branch(*branch, current_file_dir, false, state);
+        }
+        rejection::judge_whens(node, from + 1, current_file_dir, false, state);
+        // The branches MSBuild may take: every one but those a gate false
+        // whatever the uncertain names hold rules out, and those after one
+        // whose gate holds whatever they hold, each decided on the state
+        // before the `<Choose>`, which is MSBuild's state when it evaluates
+        // the gates (so before any branch's writes are marked below). Decided
+        // with no file system: MSBuild may evaluate none of these gates, so
+        // asking probes nothing, and an `Exists` decides nothing.
+        let live: Vec<Node<'_, '_>> = {
+            let mut live = vec![whens[from]];
+            let mut taken = false;
+            for branch in whens[from + 1..].iter().copied() {
+                let decision = attribute(branch, "Condition").and_then(|condition| {
+                    match condition::decide_without(
+                        &condition,
+                        &state.lookup,
+                        None,
+                        state.condition_site(),
+                        &|name| !directory_build::is_certain(state, name),
+                    ) {
+                        condition::Decision::Decided(value) => Some(value),
+                        _ => None,
+                    }
+                });
+                if decision != Some(false) {
+                    live.push(branch);
+                }
+                if decision == Some(true) {
+                    taken = true;
+                    break;
+                }
+            }
+            if !taken {
+                live.extend(otherwise);
+            }
+            live
+        };
         let mut items = item_pass::UndecidedChooseItems::default();
-        for branch in whens[from..].iter().copied().chain(otherwise) {
+        for branch in live {
             scan_undecided_choose_branch(branch, unpinned_root.as_ref(), state, &mut items);
         }
         items.apply(node.range(), state);
@@ -4130,12 +4403,6 @@ fn handle_choose(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State<
                 state.mark_skipped_write_stale(&name, &cause);
             }
         }
-        // MSBuild may choose any of those branches, and evaluate the gates
-        // after this one.
-        for branch in &whens[first_unsure.unwrap_or(from)..=from] {
-            rejection::judge_branch(*branch, current_file_dir, false, state);
-        }
-        rejection::judge_whens(node, from + 1, current_file_dir, false, state);
         state.reach_doubted -= usize::from(first_unsure.is_some());
         return;
     }
@@ -4152,6 +4419,7 @@ fn handle_choose(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State<
     if !chosen_is_certain {
         rejection::judge_whens(node, walked + 1, current_file_dir, false, state);
     }
+    state.arm_decisions.remove(&rejection::choose_key(node));
     // From the first gate the walk decided on a stale value, MSBuild may take
     // any branch but the walk's up to the first whose gate holds whatever the
     // uncertain names hold (and `<Otherwise>` only if none does), skipping
@@ -4416,10 +4684,33 @@ fn walk_property_child_inner(
         state.trust_for_raw(&condition).stale().is_none()
             || directory_build::decided_from_certain_inputs(state, &condition, &entry_dir)
     });
+    // Whether MSBuild evaluates the body exactly when the walk does
+    // ([`rejection`]), asked of the values the gate reads: only for a body
+    // that throws, or one the walk skips.
+    // `None` where the gate reads a value that may decide it otherwise.
+    let own_gate = |state: &State<'_>| match attribute(node, "Condition") {
+        None => Some(true),
+        Some(condition) => {
+            directory_build::decision_from_certain_inputs(state, &condition, &entry_dir)
+        }
+    };
     let diagnostics_before_condition = state.diagnostics.len();
     let gate = evaluate_property_condition(node, state);
     let own_condition_maybe_wrong = state.diagnostics.len() != diagnostics_before_condition
         || matches!(&gate, CondGate::Unsupported);
+    // MSBuild may take a write the walk skips, and evaluate its body: one
+    // whose gate holds whatever the walk could not evaluate in it (`… Or
+    // true`) it takes wherever the walk reaches it.
+    if !matches!(gate, CondGate::Run) {
+        match own_gate(state) {
+            Some(false) => {}
+            Some(true) => {
+                let reached = rejection::reach_is_certain(state);
+                rejection::judge_unwalked_body(node, reached, state);
+            }
+            None => rejection::judge_unwalked_body(node, false, state),
+        }
+    }
     let write_condition_maybe_wrong = inherited_condition_maybe_wrong || own_condition_maybe_wrong;
     let condition_taints_property = inherited_sdk_package_taint
         || condition_uses_sdk_taint
@@ -4497,6 +4788,10 @@ fn walk_property_child_inner(
     // — distinct from "undefined", and used in real projects to clear an
     // inherited value.
     let Some(raw) = collect_element_text(node) else {
+        // MSBuild expands the body as it reads it, its inner XML included,
+        // and may throw on an expression there.
+        let reached = rejection::reach_is_certain(state) && own_gate(state) == Some(true);
+        rejection::judge_unwalked_body(node, reached, state);
         // A body we cannot model (an element or processing instruction). Same
         // treatment as an unevaluable expansion below: drop any prior binding
         // rather than let a stale value stand in for a write whose result we
@@ -4545,6 +4840,11 @@ fn walk_property_child_inner(
     let value_uses_sdk_taint = state.raw_uses_sdk_package_taint(&raw);
     let expansion = state.expand_property_pass_value(&raw, node.range(), &name);
     state.in_define_value = prev_in_value;
+    if !expansion.throws.is_empty() {
+        let reached = rejection::reach_is_certain(state) && own_gate(state) == Some(true);
+        let expressions = expansion.throws.clone();
+        rejection::judge_throwing_expression(state, expressions, reached, node.range());
+    }
     let value_taints_property = condition_taints_property
         || value_uses_sdk_taint
         || (state.in_sdk_subtree && expansion.had_issue());
@@ -4786,16 +5086,17 @@ fn evaluate_condition_with_exemptions(
     };
     let mut eval = if state.follow_imports {
         let exists = |path: &str| condition_exists(state.observer, path, current_file_dir);
-        condition::evaluate_with_exists(
+        condition::evaluate_at(
             cond,
             &state.lookup,
-            condition::Probes {
+            Some(condition::Probes {
                 exists: &exists,
                 observer: state.observer,
-            },
+            }),
+            state.condition_site(),
         )
     } else {
-        condition::evaluate(cond, &state.lookup)
+        condition::evaluate_at(cond, &state.lookup, None, state.condition_site())
     };
     // The undefined names the evaluation visited, before the exemptions below
     // vouch for some of them.
@@ -4947,7 +5248,7 @@ fn evaluate_condition_with_exemptions(
     // project with it. The item pass judges its conditions group by group
     // instead ([`rejection::judge_deferred`]): MSBuild evaluates some the walk
     // does not.
-    if !state.in_item_pass {
+    if state.item_pass.is_none() {
         let reached = rejection::reach_is_certain(state);
         rejection::judge_condition_rejection(
             state,
@@ -5423,7 +5724,22 @@ fn package_structural_uncertainty_from_compile(
 /// `…/sdk/<version>/Sdks/<name>/Sdk` layout. Only that layout justifies
 /// tolerating shared SDK files outside the specific `Sdks/<name>` subtree (see
 /// [`State::note_sdk_tolerance`]). Case-insensitive, matching the host FS.
-fn dotnet_sdk_version_dir(root: &Path) -> Option<&Path> {
+/// `path` with `.` dropped and `..` popped, without asking the file system.
+fn lexically_normal(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+pub(crate) fn dotnet_sdk_version_dir(root: &Path) -> Option<&Path> {
     if !root
         .file_name()
         .is_some_and(|n| n.eq_ignore_ascii_case("Sdk"))
@@ -5515,16 +5831,17 @@ fn property_child_could_write(child: Node<'_, '_>, state: &State<'_>) -> bool {
     };
     let eval = if state.follow_imports {
         let exists = |path: &str| condition_exists(state.observer, path, &state.entry_project_dir);
-        condition::evaluate_with_exists(
+        condition::evaluate_at(
             cond,
             &state.lookup,
-            condition::Probes {
+            Some(condition::Probes {
                 exists: &exists,
                 observer: state.observer,
-            },
+            }),
+            state.condition_site(),
         )
     } else {
-        condition::evaluate(cond, &state.lookup)
+        condition::evaluate_at(cond, &state.lookup, None, state.condition_site())
     };
     // An undefined read the walk can prove is undefined in the real build too
     // substitutes to exactly "" (C.2b), so a child gated on a provably-false
@@ -7017,6 +7334,54 @@ fn walk_import_file(path: &Path, span: Range<usize>, collapse: bool, state: &mut
             .sdk_files_imported_from_outside
             .insert(path.to_path_buf());
     }
+    // The entry SDK's own file, by its canonical place in the version
+    // directory, however the import spelled it.
+    if let Some(root) = state.entry_sdk_version_dir.as_deref() {
+        let relative = canon
+            .strip_prefix(root)
+            .ok()
+            .map(Path::to_path_buf)
+            .or_else(|| {
+                let parent = reach_parent_canon.as_deref()?.strip_prefix(root).ok()?;
+                Some(parent.join(path.file_name()?))
+            });
+        if let Some(relative) = relative {
+            state.imported_sdk_files.insert(relative);
+        }
+    }
+    // A workload manifest file, by its path under `sdk-manifests`.
+    if workload_manifest {
+        let under: Vec<_> = path
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .skip_while(|c| !c.eq_ignore_ascii_case("sdk-manifests"))
+            .skip(1)
+            .collect();
+        if !under.is_empty() {
+            state.workload_manifest_files.insert(under.join("/"));
+        }
+    }
+    // A workload manifest the resolver found outside the entry SDK's install
+    // (the user's own, behind the install's `userlocal` marker). Installed
+    // manifests sit under `<dotnet root>/sdk-manifests` as the resolver
+    // spells the root, wherever a merged install's links lead (the version
+    // directory and the manifests can be different trees).
+    let installed_manifests = state
+        .resolved_sdk_root
+        .as_deref()
+        .and_then(dotnet_sdk_version_dir)
+        .and_then(|version_dir| version_dir.parent()?.parent())
+        .map(|root| lexically_normal(&root.join("sdk-manifests")));
+    if workload_manifest
+        && !installed_manifests
+            .is_some_and(|manifests| lexically_normal(path).starts_with(manifests))
+    {
+        state
+            .workload_manifests_outside_install
+            .insert(path.to_path_buf());
+    }
+    let saved_in_foreign_document = state.in_foreign_document;
+    state.in_foreign_document = !in_entry_sdk && !workload_manifest;
     if workload_manifest && !in_entry_sdk {
         state
             .workload_definitions
@@ -7096,6 +7461,7 @@ fn walk_import_file(path: &Path, span: Range<usize>, collapse: bool, state: &mut
     }
     state.import_site_span = saved_import_site_span;
     state.in_sdk_subtree = saved_in_sdk_subtree;
+    state.in_foreign_document = saved_in_foreign_document;
     state.depth -= 1;
     state.current_file = saved_current_file;
     state.exit_this_file(frame);

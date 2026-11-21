@@ -397,7 +397,7 @@ fn compile_update_compile_order_scales_with_items_and_targets() {
 #[test]
 fn judging_a_long_condition_chain_is_linear() {
     const N: usize = 40_000;
-    let mut condition = String::from("$([System.String]::IsNullOrWhiteSpace(''))");
+    let mut condition = String::from("'É' == 'é'");
     for _ in 0..N {
         condition.push_str(" And 'a' == 'a'");
     }
@@ -431,7 +431,7 @@ fn judging_an_operand_of_many_references_is_linear() {
     let references = "$(P)".repeat(N);
     let src = format!(
         "<Project><PropertyGroup><P>p</P></PropertyGroup>\
-         <PropertyGroup Condition=\"$([System.String]::IsNullOrWhiteSpace('')) And \
+         <PropertyGroup Condition=\"'É' == 'é' And \
          '{references}' != '' And 1 &lt; abc\"><R>x</R></PropertyGroup></Project>"
     );
     let start = std::time::Instant::now();
@@ -1204,7 +1204,7 @@ fn undecided_choose_then(branch: &str, tail: &str) -> String {
     format!(
         r#"<Project>
   <Choose>
-    <When Condition="'$([System.Guid]::NewGuid())' == ''">
+    <When Condition="'É' == 'Ê'">
       {branch}
     </When>
   </Choose>
@@ -1852,6 +1852,30 @@ fn metadata_reference_in_include_emits_diagnostic_and_skips_entry() {
         }]
     );
     assert!(p.is_partial);
+}
+
+/// A metadatum's property function reading a metadata reference, which the
+/// expansion does not model either, is reported once.
+#[test]
+fn an_unmodelled_metadata_reading_expression_is_reported_once() {
+    let src = r#"<Project>
+  <ItemGroup>
+    <PackageReference Include="P" Version="$([System.String]::Copy('%(V)'))" />
+  </ItemGroup>
+</Project>"#;
+    let p = parse(src);
+    let reports = p
+        .diagnostics
+        .iter()
+        .filter(|d| {
+            matches!(
+                &d.kind,
+                DiagnosticKind::UnsupportedPropertyExpression { expression }
+                    if expression == "$([System.String]::Copy('%(V)'))"
+            )
+        })
+        .count();
+    assert_eq!(reports, 1, "{:#?}", p.diagnostics);
 }
 
 #[test]
@@ -4028,6 +4052,39 @@ fn project_reference_metadata_child_overrides_attribute_case_insensitively() {
         ItemMetadataValue::known("false"),
         "metadata names are case-insensitive"
     );
+}
+
+/// MSBuild expands a metadatum's own metadata references before its
+/// properties, so a property function in it is handed the metadatum's value:
+/// `''` for an `X` the reference has none of, which `IsNullOrEmpty` and
+/// `IsNullOrWhiteSpace` call empty (`True` in every spelling; probed,
+/// `msbuild-condition-oracle`'s `itemsMeta`, SDK 10.0.401). The walk's
+/// expansion leaves the reference as text, which neither calls empty, so it
+/// declines rather than read `False`, which would drop a reference the build
+/// keeps.
+#[test]
+fn a_property_function_over_item_metadata_in_a_metadatum_is_unknown() {
+    for function in ["IsNullOrEmpty", "IsNullOrWhiteSpace"] {
+        let call = format!("$([System.String]::{function}('%(X)'))");
+        let src = format!(
+            r#"<Project>
+  <ItemGroup>
+    <ProjectReference Include="../A/A.fsproj" ReferenceOutputAssembly="{call}" />
+    <ProjectReference Include="../B/B.fsproj">
+      <ReferenceOutputAssembly>{call}</ReferenceOutputAssembly>
+    </ProjectReference>
+  </ItemGroup>
+</Project>"#
+        );
+        let p = parse(&src);
+        for reference in &p.project_references {
+            assert_eq!(
+                reference.reference_output_assembly,
+                ItemMetadataValue::Unknown,
+                "{function}: {reference:?}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -11200,4 +11257,94 @@ fn an_indirect_define_read_is_not_the_self_append() {
         "a real build may supply DefineConstants=1 and so SELECTED; an empty \
          define set must not be certain"
     );
+}
+
+/// Each write a document outside the install makes of a name the
+/// compiled-name derivation admits is checked as it is made, and the first
+/// one out of its grammar kept: a write under a gate that decided against it
+/// is not one, and one under a gate the walk cannot decide may have stored
+/// anything. A later clean write does not discharge it.
+#[test]
+fn foreign_write_failures_keep_the_first_value_out_of_grammar() {
+    let parsed = parse(
+        r#"<Project>
+  <PropertyGroup><Configuration>Debug</Configuration></PropertyGroup>
+  <PropertyGroup Condition="'a' == 'b'"><Configuration>Skipped one</Configuration></PropertyGroup>
+  <PropertyGroup><Configuration>Moved one</Configuration></PropertyGroup>
+  <PropertyGroup><Configuration>Debug</Configuration></PropertyGroup>
+  <PropertyGroup Condition="'$([System.Guid]::NewGuid())' == ''"><Version>1.0</Version></PropertyGroup>
+  <PropertyGroup><Unlisted>any thing</Unlisted></PropertyGroup>
+</Project>"#,
+    );
+    assert_eq!(
+        parsed.foreign_write_failures.get("configuration"),
+        Some(&Some("Moved one".to_string()))
+    );
+    assert_eq!(parsed.foreign_write_failures.get("version"), Some(&None));
+    assert_eq!(parsed.foreign_write_failures.len(), 2);
+}
+
+/// Repeated appends hold nothing beyond the first failure: memory stays as
+/// small as the lists, however long the document.
+#[test]
+fn repeated_appends_retain_nothing() {
+    let mut source = String::from("<Project>");
+    for _ in 0..4000 {
+        source.push_str("<PropertyGroup><NoWarn>$(NoWarn);FS0001</NoWarn><Unlisted>$(Unlisted);x</Unlisted></PropertyGroup>");
+    }
+    source.push_str("</Project>");
+    let parsed = parse(&source);
+    assert!(parsed.foreign_write_failures.is_empty());
+    assert!(matches!(
+        parsed.property("NoWarn"),
+        crate::PropertyRead::Value(v) if v.len() == 4000 * 7
+    ));
+}
+
+/// NuGet's `Exists('…')` guard names the very path it imports, spaces and
+/// all: a guard whose quoted path differs only in its spaces is not NuGet's,
+/// and one that matches exactly is.
+#[test]
+fn nuget_shaped_exists_guards_keep_their_spaces() {
+    let shaped = |import: &str, guard: &str| {
+        let text = format!(
+            "<Project><ImportGroup Condition=\" '$(ExcludeRestorePackageImports)' != 'true' \">\
+             <Import Project=\"{import}\" Condition=\"{guard}\" /></ImportGroup></Project>"
+        );
+        let doc = crate::document::parse(&text).unwrap();
+        let file = Path::new("/p/obj/Demo.fsproj.nuget.g.props");
+        let mut foreign = crate::ForeignDefinitions::default();
+        foreign.record_document(doc.root_element(), file);
+        !foreign.unlike_nuget.contains(file)
+    };
+    assert!(!shaped("/p/a b.props", "Exists('/p/a  b.props')"));
+    assert!(shaped("/p/a  b.props", "Exists('/p/a  b.props')"));
+    assert!(shaped("/p/a.props", " Exists('/p/a.props') "));
+    // A literal tab, which MSBuild keeps, against a space.
+    assert!(!shaped("/p/a\tb.props", "Exists('/p/a b.props')"));
+    // A quote closes the literal: two calls, not a guard of the import.
+    assert!(!shaped(
+        "/p/a') Or Exists('b",
+        "Exists('/p/a') Or Exists('b')"
+    ));
+}
+
+/// An item definition gives a type metadata defaults and creates no item, so
+/// it is not an item type a document declares (which the language-version
+/// consumer reads); the derivation still sees it.
+#[test]
+fn item_definitions_are_not_items() {
+    let text = "<Project><ItemDefinitionGroup><DisabledLanguageFeatures><M>v</M>\
+                </DisabledLanguageFeatures></ItemDefinitionGroup></Project>";
+    let doc = crate::document::parse(text).unwrap();
+    let file = Path::new("/p/Demo.fsproj");
+    let mut foreign = crate::ForeignDefinitions::default();
+    foreign.record_document(doc.root_element(), file);
+    assert!(!foreign.names_item("DisabledLanguageFeatures"));
+    assert!(
+        foreign
+            .item_definitions
+            .contains_key("disabledlanguagefeatures")
+    );
+    assert!(foreign.item_metadata.contains_key("m"));
 }

@@ -849,8 +849,9 @@ fn the_nested_point_declines_on_an_undecidable_body_gate() {
     // has the same trust check: otherwise an undecidable body write of the
     // gate leaves the import (and its Compile items) published as exact.
     //
-    // `'$(X.Substring(0,1))' == 'a'` is ordinary MSBuild we do not model, and
-    // the oracle says it is **true** (dotnet 10.0.301, 2026-08-01) — so the
+    // `'$(X)É' == '$(X)é'` is ordinary MSBuild we do not model (case folding
+    // outside ASCII), and MSBuild evaluates it **true**, throwing on nothing
+    // (msbuild-condition-oracle, SDK 10.0.401) — so the
     // real build writes `false` and skips the file, while we take the default
     // and import it.
     let tmp = TempDir::new().unwrap();
@@ -880,7 +881,7 @@ fn the_nested_point_declines_on_an_undecidable_body_gate() {
         r#"<Project>
   <PropertyGroup>
     <X>abc</X>
-    <ImportDirectoryBuildProps Condition="'$(X.Substring(0,1))' == 'a'">false</ImportDirectoryBuildProps>
+    <ImportDirectoryBuildProps Condition="'$(X)É' == '$(X)é'">false</ImportDirectoryBuildProps>
   </PropertyGroup>
   <Import Project="nested.targets" />
 </Project>"#,

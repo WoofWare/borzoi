@@ -149,6 +149,18 @@ pub(super) struct DeferredItemGroup {
     /// Whether MSBuild reaches the group for certain, as the property pass
     /// found it ([`rejection::reach_is_certain`]).
     reach_certain: bool,
+    /// A group the walk does not take (in a `<Choose>` branch it could not
+    /// decide) that MSBuild may: judged in the item pass, against the final
+    /// property table, and not evaluated ([`State::defer_judgement`]).
+    judge_only: bool,
+    /// For a judge-only group, where it stands in the walk it was deferred
+    /// from: the writes there that reach it, whose value the walk does not
+    /// hold.
+    written: Option<super::PathOf>,
+    /// For a judge-only group, whether an arm it stands in is one MSBuild
+    /// cannot take (`Speculation::dead_arms`): it holds no reference the
+    /// build makes.
+    in_dead_arm: bool,
 }
 
 impl<'r> State<'r> {
@@ -159,6 +171,32 @@ impl<'r> State<'r> {
     /// must not be resolved against the properties-so-far table the
     /// property pass is still building.
     pub(super) fn defer_item_group(&mut self, node: Node<'_, '_>, kind: DeferredGroupKind) {
+        let reach_certain = rejection::reach_is_certain(self);
+        self.defer_group(node, kind, reach_certain, false);
+    }
+
+    /// Record a group the walk does not take, which MSBuild reaches as
+    /// `reached` says, to be judged in the item pass
+    /// ([`rejection::judge_deferred`]) and not evaluated: MSBuild expands an
+    /// item group's text after every property write, so judging it against
+    /// the table as the property pass holds it now could see a value a later
+    /// write replaces.
+    pub(super) fn defer_judgement(
+        &mut self,
+        node: Node<'_, '_>,
+        kind: DeferredGroupKind,
+        reached: bool,
+    ) {
+        self.defer_group(node, kind, reached, true);
+    }
+
+    fn defer_group(
+        &mut self,
+        node: Node<'_, '_>,
+        kind: DeferredGroupKind,
+        reach_certain: bool,
+        judge_only: bool,
+    ) {
         if self.directory_build.fallback.is_some()
             && node.children().any(|child| {
                 child.is_element()
@@ -200,6 +238,16 @@ impl<'r> State<'r> {
                 DeferredFileKey::Imported(index)
             }
         };
+        let written = if judge_only {
+            self.speculatively_written()
+        } else {
+            None
+        };
+        let in_dead_arm = judge_only
+            && self
+                .speculation
+                .as_ref()
+                .is_some_and(|speculation| speculation.dead_arms > 0);
         self.deferred_item_groups.push(DeferredItemGroup {
             kind,
             file,
@@ -207,7 +255,10 @@ impl<'r> State<'r> {
             range: node.range(),
             import_site_span: self.import_site_span.clone(),
             in_sdk_subtree: self.in_sdk_subtree,
-            reach_certain: rejection::reach_is_certain(self),
+            reach_certain,
+            judge_only,
+            written,
+            in_dead_arm,
         });
     }
 }
@@ -229,8 +280,8 @@ pub(super) fn replay_deferred_item_groups(entry_doc: &Document<'_>, state: &mut 
     let using_tasks = groups
         .iter()
         .filter(|group| group.kind == DeferredGroupKind::UsingTask);
-    state.in_item_pass = true;
     for group in definition_groups.chain(item_groups).chain(using_tasks) {
+        state.item_pass = Some(group.kind);
         // Reinstate the positional context the group was recorded under, so
         // diagnostics/origins/SDK tolerance match inline evaluation.
         let saved_span =
@@ -244,7 +295,13 @@ pub(super) fn replay_deferred_item_groups(entry_doc: &Document<'_>, state: &mut 
         // MSBuild evaluates the group's conditions in this pass, against the
         // final property table: judged here, before the group is walked.
         let judge = |node: Node<'_, '_>, dir: &Path, state: &mut State<'_>| {
-            rejection::judge_deferred(node, dir, group.reach_certain, state);
+            state.judge_from_path(group.written.as_ref(), |state| {
+                rejection::judge_deferred(node, dir, group.reach_certain, state);
+            });
+            if group.kind == DeferredGroupKind::ItemGroup && group.judge_only && !group.in_dead_arm
+            {
+                taint_group_references_on_doubted_reads(node, state);
+            }
         };
         match group.file {
             DeferredFileKey::Entry => {
@@ -253,7 +310,9 @@ pub(super) fn replay_deferred_item_groups(entry_doc: &Document<'_>, state: &mut 
                 let node = resolve_deferred_node(entry_doc, group);
                 let dir = state.entry_project_dir.clone();
                 judge(node, &dir, state);
-                evaluate(node, state);
+                if !group.judge_only {
+                    evaluate(node, state);
+                }
             }
             DeferredFileKey::Imported(index) => {
                 let file = &files[index];
@@ -270,14 +329,16 @@ pub(super) fn replay_deferred_item_groups(entry_doc: &Document<'_>, state: &mut 
                     .map(Path::to_path_buf)
                     .unwrap_or_default();
                 judge(node, &dir, state);
-                evaluate(node, state);
+                if !group.judge_only {
+                    evaluate(node, state);
+                }
                 state.exit_this_file(frame);
             }
         }
         state.import_site_span = saved_span;
         state.in_sdk_subtree = saved_sdk;
     }
-    state.in_item_pass = false;
+    state.item_pass = None;
     // All items captured: collapse Include + Update into the effective set and
     // detect the versionless symptom on it (both need every item present).
     #[cfg(any(test, feature = "test-support"))]
@@ -614,6 +675,7 @@ fn evaluate_item_group(node: Node<'_, '_>, state: &mut State<'_>) {
             }
             restore(state);
             for child in node.children().filter(Node::is_element) {
+                taint_walked_reference_on_doubted_reads(child, state);
                 walk_item_child(child, state);
             }
         }
@@ -628,6 +690,9 @@ fn evaluate_item_group(node: Node<'_, '_>, state: &mut State<'_>) {
             if group_reads_untrusted && reference_risk.list_op {
                 state.project_reference_includes_hidden = true;
             }
+            // One the build makes there holds items the list lacks where it
+            // reads a name the walk doubts.
+            taint_group_references_on_doubted_reads(node, state);
             restore(state);
         }
         CondGate::Unsupported => {
@@ -644,8 +709,104 @@ fn evaluate_item_group(node: Node<'_, '_>, state: &mut State<'_>) {
             if reference_risk.list_op {
                 state.project_reference_includes_hidden = true;
             }
+            taint_group_references_on_doubted_reads(node, state);
             restore(state);
         }
+    }
+}
+
+/// Whether the gate of `element` (a reference, or its group) is false
+/// whatever the names the walk doubts hold
+/// ([`State::reference_gate_decision`]).
+fn reference_gate_is_dead(element: Node<'_, '_>, state: &State<'_>) -> bool {
+    let dir = state.entry_project_dir.clone();
+    attribute(element, "Condition").is_some_and(|condition| {
+        state.reference_gate_decision(&condition, Some(&dir)) == Some(false)
+    })
+}
+
+/// Whether `node` is a `<ProjectReference>` `Include` whose `Include` or
+/// `Exclude` reads a name the walk doubts ([`State::raw_reads_a_doubted_name`]:
+/// unpinned, SDK-tainted, or held as no value it can show undefined), read as
+/// an item spec reads it, off its text alone, so that asking probes nothing.
+///
+/// Such a reference the build makes leaves the reference list uncertain
+/// ([`ParsedProject::project_references_uncertain`]). A value the walk
+/// computes from such a name may name a different target (`Include`) or strip
+/// one it kept (`Exclude`): a phantom edge for a reference-semantics consumer.
+/// One it does not compute, it drops with the element, though MSBuild holds
+/// items there that the list then lacks (#1098). So the list is flagged
+/// whatever the walk then does with the element.
+///
+/// An `Exclude` excludes nothing from an `Include` that is empty whatever the
+/// names the walk doubts hold: one that reads none of them and expands, with
+/// no file system, to no item. Its doubt then moves no reference.
+fn reads_a_doubted_name(node: Node<'_, '_>, state: &State<'_>) -> bool {
+    if !(node.is_element()
+        && modelled_item_kind_for_element(node) == Some(ItemKind::ProjectReference))
+    {
+        return false;
+    }
+    let Some(include) = attribute(node, "Include") else {
+        return false;
+    };
+    if state.raw_reads_a_doubted_name(&include) {
+        return true;
+    }
+    let include_is_empty = || {
+        let (value, issues) = properties::substitute(&include, &state.lookup);
+        // An undefined read the walk shows exact is MSBuild's empty too.
+        issues.iter().all(|issue| {
+            matches!(issue, Issue::Undefined { name } if state.undefined_read_is_exact(name))
+        }) && value
+                .ignoring_trust()
+                .as_escaped()
+                .split(';')
+                .all(|fragment| {
+                    // An item list the walk knows exactly to be empty is no
+                    // item either; one it does not know may hold some.
+                    let fragment = fragment.trim();
+                    fragment.is_empty()
+                        || exact_item_list_reference(fragment).is_some_and(|item_type| {
+                            item_list_view(item_type, state).is_some_and(|items| items.is_empty())
+                        })
+                })
+    };
+    attribute(node, "Exclude").is_some_and(|raw| state.raw_reads_a_doubted_name(&raw))
+        && !include_is_empty()
+}
+
+/// Flag the reference list for the `<ProjectReference>` at
+/// `node`, which the item pass reaches in a group it walks, unless its own
+/// gate is dead: asked as the walk reaches it, so that an item read of
+/// `@(ProjectReference)` before it in the group sees the list as it stood.
+/// Its gate is probed only for a spec that reads a doubted name.
+fn taint_walked_reference_on_doubted_reads(node: Node<'_, '_>, state: &mut State<'_>) {
+    if reads_a_doubted_name(node, state) && !reference_gate_is_dead(node, state) {
+        state.project_references_uncertain = true;
+    }
+}
+
+/// [`taint_walked_reference_on_doubted_reads`] for every `<ProjectReference>`
+/// of the `<ItemGroup>` at `node`, a group the real build may make and the
+/// walk does not walk: one under a gate it skipped or could not evaluate, or
+/// judged only (an arm of a `<Choose>` it could not decide). A group whose
+/// own gate is dead holds none the build makes. Gates are probed only where
+/// a reference's spec reads a doubted name, so a group with none adds
+/// nothing to the read set.
+fn taint_group_references_on_doubted_reads(node: Node<'_, '_>, state: &mut State<'_>) {
+    let doubted: Vec<Node<'_, '_>> = node
+        .children()
+        .filter(|child| reads_a_doubted_name(*child, state))
+        .collect();
+    if doubted.is_empty() || reference_gate_is_dead(node, state) {
+        return;
+    }
+    if doubted
+        .into_iter()
+        .any(|child| !reference_gate_is_dead(child, state))
+    {
+        state.project_references_uncertain = true;
     }
 }
 
@@ -1078,12 +1239,6 @@ fn walk_item_child_inner(node: Node<'_, '_>, kind: ItemKind, state: &mut State<'
         // to emit a misleading item.
         return;
     }
-    // The Include VALUE can lean on an untrusted read the same way the
-    // gate can: a cleanly-expanded `$(RefPath)` whose source was written
-    // under a gate we couldn't pin may hold a different path — or none —
-    // in the real build, so the captured edge may be phantom. Flag rather
-    // than drop: the declared-structure walk keeps the element.
-    taint_reference_list_on_untrusted_value(kind, include, &expansion, state);
     let spelled = msbuild_spelling(include, expansion.value.ignoring_trust());
     match state.glob_resolver {
         None => {
@@ -1695,7 +1850,7 @@ fn read_compile_order_metadata_write(
         span: Range<usize>,
         state: &mut State<'_>,
     ) -> Option<String> {
-        let expansion = state.expand(raw, span.clone());
+        let expansion = expand_metadata(state, raw, span.clone());
         if expansion.had_issue() {
             return None;
         }
@@ -3119,7 +3274,7 @@ fn read_item_metadata(node: Node<'_, '_>, name: &str, state: &mut State<'_>) -> 
         state: &mut State<'_>,
     ) -> MetadataValue {
         state.note_package_uncertain_from_sdk_property_taint(raw);
-        let expansion = state.expand(raw, range.clone());
+        let expansion = expand_metadata(state, raw, range.clone());
         if expansion.had_issue() {
             return MetadataValue::Clear;
         }
@@ -3655,7 +3810,7 @@ pub(super) fn attribute_is_plain(node: Node<'_, '_>, attr: &roxmltree::Attribute
 /// `&lt;![CDATA[a]]&gt;` reads as `a`, ` &lt;!--c--&gt; y` as `"  y"`, and
 /// `x&lt;![CDATA[a]]&gt;` as `x<![CDATA[a]]>`. A value whose parse this crate
 /// does not model ([`crate::document::fragment_content`]) is `None`.
-fn metadata_attribute<'a>(
+pub(super) fn metadata_attribute<'a>(
     node: Node<'a, '_>,
     attr: &roxmltree::Attribute<'a, '_>,
 ) -> Option<std::borrow::Cow<'a, str>> {
@@ -3718,7 +3873,7 @@ fn set_generic_metadata_value(
     let (normalised, exact, rewritable) = if raw.is_empty() {
         (String::new(), String::new(), false)
     } else {
-        let expansion = expand_silent(raw, state);
+        let expansion = expand_metadata_silent(raw, state);
         if expansion.had_issue() {
             forget(metadata, raw);
             return;
@@ -3772,16 +3927,17 @@ fn evaluate_item_condition_silent(node: Node<'_, '_>, state: &State<'_>) -> (Con
     };
     let eval = if state.follow_imports {
         let exists = |path: &str| condition_exists(state.observer, path, &state.entry_project_dir);
-        condition::evaluate_with_exists(
+        condition::evaluate_at(
             cond,
             &state.lookup,
-            condition::Probes {
+            Some(condition::Probes {
                 exists: &exists,
                 observer: state.observer,
-            },
+            }),
+            state.condition_site(),
         )
     } else {
-        condition::evaluate(cond, &state.lookup)
+        condition::evaluate_at(cond, &state.lookup, None, state.condition_site())
     };
     let tainted =
         matches!(
@@ -3816,6 +3972,52 @@ fn evaluate_item_condition_silent_with_sdk_taint(
     (gate, condition_tainted || sdk_tainted)
 }
 
+/// Expand `raw`, the value of an item's metadatum, reporting as
+/// [`State::expand`] does. MSBuild expands a metadatum's own metadata
+/// references first, so a property function reading one is handed the
+/// metadatum's value, not the reference the walk's expansion leaves it
+/// ([`properties::expressions_reading_metadata`]): an unsupported expression.
+/// An operation (`Include`, `Exclude`, `Remove`, `Update`) is no such text:
+/// MSBuild expands its properties first and reads a metadata reference left
+/// in it as written (`Include="$([System.String]::Copy('%(M)'))"` names
+/// `%(M)`; probed, `msbuild-condition-oracle`, SDK 10.0.401), as the walk
+/// does.
+fn expand_metadata(state: &mut State<'_>, raw: &str, span: Range<usize>) -> Expansion {
+    let before = state.diagnostics.len();
+    let mut expansion = state.expand(raw, span.clone());
+    for expression in properties::expressions_reading_metadata(raw) {
+        expansion.had_unsupported = true;
+        // The expansion reports one it did not model already.
+        let reported = state.diagnostics[before..].iter().any(|diagnostic| {
+            matches!(
+                &diagnostic.kind,
+                DiagnosticKind::UnsupportedPropertyExpression { expression: seen }
+                    if seen == expression
+            )
+        });
+        if reported {
+            continue;
+        }
+        state.push(
+            DiagnosticKind::UnsupportedPropertyExpression {
+                expression: expression.to_owned(),
+            },
+            span.clone(),
+        );
+    }
+    expansion
+}
+
+/// [`expand_silent`] of a metadatum's value: a property function reading
+/// item metadata is unsupported, as in [`expand_metadata`].
+fn expand_metadata_silent(raw: &str, state: &State<'_>) -> Expansion {
+    let mut expansion = expand_silent(raw, state);
+    if !properties::expressions_reading_metadata(raw).is_empty() {
+        expansion.had_unsupported = true;
+    }
+    expansion
+}
+
 pub(super) fn expand_silent(raw: &str, state: &State<'_>) -> Expansion {
     let (value, issues) = if state.follow_imports {
         properties::substitute_with_fs(raw, &state.lookup, state.observer)
@@ -3824,6 +4026,7 @@ pub(super) fn expand_silent(raw: &str, state: &State<'_>) -> Expansion {
     };
     let mut had_undefined = false;
     let mut had_unsupported = false;
+    let throws = super::rejection::throws_in(&issues);
     let mut unpinned_root = None;
     for issue in issues {
         match issue {
@@ -3838,7 +4041,11 @@ pub(super) fn expand_silent(raw: &str, state: &State<'_>) -> Expansion {
                     unpinned_root = Some(state.root_for_undefined_read(&name));
                 }
             }
-            Issue::Unsupported { .. } | Issue::PathAdjustmentUndecided { .. } => {
+            Issue::Unsupported { .. }
+            | Issue::ReturnsBoolean { .. }
+            | Issue::ReturnsValue { .. }
+            | Issue::Throws { .. }
+            | Issue::PathAdjustmentUndecided { .. } => {
                 had_unsupported = true;
             }
         }
@@ -3859,6 +4066,7 @@ pub(super) fn expand_silent(raw: &str, state: &State<'_>) -> Expansion {
         had_undefined,
         had_unsupported,
         unpinned_root,
+        throws,
     }
 }
 
@@ -3913,28 +4121,6 @@ pub(super) fn item_key(name: &str) -> String {
 /// spliced verbatim, each path as an item of `kind`. An unresolved
 /// `@()`/`%()` in the exclude list means we cannot know what to remove,
 /// so the whole element is skipped rather than risk over-inclusion.
-/// Flag [`ParsedProject::project_references_uncertain`] when the expanded
-/// VALUE of a `<ProjectReference>` list attribute (`Include` or `Exclude`)
-/// leans on an untrusted read — an unpinned property (written under a gate
-/// we couldn't evaluate) or an SDK-package-tainted one. The expansion is
-/// clean, so without consulting the pin state the captured list would look
-/// trustworthy — but the real build's value may name a different target
-/// (Include) or strip one we kept (Exclude), either way a phantom edge for
-/// a reference-semantics consumer. Flag rather than drop: the
-/// declared-structure walk keeps the element.
-fn taint_reference_list_on_untrusted_value(
-    kind: ItemKind,
-    raw: &str,
-    expansion: &Expansion,
-    state: &mut State<'_>,
-) {
-    if kind == ItemKind::ProjectReference
-        && (expansion.unpinned_root.is_some() || state.raw_uses_sdk_package_taint(raw))
-    {
-        state.project_references_uncertain = true;
-    }
-}
-
 fn route_item_through_resolver(
     node: Node<'_, '_>,
     kind: ItemKind,
@@ -3980,17 +4166,13 @@ fn route_item_through_resolver(
     }
     let mut excludes: Vec<SpecFragment> = Vec::new();
     if let Some(raw) = exclude_attr.as_deref() {
+        // The Exclude VALUE's trust was checked with the Include's
+        // ([`reads_a_doubted_name`]); the best-effort
+        // exclusion below applies whatever we did expand.
         let expansion = state.expand(raw, node.range());
         if expansion.had_issue() {
             return;
         }
-        // The Exclude VALUE gets the same trust check as the Include's: an
-        // untrusted `$(Skip)` that expanded (cleanly) to empty here may
-        // exclude the target in the real build, leaving the captured list
-        // claiming an edge the real build strips (a phantom edge for a
-        // reference-semantics consumer). The best-effort exclusion below
-        // still applies whatever we did expand.
-        taint_reference_list_on_untrusted_value(kind, raw, &expansion, state);
         for entry in spec_fragments(expansion.value.ignoring_trust()) {
             if contains_item_reference(entry) {
                 state.push(
@@ -4604,7 +4786,7 @@ fn resolve_string_metadata(
         // A value MSBuild reads as XML is `Unknown`.
         let reading = metadata_attribute(node, &attr);
         let raw = reading.as_deref().unwrap_or(attr.value());
-        let expansion = state.expand(raw, node.range());
+        let expansion = expand_metadata(state, raw, node.range());
         resolved = if reading.is_none()
             || expansion.had_issue()
             || expansion.unpinned_root.is_some()
@@ -4669,7 +4851,7 @@ fn resolve_string_metadata(
             resolved = ItemMetadataValue::Known(None);
             continue;
         }
-        let expansion = state.expand(&raw, child.range());
+        let expansion = expand_metadata(state, &raw, child.range());
         if expansion.had_issue()
             || expansion.unpinned_root.is_some()
             || state.raw_uses_sdk_package_taint(&raw)

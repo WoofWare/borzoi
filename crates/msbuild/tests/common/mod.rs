@@ -22,6 +22,7 @@
 
 #![allow(dead_code)] // each importer uses a different subset.
 
+pub mod assembly_name;
 pub mod case_axis;
 #[cfg(unix)]
 pub mod odd_entry;
@@ -33,11 +34,11 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
-use std::time::Duration;
 
+use borzoi_oracle_harness::msbuild_oracle;
 use borzoi_oracle_harness::{BatchChild, BoundedCommand, default_timeout};
 
-use borzoi_msbuild::test_support::{Outcome, PropertyMap, evaluate, substitute};
+use borzoi_msbuild::test_support::{Issue, Outcome, PropertyMap, evaluate, substitute};
 use borzoi_msbuild::{GlobResolver, ParseError, ParsedProject, SdkResolver};
 
 thread_local! {
@@ -94,15 +95,6 @@ pub fn parse_fsproj_with_imports(
     }
 }
 
-/// Budget for the one `dotnet build` this harness runs (the condition oracle).
-///
-/// A cold build restores packages and runs a compiler, which is legitimately
-/// minutes, so the bound sits far above the harness's per-request default: it is
-/// there to stop a build that has *stalled* — blocked on a NuGet lock held by a
-/// concurrent run in a sibling worktree, say — from hanging the suite forever,
-/// not to police a slow one.
-const BUILD_TIMEOUT: Duration = Duration::from_secs(1800);
-
 /// Root of the F# corpus the differential tests walk, taken from the
 /// `BORZOI_CORPUS` environment variable.
 ///
@@ -132,123 +124,17 @@ pub fn corpus_root() -> PathBuf {
 // tools/msbuild-condition-oracle harness
 // ============================================================================
 
-/// The workspace root, two `..` jumps above this crate's manifest dir;
-/// `tools/msbuild-condition-oracle` lives there.
-fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("crates/ parent")
-        .parent()
-        .expect("workspace root parent")
-        .to_path_buf()
-}
-
-fn oracle_project_dir() -> PathBuf {
-    workspace_root()
-        .join("tools")
-        .join("msbuild-condition-oracle")
-}
-
-/// Build `tools/msbuild-condition-oracle` (unless
-/// `BORZOI_MSBUILD_CONDITION_ORACLE` points at a prebuilt binary) and
-/// return the apphost path. Same content-bearing-marker scheme as the
-/// fcs-dump / nuget-oracle harnesses, and for the same reasons: a marker file
-/// whose *contents* fingerprint the tool's sources, so branch-switching can
-/// never leave a stale oracle answering for the wrong sources, while
-/// `cargo test`'s serial test binaries skip the `dotnet build` after the first
-/// has run it.
+/// Build `tools/msbuild-condition-oracle` once and return its apphost
+/// ([`msbuild_oracle::apphost`], shared with the crates that drive the
+/// `fscArgs` op).
 fn ensure_oracle_built() -> &'static Path {
-    static BUILT: OnceLock<PathBuf> = OnceLock::new();
-    BUILT
-        .get_or_init(|| {
-            if let Some(bin) = std::env::var_os("BORZOI_MSBUILD_CONDITION_ORACLE") {
-                return PathBuf::from(bin);
-            }
-            let project = oracle_project_dir();
-            let bin = project.join("bin");
-            let apphost = bin
-                .join("Release")
-                .join("net10.0")
-                .join("msbuild-condition-oracle");
-            let marker = bin.join(".msbuild-condition-oracle-built");
-            let want = format!("{:016x}", oracle_source_fingerprint(&project));
-
-            let fresh = apphost.host_exists()
-                && borzoi_msbuild::observed::host_fs::read_to_string(&marker)
-                    .map(|recorded| recorded.trim() == want)
-                    .unwrap_or(false);
-            if !fresh {
-                let mut cmd = Command::new("dotnet");
-                cmd.args(["build", "-c", "Release", "--nologo"])
-                    .arg(&project);
-                BoundedCommand::new(cmd)
-                    .timeout(BUILD_TIMEOUT)
-                    .run_ok("dotnet build msbuild-condition-oracle");
-                assert!(
-                    apphost.host_exists(),
-                    "dotnet build msbuild-condition-oracle produced no apphost at {apphost:?}"
-                );
-                write_marker_atomically(&marker, &want);
-            }
-            apphost
-        })
-        .as_path()
+    msbuild_oracle::apphost()
 }
 
 /// The oracle's managed assembly, which also holds the `ConeLogger` that
 /// `dotnet msbuild -logger:` can load.
 pub fn oracle_assembly() -> PathBuf {
     ensure_oracle_built().with_extension("dll")
-}
-
-/// Hash the inputs whose change should force a rebuild: the tool's sources
-/// and the flake lock (which pins the SDK and thus the MSBuild the oracle
-/// loads via MSBuildLocator).
-fn oracle_source_fingerprint(project: &Path) -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    let mut sources: Vec<PathBuf> = borzoi_msbuild::observed::host_fs::read_dir(project)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| {
-            matches!(
-                p.extension().and_then(|s| s.to_str()),
-                Some("fs" | "fsproj")
-            )
-        })
-        .collect();
-    sources.sort();
-    sources.push(workspace_root().join("flake.lock"));
-
-    let mut h = DefaultHasher::new();
-    for p in &sources {
-        // File name first so a rename can't alias two contents to one hash.
-        p.file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .hash(&mut h);
-        borzoi_msbuild::observed::host_fs::read(p)
-            .unwrap_or_default()
-            .hash(&mut h);
-    }
-    h.finish()
-}
-
-/// Write `contents` to `marker` atomically (temp + rename), best-effort.
-fn write_marker_atomically(marker: &Path, contents: &str) {
-    let Some(dir) = marker.parent() else {
-        return;
-    };
-    let tmp = dir.join(format!(
-        ".msbuild-condition-oracle-built.tmp-{}",
-        std::process::id()
-    ));
-    if std::fs::write(&tmp, contents).is_ok() && std::fs::rename(&tmp, marker).is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
 }
 
 /// Strip the oracle child's environment down to what the dotnet host needs,
@@ -313,7 +199,7 @@ pub fn oracle_environment() -> HashMap<String, String> {
 /// environment) and cached for the test binary's lifetime. .NET computes
 /// it from the OS user profile — probed: redirecting `$HOME` does *not*
 /// move it — so the only exact source is MSBuild itself.
-fn msbuild_user_extensions_path() -> &'static str {
+pub fn msbuild_user_extensions_path() -> &'static str {
     static PATH: OnceLock<String> = OnceLock::new();
     PATH.get_or_init(|| {
         let dir = tempfile::TempDir::new().expect("tempdir for MSBuildUserExtensionsPath probe");
@@ -715,6 +601,29 @@ impl Oracle {
     /// project. This is what lets a generative sweep diff a `<PackageReference>`
     /// `Include`+`Update` collapse — identity matching and per-key metadata
     /// merge — against the real evaluator, resident.
+    /// The text MSBuild reads of each property, metadatum (an element's) and
+    /// inline task body in `xml`, unexpanded, in document order (the
+    /// `elementContents` op): `None` where MSBuild refuses to load the
+    /// document.
+    pub fn element_contents(&mut self, xml: &str, path: &Path) -> Option<Vec<String>> {
+        let resp = self.request(&serde_json::json!({
+            "op": "elementContents",
+            "xml": xml,
+            "path": path.to_string_lossy().into_owned(),
+        }));
+        if resp["ok"].as_bool() != Some(true) {
+            return None;
+        }
+        Some(
+            resp["contents"]
+                .as_array()
+                .expect("contents is an array")
+                .iter()
+                .map(|text| text.as_str().expect("each content is a string").to_owned())
+                .collect(),
+        )
+    }
+
     pub fn items_meta(
         &mut self,
         xml: &str,
@@ -971,18 +880,25 @@ pub fn dotnet_root_from_env() -> PathBuf {
 /// `dotnet msbuild` oracle child inherits, so both sides consult the same
 /// user-local workload roots.
 pub fn workload_env_from_process() -> (Option<PathBuf>, bool) {
+    let environment: HashMap<String, String> = std::env::vars().collect();
+    workload_env_from(&environment)
+}
+
+/// [`workload_env_from_process`] for the environment `environment`: the
+/// workload context a build under exactly that environment sees.
+pub fn workload_env_from(environment: &HashMap<String, String>) -> (Option<PathBuf>, bool) {
     // Empty home-ish values count as unset (`string.IsNullOrEmpty` in .NET's
     // CliFolderPathCalculatorCore) — match what the oracle child's dotnet host
     // does.
-    let non_empty = |var: &str| std::env::var_os(var).filter(|value| !value.is_empty());
+    let non_empty = |var: &str| environment.get(var).filter(|value| !value.is_empty());
     let user_dotnet_root = non_empty("DOTNET_CLI_HOME")
         .or_else(|| non_empty("HOME"))
         .map(|home| PathBuf::from(home).join(".dotnet"));
     // Per-variable effective-value semantics, mirroring the LSP's
     // `SdkDiscoveryEnv::from_process_env` (PACK_ROOTS goes through IsNullOrEmpty
     // upstream; the other two are presence checks).
-    let overrides_present = std::env::var_os("DOTNETSDK_WORKLOAD_MANIFEST_ROOTS").is_some()
-        || std::env::var_os("DOTNETSDK_WORKLOAD_MANIFEST_IGNORE_DEFAULT_ROOTS").is_some()
+    let overrides_present = environment.contains_key("DOTNETSDK_WORKLOAD_MANIFEST_ROOTS")
+        || environment.contains_key("DOTNETSDK_WORKLOAD_MANIFEST_IGNORE_DEFAULT_ROOTS")
         || non_empty("DOTNETSDK_WORKLOAD_PACK_ROOTS").is_some();
     (user_dotnet_root, overrides_present)
 }
@@ -1082,6 +998,9 @@ pub fn check_certain_implies_exact(
 pub enum ExpandVerdict {
     Exact,
     Partial,
+    /// We classify an expression in it as one MSBuild throws on
+    /// (`Issue::Throws`), and MSBuild errors expanding it.
+    Throws,
 }
 
 /// The expansion differential contract, asserted for one `(value, props)` case:
@@ -1124,6 +1043,29 @@ pub fn check_expand_certain_implies_exact(
         map.insert(k.clone(), v.clone());
     }
     let (ours, issues) = substitute(value, &map);
+    // A throw we claim is a claim: the walk withdraws the whole project on
+    // it, so MSBuild must error expanding the value. On the names it read
+    // from `props`: one MSBuild defines itself (`MSBuildVersion`) it holds,
+    // where `props` leaves it undefined, as the walk holds no value of one it
+    // does not seed.
+    let on_props = |reads: &[String]| {
+        reads.iter().all(|read| {
+            props
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case(read))
+        })
+    };
+    if issues
+        .iter()
+        .any(|issue| matches!(issue, Issue::Throws { reads, .. } if on_props(reads)))
+    {
+        assert!(
+            oracle.expand(&format!("|{value}|"), props).is_none(),
+            "expand certain-implies-exact violated: we classify {value:?} with props \
+             {props:?} as one MSBuild throws on ({issues:?}), and MSBuild expands it"
+        );
+        return ExpandVerdict::Throws;
+    }
     if !issues.is_empty() {
         return ExpandVerdict::Partial;
     }
@@ -1659,18 +1601,27 @@ pub fn gen_expand_value(rng: &mut SplitMix64) -> String {
 /// The same generator turns those `Partial`s `Exact` once Stage 3's dispatch
 /// lands, still under certain-implies-exact.
 pub fn gen_grammar_value(rng: &mut SplitMix64) -> String {
-    format!("$({})", gen_grammar_inner(rng, 2))
+    format!("$({})", gen_grammar_inner(rng, 2, false))
 }
 
-fn gen_grammar_inner(rng: &mut SplitMix64, depth: u32) -> String {
-    let mut s = gen_grammar_root(rng, depth);
+/// [`gen_grammar_value`] with every argument spelling MSBuild reads drawn
+/// too (an unquoted word, `null`, unquoted text around an expansion, a tab,
+/// the markers a property body reads as text) and the statics those
+/// spellings matter to. A separate stream, so the sweeps that draw
+/// [`gen_grammar_value`] keep theirs.
+pub fn gen_grammar_value_spelled(rng: &mut SplitMix64) -> String {
+    format!("$({})", gen_grammar_inner(rng, 2, true))
+}
+
+fn gen_grammar_inner(rng: &mut SplitMix64, depth: u32, spelled: bool) -> String {
+    let mut s = gen_grammar_root(rng, depth, spelled);
     for _ in 0..rng.below(3) {
-        s.push_str(&gen_grammar_link(rng, depth));
+        s.push_str(&gen_grammar_link(rng, depth, spelled));
     }
     s
 }
 
-fn gen_grammar_root(rng: &mut SplitMix64, depth: u32) -> String {
+fn gen_grammar_root(rng: &mut SplitMix64, depth: u32, spelled: bool) -> String {
     // Property receiver (defined-or-undefined), or a static call.
     if rng.below(3) == 0 {
         return (*rng.pick(CONTROLLED_PROPERTY_NAMES)).to_string();
@@ -1692,17 +1643,28 @@ fn gen_grammar_root(rng: &mut SplitMix64, depth: u32) -> String {
         "IsPathRooted",
         "AreFeaturesEnabled",
         "NormalizePath",
+        "NormalizeDirectory",
         "Nope",
     ];
+    const SPELLED_STATICS: &[&str] = &[
+        "VersionLessThan",
+        "VersionEquals",
+        "IsNullOrEmpty",
+        "IsNullOrWhiteSpace",
+    ];
+    let ty = *rng.pick(TYPES);
+    let member = if spelled && rng.below(3) == 0 {
+        *rng.pick(SPELLED_STATICS)
+    } else {
+        *rng.pick(STATICS)
+    };
     format!(
-        "[{}]::{}({})",
-        rng.pick(TYPES),
-        rng.pick(STATICS),
-        gen_grammar_args(rng, depth)
+        "[{ty}]::{member}({})",
+        gen_grammar_args(rng, depth, spelled)
     )
 }
 
-fn gen_grammar_link(rng: &mut SplitMix64, depth: u32) -> String {
+fn gen_grammar_link(rng: &mut SplitMix64, depth: u32, spelled: bool) -> String {
     const PARENLESS: &[&str] = &["Major", "Minor", "Build", "Length", "Bogus"];
     const METHODS: &[&str] = &[
         "Contains",
@@ -1716,11 +1678,15 @@ fn gen_grammar_link(rng: &mut SplitMix64, depth: u32) -> String {
     match rng.below(5) {
         0 => format!("[{}]", rng.below(4)),
         1 => format!(".{}", rng.pick(PARENLESS)),
-        _ => format!(".{}({})", rng.pick(METHODS), gen_grammar_args(rng, depth)),
+        _ => format!(
+            ".{}({})",
+            rng.pick(METHODS),
+            gen_grammar_args(rng, depth, spelled)
+        ),
     }
 }
 
-fn gen_grammar_args(rng: &mut SplitMix64, depth: u32) -> String {
+fn gen_grammar_args(rng: &mut SplitMix64, depth: u32, spelled: bool) -> String {
     if depth == 0 {
         return String::new();
     }
@@ -1731,15 +1697,33 @@ fn gen_grammar_args(rng: &mut SplitMix64, depth: u32) -> String {
         return " ".to_string();
     }
     (0..rng.below(3))
-        .map(|_| gen_grammar_arg(rng, depth - 1))
+        .map(|_| gen_grammar_arg(rng, depth - 1, spelled))
         .collect::<Vec<_>>()
         .join(",")
 }
 
-fn gen_grammar_arg(rng: &mut SplitMix64, depth: u32) -> String {
-    match rng.below(5) {
+fn gen_grammar_arg(rng: &mut SplitMix64, depth: u32, spelled: bool) -> String {
+    match rng.below(if spelled { 7 } else { 5 }) {
         0 => rng.below(10).to_string(),
-        1 => format!("$({})", gen_grammar_inner(rng, depth)),
+        1 => format!("$({})", gen_grammar_inner(rng, depth, spelled)),
+        // The argument spellings MSBuild reads other than as a quoted literal:
+        // an unquoted word (`TrimStart(vV)`), `null` in any case (no string at
+        // all), unquoted text around an expansion (`$(V).0`), a tab, a
+        // version.
+        5 => match rng.below(6) {
+            0 => format!("$({}).0", rng.pick(CONTROLLED_PROPERTY_NAMES)),
+            1 => format!("$({})", rng.pick(CONTROLLED_PROPERTY_NAMES)),
+            _ => rng
+                .pick(&["vV", "null", "NULL", "1.0", "\t", "ab"])
+                .to_string(),
+        },
+        // A quoted literal holding the markers a property body reads as text
+        // (`%(M)`, `@(J)`: no metadata or item list there) and a tab.
+        6 => {
+            let delim = *rng.pick(&['\'', '`', '"']);
+            let body = rng.pick(&["%(M)", "@(J)", "a\tb", "%(M)$(B)"]);
+            format!("{delim}{body}{delim}")
+        }
         // Quoted literal, whose body may itself be a nested `$(…)` carrying its
         // own quotes (`'$(X.Split('-')[0])'`) — the scanner's hard case. All
         // three MSBuild delimiters are generated; a literal that happens to
@@ -1797,7 +1781,7 @@ fn gen_grammar_arg_literal(rng: &mut SplitMix64, depth: u32) -> String {
         "999.999",
     ];
     if depth > 0 && rng.below(2) == 0 {
-        format!("$({})", gen_grammar_inner(rng, depth))
+        format!("$({})", gen_grammar_inner(rng, depth, false))
     } else {
         (*rng.pick(LITS)).to_string()
     }

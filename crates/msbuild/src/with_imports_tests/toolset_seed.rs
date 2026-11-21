@@ -116,7 +116,7 @@ fn an_undecided_import_before_the_sdk_withholds_the_seed() {
         "Demo.fsproj",
         &format!(
             r#"<Project>
-  <Import Project="hidden.props" Condition="'$([System.Math]::Abs(-1))' == '1'" />
+  <Import Project="hidden.props" Condition="'É' == 'é'" />
   <Import Sdk="MySdk" Project="Sdk.props" />
   {COPY}
 </Project>"#
@@ -191,7 +191,7 @@ fn an_undecided_import_before_the_sdk_keeps_the_assembly_version() {
         "Demo.fsproj",
         &format!(
             r#"<Project>
-  <Import Project="hidden.props" Condition="'$([System.Math]::Abs(-1))' == '1'" />
+  <Import Project="hidden.props" Condition="'É' == 'é'" />
   <Import Sdk="MySdk" Project="Sdk.props" />
   {COPY_ASSEMBLY_VERSION}
 </Project>"#

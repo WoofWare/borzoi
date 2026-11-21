@@ -21,10 +21,12 @@
 #![forbid(unsafe_code)]
 
 mod condition;
+mod cost;
 mod diagnostic;
 pub mod document;
 mod dotnet_io;
 mod evaluator;
+pub mod fsc;
 mod glob;
 pub mod glob_resolver;
 mod imports;
@@ -475,8 +477,11 @@ pub struct ParsedProject {
     ///   `Remove`, really does strip the reference from `ReferencePath`).
     /// - A gate decided only by an *unpinned* property (one written under a
     ///   condition we couldn't evaluate) or an SDK-tainted read — or an
-    ///   `Include` **value** expanded from one (the captured path may hold a
-    ///   different target, or none, in the real build): the real build may
+    ///   `Include` or `Exclude` **value** expanded from one, or from a name
+    ///   the walk holds no value of and cannot show undefined (a write it
+    ///   refused to compute), whether the walk keeps the item or drops it
+    ///   (the captured path may hold a different target, or none, in the
+    ///   real build, and a dropped one is an item MSBuild has): the real build may
     ///   take the other branch, running a skipped mutation or dropping a
     ///   captured `Include` (a phantom edge). A cleanly-decided gate over
     ///   undefined-but-never-written properties is trusted: under the
@@ -621,6 +626,35 @@ pub struct ParsedProject {
     /// SDK's own content in an arrangement it did not choose (a project
     /// importing `$(MSBuildToolsPath)/Microsoft.CSharp.targets`, say).
     pub sdk_files_imported_from_outside: BTreeSet<PathBuf>,
+    /// For each property the compiled-name derivation admits
+    /// ([`crate::fsc`]), the first write of it made in a document outside the
+    /// entry .NET SDK's version directory and its workload manifests (the
+    /// entry project, `Directory.Build.*`, user imports, package build files)
+    /// whose value is outside the name's grammar, keyed by the lowercased
+    /// name: that value, or `None` when the walk is not certain what the write
+    /// stored (a gate it could not decide, a value it refused or could not
+    /// compute). A write under a gate that decided against it is not one. The
+    /// SDK may copy a value between two writes, so a name's final value is not
+    /// all it held; this is every value it held from outside the install.
+    pub foreign_write_failures: BTreeMap<String, Option<String>>,
+    /// The workload manifests the evaluation loaded from outside the entry
+    /// SDK's install, by canonical location: the user's own, which the
+    /// resolver reads behind the install's `userlocal` marker. They are
+    /// entered as SDK content ([`Self::workload_definitions`]), not checked as
+    /// a document outside the install is.
+    pub workload_manifests_outside_install: BTreeSet<PathBuf>,
+    /// The files of the entry .NET SDK's version directory the evaluation
+    /// imported, each by its canonical path relative to that directory
+    /// (`Sdks/Microsoft.NET.Sdk/targets/Microsoft.NET.Sdk.targets`), however
+    /// the import spelled it (through a link into the install, say).
+    pub imported_sdk_files: BTreeSet<PathBuf>,
+    /// Every workload manifest file the evaluation read, by its path under
+    /// the install's `sdk-manifests` (feature band, manifest, its version,
+    /// file), `/`-separated.
+    pub workload_manifest_files: BTreeSet<String>,
+    /// The response file MSBuild's command line reads for the project, whose
+    /// switches (a `-p:` global, say) the evaluation did not see.
+    pub auto_response_file: AutoResponseFile,
     /// Why the walk did not see all of the build's content (an import it could
     /// not follow, or one whose gate it could not decide), or `None` when it
     /// entered everything the build imports. Content it did not see may define
@@ -911,6 +945,23 @@ pub struct ParsedProject {
     pub read_counts: observed::ReadCounts,
 }
 
+/// Whether MSBuild's command line (`dotnet msbuild`, `dotnet build`) reads a
+/// response file for a project: a `MSBuild.rsp` beside it, or the first
+/// `Directory.Build.rsp` in the project's directory or an ancestor, whose
+/// lines it takes as further switches unless handed `-noAutoResponse`. An evaluation does not read it, so its switches
+/// are invisible to one.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum AutoResponseFile {
+    /// The evaluation asked no file system (a pure parse), or resolved no
+    /// SDK whose MSBuild would build the project.
+    #[default]
+    Unread,
+    /// Neither MSBuild's directory nor any from the project's up holds one.
+    Absent,
+    /// This one.
+    Present(PathBuf),
+}
+
 /// The names the documents of an evaluation define from outside the entry
 /// .NET SDK (the `…/sdk/<version>` directory its `Sdk` resolved into, or every
 /// document when it resolved none): the entry project, `Directory.Build.*`,
@@ -943,7 +994,170 @@ pub struct ForeignDefinitions {
     /// Item types: every element directly inside an `<ItemGroup>`, wherever
     /// the group sits, and every task `<Output ItemName="…">`.
     pub items: BTreeMap<String, BTreeSet<PathBuf>>,
+    /// Item types given metadata defaults: every element directly inside an
+    /// `<ItemDefinitionGroup>`. A definition creates no item (`@(X)` of a type
+    /// only defined is empty), so it is kept apart from [`Self::items`].
+    pub item_definitions: BTreeMap<String, BTreeSet<PathBuf>>,
+    /// Item metadata names: every element directly inside one of the item or
+    /// item definition elements, and every attribute on one but the item
+    /// operations, their modifiers, its condition and its label.
+    pub item_metadata: BTreeMap<String, BTreeSet<PathBuf>>,
+    /// The documents holding an element with a `Condition` attribute.
+    pub conditioned: BTreeSet<PathBuf>,
+    /// The documents holding an expansion (`$(`, `@(` or `%(`) in an
+    /// attribute or an element's text (its text nodes joined, as MSBuild
+    /// joins them around a comment), or text the scan cannot read.
+    pub expanding: BTreeSet<PathBuf>,
+    /// The documents holding a condition or an expansion in an element of a
+    /// shape NuGet's restore does not write into `obj/*.nuget.g.props` and
+    /// `.targets` (`BuildAssetsUtils`): a group of the root conditioned on
+    /// `ExcludeRestorePackageImports`, `TargetFramework` and `Language`; a
+    /// property of one conditioned on itself being empty, its text literal or
+    /// `$(MSBuildThisFileDirectory)` and a literal; an item or `Import` of one
+    /// on a literal or `$(NuGetPackageRoot)` and a literal, conditioned on
+    /// that path existing; literal metadata.
+    pub unlike_nuget: BTreeSet<PathBuf>,
+    /// The documents holding an item operation (`Include`, `Exclude`,
+    /// `Remove`, `Update`) with a wildcard (`*`, `?`) in it: an item a glob
+    /// matched keeps the glob's spelling of its directory as its identity
+    /// (`@sub/../Args*.fs` matches `@sub/../Args.fs`), which the walk's
+    /// resolved path does not.
+    pub globbing: BTreeSet<PathBuf>,
 }
+
+/// Whether `text` may hold an expansion: `$(`, `@(` or `%(` once every
+/// whitespace character is taken out. MSBuild drops a whitespace-only text
+/// node between two comments before it joins the text around them
+/// (`Test$<!--a--> <!--b-->(X)` expands `X`), so whitespace cannot be read
+/// as separating the two; taking all of it out covers every such reading,
+/// and reads `$ (` as an expansion, which only declines more.
+fn expands(text: &str) -> bool {
+    let text: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    text.contains("$(") || text.contains("@(") || text.contains("%(")
+}
+
+/// The text of `node`'s text children, joined (MSBuild reads an element's
+/// text across the comments in it as one), or `None` when one of them is text
+/// [`document::text`] cannot read.
+fn joined_text(node: roxmltree::Node<'_, '_>) -> Option<String> {
+    let mut text = String::new();
+    for child in node.children().filter(roxmltree::Node::is_text) {
+        text.push_str(&document::text(child)?);
+    }
+    Some(text)
+}
+
+/// Whether `node`, an element holding a condition or an expansion, is one
+/// of the shapes NuGet's restore writes into `obj/*.nuget.g.props` and
+/// `.targets` (`BuildAssetsUtils`, NuGet.Client):
+///
+/// - a `PropertyGroup`, `ItemGroup` or `ImportGroup` of the root whose
+///   condition is a conjunction (` AND `) of `'$(ExcludeRestorePackageImports)'
+///   != 'true'`, `'$(TargetFramework)' == ''`, `'$(TargetFramework)' == 'x'`,
+///   `'$(Language)' == 'x'` and `'$(Language)' != 'x'`, `x` literal;
+/// - a property of such a group conditioned `'$(Name)' == ''` on its own
+///   name, its text literal or `$(MSBuildThisFileDirectory)` and a literal;
+///   each condition compared with only its ends trimmed, as NuGet pads them,
+///   so a quoted path's spaces are the path's;
+/// - an item of such a group, or an `Import` of one, whose `Include` or
+///   `Project` is a literal or `$(NuGetPackageRoot)` and a literal, with no
+///   condition or `Exists('…')` of that same text; its metadata literal.
+///
+/// A literal holds no expansion. Every other element with a condition or an
+/// expansion is not NuGet's, which [`ForeignDefinitions::unlike_nuget`]
+/// records.
+fn nuget_shaped(node: roxmltree::Node<'_, '_>) -> bool {
+    // As MSBuild reads them: a literal tab or line break kept, where
+    // `roxmltree` turns it into a space.
+    let attribute = |name: &str| {
+        node.attributes()
+            .find(|a| a.name().eq_ignore_ascii_case(name))
+            .and_then(|a| document::attribute(node, a.name()))
+    };
+    let tag = node.tag_name().name();
+    let parent = node.parent_element();
+    let parent_tag = parent.map(|p| p.tag_name().name()).unwrap_or_default();
+    let is_root = |n: Option<roxmltree::Node<'_, '_>>| {
+        n.is_some_and(|n| n.tag_name().name() == "Project" && n.parent_element().is_none())
+    };
+    let literal = |text: &str| !expands(text);
+    let only = |allowed: &[&str]| {
+        node.attributes()
+            .all(|a| allowed.iter().any(|n| a.name().eq_ignore_ascii_case(n)))
+    };
+    let quoted = |atom: &str, prefix: &str, suffix: &str| {
+        atom.strip_prefix(prefix)
+            .and_then(|rest| rest.strip_suffix(suffix))
+            .is_some_and(|value| literal(value) && !value.contains('\''))
+    };
+    let group_atom = |atom: &str| {
+        atom == "'$(ExcludeRestorePackageImports)' != 'true'"
+            || atom == "'$(TargetFramework)' == ''"
+            || quoted(atom, "'$(TargetFramework)' == '", "'")
+            || quoted(atom, "'$(Language)' == '", "'")
+            || quoted(atom, "'$(Language)' != '", "'")
+    };
+    let rooted_literal = |text: &str, root: &str| literal(text.strip_prefix(root).unwrap_or(text));
+    // One `Exists` of one quoted literal: a path holding a quote could close
+    // the literal and add another call (`a') Or Exists('b`).
+    let exists_of = |condition: Option<&str>, path: &str| {
+        !path.contains('\'') && condition.is_none_or(|c| c.trim() == format!("Exists('{path}')"))
+    };
+    let group = ["PropertyGroup", "ItemGroup", "ImportGroup"];
+    if group.contains(&tag) && is_root(parent) {
+        return only(&["Condition"])
+            && attribute("Condition").is_some_and(|c| c.trim().split(" AND ").all(group_atom));
+    }
+    if !(group.contains(&parent_tag) && is_root(parent.and_then(|p| p.parent_element()))) {
+        // Item metadata: a child of an item of such a group, literal.
+        let item_of_group = parent.is_some_and(|item| {
+            item.parent_element()
+                .is_some_and(|g| g.tag_name().name() == "ItemGroup" && is_root(g.parent_element()))
+        });
+        return item_of_group
+            && node.attributes().next().is_none()
+            && joined_text(node).is_some_and(|t| literal(&t));
+    }
+    match parent_tag {
+        "PropertyGroup" => {
+            only(&["Condition"])
+                && attribute("Condition").is_some_and(|c| c.trim() == format!("'$({tag})' == ''"))
+                && joined_text(node)
+                    .is_some_and(|t| rooted_literal(&t, "$(MSBuildThisFileDirectory)"))
+        }
+        "ItemGroup" | "ImportGroup" => {
+            let (operation, expected) = if parent_tag == "ItemGroup" {
+                ("Include", tag != "Import")
+            } else {
+                ("Project", tag == "Import")
+            };
+            expected
+                && only(&[operation, "Condition"])
+                && attribute(operation).is_some_and(|path| {
+                    rooted_literal(&path, "$(NuGetPackageRoot)")
+                        && exists_of(attribute("Condition").as_deref(), &path)
+                })
+                && joined_text(node).is_some_and(|t| t.trim().is_empty())
+        }
+        _ => false,
+    }
+}
+
+/// The attributes of an item element that are not metadata: its operations,
+/// their modifiers, its condition and its label (lowercased).
+const ITEM_ATTRIBUTES: &[&str] = &[
+    "include",
+    "exclude",
+    "remove",
+    "update",
+    "condition",
+    "label",
+    "keepmetadata",
+    "removemetadata",
+    "keepduplicates",
+    "matchonmetadata",
+    "matchonmetadataoptions",
+];
 
 /// Whether a recorded name may stand for a name other than its spelling: one
 /// the build computes (`$(…)`, `@(…)`, `%(…)`), or one carrying an escape
@@ -998,6 +1212,11 @@ impl ForeignDefinitions {
     /// Whether a document outside the SDK may define an item of type `name`.
     pub fn defines_item(&self, name: &str) -> bool {
         Self::matches(&self.items, name, |key, name| key == name)
+    }
+
+    /// Whether a document outside the SDK may define item metadata `name`.
+    pub fn defines_metadata(&self, name: &str) -> bool {
+        Self::matches(&self.item_metadata, name, |key, name| key == name)
     }
 
     /// Whether a document outside the SDK may define target `name`.
@@ -1055,13 +1274,27 @@ impl ForeignDefinitions {
     }
 
     fn record_element(&mut self, node: roxmltree::Node<'_, '_>, in_target: bool, file: &Path) {
+        let conditioned = node
+            .attributes()
+            .any(|a| a.name().eq_ignore_ascii_case("Condition"));
+        if conditioned {
+            self.conditioned.insert(file.to_path_buf());
+        }
+        let expanding = node.attributes().any(|a| expands(a.value()))
+            || joined_text(node).is_none_or(|text| expands(&text));
+        if expanding {
+            self.expanding.insert(file.to_path_buf());
+        }
+        if (conditioned || expanding) && !nuget_shaped(node) {
+            self.unlike_nuget.insert(file.to_path_buf());
+        }
         let tag = node.tag_name().name();
         let attribute = |name: &str| {
             node.attributes()
                 .find(|a| a.name().eq_ignore_ascii_case(name))
                 .map(|a| a.value())
         };
-        if tag.eq_ignore_ascii_case("Project") {
+        if tag.eq_ignore_ascii_case("Project") && node.parent_element().is_none() {
             for selection in ["DefaultTargets", "InitialTargets"] {
                 if attribute(selection).is_some_and(|v| !v.trim().is_empty()) {
                     self.target_selections
@@ -1077,7 +1310,44 @@ impl ForeignDefinitions {
                 .is_some_and(|p| p.tag_name().name().eq_ignore_ascii_case(group))
         };
         let in_property_group = in_group("PropertyGroup");
-        let output = tag.eq_ignore_ascii_case("Output");
+        let in_definition_group = in_group("ItemDefinitionGroup");
+        let in_item_group = in_group("ItemGroup") || in_definition_group;
+        // An item element's children are its metadata, and so are its
+        // attributes beyond the item operations.
+        let is_metadata = node.parent_element().is_some_and(|item| {
+            item.parent_element().is_some_and(|group| {
+                let group = group.tag_name().name();
+                group.eq_ignore_ascii_case("ItemGroup")
+                    || group.eq_ignore_ascii_case("ItemDefinitionGroup")
+            })
+        });
+        if is_metadata {
+            self.item_metadata
+                .entry(tag.to_ascii_lowercase())
+                .or_default()
+                .insert(file.to_path_buf());
+            return;
+        }
+        if in_item_group {
+            if ["include", "exclude", "remove", "update"]
+                .iter()
+                .any(|op| attribute(op).is_some_and(|value| value.contains(['*', '?'])))
+            {
+                self.globbing.insert(file.to_path_buf());
+            }
+            for attribute in node.attributes() {
+                let name = attribute.name().to_ascii_lowercase();
+                if !ITEM_ATTRIBUTES.contains(&name.as_str()) {
+                    self.item_metadata
+                        .entry(name)
+                        .or_default()
+                        .insert(file.to_path_buf());
+                }
+            }
+        }
+        // In an item group an `Output` element is an item type, not a task's
+        // output.
+        let output = tag.eq_ignore_ascii_case("Output") && !in_item_group;
         let output_property = if output {
             attribute("PropertyName")
         } else {
@@ -1089,7 +1359,9 @@ impl ForeignDefinitions {
             (&mut self.properties, output_property)
         } else if output {
             (&mut self.items, attribute("ItemName"))
-        } else if in_group("ItemGroup") {
+        } else if in_definition_group {
+            (&mut self.item_definitions, Some(tag))
+        } else if in_item_group {
             (&mut self.items, Some(tag))
         } else if tag.eq_ignore_ascii_case("Target") {
             (&mut self.targets, attribute("Name"))
@@ -1122,6 +1394,19 @@ impl ParsedProject {
     /// compare OrdinalIgnoreCase).
     pub fn property(&self, name: &str) -> PropertyRead {
         self.property_reads.read(name)
+    }
+
+    /// Whether this evaluation is the outer build of a multi-targeted
+    /// project, which dispatches one inner build per target framework and
+    /// compiles nothing itself: the SDK's `IsCrossTargetingBuild`, which it
+    /// sets when `TargetFrameworks` is and `TargetFramework` is not. `None`
+    /// when the walk does not trust the property.
+    pub fn is_outer_build(&self) -> Option<bool> {
+        match self.property("IsCrossTargetingBuild") {
+            PropertyRead::Value(value) => Some(value.eq_ignore_ascii_case("true")),
+            PropertyRead::Unset => Some(false),
+            _ => None,
+        }
     }
 }
 
@@ -1518,6 +1803,18 @@ fn parse_fsproj_observed(
         #[cfg(any(test, feature = "test-support"))]
         probe,
     );
+    // The MSBuild that builds the project is the resolved SDK's: its
+    // version directory.
+    // An SDK of another layout (a NuGet SDK, a custom resolver's) names no
+    // MSBuild directory, and the search reads nothing.
+    let msbuild_dir = walked
+        .project
+        .resolved_sdk_root
+        .as_deref()
+        .and_then(evaluator::dotnet_sdk_version_dir)
+        .map(Path::to_path_buf);
+    walked.project.auto_response_file =
+        imports::find_auto_response_file(project_path, msbuild_dir.as_deref(), &observer);
     let (read_set, read_counts, documents) = observer.finish_with_documents();
     walked.project.read_set = read_set;
     walked.project.read_counts = read_counts;

@@ -456,4 +456,171 @@ fn deep_project_text_evaluates_without_aborting() {
              <ItemGroup><Compile Include=\"{text}.fs\" /></ItemGroup>"
         ));
     }
+    // A condition that fails around a name the walk holds no value of (`X`, a
+    // write it refuses), nested deep: the rejection judgement searches it for
+    // the expressions on that name, and descends no deeper than the
+    // evaluator does, so the search is linear in the text.
+    let deep = xml_attr(&nest("$(P.TrimStart(", "$(X)", "))", DEEP));
+    evaluate_project(format!(
+        "<PropertyGroup><P>abc</P><X>$([System.String]::Copy('d'))</X>\
+         <R Condition=\"'{deep}' == 'y'\">1</R></PropertyGroup>"
+    ));
+}
+
+/// An inline task's body nested deep: the rejection judgement serializes it
+/// as MSBuild reads it, descending no deeper than a bound, so it never takes
+/// the stack.
+#[test]
+fn a_deep_inline_task_body_evaluates_without_aborting() {
+    let body = nest("<a>", "$(P[9])", "</a>", DEEP);
+    evaluate_project(format!(
+        "<PropertyGroup><P>abc</P></PropertyGroup>\
+         <UsingTask TaskName=\"X\" TaskFactory=\"RoslynCodeTaskFactory\" AssemblyFile=\"y.dll\">\
+         <Task>{body}</Task></UsingTask>"
+    ));
+}
+
+/// A name the walk holds no value of (`X`, a write it refuses), read `width`
+/// times over in the argument of a function that throws whatever it returns
+/// (no repetition of a value is a version): half as itself, half in
+/// distinct calls, so that neither one spelling nor many repeat cheaply.
+fn wide_unheld_reads(width: usize) -> String {
+    let wide: String = (0..width)
+        .map(|i| {
+            if i % 2 == 0 {
+                "$(X)".to_owned()
+            } else {
+                format!("$(X.Contains(`{i}`))")
+            }
+        })
+        .collect();
+    format!(
+        "<PropertyGroup><X>$([System.String]::Copy('d'))</X>\
+         <R>$([MSBuild]::VersionLessThan('{wide}', '1.0'))</R></PropertyGroup>"
+    )
+}
+
+/// A `<When>` the walk cannot decide, with `width` property writes and
+/// `width` item groups after them, each group judged in the item pass
+/// knowing the writes that reach it.
+fn many_groups_on_one_path(width: usize) -> String {
+    let writes: String = (0..width)
+        .map(|i| format!("<PropertyGroup><P{i}>x</P{i}></PropertyGroup>"))
+        .collect();
+    let groups: String = (0..width).map(|_| "<ItemGroup />").collect();
+    format!("<Choose><When Condition=\"'É' == 'é'\">{writes}{groups}</When></Choose>")
+}
+
+/// A `<When>` the walk cannot decide holding `width` sibling `<Choose>`s,
+/// each with a write and an item group reading a name, so that every group
+/// stands in arms of its own and every sibling's write may reach it.
+fn many_groups_on_sibling_paths(width: usize) -> String {
+    let chooses: String = (0..width)
+        .map(|i| {
+            format!(
+                "<Choose><When Condition=\"'É' == 'Ê'\"><PropertyGroup><P{i}>x</P{i}></PropertyGroup>\
+                 <ItemGroup><I Include=\"$(P0)\" /></ItemGroup></When></Choose>"
+            )
+        })
+        .collect();
+    format!("<Choose><When Condition=\"'É' == 'é'\">{chooses}</When></Choose>")
+}
+
+/// The groups of [`many_groups_on_one_path`] and of
+/// [`many_groups_on_sibling_paths`] ask only of the names they read whether a
+/// write reaches them: four times the width costs about four times the time,
+/// where gathering every write that reaches each group costs sixteen. Timed
+/// as a ratio, as [`wide_unheld_reads_are_struck_in_one_pass`] is.
+#[test]
+fn groups_ask_only_of_the_writes_they_read() {
+    for shape in [many_groups_on_one_path, many_groups_on_sibling_paths] {
+        let time = |width: usize| {
+            let body = shape(width);
+            let start = std::time::Instant::now();
+            evaluate_project(body);
+            start.elapsed()
+        };
+        time(100);
+        let narrow = time(400);
+        let wide = time(1_600);
+        let ratio = wide.as_secs_f64() / narrow.as_secs_f64().max(1e-6);
+        assert!(
+            ratio < 10.0,
+            "4× the groups took {ratio:.1}× the time ({narrow:?} → {wide:?})"
+        );
+    }
+}
+
+/// A `<Choose>` of `width` `<When>`s the walk cannot decide, each holding a
+/// write and a `<ProjectReference>`, which `rejection::arm_is_dead` asks of
+/// every arm.
+fn wide_undecided_choose(width: usize) -> String {
+    let whens: String = (0..width)
+        .map(|i| {
+            format!(
+                "<When Condition=\"'É' == 'é' And '$(P{i})' == ''\">\
+                 <PropertyGroup><P{i}>x</P{i}></PropertyGroup>\
+                 <ItemGroup><ProjectReference Include=\"R{i}.fsproj\" /></ItemGroup></When>"
+            )
+        })
+        .collect();
+    format!("<Choose>{whens}</Choose>")
+}
+
+/// The `<When>` gates `rejection::arm_is_dead` decides over `body`, on a 2 MiB
+/// stack.
+fn arm_gate_decisions(body: String) -> u64 {
+    on_small_stack("parse_fsproj", move || {
+        let source = format!("<Project>{body}</Project>");
+        let (_, costs) = borzoi_msbuild::test_support::count_walk_costs(|| {
+            parse_fsproj(
+                &borzoi_msbuild::ProjectFile::buffer(Path::new("/deep/p.fsproj"), &source)
+                    .expect("a project path spelt as its full path"),
+                &HashMap::new(),
+                &HashMap::new(),
+            )
+            .expect("well-formed XML evaluates")
+        });
+        costs.arm_gate_decisions
+    })
+}
+
+/// Whether each arm of [`wide_undecided_choose`] is one MSBuild cannot take
+/// is decided once per `<When>` for the whole chain
+/// (`rejection::arm_is_dead`): `n` arms cost `n` decisions, where deciding
+/// every earlier `<When>` again for each arm costs `n(n + 1) / 2`. Counted,
+/// so no load on the machine moves it.
+#[test]
+fn a_wide_undecided_choose_decides_each_when_once() {
+    for width in [1, 2, 500, 2_000] {
+        let decisions = arm_gate_decisions(wide_undecided_choose(width));
+        assert_eq!(
+            decisions, width as u64,
+            "{width} arms took {decisions} decisions"
+        );
+    }
+}
+
+/// The rejection judgement strikes each read of [`wide_unheld_reads`] with a
+/// value in one pass over the text, so four times the width costs about four
+/// times the time; striking one read at a time over the whole text costs
+/// sixteen. Timed as a ratio of two runs on one machine, which a loaded
+/// machine slows alike.
+#[test]
+fn wide_unheld_reads_are_struck_in_one_pass() {
+    let time = |width: usize| {
+        let body = wide_unheld_reads(width);
+        let start = std::time::Instant::now();
+        evaluate_project(body);
+        start.elapsed()
+    };
+    // Warm the allocator and the code once before timing.
+    time(DEEP / 16);
+    let narrow = time(DEEP / 4);
+    let wide = time(DEEP);
+    let ratio = wide.as_secs_f64() / narrow.as_secs_f64().max(1e-6);
+    assert!(
+        ratio < 10.0,
+        "4× the width took {ratio:.1}× the time ({narrow:?} → {wide:?})"
+    );
 }

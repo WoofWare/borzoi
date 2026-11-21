@@ -12,11 +12,14 @@ libc = "0.2"
 # rustc's own lexer, used by `module_tree` to read `mod` declarations without
 # re-implementing Rust's string/comment/raw-literal lexing by hand.
 proc-macro2.workspace = true
-# The `nuget-oracle` protocol is JSON lines (`nuget_oracle`).
+# The `nuget-oracle` and `uses-project-graph-batch` protocols are JSON lines
+# (`nuget_oracle`, `project_graph`).
+serde.workspace = true
 serde_json.workspace = true
+# The directory a `project_graph` fixture is written to.
+tempfile.workspace = true
 # `xml_pump` locates the element paths it repeats.
 roxmltree.workspace = true
-
-[dev-dependencies]
+# `hostile` offers its alphabets as proptest strategies, and its fixture
+# builder makes its trees in temporary directories.
 proptest.workspace = true
-tempfile.workspace = true

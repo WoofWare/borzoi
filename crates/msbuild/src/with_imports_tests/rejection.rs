@@ -11,7 +11,7 @@ use super::*;
 use tempfile::TempDir;
 
 /// A condition conjunct MSBuild finds true and the walk cannot evaluate.
-const UNDECIDED_TRUE: &str = "$([System.String]::IsNullOrWhiteSpace(''))";
+const UNDECIDED_TRUE: &str = "'É' == 'é'";
 
 /// Whether the walk published nothing as the build's, for a rejection it may
 /// make: the facets and reads a rejected evaluation withdraws.
@@ -594,6 +594,141 @@ fn an_illegal_condition_msbuild_evaluates_is_rejected() {
     }
 }
 
+/// A property function MSBuild throws on (MSB4184) on values the walk is
+/// certain of, wherever MSBuild evaluates it: a condition, a property body,
+/// an item's `Include` or metadata (#1009). Each pinned in
+/// `tests/fsproj_property_table_diff.rs`'s
+/// `property_functions_msbuild_throws_on_reject_where_it_evaluates_them` or
+/// `tests/condition_diff.rs`'s corners.
+#[test]
+fn a_property_function_msbuild_throws_on_is_rejected() {
+    for body in [
+        "<PropertyGroup><P>a;b</P><R Condition=\"'$(P.Split(`;`)[3])' == ''\">x</R></PropertyGroup>",
+        "<PropertyGroup><P>abc</P><R Condition=\"'$(P[5])' == '' And false\">x</R></PropertyGroup>",
+        "<PropertyGroup><R Condition=\"$([MSBuild]::VersionGreaterThan('abc', '1.0'))\">x</R></PropertyGroup>",
+        "<PropertyGroup><P>a;b</P><R>$(P.Split(';')[3])</R></PropertyGroup>",
+        "<PropertyGroup><Len>10x</Len><R>$(Len.Split('8')[1])</R></PropertyGroup>",
+        "<PropertyGroup><P>a;b</P><R>$([MSBuild]::VersionLessThan('$(P)', '1.0'))</R></PropertyGroup>",
+        "<PropertyGroup><P>a;b</P></PropertyGroup><ItemGroup><I Include=\"$(P.Split(';')[3])\" /></ItemGroup>",
+        "<PropertyGroup><P>a;b</P></PropertyGroup><ItemGroup><I Include=\"x\"><M>$(P[9])</M></I></ItemGroup>",
+    ] {
+        for parsed in both_walkers(&format!("  {body}")) {
+            assert_rejected(&parsed, &["Before", "After"]);
+        }
+    }
+}
+
+/// What the walk reads a property function's inputs as must be MSBuild's
+/// before a throw on them is a claim, and the text must be one MSBuild
+/// expands: each of these evaluates in MSBuild (`tests/condition_diff.rs`'s
+/// `where_msbuild_evaluates_a_text` and corners).
+#[test]
+fn a_throw_on_text_msbuild_reads_otherwise_is_none() {
+    for body in [
+        // Version arguments in either other string delimiter.
+        "<PropertyGroup><R Condition=\"$([MSBuild]::VersionEquals(&quot;1.2&quot;,&quot;1.2&quot;))\">x</R></PropertyGroup>",
+        "<PropertyGroup><R Condition=\"$([MSBuild]::VersionEquals(`1.2`,`1.2`))\">x</R></PropertyGroup>",
+        // An item definition's metadata MSBuild substitutes first.
+        "<ItemDefinitionGroup><I><V>1.0</V><M>$([MSBuild]::VersionEquals('%(V)','1.0'))</M></I></ItemDefinitionGroup>",
+        "<ItemGroup><I Include=\"x\" V=\"1.0\" M=\"$([MSBuild]::VersionEquals('%(V)','1.0'))\" /></ItemGroup>",
+        // A label MSBuild does not expand.
+        "<PropertyGroup><P>abc</P></PropertyGroup><UsingTask TaskName=\"X\" AssemblyFile=\"y.dll\" Label=\"$(P[9])\" />",
+        "<PropertyGroup><P>abc</P></PropertyGroup><ItemGroup><I Include=\"x\" Label=\"$(P[9])\" /></ItemGroup>",
+        // A literal tab in an attribute, which MSBuild reads as itself.
+        "<PropertyGroup><P>a&#x9;b</P></PropertyGroup><ItemGroup><I Include=\"$(P.Split('\t')[1])\" /></ItemGroup>",
+        // A boolean the walk does not compute coerces without throwing.
+        "<PropertyGroup><R Condition=\"$([System.String]::IsNullOrWhiteSpace('\u{a0}'))\">x</R></PropertyGroup>",
+    ] {
+        for parsed in both_walkers(&format!("  {body}")) {
+            assert_eq!(parsed.rejection, None, "{body}: {:#?}", parsed.diagnostics);
+        }
+    }
+    // An `Update`'s metadata is expanded only where the update applies.
+    let body = "<PropertyGroup><P>abc</P></PropertyGroup><ItemGroup><I Update=\"nothere\" M=\"$(P[9])\" /></ItemGroup>";
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_ne!(
+            parsed.rejection.as_ref().map(|r| r.certainty),
+            Some(RejectionCertainty::Certain),
+            "{body}"
+        );
+    }
+}
+
+/// A throw on certain values beside an operand the walk cannot judge is
+/// still MSBuild's: one on a value the walk holds none of (`A`, refused), or
+/// one returning a boolean the walk does not compute, does not hide a later
+/// expression that throws whatever it holds.
+#[test]
+fn a_throw_beside_an_unjudged_expression_is_judged() {
+    let refused = "<A>$(P.Substring(0))</A>";
+    for body in [
+        format!("<PropertyGroup><P>abc</P>{refused}<R>$(A[0])$(P[9])</R></PropertyGroup>"),
+        format!(
+            "<PropertyGroup><P>abc</P>{refused}<R Condition=\"'$(A)$(P[9])' == ''\">x</R></PropertyGroup>"
+        ),
+        "<PropertyGroup><P>abc</P><R Condition=\"'$([System.String]::IsNullOrWhiteSpace(&quot;É&quot;))' == '$(P[9])'\">x</R></PropertyGroup>"
+            .to_owned(),
+    ] {
+        for parsed in both_walkers(&format!("  {body}")) {
+            assert_withdrawn_as(
+                &parsed,
+                &["Before", "After"],
+                parsed
+                    .rejection
+                    .as_ref()
+                    .map_or(RejectionCertainty::Possible, |r| r.certainty),
+            );
+        }
+    }
+}
+
+/// An operand the walk does not model, reached on values it is certain of,
+/// may throw (`'abc'.Substring(5)` does, MSB4184): a Possible site, before
+/// the operand that decides the condition and not after it. One MSBuild
+/// evaluates without throwing, to a boolean the walk cannot compute, is none.
+#[test]
+fn an_unmodelled_operand_reached_on_certain_values_may_reject() {
+    for c in [
+        "'$(P.Substring(5))' == '' And false",
+        "!('$(P.Substring(5))' == '') Or true",
+        "'$(P.Substring(5))' == '' Or true",
+    ] {
+        let body = format!("<PropertyGroup><P>abc</P><R Condition=\"{c}\">x</R></PropertyGroup>");
+        for parsed in both_walkers(&format!("  {body}")) {
+            assert_withdrawn(&parsed, &["Before", "After"]);
+        }
+    }
+    for c in [
+        "false And '$(P.Substring(5))' == ''",
+        "true Or '$(P.Substring(5))' == ''",
+        "'É' == 'é'",
+        "'É' == 'é' And '$(P)' == 'abc'",
+    ] {
+        let body = format!("<PropertyGroup><P>abc</P><R Condition=\"{c}\">x</R></PropertyGroup>");
+        for parsed in both_walkers(&format!("  {body}")) {
+            assert_eq!(parsed.rejection, None, "{body}: {:#?}", parsed.diagnostics);
+        }
+    }
+}
+
+/// A property function that fails on a value the walk holds none of, and
+/// MSBuild may hold another of (a write the walk refused to compute, a
+/// reserved name it does not seed), is no site: the judgement over the values
+/// a name may hold (#1009's second stage). The SDK's own
+/// `VersionGreaterThanOrEquals($(MSBuildVersion), '17.0')` is of it.
+#[test]
+fn a_throw_on_a_value_the_walk_holds_none_of_is_not_yet_judged() {
+    for body in [
+        "<PropertyGroup><R Condition=\"$([MSBuild]::VersionGreaterThanOrEquals($(MSBuildVersion), '17.0'))\">x</R></PropertyGroup>",
+        "<PropertyGroup><Q>$(Configuration.Substring(0,1))</Q><R>$([MSBuild]::VersionLessThan('$(Q)', '18.9'))</R></PropertyGroup>",
+        "<PropertyGroup><Q>$(Configuration.Substring(0,1))</Q><R Condition=\"'$(Q.Split(`;`)[3])' == ''\">x</R></PropertyGroup>",
+    ] {
+        for parsed in both_walkers(&format!("  {body}")) {
+            assert_eq!(parsed.rejection, None, "{body}: {:#?}", parsed.diagnostics);
+        }
+    }
+}
+
 #[test]
 fn an_operand_msbuild_never_reaches_is_no_cause_to_withdraw() {
     // MSBuild stops at the operand that decides the condition, so it never
@@ -689,7 +824,7 @@ fn a_literal_needing_the_file_system_past_an_unevaluable_operand_may_reject() {
     let tmp = TempDir::new().unwrap();
     let project_path = project(
         &tmp,
-        "  <PropertyGroup Condition=\"$([System.String]::IsNullOrWhiteSpace('')) And \
+        "  <PropertyGroup Condition=\"'É' == 'é' And \
          HasTrailingSlash('/tmp\\a;b')\"><R>x</R></PropertyGroup>",
         &[],
     );
@@ -718,19 +853,19 @@ fn an_operand_past_the_one_that_settles_the_question_is_not_probed() {
         ),
         // Evaluation stops at an operand it cannot evaluate; `Exists` cannot
         // throw, nor gates an operand that can.
-        "<PropertyGroup Condition=\"$([System.String]::IsNullOrWhiteSpace('')) And Exists('tail')\">\
+        "<PropertyGroup Condition=\"'É' == 'é' And Exists('tail')\">\
          <R>x</R></PropertyGroup>"
             .to_owned(),
         // ... nor a boolean literal after it, quoted or not.
-        "<PropertyGroup Condition=\"$([System.String]::IsNullOrWhiteSpace('')) And Exists('tail') \
+        "<PropertyGroup Condition=\"'É' == 'é' And Exists('tail') \
          And true\"><R>x</R></PropertyGroup>"
             .to_owned(),
-        "<PropertyGroup Condition=\"$([System.String]::IsNullOrWhiteSpace('')) And Exists('tail') \
+        "<PropertyGroup Condition=\"'É' == 'é' And Exists('tail') \
          And 'true'\"><R>x</R></PropertyGroup>"
             .to_owned(),
         // Evaluation stops at an operand it cannot evaluate; whether MSBuild
         // may throw is settled in the `Or`, before `Exists`.
-        "<PropertyGroup Condition=\"($([System.String]::IsNullOrWhiteSpace('')) Or 1 &lt; abc) \
+        "<PropertyGroup Condition=\"('É' == 'é' Or 1 &lt; abc) \
          And Exists('tail')\"><R>x</R></PropertyGroup>"
             .to_owned(),
         // Reached for certain, throwing on the value the walk holds (unset)
@@ -924,7 +1059,7 @@ fn an_import_a_group_may_not_make_does_not_make_a_later_one_a_duplicate() {
             &tmp,
             &format!(
                 "  <ImportGroup Condition=\"{UNDECIDED_TRUE}\">\n    <Import Project=\"{first}\" \
-                 Condition=\"$([System.String]::IsNullOrWhiteSpace('x'))\" />\n    \
+                 Condition=\"'É' == 'Ê'\" />\n    \
                  <Import Project=\"CS/a.props\" />\n  </ImportGroup>"
             ),
             &[
@@ -1113,5 +1248,717 @@ fn an_include_beside_an_empty_remove_is_rejected() {
     // which the loader differential's oracle cannot report as a rejection.
     for parsed in both_walkers("  <ItemGroup><I Include=\"x\" Remove=\"\" /></ItemGroup>") {
         assert_rejected(&parsed, &["Before", "After"]);
+    }
+}
+
+/// A leaf over a name the walk holds no value of (`X`, a write it refused to
+/// compute) has none of MSBuild's booleans, whatever it computes on the `""`
+/// it substitutes: `IsNullOrWhiteSpace('')` is true, but MSBuild's `X` is
+/// `Debug`, so its `Or` goes on to an order on a word, which throws. What
+/// comes after such a leaf is reached perhaps.
+#[test]
+fn a_leaf_on_a_value_the_walk_holds_none_of_decides_nothing_after_it() {
+    let refused = "<X>$([System.String]::Copy('Debug'))</X>";
+    for c in [
+        "'$([System.String]::IsNullOrWhiteSpace(`$(X)`))' Or '' &gt; 'x'",
+        "'$(X)' == '' Or '' &gt; 'x'",
+        "!('$(X)' != '') Or '' &gt; 'x'",
+    ] {
+        let body = format!("<PropertyGroup>{refused}<R Condition=\"{c}\">x</R></PropertyGroup>");
+        for parsed in both_walkers(&format!("  {body}")) {
+            assert_withdrawn(&parsed, &["Before", "After"]);
+        }
+    }
+}
+
+/// MSBuild expands an item's operation by what the operation reads
+/// (`LazyItemEvaluator`): an `Include` and its `Exclude`, a `Remove` and its
+/// `MatchOnMetadata`, an `Update`. The `MatchOnMetadata` options are parsed
+/// as written, and an operation's attribute on another operation's item is
+/// not expanded (probed, `msbuild-condition-oracle`, SDK 10.0.401).
+#[test]
+fn an_item_attribute_is_judged_by_the_operation_that_reads_it() {
+    for body in [
+        "<ItemGroup><I Include=\"x\" MatchOnMetadata=\"$(P[9])\" /></ItemGroup>",
+        "<ItemGroup><I Include=\"x\" MatchOnMetadataOptions=\"$(P[9])\" /></ItemGroup>",
+        "<ItemGroup><I Update=\"x\" MatchOnMetadata=\"$(P[9])\" /></ItemGroup>",
+        "<ItemGroup><J Include=\"x\" /><I Remove=\"@(J)\" MatchOnMetadata=\"M\" MatchOnMetadataOptions=\"$(P[9])\" /></ItemGroup>",
+    ] {
+        let body = format!("<PropertyGroup><P>abc</P></PropertyGroup>{body}");
+        for parsed in both_walkers(&format!("  {body}")) {
+            assert_eq!(parsed.rejection, None, "{body}: {:#?}", parsed.diagnostics);
+        }
+    }
+    let body = "<PropertyGroup><P>abc</P></PropertyGroup><ItemGroup><J Include=\"x\" /><I Remove=\"@(J)\" MatchOnMetadata=\"$(P[9])\" /></ItemGroup>";
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_rejected(&parsed, &["Before", "After"]);
+    }
+}
+
+/// A boolean the walk does not compute coerces without throwing only where it
+/// is the whole operand: beside text it is a word (`xFalse`), which MSBuild
+/// throws on coercing.
+#[test]
+fn a_boolean_beside_text_is_no_boolean() {
+    for c in [
+        "'x$([System.String]::IsNullOrWhiteSpace(`é`))'",
+        "'$([System.String]::IsNullOrWhiteSpace(`é`))x'",
+    ] {
+        let body = format!("<PropertyGroup><R Condition=\"{c}\">x</R></PropertyGroup>");
+        for parsed in both_walkers(&format!("  {body}")) {
+            let certainty = parsed
+                .rejection
+                .as_ref()
+                .map_or(RejectionCertainty::Possible, |r| r.certainty);
+            assert_withdrawn_as(&parsed, &["Before", "After"], certainty);
+        }
+    }
+    let body = "<PropertyGroup><R Condition=\"'$([System.String]::IsNullOrWhiteSpace(`é`))'\">x</R></PropertyGroup>";
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_eq!(parsed.rejection, None, "{body}: {:#?}", parsed.diagnostics);
+    }
+}
+
+/// A throw rests on what its expression read before it threw: a later step,
+/// which MSBuild never reaches, reading a name the walk holds no value of
+/// does not make the throw one the walk cannot judge.
+#[test]
+fn a_throw_rests_only_on_what_it_read_before_it() {
+    let refused = "<X>$([System.String]::Copy('Debug'))</X>";
+    for body in [
+        format!(
+            "<PropertyGroup><P>abc</P>{refused}<R>$(P.Split(';')[9].Contains('$(X)'))</R></PropertyGroup>"
+        ),
+        format!(
+            "<PropertyGroup><P>abc</P>{refused}<R Condition=\"'$(P.Split(`;`)[9].Contains(`$(X)`))' == ''\">x</R></PropertyGroup>"
+        ),
+    ] {
+        // In a condition the throw's certainty is judged leaf-wise, a
+        // doubted name anywhere in the leaf leaving it Possible.
+        let certainty = if body.contains("Condition") {
+            RejectionCertainty::Possible
+        } else {
+            RejectionCertainty::Certain
+        };
+        for parsed in both_walkers(&format!("  {body}")) {
+            assert_withdrawn_as(&parsed, &["Before", "After"], certainty);
+        }
+    }
+}
+
+/// MSBuild expands an item's text's properties before its item lists, so a
+/// function is handed an item list as written, in an operation or a
+/// metadatum alike: `VersionEquals('@(J)', '1.0')` throws whatever `J` holds
+/// (probed, `msbuild-condition-oracle`, SDK 10.0.401). A metadata reference
+/// in an operation is likewise read as written; in a metadatum it is the
+/// metadatum's value, which the walk does not judge (#1094).
+#[test]
+fn an_item_list_in_an_items_function_is_read_as_written() {
+    let call = "$([MSBuild]::VersionEquals('@(J)','1.0'))";
+    for body in [
+        format!("<ItemGroup><J Include=\"1.0\" /><I Include=\"{call}\" /></ItemGroup>"),
+        format!("<ItemGroup><J Include=\"1.0\" /><I Include=\"x\" M=\"{call}\" /></ItemGroup>"),
+        format!("<ItemGroup><J Include=\"1.0\" /><I Include=\"x\"><M>{call}</M></I></ItemGroup>"),
+        "<ItemGroup><I Include=\"$([MSBuild]::VersionEquals('%(M)','1.0'))\" /></ItemGroup>"
+            .to_owned(),
+    ] {
+        // Metadata reading an item list is evaluated item by item, which the
+        // walk does not count here: reached perhaps.
+        let certainty = if body.contains("<I Include=\"x\"") {
+            RejectionCertainty::Possible
+        } else {
+            RejectionCertainty::Certain
+        };
+        for parsed in both_walkers(&format!("  {body}")) {
+            assert_withdrawn_as(&parsed, &["Before", "After"], certainty);
+        }
+    }
+}
+
+/// In an item's condition MSBuild expands an item expression its properties
+/// form after it expands them, so one formed beside a boolean the walk does
+/// not compute is still formed: `@(Foo->NoSuchFunction())` throws.
+#[test]
+fn an_item_expression_beside_an_unknown_boolean_may_reject() {
+    let body = "<PropertyGroup><A>@</A><B>(Foo-&gt;NoSuchFunction())</B></PropertyGroup><ItemGroup><Foo Include=\"f\" /><I Include=\"x\" Condition=\"'$([System.String]::IsNullOrWhiteSpace(`é`))$(A)$(B)' == 'z'\" /></ItemGroup>";
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_withdrawn(&parsed, &["Before", "After"]);
+    }
+}
+
+/// `Version.Parse` throws on what it cannot read, a boolean among them.
+#[test]
+fn a_version_parse_of_an_unknown_boolean_may_reject() {
+    let body = "<PropertyGroup><R Condition=\"$([System.Version]::Parse($([System.String]::IsNullOrWhiteSpace('é'))).Build) == 1\">x</R></PropertyGroup>";
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_withdrawn(&parsed, &["Before", "After"]);
+    }
+}
+
+/// An unquoted version argument holding an expansion is read as MSBuild
+/// reads it: `VersionLessThan($(Major).0, 4.0)` is true for `Major=3`.
+#[test]
+fn an_unquoted_version_argument_around_an_expansion_is_read() {
+    let body = "<PropertyGroup><Major>3</Major><R Condition=\"$([MSBuild]::VersionLessThan($(Major).0,4.0))\">x</R></PropertyGroup>";
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_eq!(parsed.rejection, None, "{body}: {:#?}", parsed.diagnostics);
+        assert_eq!(parsed.property("R").value(), Some("x"), "{body}");
+    }
+}
+
+/// A file-system function MSBuild throws on, in text the walk does not
+/// expand itself (an item's `Include`), is judged on what the file system
+/// holds, as the walk's own expansions are: `GetDirectoryNameOfFileAbove`
+/// finds no file and returns `''`, which has no first character.
+#[test]
+fn a_file_system_function_in_an_items_text_is_judged_on_the_file_system() {
+    let body = "<ItemGroup><I Include=\"$([MSBuild]::GetDirectoryNameOfFileAbove($(MSBuildProjectDirectory), 'surely-not-here-1009.props')[0])\" /></ItemGroup>";
+    let [with_imports, _] = both_walkers(&format!("  {body}"));
+    assert_rejected(&with_imports, &["Before", "After"]);
+}
+
+/// A throw that read a name the walk holds no value of is judged where it
+/// throws whatever that name's expressions return, on the rest: `true` is no
+/// version, whatever `X` is (MSBuild's `X` is `Debug`; it throws). In a text
+/// and in a condition's `Exists` alike.
+#[test]
+fn a_throw_whatever_an_unheld_name_returns_may_reject() {
+    let refused = "<X>$([System.String]::Copy('Debug'))</X>";
+    for body in [
+        format!(
+            "<PropertyGroup><A>true</A>{refused}<R>$([MSBuild]::VersionLessThan($(A),$(X)))</R></PropertyGroup>"
+        ),
+        format!(
+            "<PropertyGroup><A>true</A>{refused}</PropertyGroup><ItemGroup><I Include=\"x\" Condition=\"Exists('$([MSBuild]::VersionLessThan($(X),$(A)))')\" /></ItemGroup>"
+        ),
+    ] {
+        for parsed in both_walkers(&format!("  {body}")) {
+            assert_withdrawn(&parsed, &["Before", "After"]);
+        }
+    }
+}
+
+/// A body under a gate the walk decides true whatever it could not evaluate
+/// (`'$(U[0])' == 'z' Or true` is true wherever it returns) is one MSBuild
+/// evaluates, and a throw in it is judged.
+#[test]
+fn a_throw_under_a_gate_decided_true_past_an_unknown_operand_is_judged() {
+    let refused = "<U>$([System.String]::Copy('abc'))</U>";
+    for gate in ["'$(U[0])' == 'z' Or true", "'$(U)' == 'z' Or true"] {
+        let body = format!(
+            "<PropertyGroup><P>a</P>{refused}<R Condition=\"{gate}\">$(P[9])</R></PropertyGroup>"
+        );
+        for parsed in both_walkers(&format!("  {body}")) {
+            let certainty = parsed
+                .rejection
+                .as_ref()
+                .map_or(RejectionCertainty::Possible, |r| r.certainty);
+            assert_withdrawn_as(&parsed, &["Before", "After"], certainty);
+        }
+    }
+}
+
+/// Design-time evaluation of a property's condition expands both sides of an
+/// equality, for its table of conditioned properties, even where one side
+/// is empty and decides it: `'' != 'a$(P[9])'` throws there, though a build
+/// never expands `'a$(P[9])'`. An item's condition does not: there the empty
+/// side decides it, and the item is excluded.
+#[test]
+fn an_empty_side_does_not_spare_the_other_from_design_time_expansion() {
+    for c in ["'' != 'a$(P[9])'", "'a$(P[9])' == ''"] {
+        let body = format!("<PropertyGroup><P>a</P><R Condition=\"{c}\">x</R></PropertyGroup>");
+        for parsed in both_walkers(&format!("  {body}")) {
+            assert_rejected(&parsed, &["Before", "After"]);
+        }
+        let body = format!(
+            "<PropertyGroup><P>a</P></PropertyGroup><ItemGroup><I Include=\"x\" Condition=\"{c}\" /></ItemGroup>"
+        );
+        for parsed in both_walkers(&format!("  {body}")) {
+            assert_eq!(parsed.rejection, None, "{body}: {:#?}", parsed.diagnostics);
+        }
+    }
+}
+
+/// A leaf on a name the walk is not sure of, though it holds a value MSBuild
+/// may hold, has none of MSBuild's booleans: `U` is `''` as the walk holds it,
+/// but MSBuild takes the write the walk could not decide, so its `Or` goes on
+/// to an order on a word, which throws.
+#[test]
+fn a_leaf_on_a_value_the_walk_is_not_sure_of_decides_nothing_after_it() {
+    let body = format!(
+        "<PropertyGroup><U></U><U Condition=\"{UNDECIDED_TRUE}\">yes</U>\
+         <R Condition=\"$([System.String]::IsNullOrWhiteSpace('$(U)')) Or 1 &lt; abc\">x</R></PropertyGroup>"
+    );
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_withdrawn(&parsed, &["Before", "After"]);
+    }
+}
+
+/// An `Update` under a gate certainly false applies nowhere, so MSBuild
+/// expands none of its metadata.
+#[test]
+fn an_update_under_a_false_gate_expands_no_metadata() {
+    for body in [
+        "<ItemGroup><I Include=\"x\" /><I Update=\"x\" Condition=\"false\" M=\"$(P[9])\" /></ItemGroup>",
+        "<ItemGroup><I Include=\"x\" /></ItemGroup><ItemGroup Condition=\"false\"><I Update=\"x\" M=\"$(P[9])\" /></ItemGroup>",
+        "<ItemGroup><I Include=\"x\" /><I Update=\"x\" Condition=\"false\"><M>$(P[9])</M></I></ItemGroup>",
+    ] {
+        let body = format!("<PropertyGroup><P>a</P></PropertyGroup>{body}");
+        for parsed in both_walkers(&format!("  {body}")) {
+            assert_eq!(parsed.rejection, None, "{body}: {:#?}", parsed.diagnostics);
+        }
+    }
+}
+
+/// A typed result spliced among other text in a version argument is the
+/// text it renders as: `VersionGreaterThan($(P.Length).0, 0)` is true for
+/// `P=1`, quoted or not.
+#[test]
+fn a_typed_result_among_text_in_a_version_argument_is_its_text() {
+    for c in [
+        "$([MSBuild]::VersionGreaterThan($(P.Length).0, 0))",
+        "$([MSBuild]::VersionGreaterThan('$(P.Length).0', 0))",
+    ] {
+        let body = format!("<PropertyGroup><P>1</P><R Condition=\"{c}\">x</R></PropertyGroup>");
+        for parsed in both_walkers(&format!("  {body}")) {
+            assert_eq!(parsed.rejection, None, "{body}: {:#?}", parsed.diagnostics);
+            assert_eq!(parsed.property("R").value(), Some("x"), "{body}");
+        }
+    }
+}
+
+/// MSBuild expands an item's text after every property write, so an item in
+/// a `<Choose>` branch the walk does not take is judged against the final
+/// table: `P` is `a` there, which has no index 1, though it is `abc` where
+/// the branch stands.
+#[test]
+fn an_untaken_branchs_items_are_judged_against_the_final_table() {
+    let branch = format!(
+        "<Choose><When Condition=\"{UNDECIDED_TRUE}\"><ItemGroup><I Include=\"$(P[1])\" /></ItemGroup></When></Choose>"
+    );
+    let rejected = format!(
+        "<PropertyGroup><P>abc</P></PropertyGroup>{branch}<PropertyGroup><P>a</P></PropertyGroup>"
+    );
+    for parsed in both_walkers(&format!("  {rejected}")) {
+        assert_withdrawn(&parsed, &["Before", "After"]);
+    }
+    let evaluated = format!(
+        "<PropertyGroup><P>a</P></PropertyGroup>{branch}<PropertyGroup><P>abc</P></PropertyGroup>"
+    );
+    for parsed in both_walkers(&format!("  {evaluated}")) {
+        assert_eq!(
+            parsed.rejection, None,
+            "{evaluated}: {:#?}",
+            parsed.diagnostics
+        );
+    }
+}
+
+/// A write in content the walk does not take leaves its name's value there
+/// unknown to what follows on that path: `P` is `abc` by the time `Q` reads
+/// it there, which has an index 1, though the walk holds `a`. That MSBuild
+/// throws on such a value is the judgement over the values a name may hold
+/// (#1097), not a judgement on the value the walk holds.
+#[test]
+fn a_write_in_untaken_content_leaves_its_name_unknown_there() {
+    let body = format!(
+        "<PropertyGroup><P>a</P></PropertyGroup><PropertyGroup Condition=\"{UNDECIDED_TRUE}\"><P>abc</P><Q>$(P[1])</Q></PropertyGroup>"
+    );
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_eq!(parsed.rejection, None, "{body}: {:#?}", parsed.diagnostics);
+    }
+}
+
+/// Each branch of a `<Choose>` in content the walk does not take starts from
+/// what the path held before it: a write in one `<When>` is no write in the
+/// `<Otherwise>`, where `P` is `abc`, which has no index 9.
+#[test]
+fn a_branch_does_not_see_its_siblings_writes() {
+    let body = format!(
+        "<PropertyGroup><P>abc</P></PropertyGroup><Choose><When Condition=\"{UNDECIDED_TRUE}\"><Choose>\
+         <When Condition=\"'É' == 'x'\"><PropertyGroup><P>abcdefghijkl</P></PropertyGroup></When>\
+         <Otherwise><PropertyGroup><R>$(P[9])</R></PropertyGroup></Otherwise>\
+         </Choose></When></Choose>"
+    );
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_withdrawn(&parsed, &["Before", "After"]);
+    }
+}
+
+/// MSBuild turns a `UsingTask`'s `AssemblyFile`'s own `\` into `/` before it
+/// expands it where `\` is no separator: `$(P.Split('\')[1])` splits `a/b`
+/// on `/`.
+#[cfg(not(windows))]
+#[test]
+fn a_using_task_assembly_file_is_read_with_its_slashes_turned() {
+    let body = "<PropertyGroup><P>a/b</P></PropertyGroup><UsingTask TaskName=\"X\" AssemblyFile=\"$(P.Split('\\')[1])\" />";
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_eq!(parsed.rejection, None, "{body}: {:#?}", parsed.diagnostics);
+    }
+}
+
+/// Whether an item's metadata is evaluated item by item is read from the
+/// metadata as MSBuild reads it: `&lt;![CDATA[%]]&gt;(Identity)` in an
+/// attribute is `%(Identity)`, so with no item MSBuild evaluates no metadata,
+/// and a throw in it is no certain rejection.
+#[test]
+fn per_item_metadata_is_read_from_its_decoded_value() {
+    let body = "<PropertyGroup><Z>abc</Z></PropertyGroup><ItemGroup><I Include=\"$(Empty)\" V=\"&lt;![CDATA[%]]&gt;(Identity)\"><M>$(Z[9])</M></I></ItemGroup>";
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_ne!(
+            parsed.rejection.as_ref().map(|r| r.certainty),
+            Some(RejectionCertainty::Certain),
+            "{body}: {:#?}",
+            parsed.rejection
+        );
+    }
+}
+
+/// An item group in a `<Choose>` branch the walk does not take, judged in the
+/// item pass, knows the names written before it on that path: `P` is long
+/// enough to index there, though the final table holds `abc`. A throw on the
+/// value the walk holds is no site.
+#[test]
+fn an_untaken_branchs_items_know_the_writes_before_them() {
+    let body = format!(
+        "<PropertyGroup><P>abc</P></PropertyGroup><Choose><When Condition=\"{UNDECIDED_TRUE}\">\
+         <PropertyGroup><P>abcdefghijkl</P></PropertyGroup>\
+         <ItemGroup><I Include=\"$(P[9])\" /></ItemGroup></When></Choose>"
+    );
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_eq!(parsed.rejection, None, "{body}: {:#?}", parsed.diagnostics);
+    }
+}
+
+/// A certain write after the path settles what the item pass reads: `P` is
+/// `z` there, which has no index 9, whatever the branch wrote.
+#[test]
+fn a_certain_write_after_the_path_settles_an_items_value() {
+    let body = format!(
+        "<PropertyGroup><P>abc</P></PropertyGroup><Choose><When Condition=\"{UNDECIDED_TRUE}\">\
+         <PropertyGroup><P>abcdefghijkl</P></PropertyGroup>\
+         <ItemGroup><I Include=\"$(P[9])\" /></ItemGroup></When></Choose>\
+         <PropertyGroup><P>z</P></PropertyGroup>"
+    );
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_withdrawn(&parsed, &["Before", "After"]);
+    }
+}
+
+/// A write whose gate is certainly false on the path writes nothing there:
+/// `P` is still `a`, which has no index 9.
+#[test]
+fn a_write_under_a_false_gate_leaves_its_name_as_it_was() {
+    let body = format!(
+        "<PropertyGroup><P>a</P></PropertyGroup><PropertyGroup Condition=\"{UNDECIDED_TRUE}\">\
+         <P Condition=\"false\">abcdefghijkl</P><Q>$(P[9])</Q></PropertyGroup>"
+    );
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_withdrawn(&parsed, &["Before", "After"]);
+    }
+}
+
+/// An inline task's `Evaluate` holding an item list is one the walk does not
+/// expand: `@(Flag)` is `false` to MSBuild, which then skips the body, so a
+/// throw in the body is no certain rejection.
+#[test]
+fn an_evaluate_flag_holding_an_item_list_reaches_the_body_perhaps() {
+    let body = "<PropertyGroup><P>a</P></PropertyGroup><ItemGroup><Flag Include=\"false\" /></ItemGroup>\
+                <UsingTask TaskName=\"X\" TaskFactory=\"RoslynCodeTaskFactory\" AssemblyFile=\"y.dll\">\
+                <Task Evaluate=\"@(Flag)\">$(P[9])</Task></UsingTask>";
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_ne!(
+            parsed.rejection.as_ref().map(|r| r.certainty),
+            Some(RejectionCertainty::Certain),
+            "{body}: {:#?}",
+            parsed.rejection
+        );
+    }
+}
+
+/// A condition of the property pass reads an item list its properties'
+/// values form as text: `'$(A)$(B)' != ''` is true, `@(I)` being no empty
+/// text (probed, `msbuild-condition-oracle`, SDK 10.0.401).
+#[test]
+fn an_item_list_formed_in_a_property_condition_is_text() {
+    let body = "<PropertyGroup><A>@</A><B>(I)</B><R Condition=\"'$(A)$(B)' != ''\">yes</R></PropertyGroup>";
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_eq!(parsed.rejection, None, "{body}: {:#?}", parsed.diagnostics);
+        assert_eq!(parsed.property("R").value(), Some("yes"), "{body}");
+    }
+}
+
+/// An inline task's body holding an element is its inner XML as serialized:
+/// a plain reference in an attribute (`<Reference Include="$(Lib)" />`) is
+/// no throw, as in any declaration that names a library by a property.
+#[test]
+fn a_plain_reference_in_an_inline_task_attribute_is_no_throw() {
+    let body = "<PropertyGroup><Lib>abc.dll</Lib></PropertyGroup>\
+                <UsingTask TaskName=\"X\" TaskFactory=\"RoslynCodeTaskFactory\" AssemblyFile=\"y.dll\">\
+                <Task><Reference Include=\"$(Lib)\" /><Code Type=\"Fragment\" Language=\"cs\">x</Code></Task></UsingTask>";
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_eq!(parsed.rejection, None, "{body}: {:#?}", parsed.diagnostics);
+    }
+}
+
+/// An inline task's `Evaluate` flag is read as `Boolean.TryParse` reads it,
+/// which takes `false` padded with NULs as with whitespace: the body is then
+/// not expanded, and its throw is none.
+#[test]
+fn an_evaluate_flag_padded_with_a_nul_is_false() {
+    let task = |flag: &str| {
+        format!(
+            "<PropertyGroup><P>x</P><N>%00</N></PropertyGroup>\
+             <UsingTask TaskName=\"X\" TaskFactory=\"RoslynCodeTaskFactory\" AssemblyFile=\"y.dll\">\
+             <Task Evaluate=\"{flag}\">$(P[9])</Task></UsingTask>"
+        )
+    };
+    let padded = task("false$(N[0])");
+    for parsed in both_walkers(&format!("  {padded}")) {
+        assert_eq!(
+            parsed.rejection, None,
+            "{padded}: {:#?}",
+            parsed.diagnostics
+        );
+    }
+    let evaluated = task("true$(N[0])");
+    for parsed in both_walkers(&format!("  {evaluated}")) {
+        assert_rejected(&parsed, &["Before", "After"]);
+    }
+}
+
+/// A property's or metadatum's body holding an element is its inner XML,
+/// which MSBuild expands like any other body: a throw in it rejects the
+/// project, and the same body with an index in range does not.
+#[test]
+fn an_element_valued_body_is_judged_as_its_inner_xml() {
+    let sites = [
+        "<PropertyGroup><Q><Data>$(P[INDEX])</Data></Q></PropertyGroup>",
+        "<ItemGroup><I Include=\"a\"><M><Data>$(P[INDEX])</Data></M></I></ItemGroup>",
+        "<ItemDefinitionGroup><I><M><Data>$(P[INDEX])</Data></M></I></ItemDefinitionGroup>",
+    ];
+    for site in sites {
+        let throwing = format!(
+            "<PropertyGroup><P>x</P></PropertyGroup>{}",
+            site.replace("INDEX", "9")
+        );
+        for parsed in both_walkers(&format!("  {throwing}")) {
+            assert_rejected(&parsed, &["Before", "After"]);
+        }
+        let in_range = format!(
+            "<PropertyGroup><P>x</P></PropertyGroup>{}",
+            site.replace("INDEX", "0")
+        );
+        for parsed in both_walkers(&format!("  {in_range}")) {
+            assert_eq!(
+                parsed.rejection, None,
+                "{in_range}: {:#?}",
+                parsed.diagnostics
+            );
+        }
+    }
+}
+
+/// An inline task written with Windows line ends is read as MSBuild reads it:
+/// its whitespace nodes, carriage returns and all, are dropped, and a plain
+/// reference in an attribute is no throw.
+#[test]
+fn an_inline_task_with_windows_line_ends_is_serialized() {
+    let body = "<PropertyGroup><Lib>abc.dll</Lib></PropertyGroup>\r\n\
+                <UsingTask TaskName=\"X\" TaskFactory=\"RoslynCodeTaskFactory\" AssemblyFile=\"y.dll\">\r\n\
+                <Task>\r\n  <Reference Include=\"$(Lib)\" />\r\n  \
+                <Code Type=\"Fragment\" Language=\"cs\"><![CDATA[x]]></Code>\r\n</Task>\r\n</UsingTask>";
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_eq!(parsed.rejection, None, "{body}: {:#?}", parsed.diagnostics);
+    }
+}
+
+/// Code written as an element's text over several lines is serialized as
+/// read, its line ends included: an expression in it is judged, a throw for
+/// certain and a plain reference as none.
+#[test]
+fn an_inline_tasks_code_over_several_lines_is_judged() {
+    let task = |code: &str| {
+        format!(
+            "<PropertyGroup><P>abc</P></PropertyGroup>\
+             <UsingTask TaskName=\"X\" TaskFactory=\"RoslynCodeTaskFactory\" AssemblyFile=\"y.dll\">\
+             <Task>\n  <Code Type=\"Fragment\" Language=\"cs\">\n    {code}\n  </Code>\n</Task></UsingTask>"
+        )
+    };
+    let throwing = task("Log.LogMessage(\"$(P[9])\");");
+    for parsed in both_walkers(&format!("  {throwing}")) {
+        assert_rejected(&parsed, &["Before", "After"]);
+    }
+    let plain = task("Log.LogMessage(\"$(P)\");");
+    for parsed in both_walkers(&format!("  {plain}")) {
+        assert_eq!(parsed.rejection, None, "{plain}: {:#?}", parsed.diagnostics);
+    }
+}
+
+/// An item group from content the walk does not take is judged knowing the
+/// writes of its whole path, those after it included: MSBuild evaluates it
+/// after every property write there, when `P` is long enough to index.
+#[test]
+fn an_untaken_branchs_items_know_the_writes_after_them() {
+    let body = format!(
+        "<PropertyGroup><P>x</P></PropertyGroup><Choose><When Condition=\"{UNDECIDED_TRUE}\">\
+         <ItemGroup><I Include=\"$(P[4])\" /></ItemGroup>\
+         <PropertyGroup><P>long enough</P></PropertyGroup></When></Choose>"
+    );
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_eq!(parsed.rejection, None, "{body}: {:#?}", parsed.diagnostics);
+    }
+}
+
+/// An item group from content the walk does not take knows only the writes
+/// that can reach it: one in another arm of a `<Choose>` that holds it is
+/// none. MSBuild takes the `<Otherwise>` here, where `P` is short, and
+/// rejects; the long `P` of the `<When>` beside it never reaches the item.
+#[test]
+fn an_untaken_branchs_items_know_no_write_of_a_sibling_arm() {
+    let body = format!(
+        "<PropertyGroup><P>x</P></PropertyGroup><Choose><When Condition=\"{UNDECIDED_TRUE}\">\
+         <Choose><When Condition=\"'É' == 'Ê'\"><PropertyGroup><P>long enough</P></PropertyGroup></When>\
+         <Otherwise><ItemGroup><I Include=\"$(P[9])\" /></ItemGroup></Otherwise></Choose>\
+         </When></Choose>"
+    );
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_withdrawn(&parsed, &["Before", "After"]);
+    }
+}
+
+/// The values an expression on an unheld name is tried as returning include
+/// the hyphen a prerelease version joins with: `1$(X)preview` is `1-preview`
+/// for MSBuild's `X`, a version, so the walk claims no throw on it.
+#[test]
+fn a_prerelease_spelling_is_among_the_values_tried() {
+    let body = "<PropertyGroup><X>$([System.String]::Copy('-'))</X>\
+                <R>$([MSBuild]::VersionLessThan('1$(X)preview', '2.0'))</R></PropertyGroup>";
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_eq!(parsed.rejection, None, "{body}: {:#?}", parsed.diagnostics);
+    }
+}
+
+/// An inline task's body that starts with a CDATA section is its inner text,
+/// an element's included: `$(P[9])` here, which MSBuild throws on, for
+/// certain.
+#[test]
+fn a_task_body_leading_with_cdata_is_its_inner_text() {
+    let body = "<PropertyGroup><P>x</P></PropertyGroup>\
+                <UsingTask TaskName=\"X\" TaskFactory=\"RoslynCodeTaskFactory\" AssemblyFile=\"y.dll\">\
+                <Task><![CDATA[$]]><Code>(P[9])</Code></Task></UsingTask>";
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_rejected(&parsed, &["Before", "After"]);
+    }
+}
+
+/// An inline task's body nested past the bound the serialization descends
+/// to (so that a deep body cannot take the stack) declines: a throw in it is
+/// a possible rejection, not a certain one.
+#[test]
+fn a_task_body_nested_past_the_bound_declines() {
+    let body = format!(
+        "<PropertyGroup><P>abc</P></PropertyGroup>\
+         <UsingTask TaskName=\"X\" TaskFactory=\"RoslynCodeTaskFactory\" AssemblyFile=\"y.dll\">\
+         <Task>{}$(P[9]){}</Task></UsingTask>",
+        "<a>".repeat(100),
+        "</a>".repeat(100)
+    );
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_withdrawn(&parsed, &["Before", "After"]);
+    }
+}
+
+/// A CDATA section in an element of an inline task's body is serialized as
+/// one, so an expression in it is judged, for certain where it is reached
+/// for certain.
+#[test]
+fn an_expression_in_a_task_bodys_cdata_section_is_judged() {
+    let body = "<PropertyGroup><P>abc</P></PropertyGroup>\
+                <UsingTask TaskName=\"X\" TaskFactory=\"RoslynCodeTaskFactory\" AssemblyFile=\"y.dll\">\
+                <Task><Code><![CDATA[$(P[9])]]></Code></Task></UsingTask>";
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_rejected(&parsed, &["Before", "After"]);
+    }
+}
+
+/// The inner text of a body that starts with a CDATA section drops a
+/// whitespace node between its sections, as MSBuild's reader does: the
+/// separator set here is `;` alone, and `a b` has no second element.
+#[test]
+fn a_task_bodys_inner_text_drops_whitespace_nodes() {
+    let body = "<PropertyGroup><S>a b</S></PropertyGroup>\
+                <UsingTask TaskName=\"X\" TaskFactory=\"RoslynCodeTaskFactory\" AssemblyFile=\"y.dll\">\
+                <Task><![CDATA[$(S.Split(']]><Code> </Code><![CDATA[;')[1])]]></Task></UsingTask>";
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_rejected(&parsed, &["Before", "After"]);
+    }
+}
+
+/// An inline task's body in the project's own namespace, as most `.targets`
+/// declare it, is serialized with the declaration, which holds no
+/// expression: a plain reference in an attribute is no throw.
+#[test]
+fn an_inline_task_in_the_msbuild_namespace_is_serialized() {
+    let tmp = TempDir::new().unwrap();
+    let project_path = write_at(
+        tmp.path(),
+        "proj/p.fsproj",
+        "<Project xmlns=\"http://schemas.microsoft.com/developer/msbuild/2003\">\
+         <PropertyGroup><Lib>a.dll</Lib></PropertyGroup>\
+         <UsingTask TaskName=\"X\" TaskFactory=\"RoslynCodeTaskFactory\" AssemblyFile=\"y.dll\">\
+         <Task><Reference Include=\"$(Lib)\" /><Code Type=\"Fragment\" Language=\"cs\">x</Code></Task></UsingTask>\
+         <PropertyGroup><After>1</After></PropertyGroup></Project>",
+    );
+    let parsed = parse_file(&project_path);
+    assert_eq!(parsed.rejection, None, "{:#?}", parsed.diagnostics);
+}
+
+/// A metadatum's value substituted into another's text may move where an
+/// expression starts (`%(M)` holding `$(`), so a throw in such text is no
+/// certain rejection.
+#[test]
+fn a_throw_beside_a_metadata_reference_is_no_certain_rejection() {
+    let body = "<PropertyGroup><P>abc</P></PropertyGroup>\
+                <ItemDefinitionGroup><I><M>$(</M><N>%(M)abc$(P[9])</N></I></ItemDefinitionGroup>";
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_ne!(
+            parsed.rejection.as_ref().map(|r| r.certainty),
+            Some(RejectionCertainty::Certain),
+            "{body}: {:#?}",
+            parsed.rejection
+        );
+    }
+}
+
+/// An inline task's body the walk cannot read as MSBuild does (a carriage
+/// return in a text, whose line end `roxmltree` folds and MSBuild's reader
+/// keeps) is checked for an expression across its markup, as its inner text
+/// joins it: `$` and `(P[9])` in separate pieces still form one.
+#[test]
+fn a_task_body_read_apart_is_checked_across_its_markup() {
+    let body = "<PropertyGroup><P>abc</P></PropertyGroup>\
+                <UsingTask TaskName=\"X\" TaskFactory=\"RoslynCodeTaskFactory\" AssemblyFile=\"y.dll\">\
+                <Task><![CDATA[$]]><Code>(P[9])\r</Code></Task></UsingTask>";
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_withdrawn(&parsed, &["Before", "After"]);
+    }
+}
+
+/// Under `xml:space="preserve"` MSBuild keeps the whitespace the walk would
+/// drop from an inline task's inner text, so the walk declines that reading
+/// rather than claim a throw it would form without the space.
+#[test]
+fn a_task_body_under_xml_space_is_no_certain_rejection() {
+    let body = "<PropertyGroup><P>abc</P></PropertyGroup>\
+                <UsingTask TaskName=\"X\" TaskFactory=\"RoslynCodeTaskFactory\" AssemblyFile=\"y.dll\">\
+                <Task><![CDATA[$]]><Code xml:space=\"preserve\"> </Code><![CDATA[(P[9])]]></Task></UsingTask>";
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_ne!(
+            parsed.rejection.as_ref().map(|r| r.certainty),
+            Some(RejectionCertainty::Certain),
+            "{body}: {:#?}",
+            parsed.rejection
+        );
     }
 }

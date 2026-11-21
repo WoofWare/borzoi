@@ -36,11 +36,15 @@
 pub mod alloc_limit;
 pub mod corpus_key;
 pub mod fcs_position;
+pub mod fsc_args;
+pub mod hostile;
 pub mod manifest;
 pub mod module_tree;
+pub mod msbuild_oracle;
 pub mod nuget_oracle;
 pub mod panic_silence;
 pub mod par_map;
+pub mod project_graph;
 pub mod repetition_shapes;
 pub mod restore_globals;
 pub mod stack_probe;
@@ -90,6 +94,9 @@ pub enum BatchFailure {
     Stdin(std::io::Error),
     /// The oracle could not be started.
     Spawn(std::io::Error),
+    /// The request is blank or holds a line break, so it is not one request
+    /// line: it was not sent.
+    NotOneLine,
 }
 
 impl std::fmt::Display for BatchFailure {
@@ -106,6 +113,10 @@ impl std::fmt::Display for BatchFailure {
             }
             BatchFailure::Stdin(e) => write!(f, "writing the request to the oracle failed: {e}"),
             BatchFailure::Spawn(e) => write!(f, "starting the oracle failed: {e}"),
+            BatchFailure::NotOneLine => write!(
+                f,
+                "the request is blank or holds a line break, so it is not one request line"
+            ),
         }
     }
 }
@@ -274,18 +285,30 @@ impl BatchChild {
     /// A wedged or crashed oracle is killed, reaped, and respawned, and the request
     /// retried on the fresh child, up to `attempts` times; only then does it panic.
     pub fn request(&mut self, request: &str) -> String {
-        self.try_request(request).unwrap_or_else(|why| {
-            panic!(
+        self.try_request(request).unwrap_or_else(|why| match why {
+            // Refused here, before any child saw it: no attempt, no stderr.
+            BatchFailure::NotOneLine => panic!("{} was not sent {request:?}: {why}", self.what),
+            _ => panic!(
                 "{} failed {} time(s) answering {request:?}: {why} (see the child's stderr above)",
                 self.what, self.attempts,
-            )
+            ),
         })
     }
 
     /// [`request`](Self::request), with the failure of the last attempt
     /// returned rather than panicked on. The child that failed it is gone, so
     /// the next request is put to a fresh one.
+    ///
+    /// A request that is blank or holds `\n` or `\r` is refused with
+    /// [`BatchFailure::NotOneLine`] before anything is written: responses are
+    /// paired with requests by position, one line each, so it would draw no
+    /// answer (an oracle that skips blank lines leaves the caller waiting out
+    /// the whole budget) or several, and every later request would get
+    /// another's.
     pub fn try_request(&mut self, request: &str) -> Result<String, BatchFailure> {
+        if request.trim().is_empty() || request.contains(['\n', '\r']) {
+            return Err(BatchFailure::NotOneLine);
+        }
         let mut last = None;
         for _ in 0..self.attempts {
             if self.io.is_none() {
@@ -311,6 +334,32 @@ impl BatchChild {
             }
         }
         Err(last.expect("a failed attempt records why"))
+    }
+
+    /// End the child: close its stdin, which ends an oracle's batch loop, and
+    /// wait up to `grace` for it to exit on its own, killing it if it has not.
+    /// Its exit status when it exited on its own; `None` when it was killed,
+    /// or was never spawned.
+    ///
+    /// Dropping the driver kills the child outright, which for a .NET oracle
+    /// leaves its runtime's debugger pipes behind in `TMPDIR`; a caller that
+    /// spawns a child per request ends each with this instead.
+    pub fn finish(mut self, grace: Duration) -> Option<std::process::ExitStatus> {
+        let mut io = self.io.take()?;
+        // `None` only while a write is in flight, which a finished round-trip
+        // never leaves: then the child is killed below.
+        drop(io.stdin.take());
+        let deadline = Instant::now() + grace;
+        loop {
+            match io.child.try_wait() {
+                Ok(Some(status)) => return Some(status),
+                Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+                Ok(None) | Err(_) => {
+                    io.kill();
+                    return None;
+                }
+            }
+        }
     }
 }
 

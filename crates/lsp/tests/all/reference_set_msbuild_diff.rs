@@ -803,11 +803,12 @@ fn fsharp_item_definition_default_matches_msbuild() {
 }
 
 /// A `<ProjectReference Update>` writing `ReferenceOutputAssembly=false`
-/// inside an `<ItemGroup>` whose `Condition` is a property function — legal
-/// MSBuild (true in the real build), outside our condition grammar. MSBuild
-/// executes the update and strips the reference; we skip the whole group,
-/// so the evaluator must distrust the un-mutated Include rather than fold
-/// `Mid.dll` from it — both sides agree `Mid` is absent.
+/// inside an `<ItemGroup>` whose `Condition` is an equality whose case
+/// folding is outside ASCII — legal MSBuild (true in the real build, without
+/// throwing), outside what we model. MSBuild executes the update and strips
+/// the reference; we skip the whole group, so the evaluator must distrust the
+/// un-mutated Include rather than fold `Mid.dll` from it — both sides agree
+/// `Mid` is absent.
 #[test]
 fn fsharp_condition_gated_reference_update_matches_msbuild() {
     let root = fixture_root("fs-ref-gated-update");
@@ -824,7 +825,7 @@ fn fsharp_condition_gated_reference_update_matches_msbuild() {
          \x20   <Compile Include=\"App.fs\" />\n\
          \x20   <ProjectReference Include=\"../Mid/Mid.fsproj\" />\n\
          \x20 </ItemGroup>\n\
-         \x20 <ItemGroup Condition=\"$([MSBuild]::Add(1, 1)) == 2\">\n\
+         \x20 <ItemGroup Condition=\"'É' == 'é'\">\n\
          \x20   <ProjectReference Update=\"../Mid/Mid.fsproj\" ReferenceOutputAssembly=\"false\" />\n\
          \x20 </ItemGroup>\n\
          </Project>\n",

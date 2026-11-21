@@ -605,7 +605,7 @@ mod package_version_tests {
     fn a_central_version_under_an_undecidable_condition_is_not_exact() {
         let reads = read(
             "<ItemGroup><PackageVersion Include=\"a\" Version=\"1\" \
-             Condition=\"$([System.String]::IsNullOrWhiteSpace(''))\" /></ItemGroup>",
+             Condition=\"'É' == 'é'\" /></ItemGroup>",
             &[],
             &["PackageVersion"],
         );
@@ -646,7 +646,7 @@ mod dependency_list_tests {
     fn a_copy_of_a_bucketed_list_is_not_exact() {
         let reads = read(
             "<ItemGroup><PackageReference Include=\"a\" Version=\"1\" \
-             Condition=\"$([System.String]::IsNullOrWhiteSpace(''))\" />\
+             Condition=\"'É' == 'é'\" />\
              <PackageVersion Include=\"@(PackageReference)\" /></ItemGroup>",
             &[],
             &["PackageVersion"],
@@ -666,7 +666,7 @@ mod global_package_reference_tests {
         let reads = read(
             "<ItemGroup><GlobalPackageReference Include=\"g\" Version=\"1\" Extra=\"e\" />\
              <PackageVersion Include=\"a\" Version=\"1\" \
-             Condition=\"$([System.String]::IsNullOrWhiteSpace(''))\" /></ItemGroup>",
+             Condition=\"'É' == 'é'\" /></ItemGroup>",
             &[],
             &["GlobalPackageReference", "PackageVersion"],
         );
@@ -751,7 +751,7 @@ mod target_tests {
     #[test]
     fn an_opaque_walk_makes_no_claim() {
         let (reads, _) = read_targets(
-            "<Import Project=\"t.targets\" Condition=\"$([System.String]::IsNullOrWhiteSpace(''))\" />",
+            "<Import Project=\"t.targets\" Condition=\"'É' == 'é'\" />",
             "<Target Name=\"A\" />",
             &["A"],
         );

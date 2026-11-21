@@ -110,6 +110,11 @@ the runtime fcs-dump runs on, so a self-contained bundle would check every file
 against its own directory — implementation assemblies plus
 FSharp.Compiler.Service itself — and fcs-dump refuses to start that way.
 
+fcs-dump refuses, unopened, any file it or FCS would read that is not a
+regular file (a FIFO, a device). That guard is Unix-only, and it has a
+check-then-open race (#1087); the "Files that are not regular" block in
+`tools/fcs-dump/Program.fs` states both limits.
+
 A request below F# 8.0 — the current FCS's support floor, below which it no
 longer behaves as the older compilers did because it deleted the features
 introduced there — goes to a second oracle, `tools/fcs-dump-legacy`: a frozen

@@ -1032,6 +1032,14 @@ fn rejection_message(cause: &RejectionCause, certain: bool) -> String {
                  `MatchOnMetadata` by more than item types — no evaluated value is trusted"
             )
         }
+        RejectionCause::ThrowingExpression { expression } if certain => format!(
+            "MSBuild rejects this project: it cannot evaluate the property function \
+             `{expression}` — no evaluated value is trusted"
+        ),
+        RejectionCause::ThrowingExpression { expression } => format!(
+            "MSBuild may reject this project: it may be unable to evaluate the property \
+             function `{expression}` — no evaluated value is trusted"
+        ),
     }
 }
 
@@ -1874,7 +1882,7 @@ mod tests {
                 DiagnosticSeverity::ERROR,
             ),
             (
-                "<Project>\n  <PropertyGroup Condition=\"$([System.String]::IsNullOrWhiteSpace(''))\">\n    \
+                "<Project>\n  <PropertyGroup Condition=\"'É' == 'é'\">\n    \
                  <R Condition=\"tr ue\">x</R>\n  </PropertyGroup>\n</Project>",
                 2,
                 DiagnosticSeverity::WARNING,

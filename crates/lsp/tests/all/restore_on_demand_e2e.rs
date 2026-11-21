@@ -21,6 +21,15 @@ use borzoi::server::State;
 /// (`fsharp.core/10.1.204/`). Pinned explicitly so the resolve is deterministic.
 const FSHARP_CORE_VERSION: &str = "10.1.204";
 
+/// A server's state with on-demand restore on (a trust opt-in, off by
+/// default), under the host's own environment, as [`State::default`] reads it.
+fn restoring_state() -> State {
+    crate::common::assert_host_has_a_user_nuget_config();
+    let mut state = State::default();
+    state.semantic.set_on_demand_restore_enabled(true);
+    state
+}
+
 fn namespace(parts: &[&str]) -> Vec<String> {
     parts.iter().map(|part| part.to_string()).collect()
 }
@@ -74,9 +83,7 @@ fn on_demand_restore_populates_the_env_without_a_project_assets_json() {
     let root = write_unrestored_project("resolve");
     let fsproj = root.join("App.fsproj");
 
-    let mut state = State::default();
-    // On-demand restore is a trust opt-in, off by default; enable it for the test.
-    state.semantic.set_on_demand_restore_enabled(true);
+    let mut state = restoring_state();
     let docs = borzoi::vfs::Vfs::new();
 
     // Resolving the project builds and caches its assembly env; with no assets
@@ -135,9 +142,7 @@ fn the_workspace_entry_point_restores_on_its_own() {
     let root = write_unrestored_project("standalone");
     let fsproj = root.join("App.fsproj");
 
-    let mut state = State::default();
-    // On-demand restore is a trust opt-in, off by default; enable it for the test.
-    state.semantic.set_on_demand_restore_enabled(true);
+    let mut state = restoring_state();
     let dotnet_root = state.workspace.dotnet_root_for_project(&fsproj);
     assert!(
         dotnet_root.is_some(),
@@ -284,8 +289,7 @@ fn framework_and_flowed(state: &mut State, fsproj: &std::path::Path) -> (bool, b
 #[test]
 fn a_symlink_spelt_project_never_loses_its_references_packages() {
     let root = write_unrestored_pair_behind_a_symlink("symlink-spelt");
-    let mut state = State::default();
-    state.semantic.set_on_demand_restore_enabled(true);
+    let mut state = restoring_state();
 
     let (framework, flowed) =
         framework_and_flowed(&mut state, &root.join("link").join("App.fsproj"));
@@ -305,8 +309,7 @@ fn a_symlink_spelt_project_never_loses_its_references_packages() {
 #[test]
 fn by_its_real_path_the_reference_brings_its_package() {
     let root = write_unrestored_pair_behind_a_symlink("symlink-control");
-    let mut state = State::default();
-    state.semantic.set_on_demand_restore_enabled(true);
+    let mut state = restoring_state();
 
     let (framework, flowed) =
         framework_and_flowed(&mut state, &root.join("real").join("App.fsproj"));
@@ -325,8 +328,7 @@ fn by_its_real_path_the_reference_brings_its_package() {
 #[test]
 fn the_real_spelling_keeps_its_reference_after_a_symlinked_one() {
     let root = write_unrestored_pair_behind_a_symlink("symlink-first");
-    let mut state = State::default();
-    state.semantic.set_on_demand_restore_enabled(true);
+    let mut state = restoring_state();
 
     framework_and_flowed(&mut state, &root.join("link").join("App.fsproj"));
     let (framework, flowed) =

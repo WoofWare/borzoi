@@ -605,6 +605,15 @@ pub(crate) struct PropertyProvenance<T = Range<usize>> {
 pub(crate) type ResolvedProvenance = PropertyProvenance<SdkPackagePropertyTaint>;
 
 impl<T> PropertyProvenance<T> {
+    /// Whether the write may have stored something other than what the walk
+    /// holds: any channel records a doubt.
+    pub(crate) fn is_doubtful(&self) -> bool {
+        matches!(self.taint, TaintOutcome::Set(_))
+            || matches!(self.unpinned, UnpinnedOutcome::Set(_))
+            || matches!(self.refused, RefusedOutcome::Set)
+            || matches!(self.stale, StaleOutcome::Set(_))
+    }
+
     /// Resolve the taint payload, leaving the other two channels' verdicts
     /// untouched.
     pub(crate) fn map_taint<U>(self, f: impl FnOnce(T) -> U) -> PropertyProvenance<U> {

@@ -1026,7 +1026,7 @@ fn an_undecided_import_before_the_sdk_withholds_the_overridable_seeds() {
                     &format!(
                         r#"<Project>
   <PropertyGroup><X>abc</X></PropertyGroup>
-  <Import Project="hidden.props" Condition="'$(X.Substring(0,1))' == 'a'" />
+  <Import Project="hidden.props" Condition="'$(X)É' == '$(X)é'" />
   <Import Sdk="Fake.Sdk" Project="Sdk.props" />
   {}
   <PropertyGroup><ProbeCommonPropsFrom>$(CommonPropsFrom)</ProbeCommonPropsFrom></PropertyGroup>
