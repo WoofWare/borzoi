@@ -1118,7 +1118,7 @@ mod tests {
     #[test]
     fn a_possible_registration_refusal_claims_nothing_of_the_value() {
         let cause = RejectionCause::UsingTaskRegistration {
-            task: "X".to_owned(),
+            task: "X".into(),
             attribute: "ParameterType".to_owned(),
             value: "System.TimeSpan".to_owned(),
         };

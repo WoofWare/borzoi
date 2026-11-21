@@ -215,6 +215,7 @@ pub(super) fn first_repeat<K: Ord>(keys: &[K]) -> Option<(usize, usize)> {
     let mut found: Option<(usize, usize)> = None;
     let mut run_start = 0;
     for (i, pair) in order.windows(2).enumerate() {
+        crate::cost::count(|costs| costs.name_comparisons += 1);
         if keys[pair[0]] != keys[pair[1]] {
             run_start = i + 1;
         } else if i == run_start && found.is_none_or(|(_, later)| pair[1] < later) {

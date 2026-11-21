@@ -30,14 +30,16 @@ use borzoi_msbuild::RejectionCertainty;
 use borzoi_oracle_harness::hostile::{self, Dimension, coverage, value};
 use common::{Oracle, SplitMix64};
 
-/// An inline task's `<UsingTask>` attributes, but for its children.
-const INLINE: &str = "TaskName=\"X\" TaskFactory=\"RoslynCodeTaskFactory\" \
-                      AssemblyFile=\"$(MSBuildToolsPath)\\Microsoft.Build.Tasks.Core.dll\"";
+/// An inline task's `<UsingTask>` attributes, but for its children: every
+/// value one the walk holds for certain, so that a refusal in the children is
+/// MSBuild's first.
+const INLINE: &str = "TaskName=\"X\" TaskFactory=\"RoslynCodeTaskFactory\" AssemblyFile=\"y.dll\"";
 
 /// Items every graded document declares: `Flags`, a list of one boolean, so
 /// that a value naming it expands to one MSBuild takes, where the walk cannot
-/// tell.
-const ITEMS: &str = "<ItemGroup><Flags Include=\"true\" /></ItemGroup>";
+/// tell; and `Input`, of one short item, which a transform taking more of it
+/// throws on.
+const ITEMS: &str = "<ItemGroup><Flags Include=\"true\" /><Input Include=\"a\" /></ItemGroup>";
 
 /// A gate MSBuild evaluates to true and the walk cannot decide.
 const UNDECIDED_TRUE: &str = "'É' == 'é'";
@@ -556,6 +558,49 @@ fn hand_picked_registrations() {
             false,
             None,
         ),
+        // A value the walk does not hold for certain (a toolset's directory)
+        // before a refusal: MSBuild passes it, but the walk cannot show it
+        // does, so the refusal's cause is only possible.
+        (
+            "<UsingTask TaskName=\"X\" TaskFactory=\"RoslynCodeTaskFactory\" \
+             AssemblyFile=\"$(MSBuildToolsPath)\\Microsoft.Build.Tasks.Core.dll\">\
+             <Task Evaluate=\"off\">x</Task></UsingTask>"
+                .to_owned(),
+            true,
+            Some(Possible),
+        ),
+        // An earlier task MSBuild may stop at, on a value the walk doubts
+        // and takes (`F` is `first`, or empty), before a later refusal.
+        (
+            format!(
+                "<PropertyGroup><F>first</F><F Condition=\"{UNDECIDED_TRUE}\"></F></PropertyGroup>\
+                 <UsingTask TaskName=\"$(F)\" AssemblyFile=\"y.dll\" />\
+                 <UsingTask TaskName=\"Y\" AssemblyFile=\"$(Missing)\" />"
+            ),
+            true,
+            Some(Possible),
+        ),
+        // A name with literal text that MSBuild may still fail to expand: `T`
+        // may hold a transform that throws on `Input`.
+        (
+            format!(
+                "<PropertyGroup><T>y</T><T Condition=\"{UNDECIDED_TRUE}\">@(Input->Substring(4))</T>\
+                 </PropertyGroup><UsingTask TaskName=\"Prefix$(T)\" AssemblyFile=\"$(Missing)\" />"
+            ),
+            true,
+            Some(Possible),
+        ),
+        // A body MSBuild does not expand, its `Evaluate` certainly false: a
+        // throw in it is no stop before the parameters.
+        (
+            inline_task(
+                "",
+                "<ParameterGroup><A Required=\"bad\" /></ParameterGroup>\
+                 <Task Evaluate=\"false$(Missing)\">$(Empty.Substring(1))</Task>",
+            ),
+            true,
+            Some(Certain),
+        ),
         // A child the loader does not take, where no parse configuration can
         // have it skipped
         // ([`a_child_a_parse_configuration_may_skip_needs_no_certain_factory`]).
@@ -720,7 +765,7 @@ fn parameters_colliding_by_case_fail_the_registry() {
     assert_eq!(
         rejection.cause,
         borzoi_msbuild::RejectionCause::UsingTaskParameterCollision {
-            task: "X".to_owned(),
+            task: "X".into(),
             first: "A".to_owned(),
             second: "a".to_owned(),
         },
@@ -874,6 +919,9 @@ const SPECIAL: &[&str] = &[
     "$([System.String]::IsNullOrWhiteSpace('é'))",
     "$(At)(Nothing)",
     "$(At)",
+    "$(F)",
+    "Prefix$(T)",
+    "false$(Missing)",
     "$([System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture)",
     "$(Empty)",
     "%(M)",
@@ -1000,7 +1048,9 @@ fn composite_document(rng: &mut SplitMix64) -> String {
 }
 
 /// The property writes every [`composite_sweep`] document makes.
-const COMPOSITE_WRITES: &str = "<P>a</P><At>@</At><At Condition=\"'É' == 'é'\">@</At>";
+const COMPOSITE_WRITES: &str = "<P>a</P><At>@</At><At Condition=\"'É' == 'é'\">@</At>\
+                                <F>first</F><F Condition=\"'É' == 'é'\"></F>\
+                                <T>y</T><T Condition=\"'É' == 'é'\">@(Input->Substring(4))</T>";
 
 /// `cases` documents of one or two whole `<UsingTask>`s from `seed`
 /// ([`composite_document`]), each graded ([`grade`]): a certain rejection
@@ -1014,7 +1064,16 @@ fn composite_sweep(seed: u64, cases: usize) -> Census {
             .map(|_| composite_document(&mut rng))
             .collect();
         tally.cases += 1;
-        let graded = grade(&mut oracle, COMPOSITE_WRITES, &body, Doubt::None);
+        // `F` and `T` are written under an undecided gate with a value other
+        // than the one the walk holds: a rejection resting on MSBuild's is
+        // the #1051 gap, which `grade` lets pass only where one is read.
+        let doubt = if body.contains("$(F)") || body.contains("$(T)") {
+            Doubt::Differs
+        } else {
+            Doubt::None
+        };
+        let graded = grade(&mut oracle, COMPOSITE_WRITES, &body, doubt);
+        tally.unheld_value += usize::from(graded.msbuild_rejects && graded.walk.is_none());
         tally.msbuild_rejects += usize::from(graded.msbuild_rejects);
         match graded.walk {
             Some(RejectionCertainty::Certain) => tally.certain += 1,
