@@ -7,8 +7,9 @@
 //! the baseline revision, over the points the sweep dumped
 //! (`BORZOI_PATH_FIXUP_DUMP`), and writes
 //! `tests/manifests/path_fixup_baseline.txt`. It reads the walk only through
-//! the crate's public surface, and lays out the sweep's fixture itself, so
-//! that it builds at a revision older than the sweep.
+//! the crate's public surface, and lays out the sweep's fixture itself from
+//! the layout the sweep dumped, so that it builds at a revision older than
+//! the sweep.
 
 #![cfg(unix)]
 
@@ -21,51 +22,38 @@ use borzoi_msbuild::observed::host_fs;
 use borzoi_msbuild::test_support::{EvaluationReads, ReadProbe, parse_fsproj_reads};
 use borzoi_msbuild::{GlobResolver, ItemKind, ParsedProject, PropertyRead, glob_resolver};
 
-/// The fixture's working directories, as the sweep lays them out, and the
-/// relative segments each holds.
-const DIRECTORIES: &[(&str, &[&str])] = &[
-    ("cwd-empty", &[]),
-    ("cwd-full", &["seg", "obj"]),
-    ("cwd-seg", &["seg"]),
-    ("cwd-obj", &["obj"]),
-    ("proj-full", &["seg", "obj"]),
-    ("proj-empty", &[]),
-];
-
-/// Files under `proj-full`'s segments, and beside both projects.
-const ITEM_FILES: &[&str] = &["seg/a.fs", "seg/b c.fs", "obj/a.fs"];
-
-/// The projects, each beside an `a.fs`.
-const PROJECTS: [&str; 2] = ["proj-full", "proj-empty"];
-
-/// Each project's starts, as the sweep evaluates it from them.
-fn starts_of(project: &str) -> [&'static str; 5] {
-    match project {
-        "proj-full" => ["cwd-empty", "cwd-full", "cwd-seg", "cwd-obj", "proj-full"],
-        "proj-empty" => ["cwd-empty", "cwd-full", "cwd-seg", "cwd-obj", "proj-empty"],
-        other => panic!("no project {other}"),
+/// Lay the dumped `layout` (the sweep's `layout_text`) out under `root`, as
+/// the sweep's `lay_out` does, and return each project's starts from its
+/// `project` lines.
+fn lay_out(root: &std::path::Path, layout: &str) -> HashMap<String, Vec<String>> {
+    let mut starts = HashMap::new();
+    for line in layout.lines() {
+        let mut fields = line.split('\t');
+        match fields.next() {
+            Some("dir") => {
+                let dir = root.join(fields.next().expect("a directory"));
+                std::fs::create_dir_all(&dir).unwrap();
+                for name in fields {
+                    std::fs::create_dir_all(dir.join(name)).unwrap();
+                }
+            }
+            Some("file") => {
+                std::fs::write(root.join(fields.next().expect("a file")), "").unwrap();
+            }
+            Some("project") => {
+                let project = fields.next().expect("a project").to_owned();
+                let labels = fields
+                    .next()
+                    .expect("its starts")
+                    .split(',')
+                    .map(str::to_owned)
+                    .collect();
+                starts.insert(project, labels);
+            }
+            other => panic!("no layout line {other:?}"),
+        }
     }
-}
-
-/// The layout above as text, as the sweep's `layout_text` spells its own, so
-/// that a point's key covers it: a layout the two files lay out apart keys
-/// no point alike, and every row reads as stale.
-fn layout_text() -> String {
-    let mut text = String::new();
-    for (dir, segments) in DIRECTORIES {
-        text.push_str(&format!("dir\t{dir}\t{}\n", segments.join(",")));
-    }
-    for file in ITEM_FILES {
-        text.push_str(&format!("file\tproj-full/{file}\n"));
-    }
-    for project in PROJECTS {
-        text.push_str(&format!("file\t{project}/a.fs\n"));
-        text.push_str(&format!(
-            "project\t{project}\t{}\n",
-            starts_of(project).join(",")
-        ));
-    }
-    text
+    starts
 }
 
 #[test]
@@ -81,18 +69,8 @@ fn record_baseline() {
     let root = host_fs::canonicalize(tmp.path()).unwrap().join("fixture");
     std::fs::create_dir(&root).unwrap();
     let root_text = root.to_str().unwrap().to_owned();
-    for (dir, segments) in DIRECTORIES {
-        std::fs::create_dir_all(root.join(dir)).unwrap();
-        for segment in *segments {
-            std::fs::create_dir_all(root.join(dir).join(segment)).unwrap();
-        }
-    }
-    for file in ITEM_FILES {
-        std::fs::write(root.join("proj-full").join(file), "").unwrap();
-    }
-    for dir in PROJECTS {
-        std::fs::write(root.join(dir).join("a.fs"), "").unwrap();
-    }
+    let layout = host_fs::read_to_string(dump.join("layout.txt")).unwrap();
+    let starts_of = lay_out(&root, &layout);
     let uext = common::oracle_environment()
         .get("MSBuildUserExtensionsPath")
         .cloned()
@@ -181,10 +159,7 @@ fn record_baseline() {
         let served_reads = parse_fsproj_reads(&file, &extra, &env, None, globs, None, &probe).ok();
         let pure = borzoi_msbuild::parse_fsproj(&file, &extra, &env).ok();
         // Every generated input, hashed as the sweep's `point_fingerprint`.
-        let fingerprint = fnv1a(&format!(
-            "{text}\n--\n{meta}\n--\n{env_text}\n--\n{}",
-            layout_text()
-        ));
+        let fingerprint = fnv1a(&format!("{text}\n--\n{meta}\n--\n{env_text}\n--\n{layout}"));
         let mut row = format!("{key}\t{fingerprint}");
         let mut push = |mode: &str, claim: Option<Vec<String>>| {
             row.push_str(&format!("\t{mode} {}", encode_claim(&place(claim))));
@@ -200,7 +175,7 @@ fn record_baseline() {
                 .and_then(|(p, r)| claim(p, Some(r), &read)),
         );
         push("pu", pure.as_ref().and_then(|p| claim(p, None, &read)));
-        for label in starts_of(&project) {
+        for label in &starts_of[&project] {
             let dir = root.join(label);
             let supplied =
                 parse_fsproj_reads(&file, &extra, &env, None, globs, Some(&dir), &probe).ok();

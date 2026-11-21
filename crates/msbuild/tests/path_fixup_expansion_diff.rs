@@ -78,18 +78,71 @@ use borzoi_oracle_harness::manifest::{self, Manifest};
 use common::{Oracle, SplitMix64};
 use tempfile::TempDir;
 
-/// The fixture's working directories, in [`World::starts`] order, and the
-/// relative segments the generator writes (`seg`, `obj`) each holds as a
-/// directory. `path_fixup_baseline.rs` lays out the same table, and both
-/// hash it into every point's key ([`layout_text`]).
-const STARTS: [(&str, &[&str]); 6] = [
-    ("cwd-empty", &[]),
-    ("cwd-full", &["seg", "obj"]),
-    ("cwd-seg", &["seg"]),
-    ("cwd-obj", &["obj"]),
-    ("proj-full", &["seg", "obj"]),
-    ("proj-empty", &[]),
+/// Which of the relative names a generated expansion may probe
+/// ([`relative_names`]) a working directory holds as directories.
+#[derive(Clone, Copy)]
+enum Holds {
+    Nothing,
+    Every,
+    Only(&'static str),
+}
+
+/// The fixture's working directories, in [`World::starts`] order, and what
+/// each holds.
+const STARTS: [(&str, Holds); 6] = [
+    ("cwd-empty", Holds::Nothing),
+    ("cwd-full", Holds::Every),
+    ("cwd-seg", Holds::Only("seg")),
+    ("cwd-obj", Holds::Only("obj")),
+    ("proj-full", Holds::Every),
+    ("proj-empty", Holds::Nothing),
 ];
+
+/// The names a start holds as directories.
+fn held(holds: Holds) -> Vec<String> {
+    match holds {
+        Holds::Nothing => Vec::new(),
+        Holds::Only(name) => vec![name.to_owned()],
+        Holds::Every => relative_names(),
+    }
+}
+
+/// Every relative first segment a generated expansion may ask MSBuild's
+/// fixup about, found by brute force over the generator's own vocabulary:
+/// each relative first segment of [`PREFIXES`] (alone, and before a `\`),
+/// inside each read [`TEMPLATES`] entry, inside each copy template or none,
+/// and each literal run of those templates, which the fixup asks about
+/// piece by piece. A start that holds every one varies every probe a point
+/// can make, not only `seg` and `obj`.
+fn relative_names() -> Vec<String> {
+    let mut names = std::collections::BTreeSet::new();
+    let mut note = |text: &str| {
+        let text = text.replace("$(Empty)", "");
+        if !text.contains('\\') {
+            return;
+        }
+        let first = text.split(['/', '\\']).next().unwrap_or_default();
+        if !matches!(first, "" | "." | "..") {
+            names.insert(first.to_owned());
+        }
+    };
+    let values: Vec<String> = PREFIXES
+        .iter()
+        .filter(|prefix| !prefix.starts_with(['/', '\\']))
+        .flat_map(|prefix| [(*prefix).to_owned(), format!("{prefix}\\x")])
+        .collect();
+    for read in TEMPLATES {
+        for run in read.split("{v}") {
+            note(run);
+        }
+        for copy in std::iter::once("{v}").chain(TEMPLATES.iter().copied()) {
+            for value in &values {
+                note(&read.replace("{v}", &copy.replace("{v}", value)));
+            }
+        }
+    }
+    names.into_iter().collect()
+}
 
 /// Files under `proj-full`'s segments, for the `Compile` globs to find.
 const ITEM_FILES: &[&str] = &["seg/a.fs", "seg/b c.fs", "obj/a.fs"];
@@ -132,15 +185,20 @@ const PROJECTS: [(&str, [usize; 5]); 2] = [
     ("proj-empty", [0, 1, 2, 3, 5]),
 ];
 
-/// The fixture's layout as text: each start's directory and the segments it
-/// holds, the files under `proj-full` and beside each project, and each
-/// project's starts. Hashed into every point's key ([`point_fingerprint`]),
-/// as `path_fixup_baseline.rs` hashes its own table, so that a layout the
-/// two files lay out apart keys no point alike.
+/// The fixture's layout as text: a `dir` line per start, its directory and
+/// each name it holds; a `file` line per file under `proj-full` and beside
+/// each project; and a `project` line per project, with its starts. The
+/// sweep lays the fixture out from it ([`lay_out`]), dumps it for
+/// `path_fixup_baseline.rs`, which lays its fixture out from that dump, and
+/// hashes it into every point's key ([`point_fingerprint`]).
 fn layout_text() -> String {
     let mut text = String::new();
-    for (dir, segments) in STARTS {
-        text.push_str(&format!("dir\t{dir}\t{}\n", segments.join(",")));
+    for (dir, holds) in STARTS {
+        text.push_str(&format!("dir\t{dir}"));
+        for name in held(holds) {
+            text.push_str(&format!("\t{name}"));
+        }
+        text.push('\n');
     }
     for file in ITEM_FILES {
         text.push_str(&format!("file\tproj-full/{file}\n"));
@@ -153,6 +211,28 @@ fn layout_text() -> String {
     text
 }
 
+/// Lay `layout` ([`layout_text`]) out under `root`, as
+/// `path_fixup_baseline.rs` does.
+fn lay_out(root: &std::path::Path, layout: &str) {
+    for line in layout.lines() {
+        let mut fields = line.split('\t');
+        match fields.next() {
+            Some("dir") => {
+                let dir = root.join(fields.next().expect("a directory"));
+                std::fs::create_dir_all(&dir).unwrap();
+                for name in fields {
+                    std::fs::create_dir_all(dir.join(name)).unwrap();
+                }
+            }
+            Some("file") => {
+                std::fs::write(root.join(fields.next().expect("a file")), "").unwrap();
+            }
+            Some("project") => {}
+            other => panic!("no layout line {other:?}"),
+        }
+    }
+}
+
 impl Fixture {
     /// The fixture for `seed`, in a new temporary directory under `parent`.
     fn new(seed: u64, parent: &std::path::Path) -> Fixture {
@@ -163,20 +243,7 @@ impl Fixture {
         // may share ([`placeholder`]).
         let root = host_fs::canonicalize(tmp.path()).unwrap().join("fixture");
         std::fs::create_dir(&root).unwrap();
-        for (dir, segments) in STARTS {
-            std::fs::create_dir_all(root.join(dir)).unwrap();
-            for segment in segments {
-                std::fs::create_dir_all(root.join(dir).join(segment)).unwrap();
-            }
-        }
-        // What the `Compile` globs find: files under the segments of
-        // `proj-full`, and beside both projects.
-        for file in ITEM_FILES {
-            std::fs::write(root.join("proj-full").join(file), "").unwrap();
-        }
-        for (dir, _) in PROJECTS {
-            std::fs::write(root.join(dir).join("a.fs"), "").unwrap();
-        }
+        lay_out(&root, &layout_text());
         let mut rng = SplitMix64(seed ^ 0x5eed_e1f1_0000_0001);
         let root_text = root.to_str().unwrap().to_owned();
         let environment: Vec<(String, String)> = (0..ENVIRONMENT_VALUES)
@@ -206,12 +273,12 @@ impl World {
         let fixture = Fixture::new(seed, &fixture_parent());
         let starts = STARTS
             .into_iter()
-            .map(|(label, segments)| {
+            .map(|(label, holds)| {
                 let dir = fixture.root.join(label);
                 Start {
                     label,
                     oracle: Oracle::spawn_in_dir_with_env(&dir, &fixture.environment),
-                    all_absent: segments.is_empty(),
+                    all_absent: held(holds).is_empty(),
                     dir,
                 }
             })
@@ -388,6 +455,10 @@ const AFTER: &str = "  </PropertyGroup>\n  <PropertyGroup>\n    <After>ok</After
 /// segment joined to a part by a `\`, whose respelling moves the value's
 /// fields; otherwise [`gen_value`]'s.
 fn gen_site_value(rng: &mut SplitMix64, root: &str, site: Site) -> String {
+    if site == Site::Item && rng.below(2) == 0 {
+        // A bare segment, whose glob finds `proj-full`'s files.
+        return (*rng.pick(&["seg", "obj"])).to_owned();
+    }
     if site == Site::Index && rng.below(2) == 0 {
         let segment = *rng.pick(&["seg", "obj"]);
         let separator = *rng.pick(&["\\", "%5c"]);
@@ -544,6 +615,9 @@ fn gen_point(
     // value whose pass respells a kept `\` (`./{v}//q`).
     let template = if site == Site::Index && rng.below(2) == 0 {
         "./{v}//q"
+    } else if site == Site::Item && matches!(value.as_str(), "seg" | "obj") {
+        // So that the glob under a bare segment finds its files.
+        "{v}"
     } else {
         *rng.pick(TEMPLATES)
     };
@@ -831,6 +905,39 @@ struct Seen {
 /// The served modes, as the baseline names them.
 const MODES: [&str; 3] = ["wi", "rd", "pu"];
 
+/// What a glob at an item point found, by MSBuild's answer from any start: a
+/// file under `proj-full`'s segments ([`ITEM_FILES`]) through a wildcard,
+/// and that, beside an `Exclude`, with the excluded file gone. Counted so
+/// that a gate whose globs found nothing cannot pass for one that grades
+/// them.
+#[derive(Default)]
+struct GlobCoverage {
+    found: usize,
+    found_beside_exclude: usize,
+}
+
+impl GlobCoverage {
+    fn count(&mut self, point: &Point, seen: &Seen) {
+        if point.site != Site::Item || !point.xml.contains('*') {
+            return;
+        }
+        let listed = |file: &str| {
+            let suffix = format!("/proj-full/{file}");
+            seen.theirs
+                .iter()
+                .flatten()
+                .flatten()
+                .any(|path| path.ends_with(&suffix))
+        };
+        if ITEM_FILES.iter().any(|file| listed(file)) {
+            self.found += 1;
+            if point.xml.contains("Exclude=") && listed("seg/b c.fs") && !listed("seg/a.fs") {
+                self.found_beside_exclude += 1;
+            }
+        }
+    }
+}
+
 /// [`grade`], holding every claim to the whole contract.
 fn check(world: &mut World, point: &Point) -> Seen {
     let seen = grade(world, point);
@@ -1044,7 +1151,14 @@ fn grade(world: &mut World, point: &Point) -> Seen {
         let Some(ours) = ours else {
             continue;
         };
-        if mode == "served with imports" {
+        // An identity is read through the probe; every other read through
+        // the walk the LSP serves.
+        let counted = if matches!(point.read, Read::Identities) {
+            "served reads"
+        } else {
+            "served with imports"
+        };
+        if mode == counted {
             served = true;
         }
         if moved && !own_backslash {
@@ -1143,7 +1257,7 @@ fn wrong_where_present(starts: [usize; 5], segment: &str) -> Vec<(String, Vec<&'
     let present: Vec<&'static str> = starts
         .iter()
         .map(|&start| STARTS[start])
-        .filter(|(_, segments)| segments.contains(&segment))
+        .filter(|(_, holds)| held(*holds).iter().any(|name| name == segment))
         .map(|(label, _)| label)
         .collect();
     MODES
@@ -1257,6 +1371,7 @@ fn expansions_hold_msbuilds_path_fixup() {
     let mut rng = SplitMix64(seed);
     let mut world = World::new(seed);
     let mut census: BTreeMap<(Source, Site), Census> = BTreeMap::new();
+    let mut globs = GlobCoverage::default();
     for case in 0..cases {
         let source = Source::ALL[case % Source::ALL.len()];
         let site = match *rng.pick(&Site::SOAKED) {
@@ -1266,6 +1381,7 @@ fn expansions_hold_msbuilds_path_fixup() {
         };
         let point = gen_point(&mut rng, &world.fixture, source, site, (case / 7) % 2);
         let seen = check_all_absent(&mut world, &point);
+        globs.count(&point, &seen);
         let entry = census.entry((source, site)).or_default();
         entry.points += 1;
         entry.served += usize::from(seen.served);
@@ -1303,6 +1419,7 @@ fn expansions_hold_msbuilds_path_fixup() {
     }
     let moved: usize = census.values().map(|e| e.moved).sum();
     assert!(moved > 0, "no point moved with the working directory");
+    assert!(globs.found > 0, "no item glob found a file");
     for site in Site::SOAKED {
         let (points, served, site_moved, supplied_moved) = census
             .iter()
@@ -1319,7 +1436,7 @@ fn expansions_hold_msbuilds_path_fixup() {
             // MSBuild reads the `\` of an `Exists` argument and of an item
             // spec as a separator, so what they answer is the same from every
             // working directory. The served walk commits most item specs, and a
-            // little over half of the `Exists` arguments (52% to 66% over
+            // little over half of the `Exists` arguments (57% to 74% over
             // twelve seeds), so their floors differ.
             Site::Exists | Site::Item => {
                 assert_eq!(site_moved, 0, "{site:?}: MSBuild's answer moved");
@@ -1582,6 +1699,7 @@ fn fixed_seed_sweep_regresses_nothing_main_answers() {
     if let Some(dump) = std::env::var_os("BORZOI_PATH_FIXUP_DUMP").map(PathBuf::from) {
         std::fs::create_dir_all(&dump).unwrap();
         std::fs::write(dump.join("env.txt"), &env).unwrap();
+        std::fs::write(dump.join("layout.txt"), layout_text()).unwrap();
         for (key, point) in &points {
             dump_point(&dump, key, point, &root);
         }
@@ -1596,9 +1714,11 @@ fn fixed_seed_sweep_regresses_nothing_main_answers() {
     let mut violations = 0usize;
     // The claims `main` made wrongly that the walk under test does not.
     let mut righted = 0usize;
+    let mut globs = GlobCoverage::default();
     for (key, point) in &points {
         let (source, site) = (point.source, point.site);
         let seen = grade(&mut world, point);
+        globs.count(point, &seen);
         violations += seen.violations.len();
         let hash = point_fingerprint(point, &root, &env);
         let Some(row) = baseline.get(key).filter(|row| row.hash == hash) else {
@@ -1653,6 +1773,14 @@ fn fixed_seed_sweep_regresses_nothing_main_answers() {
         "path fixup fixed seed: {violations} wrong claims, {} shared with main; \
          {righted} of main's wrong claims the walk does not make",
         pins.len()
+    );
+    eprintln!(
+        "item globs that found a file: {}, of them beside an Exclude that removed one: {}",
+        globs.found, globs.found_beside_exclude
+    );
+    assert!(
+        globs.found > 0 && globs.found_beside_exclude > 0,
+        "the fixed seed grades no glob that finds a file, or none beside an Exclude"
     );
     // A row no point visits is coverage the sweep lost without saying so.
     let generated: std::collections::HashSet<&str> =
@@ -1739,6 +1867,15 @@ fn sdk_output_paths_moved_by_the_startup_directory_are_pinned() {
     ];
     let tmp = TempDir::new().unwrap();
     let root = host_fs::canonicalize(tmp.path()).unwrap();
+    // Empty directory imports, so that neither side reads the host's from
+    // above the temporary directory.
+    for name in [
+        "Directory.Build.props",
+        "Directory.Build.targets",
+        "Directory.Packages.props",
+    ] {
+        std::fs::write(root.join(name), "<Project />").unwrap();
+    }
     let project_dir = root.join("app");
     let elsewhere = root.join("elsewhere");
     let full = root.join("full");
