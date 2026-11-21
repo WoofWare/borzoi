@@ -1290,9 +1290,10 @@ struct State<'r> {
     /// when it is set.
     rejection: Option<crate::Rejection>,
     /// How many constructs the walk is inside whose gate it did not decide
-    /// from certain inputs and took: a `<PropertyGroup>`, a `<Choose>` past a
-    /// `<When>` so decided, or an import whose path it did not compute from
-    /// certain values. Import gates count in
+    /// from certain inputs and took: a `<PropertyGroup>` or `<ItemGroup>`, a
+    /// `<Choose>` past a `<When>` so decided, or an import whose path it did
+    /// not compute from certain values; in the item pass, also a replayed
+    /// group the property pass did not reach for certain. Import gates count in
     /// [`directory_build::Bookkeeping`] instead. A construct reached inside
     /// one is not reached for certain ([`rejection::reach_is_certain`]).
     reach_doubted: usize,

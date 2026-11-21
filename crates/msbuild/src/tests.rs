@@ -561,6 +561,145 @@ fn compile_update_strand_without_a_pending_batch_declines() {
     assert!(p.items_uncertain, "{:?}", p.diagnostics);
 }
 
+/// `F` is `on` to the walk, which cannot decide `'É' == 'é'`, and `off` to
+/// MSBuild, which folds `É` to `é`: a gate on `F` is one the walk takes on an
+/// untrusted read.
+const UNTRUSTED_F: &str =
+    r#"<PropertyGroup><F>on</F><F Condition="'É' == 'é'">off</F></PropertyGroup>"#;
+
+/// Parse `body` after [`UNTRUSTED_F`], with the stranding tail every batch
+/// test shares: `Update="A.fs;A.fs"` leaves its batch at the second `A.fs`
+/// where no batch is pending, stranding `A.fs`, and `Update="B.fs;A.fs"`
+/// then collides on it, stranding `B.fs` with `CompileFirst` until `B.fs` is
+/// included. Where no batch is pending before the first, MSBuild compiles
+/// `B.fs` first.
+fn parse_before_a_strand(body: &str) -> ParsedProject {
+    parse(&format!(
+        r#"<Project>{UNTRUSTED_F}
+  {body}
+  <ItemGroup>
+    <Compile Update="A.fs;A.fs" Link="a" />
+    <Compile Update="B.fs;A.fs" CompileOrder="CompileFirst" />
+    <Compile Include="A.fs;B.fs" />
+  </ItemGroup></Project>"#
+    ))
+}
+
+/// The walk commits to no compile order but MSBuild's, `B.fs` first.
+fn assert_b_first_or_declined(p: &ParsedProject, case: &str) {
+    assert_order_or_declined(p, &["B.fs", "A.fs"], case);
+}
+
+/// The walk commits to no compile order but `msbuild`.
+fn assert_order_or_declined(p: &ParsedProject, msbuild: &[&str], case: &str) {
+    assert!(
+        p.items_uncertain || file_names(&p.items) == msbuild,
+        "{case}: {:?} {:?}",
+        file_names(&p.items),
+        p.diagnostics
+    );
+}
+
+/// A condition-false `Update` is none of MSBuild's batch: it leaves no batch
+/// pending for `A.fs;A.fs` to flush, so `B.fs` takes the stranded
+/// `CompileFirst`, as without it.
+#[test]
+fn a_condition_false_update_joins_no_batch() {
+    let p = parse_before_a_strand(
+        r#"<ItemGroup><Compile Update="Z.fs" Condition="'$(NeverSet)' == 'true'" Link="z" /></ItemGroup>"#,
+    );
+    assert_b_first_or_declined(&p, "false Update");
+}
+
+/// An `Update` the walk may or may not reach may or may not leave a batch
+/// pending: under an own gate, or a group gate, that the walk takes on an
+/// untrusted read or on an inexact one (MSBuild sets the toolset's
+/// `MSBuildStartupDirectory`, which the pure walk does not hold), or in a
+/// `<Choose>` arm it took so. MSBuild skips each, and compiles `B.fs` first.
+#[test]
+fn an_update_the_walk_may_not_reach_may_leave_no_batch_pending() {
+    for (case, body) in [
+        (
+            "own gate",
+            r#"<ItemGroup><Compile Update="Z.fs" Condition="'$(F)' == 'on'" Link="z" /></ItemGroup>"#,
+        ),
+        (
+            "group gate",
+            r#"<ItemGroup Condition="'$(F)' == 'on'"><Compile Update="Z.fs" Link="z" /></ItemGroup>"#,
+        ),
+        (
+            "inexact group gate",
+            r#"<ItemGroup Condition="'$(MSBuildStartupDirectory)' == ''"><Compile Update="Z.fs" Link="z" /></ItemGroup>"#,
+        ),
+        (
+            "Choose arm",
+            r#"<Choose><When Condition="'$(F)' == 'on'"><ItemGroup><Compile Update="Z.fs" Link="z" /></ItemGroup></When></Choose>"#,
+        ),
+        (
+            "Choose arm taken on an inexact read",
+            r#"<Choose><When Condition="'$(MSBuildStartupDirectory)' == ''"><ItemGroup><Compile Update="Z.fs" Link="z" /></ItemGroup></When></Choose>"#,
+        ),
+    ] {
+        assert_b_first_or_declined(&parse_before_a_strand(body), case);
+    }
+}
+
+/// A group the walk skips on an untrusted read may run: its `A.fs;A.fs`
+/// strands `A.fs`, and `B.fs;A.fs` collides on it, so MSBuild compiles
+/// `B.fs` first.
+#[test]
+fn a_group_the_walk_skips_may_feed_the_batch() {
+    let p = parse(&format!(
+        r#"<Project>{UNTRUSTED_F}
+  <ItemGroup Condition="'$(F)' == 'off'"><Compile Update="A.fs;A.fs" Link="a" /></ItemGroup>
+  <ItemGroup>
+    <Compile Update="B.fs;A.fs" CompileOrder="CompileFirst" />
+    <Compile Include="A.fs;B.fs" />
+  </ItemGroup></Project>"#
+    ));
+    assert_b_first_or_declined(&p, "skipped group");
+}
+
+/// An operation the walk may not reach behind a pending batch may flush it,
+/// or not: where MSBuild runs the `Include` the walk skips, `Z.fs`'s batch is
+/// flushed, `A.fs;A.fs` strands `A.fs`, and MSBuild compiles `B.fs` first.
+#[test]
+fn an_operation_the_walk_may_skip_may_flush_a_pending_batch() {
+    for (case, body) in [
+        (
+            "own gate",
+            r#"<ItemGroup><Compile Update="Z.fs" Link="z" /><Compile Include="C.fs" Condition="'$(F)' == 'off'" /></ItemGroup>"#,
+        ),
+        (
+            "group gate",
+            r#"<ItemGroup><Compile Update="Z.fs" Link="z" /></ItemGroup><ItemGroup Condition="'$(F)' == 'off'"><Compile Include="C.fs" /></ItemGroup>"#,
+        ),
+    ] {
+        assert_order_or_declined(
+            &parse_before_a_strand(body),
+            &["B.fs", "C.fs", "A.fs"],
+            case,
+        );
+    }
+}
+
+/// An undecided group whose only `Update` is certainly skipped leaves the
+/// batch as it was: MSBuild orders `A.fs, B.fs` whether the group runs or
+/// not.
+#[test]
+fn an_undecided_group_of_skipped_updates_leaves_the_batch() {
+    let p = parse(
+        r#"<Project>
+  <ItemGroup Condition="'É' == 'é'"><Compile Update="Z.fs" Condition="false" Link="z" /></ItemGroup>
+  <ItemGroup>
+    <Compile Update="B.fs;A.fs" CompileOrder="CompileFirst" />
+    <Compile Include="A.fs;B.fs" />
+  </ItemGroup></Project>"#,
+    );
+    assert!(!p.items_uncertain, "{:#?}", p.diagnostics);
+    assert_eq!(file_names(&p.items), ["A.fs", "B.fs"]);
+}
+
 #[test]
 fn compile_update_compile_order_keeps_original_order_within_bucket() {
     let src = r#"<Project>
@@ -5039,13 +5178,11 @@ fn an_update_leaving_batched_entries_marks_the_set_uncertain() {
     // `Update` named) removes its earlier fragments by text, not by the
     // batch's full-path key, so they stay and are applied at the next
     // flush, after the `Include`. Probed (dotnet 10): `Beta` gets the
-    // override. The leaving `Update` need not write a package metadatum,
-    // and need not run: a condition-false one is batched too.
-    for first in [
-        r#"<PackageReference Update="Alpha;Alpha" />"#,
-        r#"<PackageReference Update="Alpha;Alpha" Condition="'$(NeverSet)' == 'true'" />"#,
-    ] {
-        let src = format!(
+    // override. The leaving `Update` need not write a package metadatum, but
+    // it must run: a condition-false one is none of the batch's, and leaves
+    // `Beta` no override (probed, `dotnet msbuild`, SDK 10.0.401).
+    let src = |first: &str| {
+        format!(
             r#"<Project>
   <ItemGroup>
     {first}
@@ -5053,13 +5190,27 @@ fn an_update_leaving_batched_entries_marks_the_set_uncertain() {
     <PackageReference Include="Alpha;Beta" Version="1.0" />
   </ItemGroup>
 </Project>"#
-        );
-        let p = parse(&src);
-        assert!(
-            p.package_references_uncertain,
-            "{first}: the second Update leaves Beta's override in the batch"
-        );
-    }
+        )
+    };
+    let p = parse(&src(r#"<PackageReference Update="Alpha;Alpha" />"#));
+    assert!(
+        p.package_references_uncertain,
+        "the second Update leaves Beta's override in the batch"
+    );
+    let p = parse(&src(
+        r#"<PackageReference Update="Alpha;Alpha" Condition="'$(NeverSet)' == 'true'" />"#,
+    ));
+    assert!(
+        !p.package_references_uncertain,
+        "{:?}",
+        p.package_reference_uncertainties
+    );
+    let beta = p
+        .package_references
+        .iter()
+        .find(|r| r.id == "Beta")
+        .expect("Beta captured");
+    assert_eq!(beta.version_override, None);
     // Two single-fragment Updates of one identity leave nothing: the second
     // fails at its first fragment, before adding any.
     let src = r#"<Project>
