@@ -44,7 +44,6 @@
 mod common;
 
 use std::path::Path;
-use std::process::Command;
 use std::time::Duration;
 
 use borzoi_msbuild::observed::host_fs::{self, HostPath};
@@ -52,7 +51,7 @@ use borzoi_msbuild::test_support::unescape;
 use borzoi_oracle_harness::BoundedCommand;
 use borzoi_oracle_harness::fsc_args::assembly_name_of;
 use borzoi_oracle_harness::msbuild_oracle::{
-    BuildInputs, FscArgsDecline, FscArgsRequest, FscBuild, build_environment, fsc_args,
+    BuildInputs, FscArgsDecline, FscArgsRequest, FscBuild, fsc_args, msbuild_command,
 };
 
 /// What `fsc_args` must report for a fixture.
@@ -325,14 +324,14 @@ fn fixtures() -> Vec<Fixture> {
 }
 
 /// The `FscCommandLineArgs` a real build of `project` reports through
-/// `-getItem` (unescaped), in the environment `fsc_args` builds in. Run on the
+/// `-getItem` (unescaped), started as `fsc_args` starts its build
+/// (`msbuild_command`). Run on the
 /// control, a second copy of the fixture, so it builds from scratch.
 fn reported_arguments(project: &Path, globals: &[(&str, &str)]) -> Vec<String> {
     let dir = project.parent().unwrap();
     let out_file = dir.join("fsc-args-items.json");
-    let mut cmd = Command::new("dotnet");
-    cmd.current_dir(dir).args([
-        "msbuild",
+    let mut cmd = msbuild_command(dir, &BuildInputs::new());
+    cmd.args([
         "-nodeReuse:false",
         "-restore",
         "-t:Build",
@@ -343,7 +342,7 @@ fn reported_arguments(project: &Path, globals: &[(&str, &str)]) -> Vec<String> {
         cmd.arg(format!("-p:{name}={value}"));
     }
     cmd.arg(format!("-getResultOutputFile:{}", out_file.display()));
-    cmd.arg(project).env_clear().envs(build_environment());
+    cmd.arg(project);
     let out = BoundedCommand::new(cmd)
         .timeout(Duration::from_secs(900))
         .run()
@@ -371,17 +370,12 @@ fn reported_arguments(project: &Path, globals: &[(&str, &str)]) -> Vec<String> {
 
 /// A plain build of `project` in place, under `inputs`, which must succeed.
 fn plain_build(project: &Path, inputs: &BuildInputs) {
-    let mut cmd = Command::new("dotnet");
-    cmd.current_dir(project.parent().unwrap()).args([
-        "msbuild",
-        "-nodeReuse:false",
-        "-restore",
-        "-t:Build",
-    ]);
+    let mut cmd = msbuild_command(project.parent().unwrap(), inputs);
+    cmd.args(["-nodeReuse:false", "-restore", "-t:Build"]);
     for (name, value) in inputs.globals() {
         cmd.arg(format!("-p:{name}={value}"));
     }
-    cmd.arg(project).env_clear().envs(build_environment());
+    cmd.arg(project);
     BoundedCommand::new(cmd)
         .timeout(Duration::from_secs(900))
         .run_ok(format_args!("plain build of {}", project.display()));
