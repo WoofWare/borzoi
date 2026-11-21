@@ -1054,19 +1054,31 @@ enum RegistrationValue {
     SomeBoolean,
 }
 
-/// The value MSBuild registers `raw` as, expanded with the file system where
-/// the walk has it, as its other expansions are, so that a probe it makes is
-/// recorded and a function that reads the file system is computed.
-fn registration_value(raw: &str, state: &State<'_>) -> RegistrationValue {
+/// `raw` expanded as MSBuild registers it, with the file system where the
+/// walk has it, as its other expansions are, so that a probe it makes is
+/// recorded and a function that reads the file system is computed: the
+/// value, escapes and all, and the expansion's issues. Each attribute the
+/// registration reads is expanded once, here, for its throws and its rules
+/// alike.
+fn registration_expansion(raw: &str, state: &State<'_>) -> (String, Vec<properties::Issue>) {
     crate::cost::count(|costs| costs.registration_expansions += 1);
     let (value, issues) = if state.follow_imports {
         properties::substitute_with_fs(raw, &state.lookup, state.observer)
     } else {
         properties::substitute(raw, &state.lookup)
     };
-    let value = value.ignoring_trust().as_escaped().to_owned();
-    // An expression MSBuild throws on is judged where it is
-    // ([`judge_unwalked_text`]).
+    (value.ignoring_trust().as_escaped().to_owned(), issues)
+}
+
+/// The value MSBuild registers `raw` as, from its expansion
+/// ([`registration_expansion`]).
+fn registration_value(
+    raw: &str,
+    value: String,
+    issues: &[properties::Issue],
+    state: &State<'_>,
+) -> RegistrationValue {
+    // An expression MSBuild throws on is judged where it is, in the step.
     if issues
         .iter()
         .any(|issue| matches!(issue, properties::Issue::Throws { .. }))
@@ -1215,10 +1227,14 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
                 attribute_name: &str,
                 rule: Option<&dyn Fn(&str) -> Registered>|
      -> Option<String> {
-        judge_unwalked_text(state, raw, reached, span.clone());
+        let (expanded, issues) = registration_expansion(raw, state);
+        let thrown = throws_in(&issues);
+        if !thrown.is_empty() {
+            judge_throwing_expression(state, thrown, reached, span.clone());
+        }
         // An attribute no rule judges is read for its throws alone.
         rule?;
-        let value = registration_value(raw, state);
+        let value = registration_value(raw, expanded, &issues, state);
         let certain = match &value {
             RegistrationValue::Certain(value) => Some(value.clone()),
             _ => None,
@@ -1408,13 +1424,15 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
             if let Some((first, _)) = collision.filter(|(first, second)| {
                 *second == at
                     && loader::qname(parameters[*first]) != loader::qname(parameters[*second])
+                    && loader::is_valid_name(loader::qname(parameters[*first]))
+                    && loader::is_valid_name(loader::qname(parameters[*second]))
             }) {
                 state.note_rejection(
                     certain_if(reached),
                     RejectionCause::UsingTaskParameterCollision {
                         task: std::sync::Arc::clone(&task),
-                        first: loader::qname(parameters[first]).to_owned(),
-                        second: loader::qname(parameter).to_owned(),
+                        first: preview(loader::qname(parameters[first])).into(),
+                        second: preview(loader::qname(parameter)).into(),
                     },
                     parameter.range(),
                 );

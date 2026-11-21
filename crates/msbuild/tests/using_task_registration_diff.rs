@@ -117,7 +117,17 @@ fn grade(oracle: &mut Oracle, writes: &str, body: &str, doubt: Doubt) -> Graded 
                     task.len()
                 );
             }
-            borzoi_msbuild::RejectionCause::UsingTaskParameterCollision { task, .. } => {
+            borzoi_msbuild::RejectionCause::UsingTaskParameterCollision {
+                task,
+                first,
+                second,
+            } => {
+                assert!(
+                    first.len() <= bound && second.len() <= bound,
+                    "a collision keeps names of {} and {} bytes",
+                    first.len(),
+                    second.len()
+                );
                 assert!(
                     task.len() <= bound,
                     "a collision keeps a task name of {} bytes",
@@ -270,10 +280,11 @@ fn alone(
                 other => panic!("a registration attribute the differential does not know: {other}"),
             }
         }
-        RejectionCause::UsingTaskParameterCollision { first, second, .. } => (
+        // `raw`: the two parameters as written, the names whole.
+        RejectionCause::UsingTaskParameterCollision { .. } => (
             format!(
-                "<UsingTask {INLINE}><ParameterGroup><{first} /><{second} /></ParameterGroup>\
-                 <Task>x</Task></UsingTask>"
+                "<UsingTask {INLINE}><ParameterGroup>{}</ParameterGroup><Task>x</Task></UsingTask>",
+                raw.expect("a collision's parameters, read from the document")
             ),
             "",
         ),
@@ -319,6 +330,9 @@ fn assert_msbuild_refuses_alone(
         borzoi_msbuild::RejectionCause::UsingTaskRegistration { attribute, .. } => {
             raw_attribute(xml, rejection.span.clone(), attribute)
         }
+        borzoi_msbuild::RejectionCause::UsingTaskParameterCollision { .. } => {
+            Some(colliding_parameters(xml, rejection.span.start))
+        }
         _ => None,
     };
     let Some((body, attribute)) = alone(cause, raw.as_deref()) else {
@@ -326,9 +340,10 @@ fn assert_msbuild_refuses_alone(
     };
     // At the document's own path, so that what reads the project's name or
     // directory reads what it did there.
-    let alone = format!(
-        "<Project><PropertyGroup><Empty></Empty>{writes}</PropertyGroup>{ITEMS}{body}</Project>"
-    );
+    // The document as it was, every property and item in it, with its
+    // `<UsingTask>`s replaced by the one construct.
+    let _ = writes;
+    let alone = without_using_tasks(xml).replacen("</Project>", &format!("{body}</Project>"), 1);
     std::fs::write(path, &alone).unwrap();
     let Some(rejected) = design_time_code(oracle, &alone, path) else {
         panic!(
@@ -350,6 +365,47 @@ fn assert_msbuild_refuses_alone(
              {alone}\nclaimed in {xml}"
         );
     }
+}
+
+/// The parameter starting at `at` in `xml` and the earlier one its name folds
+/// to, as empty elements of their names as written: what a collision the walk
+/// claims there is between.
+fn colliding_parameters(xml: &str, at: usize) -> String {
+    let name = |node: roxmltree::Node<'_, '_>| -> String {
+        xml[node.range().start + 1..]
+            .chars()
+            .take_while(|c| !c.is_whitespace() && *c != '/' && *c != '>')
+            .collect()
+    };
+    let document = borzoi_msbuild::document::parse(xml).expect("well-formed");
+    let second = document
+        .descendants()
+        .find(|node| node.is_element() && node.range().start == at)
+        .expect("the collision's span starts at a parameter");
+    let second_name = name(second);
+    let first_name =
+        std::iter::successors(second.prev_sibling_element(), |n| n.prev_sibling_element())
+            .map(name)
+            .find(|first| first.eq_ignore_ascii_case(&second_name))
+            .expect("an earlier parameter of the folded name");
+    format!("<{first_name} /><{second_name} />")
+}
+
+/// `xml` without its `<UsingTask>` elements (any prefix), the rest as
+/// written.
+fn without_using_tasks(xml: &str) -> String {
+    let document = borzoi_msbuild::document::parse(xml).expect("well-formed");
+    let mut ranges: Vec<std::ops::Range<usize>> = document
+        .descendants()
+        .filter(|node| node.is_element() && node.tag_name().name() == "UsingTask")
+        .map(|node| node.range())
+        .collect();
+    ranges.sort_by_key(|range| std::cmp::Reverse(range.start));
+    let mut out = xml.to_owned();
+    for range in ranges {
+        out.replace_range(range, "");
+    }
+    out
 }
 
 /// The source text of the attribute `name` of the element `span` starts in
@@ -893,6 +949,38 @@ fn hand_picked_registrations() {
             true,
             Some(Certain),
         ),
+        // A refusal that rests on a write in the document (`R` is `x`, so
+        // the flag is `xtrue`): graded alone with that write kept.
+        (
+            format!(
+                "<PropertyGroup><R>x</R></PropertyGroup>{}",
+                inline_task(
+                    "",
+                    "<ParameterGroup><A Required=\"$(R)true\" /></ParameterGroup><Task>x</Task>"
+                )
+            ),
+            true,
+            Some(Certain),
+        ),
+        // Names the loader refuses alone (MSB5016 for the dot): no registry
+        // collision besides, which renaming one would not fix.
+        (
+            inline_task("", "<ParameterGroup><A.b /><a.b /></ParameterGroup><Task>x</Task>"),
+            true,
+            Some(Certain),
+        ),
+        // Long names one to the registry: kept bounded.
+        (
+            inline_task(
+                "",
+                &format!(
+                    "<ParameterGroup><{0}a /><{0}A /></ParameterGroup><Task>x</Task>",
+                    "N".repeat(1000)
+                ),
+            ),
+            true,
+            Some(Certain),
+        ),
         // A child the loader does not take, where no parse configuration can
         // have it skipped
         // ([`a_child_a_parse_configuration_may_skip_needs_no_certain_factory`]).
@@ -917,9 +1005,9 @@ fn hand_picked_registrations() {
     }
 }
 
-/// The registration expands a value for its rules alone: `Runtime`,
-/// `Architecture` and `Override`, which no rule judges, are read for their
-/// throws and not expanded again.
+/// The registration expands each attribute it reads once, for its throws and
+/// its rules alike (`rejection::registration_expansion`): five attributes,
+/// five expansions.
 #[test]
 fn attributes_no_rule_judges_are_expanded_once() {
     let xml = "<Project><UsingTask TaskName=\"X\" AssemblyFile=\"y.dll\" Runtime=\"NET\" \
@@ -933,7 +1021,7 @@ fn attributes_no_rule_judges_are_expanded_once() {
         )
         .expect("well-formed")
     });
-    assert_eq!(costs.registration_expansions, 2, "{costs:?}");
+    assert_eq!(costs.registration_expansions, 5, "{costs:?}");
 }
 
 /// A `<UsingTask>` whose child is one the loader does not take, beside a
@@ -1021,8 +1109,8 @@ fn parameters_colliding_by_case_fail_the_registry() {
         rejection.cause,
         borzoi_msbuild::RejectionCause::UsingTaskParameterCollision {
             task: "X".into(),
-            first: "A".to_owned(),
-            second: "a".to_owned(),
+            first: "A".into(),
+            second: "a".into(),
         },
     );
 }
