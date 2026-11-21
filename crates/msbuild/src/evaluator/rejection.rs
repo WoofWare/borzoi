@@ -771,6 +771,10 @@ pub(super) fn judge_unwalked(node: Node<'_, '_>, dir: &Path, reached: bool, stat
         "ItemDefinitionGroup" => judge_item_definition_group(node, reached, state),
         // A `<UsingTask>` resolves `Exists` against its own file's directory.
         // MSBuild expands its attributes where it takes it.
+        // One under a prefix (`ext:UsingTask`) is none to the loader, which
+        // refuses the file for it or, under a parse configuration, skips it
+        // (`judge_load_time`): MSBuild registers nothing.
+        "UsingTask" if loader::qname(node) != "UsingTask" => {}
         "UsingTask" => {
             let gate = judge_gate(node, dir, reached, state);
             if let Some(inner) = gate.inner(reached) {
@@ -1060,13 +1064,22 @@ fn registration_value(raw: &str, state: &State<'_>) -> RegistrationValue {
         properties::substitute(raw, &state.lookup)
     };
     let value = value.ignoring_trust().as_escaped().to_owned();
-    if issues.iter().any(|issue| {
-        matches!(
-            issue,
-            properties::Issue::Unsupported { .. } | properties::Issue::Throws { .. }
-        )
-    }) {
+    // An expression MSBuild throws on is judged where it is
+    // ([`judge_unwalked_text`]).
+    if issues
+        .iter()
+        .any(|issue| matches!(issue, properties::Issue::Throws { .. }))
+    {
         return RegistrationValue::Unheld;
+    }
+    // One the walk does not model (a padded reference, `$( Flag)`, which
+    // MSBuild expands to empty; a function it does not compute) holds a value
+    // the walk does not know, which the registration may refuse.
+    if issues
+        .iter()
+        .any(|issue| matches!(issue, properties::Issue::Unsupported { .. }))
+    {
+        return RegistrationValue::Opaque(value);
     }
     // A function returning a boolean the walk does not fold, standing alone:
     // `True` or `False`.
@@ -1201,6 +1214,8 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
                 rule: Option<&dyn Fn(&str) -> Registered>|
      -> Option<String> {
         judge_unwalked_text(state, raw, reached, span.clone());
+        // An attribute no rule judges is read for its throws alone.
+        rule?;
         let value = registration_value(raw, state);
         let certain = match &value {
             RegistrationValue::Certain(value) => Some(value.clone()),
@@ -1369,7 +1384,12 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
                     );
                 }
             }
-            if let Some((first, _)) = collision.filter(|(_, second)| *second == at) {
+            // Two of one spelling are the loader's to refuse (MSB4173,
+            // `judge_load_time`), before the registry sees either.
+            if let Some((first, _)) = collision.filter(|(first, second)| {
+                *second == at
+                    && loader::qname(parameters[*first]) != loader::qname(parameters[*second])
+            }) {
                 state.note_rejection(
                     certain_if(reached),
                     RejectionCause::UsingTaskParameterCollision {
@@ -1388,6 +1408,23 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
             step(state, &raw, node.range(), name, None);
         }
     }
+}
+
+/// The longest refused value a registration diagnostic keeps, in bytes.
+const PREVIEW_BYTES: usize = 256;
+
+/// `value` as a diagnostic keeps it: whole up to [`PREVIEW_BYTES`], else its
+/// start and an ellipsis, so that diagnostics of many parameters reading one
+/// long property keep no copy of it each.
+fn preview(value: &str) -> std::borrow::Cow<'_, str> {
+    if value.len() <= PREVIEW_BYTES {
+        return value.into();
+    }
+    let mut end = PREVIEW_BYTES;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &value[..end]).into()
 }
 
 /// Judge `value`, as the walk holds it (written `raw_text`), of `attribute_name` of the
@@ -1438,7 +1475,7 @@ fn judge_registered(
         RejectionCause::UsingTaskRegistration {
             task: std::sync::Arc::clone(task),
             attribute: attribute_name.to_owned(),
-            value: value.into(),
+            value: preview(&value).into(),
         },
         span,
     );
