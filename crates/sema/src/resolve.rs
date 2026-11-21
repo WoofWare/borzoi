@@ -2717,6 +2717,28 @@ fn is_type_augmentation(defn: &TypeDefn) -> bool {
     matches!(defn.repr(), Some(TypeDefnRepr::ObjectModel(om)) if om.is_augmentation())
 }
 
+/// Whether `defn` augments a type in either shape a file can write it: an
+/// implementation's `type T with …` ([`is_type_augmentation`], a tuple
+/// type's included), or a signature's, which puts the `with` directly on the
+/// definition with no representation. What a file declares of the types it
+/// augments (its extension names) reads both shapes.
+pub(super) fn is_any_augmentation(defn: &TypeDefn) -> bool {
+    is_type_augmentation(defn) || is_signature_with_block(defn)
+}
+
+/// Whether `defn` is a signature's `type T with … end`: a `with` directly on
+/// a definition with no representation. It augments `T`, or, with a
+/// single-identifier head, may declare it (an opaque type whose block holds
+/// its members), which FCS checks against the implementation.
+fn is_signature_with_block(defn: &TypeDefn) -> bool {
+    defn.repr().is_none()
+        && defn
+            .syntax()
+            .children_with_tokens()
+            .filter_map(|el| el.into_token())
+            .any(|t| t.kind() == SyntaxKind::WITH_TOK)
+}
+
 /// The sole identifier token of a single-segment type name (`type T`), or
 /// `None` for a qualified head (`type A.B with …` — an augmentation of an
 /// existing nested type, never a fresh definition) or a malformed/empty name.

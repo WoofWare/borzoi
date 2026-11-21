@@ -1128,3 +1128,58 @@ fn an_unbuilt_reference_keeps_every_open_but_an_assembly_namespace_wholesale() {
         failures.join("\n")
     );
 }
+
+/// A signature's augmentation puts `with` directly on the definition, with no
+/// representation. A later file sees the signature, so its members are the
+/// project's extension names: FCS binds a later file's call to the
+/// signature's extension whether the implementation declares it too or not
+/// (FS0193, an edit in progress), and the gate must decline the call. The
+/// call's literal receiver needs no resolution, so a gate that let the
+/// intrinsic `Equals(obj)` stand commits `bool` where FCS says `int64`.
+#[test]
+fn a_signature_augmentation_names_its_members() {
+    const CALL: Call = Call {
+        binder: "c1",
+        text: "\"abc\".Equals(1)",
+    };
+    // The consumer reaches the `[<AutoOpen>]` module through its own
+    // namespace, with no `open` for the gate to read as unenumerated.
+    let signature = "namespace ExtNs\n\
+                     [<AutoOpen>]\n\
+                     module M =\n    \
+                     type System.String with\n        \
+                     member Equals: i: int -> int64\n";
+    let consumer = format!("module ExtNs.Use\nlet {} x = {}\n", CALL.binder, CALL.text);
+    for (label, implementation) in [
+        (
+            "implemented",
+            "namespace ExtNs\n\
+             [<AutoOpen>]\n\
+             module M =\n    \
+             type System.String with\n        \
+             member this.Equals(i: int) = 0L\n",
+        ),
+        (
+            "unimplemented",
+            "namespace ExtNs\n[<AutoOpen>]\nmodule M =\n    type Unrelated = A\n",
+        ),
+    ] {
+        let checked = check(
+            &[
+                ("Ext.fsi", signature.to_owned()),
+                ("Ext.fs", implementation.to_owned()),
+                ("Use.fs", consumer.clone()),
+            ],
+            &[CALL],
+        );
+        assert!(checked.unsound.is_empty(), "{label}: {:?}", checked.unsound);
+        let call = &checked.calls[0];
+        assert_eq!(
+            call.fcs.as_deref(),
+            Some("System.Int64"),
+            "{label}: FCS must bind the signature's extension, or this pins nothing"
+        );
+        assert_eq!(call.gate, Some(GateInput::ProjectName), "{label}");
+        assert_eq!(call.ours, None, "{label}");
+    }
+}
