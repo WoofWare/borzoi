@@ -1025,8 +1025,8 @@ fn render_rejection_cause(cause: &RejectionCause, certain: bool) -> String {
             attribute,
             value,
         } => {
-            // A possible refusal rests on a value the walk holds that MSBuild
-            // may not read: it is named as one the attribute may read.
+            // A possible refusal is one Borzoi cannot rule out: on a value
+            // MSBuild may not read, or by a rule it does not know.
             if certain {
                 format!(
                     "a `<UsingTask>` of `{task}` whose `{attribute}` reads `{value}`, which \
@@ -1034,8 +1034,9 @@ fn render_rejection_cause(cause: &RejectionCause, certain: bool) -> String {
                 )
             } else {
                 format!(
-                    "a `<UsingTask>` of `{task}` whose `{attribute}` may read `{value}`, which \
-                     MSBuild would refuse to register, so MSBuild {rejects} the whole project"
+                    "a `<UsingTask>` of `{task}` whose `{attribute}` (`{value}`, as Borzoi reads \
+                     it) Borzoi cannot confirm MSBuild registers, so MSBuild {rejects} the whole \
+                     project"
                 )
             }
         }
