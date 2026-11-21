@@ -342,6 +342,15 @@ fn assert_msbuild_refuses_alone(
             let Some((body, attribute)) = alone(cause, raw.as_deref()) else {
                 panic!("a certain refusal the differential does not isolate: {cause:?}: {xml}");
             };
+            // An illegal condition's own template is the gate.
+            let gate = if matches!(
+                cause,
+                borzoi_msbuild::RejectionCause::IllegalCondition { .. }
+            ) {
+                String::new()
+            } else {
+                gate
+            };
             (
                 body.replacen("<UsingTask ", &format!("<UsingTask{gate} "), 1),
                 attribute.to_owned(),
@@ -355,7 +364,12 @@ fn assert_msbuild_refuses_alone(
     let _ = writes;
     let alone = without_using_tasks(xml).replacen("</Project>", &format!("{body}</Project>"), 1);
     std::fs::write(path, &alone).unwrap();
-    let Some(rejected) = design_time_code(oracle, &alone, path) else {
+    let rejected = design_time_code(oracle, &alone, path);
+    assert!(
+        rejected.as_ref().is_none_or(|r| r.code != "MSB4025"),
+        "the isolated document is no well-formed project: {alone}\nclaimed in {xml}"
+    );
+    let Some(rejected) = rejected else {
         panic!(
             "the walk claims MSBuild refuses {cause:?}, and alone MSBuild evaluates it: \
              {alone}\nclaimed in {xml}"
@@ -1506,7 +1520,14 @@ fn mostly(rng: &mut SplitMix64, value: &str) -> String {
 /// MSBuild may stop at, a body that is not the last child, parameters that
 /// are not the first, names that fold to one.
 fn composite_document(rng: &mut SplitMix64) -> String {
+    // The hostile dimensions drawn so far: each section's are kept only if
+    // MSBuild registers that section ([`DRAWN`]).
+    let mark = || DRAWN.with(|drawn| drawn.borrow().len());
+    let split = |from: usize| DRAWN.with(|drawn| drawn.borrow_mut().split_off(from));
     let mut children = Vec::new();
+    let mut group_drawn = Vec::new();
+    let mut body_drawn = Vec::new();
+    let before_group = mark();
     if rng.below(3) != 0 {
         let mut names = vec!["A", "B", "a", "A", "UsingTask"];
         let count = 1 + rng.below(3);
@@ -1531,6 +1552,8 @@ fn composite_document(rng: &mut SplitMix64) -> String {
         }
         children.push(format!("<ParameterGroup>{parameters}</ParameterGroup>"));
     }
+    group_drawn.extend(split(before_group));
+    let before_body = mark();
     if rng.below(3) != 0 {
         let evaluate = if rng.below(2) == 0 {
             format!(" Evaluate=\"{}\"", composite_value(rng))
@@ -1544,9 +1567,11 @@ fn composite_document(rng: &mut SplitMix64) -> String {
         };
         children.push(format!("<Task{evaluate}>{text}</Task>"));
     }
+    body_drawn.extend(split(before_body));
     if rng.below(3) == 0 {
         children.reverse();
     }
+    let before_task = mark();
     let mut attributes = format!(" TaskName=\"{}\"", mostly(rng, "X"));
     let factory = if children.is_empty() {
         (rng.below(3) == 0).then(|| composite_value(rng))
@@ -1575,8 +1600,25 @@ fn composite_document(rng: &mut SplitMix64) -> String {
     if rng.below(6) == 0 {
         attributes += &format!(" Override=\"{}\"", composite_value(rng));
     }
-    if rng.below(4) == 0 {
+    let gated = rng.below(4) == 0;
+    if gated {
         attributes += &format!(" Condition=\"{}\"", rng.pick(CONDITIONS));
+    }
+    // What MSBuild registers for certain: an ungated task's attributes, its
+    // parameter group if it is the first child, its body if it is the last.
+    let task_drawn = split(before_task);
+    if !gated {
+        let registered = |child: Option<&String>, tag: &str| {
+            child.is_some_and(|child| child.starts_with(&format!("<{tag}")))
+        };
+        let mut reached = task_drawn;
+        if registered(children.first(), "ParameterGroup") {
+            reached.extend(group_drawn);
+        }
+        if registered(children.last(), "Task") {
+            reached.extend(body_drawn);
+        }
+        DRAWN.with(|drawn| drawn.borrow_mut().extend(reached));
     }
     format!("<UsingTask{attributes}>{}</UsingTask>", children.concat())
 }
