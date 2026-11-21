@@ -9,6 +9,9 @@
 pub struct WalkCosts {
     /// The `<When>` gates `rejection::arm_is_dead` decided.
     pub arm_gate_decisions: u64,
+    /// The `<UsingTask>` values `rejection::registration_value` expanded
+    /// for the registration's rules.
+    pub registration_expansions: u64,
     /// The comparisons of two names `loader::first_repeat` made, finding a
     /// repeated parameter name.
     pub name_comparisons: u64,
@@ -17,7 +20,11 @@ pub struct WalkCosts {
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static COSTS: std::cell::Cell<WalkCosts> = const {
-        std::cell::Cell::new(WalkCosts { arm_gate_decisions: 0, name_comparisons: 0 })
+        std::cell::Cell::new(WalkCosts {
+            arm_gate_decisions: 0,
+            name_comparisons: 0,
+            registration_expansions: 0,
+        })
     };
 }
 

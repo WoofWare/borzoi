@@ -1058,6 +1058,7 @@ enum RegistrationValue {
 /// the walk has it, as its other expansions are, so that a probe it makes is
 /// recorded and a function that reads the file system is computed.
 fn registration_value(raw: &str, state: &State<'_>) -> RegistrationValue {
+    crate::cost::count(|costs| costs.registration_expansions += 1);
     let (value, issues) = if state.follow_imports {
         properties::substitute_with_fs(raw, &state.lookup, state.observer)
     } else {
