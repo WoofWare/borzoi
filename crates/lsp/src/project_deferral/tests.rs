@@ -1155,7 +1155,7 @@ fn a_feature_switch_refusal_names_its_route() {
 #[test]
 fn a_possible_registration_refusal_claims_nothing_of_the_value() {
     let cause = borzoi_msbuild::RejectionCause::UsingTaskRegistration {
-        task: "X".to_owned(),
+        task: "X".into(),
         attribute: "ParameterType".to_owned(),
         value: "System.TimeSpan".to_owned(),
     };

@@ -312,9 +312,10 @@ pub enum RejectionCause {
     /// `ParameterType`, `Output` or `Required`) expanded to `value`, which
     /// the registration does not take (an empty name, a flag that is no
     /// boolean, a type it does not resolve, a body under no task factory).
-    /// `task` is the `TaskName` as written.
+    /// `task` is the `TaskName` as written, shared by every refusal of the
+    /// task's parameters.
     UsingTaskRegistration {
-        task: String,
+        task: std::sync::Arc<str>,
         attribute: String,
         value: String,
     },
@@ -323,7 +324,7 @@ pub enum RejectionCause {
     /// on the `second`, after the `first` (MSB1025). `task` is the
     /// `TaskName` as written.
     UsingTaskParameterCollision {
-        task: String,
+        task: std::sync::Arc<str>,
         first: String,
         second: String,
     },
