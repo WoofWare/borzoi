@@ -1045,14 +1045,14 @@ fn rejection_message(cause: &RejectionCause, certain: bool) -> String {
             attribute,
             value,
         } => {
-            let (rejects, cannot) = if certain {
-                ("rejects", "cannot")
+            let (rejects, refuses) = if certain {
+                ("rejects", "refuses")
             } else {
-                ("may reject", "may be unable to")
+                ("may reject", "may refuse")
             };
             format!(
                 "MSBuild {rejects} this project: a `<UsingTask>` of `{task}` has `{attribute}` \
-                 `{value}`, which it {cannot} register — no evaluated value is trusted"
+                 `{value}`, which it {refuses} to register — no evaluated value is trusted"
             )
         }
         RejectionCause::UsingTaskParameterCollision {
@@ -1114,7 +1114,7 @@ mod tests {
     use tempfile::TempDir;
 
     /// A registration the walk only doubts claims nothing of the value: the
-    /// message says MSBuild may be unable to register it, not that it cannot.
+    /// message says MSBuild may refuse to register it, not that it does.
     #[test]
     fn a_possible_registration_refusal_claims_nothing_of_the_value() {
         let cause = RejectionCause::UsingTaskRegistration {
@@ -1123,10 +1123,10 @@ mod tests {
             value: "System.TimeSpan".into(),
         };
         let possible = rejection_message(&cause, false);
-        assert!(possible.contains("may be unable to register"), "{possible}");
+        assert!(possible.contains("may refuse to register"), "{possible}");
         assert!(!possible.contains("cannot"), "{possible}");
         let certain = rejection_message(&cause, true);
-        assert!(certain.contains("cannot register"), "{certain}");
+        assert!(certain.contains("refuses to register"), "{certain}");
     }
 
     /// A `get_env` closure supplying `%LOCALAPPDATA%` (used only on Windows;

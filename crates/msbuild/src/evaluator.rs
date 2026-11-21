@@ -1289,11 +1289,6 @@ struct State<'r> {
     /// ([`rejection`]); [`Self::into_project`] withdraws what the walk publishes
     /// when it is set.
     rejection: Option<crate::Rejection>,
-    /// Whether MSBuild registers every `<UsingTask>` the walk has judged so
-    /// far for certain, so that it reaches the next one
-    /// (`rejection::judge_using_task`): a refusal there is MSBuild's first
-    /// only then.
-    registrations_pass: bool,
     /// How many constructs the walk is inside whose gate it did not decide
     /// from certain inputs and took: a `<PropertyGroup>`, a `<Choose>` past a
     /// `<When>` so decided, or an import whose path it did not compute from
@@ -1846,7 +1841,6 @@ impl<'r> State<'r> {
             env_property_names,
             walk_opaque: None,
             rejection: None,
-            registrations_pass: true,
             reach_doubted: 0,
             taken_import_path_certain: false,
             item_pass: None,
@@ -2332,7 +2326,6 @@ impl<'r> State<'r> {
             env_property_names: _,
             walk_opaque: _,
             rejection,
-            registrations_pass: _,
             reach_doubted: _,
             taken_import_path_certain: _,
             item_pass: _,

@@ -1025,14 +1025,10 @@ fn render_rejection_cause(cause: &RejectionCause, certain: bool) -> String {
             attribute,
             value,
         } => {
-            let cannot = if certain {
-                "cannot"
-            } else {
-                "may be unable to"
-            };
+            let refuses = if certain { "refuses" } else { "may refuse" };
             format!(
                 "a `<UsingTask>` of `{task}` whose `{attribute}` reads `{value}`, which MSBuild \
-                 {cannot} register, so MSBuild {rejects} the whole project"
+                 {refuses} to register, so MSBuild {rejects} the whole project"
             )
         }
         RejectionCause::UsingTaskParameterCollision {

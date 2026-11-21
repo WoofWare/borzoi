@@ -772,9 +772,6 @@ pub(super) fn judge_unwalked(node: Node<'_, '_>, dir: &Path, reached: bool, stat
         // A `<UsingTask>` resolves `Exists` against its own file's directory.
         // MSBuild expands its attributes where it takes it.
         "UsingTask" => {
-            // MSBuild evaluates its condition only once it has registered
-            // every earlier task (`State::registrations_pass`).
-            let reached = reached && state.registrations_pass;
             let gate = judge_gate(node, dir, reached, state);
             if let Some(inner) = gate.inner(reached) {
                 judge_using_task(node, inner, state);
@@ -1049,9 +1046,8 @@ enum RegistrationValue {
     Unheld,
     /// A single property function, the whole of the value, that returns a
     /// boolean the walk does not fold (`Issue::ReturnsBoolean`): `True` or
-    /// `False`. `operands_certain`: whether every name it reads is one the
-    /// walk is certain of, so that MSBuild computes it on the walk's values.
-    SomeBoolean { operands_certain: bool },
+    /// `False`.
+    SomeBoolean,
 }
 
 /// The value MSBuild registers `raw` as, expanded with the file system where
@@ -1082,9 +1078,7 @@ fn registration_value(raw: &str, state: &State<'_>) -> RegistrationValue {
             .all(|issue| matches!(issue, properties::Issue::ReturnsBoolean { .. }))
         && expressions.next() == Some(raw.trim())
     {
-        return RegistrationValue::SomeBoolean {
-            operands_certain: operands_are_certain(state, raw),
-        };
+        return RegistrationValue::SomeBoolean;
     }
     // A value MSBuild computes without throwing that the walk does not (a
     // host's architecture, a boolean beside other text), or an item list
@@ -1162,74 +1156,52 @@ enum Registered {
 
 /// Judge the `<UsingTask>` at `node` as MSBuild registers the task, which it
 /// does as `reached` says (`TaskRegistry.RegisterTasksFromUsingTaskElement`
-/// and `ParameterGroupAndTaskElementRecord`, MSBuild 18.9), in its order, each
-/// value judged where MSBuild expands it, for an expression it throws on
+/// and `ParameterGroupAndTaskElementRecord`, MSBuild 18.9), each value judged
+/// where MSBuild expands it, for an expression it throws on
 /// ([`judge_unwalked_text`]) and then for what the registration refuses
 /// without one ([`judge_registered`], #1099):
 ///
-/// 1. `TaskName`, which must not expand to empty;
-/// 2. `TaskFactory`, under which children need one that is neither empty,
-///    `AssemblyTaskFactory` nor `TaskHostFactory`;
-/// 3. the `AssemblyFile` written, else the `AssemblyName`, which must not
-///    expand to empty;
-/// 4. the body (`ProjectUsingTaskElement.TaskBody`: the last child, if it is
-///    a `<Task>`): its `Evaluate`, which `Boolean.TryParse` must read
-///    (written empty, it reads as absent), and its text (CDATA included, and
-///    its elements' attributes; not its comments) unless `Evaluate` holds
-///    `false`, in any case and padding;
-/// 5. the parameters (`ParameterGroup`: the first child, if it is a
-///    `<ParameterGroup>`), each one's `ParameterType` (not empty, and a type
-///    MSBuild takes: [`PARAMETER_TYPES`] are those probed), `Output` and
-///    `Required` (booleans), and its name, which MSBuild keys
-///    case-insensitively, so one an earlier name folds to fails its registry;
-/// 6. `Runtime`, `Architecture` and `Override`.
+/// - `TaskName`, which must not expand to empty;
+/// - `TaskFactory`, under which children need one that is neither empty,
+///   `AssemblyTaskFactory` nor `TaskHostFactory`;
+/// - the `AssemblyFile` written, else the `AssemblyName`, which must not
+///   expand to empty;
+/// - the body (`ProjectUsingTaskElement.TaskBody`: the last child, if it is a
+///   `<Task>`): its `Evaluate`, which `Boolean.TryParse` must read (written
+///   empty, it reads as absent), and its text (CDATA included, and its
+///   elements' attributes; not its comments) unless `Evaluate` holds `false`,
+///   in any case and padding;
+/// - the parameters (`ParameterGroup`: the first child, if it is a
+///   `<ParameterGroup>`), each one's `ParameterType` (not empty, and a type
+///   MSBuild takes: [`PARAMETER_TYPES`] are those probed), `Output` and
+///   `Required` (booleans), and its name, which MSBuild keys
+///   case-insensitively, so one an earlier name folds to fails its registry;
+/// - `Runtime`, `Architecture` and `Override`.
 ///
 /// It expands neither `Label` nor `RequiredPlatform` nor `RequiredRuntime`
 /// (probed, `msbuild-condition-oracle`, SDK 10.0.401;
 /// `tests/condition_diff.rs`'s
 /// `using_task_texts_are_judged_where_msbuild_expands_them`), and its
-/// `Condition` is judged as one. MSBuild reports the first step it refuses,
-/// so a step is reached for certain only past every earlier step the walk is
-/// certain MSBuild passes, an earlier task's among them
-/// (`State::registrations_pass`): a value it holds for certain that the
-/// registration takes. A refusal after a step MSBuild may stop at is a
-/// rejection whose cause the walk cannot name, so it is only possible.
+/// `Condition` is judged as one.
+///
+/// A certain rejection claims that MSBuild rejects the project, and that the
+/// construct it names is one MSBuild refuses: not that it is the first
+/// MSBuild reports. Every step either passes or rejects the project, so a
+/// refusal is a rejection however MSBuild fares at the steps before it; what
+/// those steps decide is only which error MSBuild reports, which nothing
+/// reads.
 fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
     let task: std::sync::Arc<str> = attribute(node, "TaskName").unwrap_or_default().into();
-    // Whether MSBuild gets past every construct before the task for certain:
-    // none it may already have stopped at, nor an earlier task it may not
-    // have registered (`State::registrations_pass`).
-    let prior = state.rejection.is_none() && state.registrations_pass;
-    // Whether it reaches the task for certain.
-    let entry = reached && prior;
-    // Whether it certainly passes every step so far, should it reach them:
-    // a step is reached for certain where `entry && ok`. A task MSBuild may
-    // skip does not stop the next, so `ok` alone carries on.
-    let mut ok = true;
-    // The step of `raw`, judged by `rule`; whether MSBuild certainly passes
-    // it narrows `ok`. Returns the value as the walk holds it.
+    // The step of `raw`, judged by `rule`. Returns the value the walk holds
+    // for certain, if it does.
     let step = |state: &mut State<'_>,
-                ok: &mut bool,
                 raw: &str,
                 span: Range<usize>,
                 attribute_name: &str,
                 rule: Option<&dyn Fn(&str) -> Registered>|
      -> Option<String> {
-        judge_unwalked_text(state, raw, entry && *ok, span.clone());
+        judge_unwalked_text(state, raw, reached, span.clone());
         let value = registration_value(raw, state);
-        let passes = match (&value, rule) {
-            (RegistrationValue::Certain(value), Some(rule)) => rule(value) == Registered::Takes,
-            (RegistrationValue::Certain(_), None) => true,
-            (
-                RegistrationValue::SomeBoolean {
-                    operands_certain: true,
-                },
-                rule,
-            ) => rule.is_none_or(|rule| {
-                rule("True") == Registered::Takes && rule("False") == Registered::Takes
-            }),
-            _ => false,
-        };
         let certain = match &value {
             RegistrationValue::Certain(value) => Some(value.clone()),
             _ => None,
@@ -1243,10 +1215,9 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
                 span,
                 attribute_name,
                 rule,
-                entry && *ok,
+                reached,
             );
         }
-        *ok &= passes;
         certain
     };
     let non_empty = |value: &str| {
@@ -1303,56 +1274,43 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
         }
     };
     if let Some(raw) = attribute(node, "TaskName") {
-        step(
-            state,
-            &mut ok,
-            &raw,
-            node.range(),
-            "TaskName",
-            Some(&non_empty),
-        );
+        step(state, &raw, node.range(), "TaskName", Some(&non_empty));
     }
     let factory_raw = attribute(node, "TaskFactory");
     if factory_raw.is_some() || !children.is_empty() || others {
         let raw = factory_raw.unwrap_or_default();
         step(
             state,
-            &mut ok,
             &raw,
             node.range(),
             "TaskFactory",
             (!children.is_empty() || others).then_some(&factory as &dyn Fn(&str) -> Registered),
         );
     }
-    let _ = match (
+    match (
         attribute(node, "AssemblyFile"),
         attribute(node, "AssemblyName"),
     ) {
-        (Some(raw), _) if !raw.is_empty() => step(
-            state,
-            &mut ok,
-            &assembly_file_text(&raw),
-            node.range(),
-            "AssemblyFile",
-            Some(&non_empty),
-        ),
-        (_, Some(raw)) => step(
-            state,
-            &mut ok,
-            &raw,
-            node.range(),
-            "AssemblyName",
-            Some(&non_empty),
-        ),
-        _ => None,
-    };
+        (Some(raw), _) if !raw.is_empty() => {
+            step(
+                state,
+                &assembly_file_text(&raw),
+                node.range(),
+                "AssemblyFile",
+                Some(&non_empty),
+            );
+        }
+        (_, Some(raw)) => {
+            step(state, &raw, node.range(), "AssemblyName", Some(&non_empty));
+        }
+        _ => {}
+    }
     if let Some(body) = children.last().filter(|child| named(child, "Task")) {
         let body_reached = match attribute(*body, "Evaluate") {
-            None => Some(entry && ok),
+            None => Some(reached),
             Some(evaluate) => {
                 let held = step(
                     state,
-                    &mut ok,
                     &evaluate,
                     body.range(),
                     "Evaluate",
@@ -1370,22 +1328,13 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
                     {
                         None
                     }
-                    Some(_) => Some(entry && ok),
+                    Some(_) => Some(reached),
                     None => Some(false),
                 }
             }
         };
         if let Some(body_reached) = body_reached {
             judge_element_contents(state, *body, body_reached, Contents::Text);
-            // MSBuild passes the body only where it expands it without
-            // throwing, which the walk is certain of only for text it reads
-            // and holds the value of.
-            ok &= element_inner_contents(*body).is_some_and(|text| {
-                matches!(
-                    registration_value(&text, state),
-                    RegistrationValue::Certain(_)
-                )
-            });
         }
     }
     if let Some(group) = children
@@ -1413,7 +1362,6 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
                 if let Some(raw) = attribute(parameter, name) {
                     step(
                         state,
-                        &mut ok,
                         &raw,
                         parameter.range(),
                         name,
@@ -1423,7 +1371,7 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
             }
             if let Some((first, _)) = collision.filter(|(_, second)| *second == at) {
                 state.note_rejection(
-                    certain_if(entry && ok),
+                    certain_if(reached),
                     RejectionCause::UsingTaskParameterCollision {
                         task: std::sync::Arc::clone(&task),
                         first: loader::qname(parameters[first]).to_owned(),
@@ -1431,17 +1379,15 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
                     },
                     parameter.range(),
                 );
-                ok = false;
                 break;
             }
         }
     }
     for name in ["Runtime", "Architecture", "Override"] {
         if let Some(raw) = attribute(node, name) {
-            step(state, &mut ok, &raw, node.range(), name, None);
+            step(state, &raw, node.range(), name, None);
         }
     }
-    state.registrations_pass = prior && ok;
 }
 
 /// Judge `value`, as the walk holds it (written `raw_text`), of `attribute_name` of the
@@ -1471,7 +1417,7 @@ fn judge_registered(
             (false, value, verdict)
         }
         RegistrationValue::Opaque(value) => (false, value, Registered::Unknown),
-        RegistrationValue::SomeBoolean { .. } => {
+        RegistrationValue::SomeBoolean => {
             let verdict = if rule("True") == Registered::Takes && rule("False") == Registered::Takes
             {
                 Registered::Takes
