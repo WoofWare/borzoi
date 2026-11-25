@@ -2520,7 +2520,11 @@ impl<'a> Resolver<'a> {
             verdict => verdict,
         };
         if let Some(res) = verdict {
-            if let Resolution::Local(id) = res {
+            if cfg!(debug_assertions)
+                && let Resolution::Local(id) = res
+            {
+                // FCS's `ResolveAttributeType` finds an in-file type by the
+                // written name or its `Attribute`-suffixed form.
                 let name = self.assemblies.names().text(self.out.defs[id].name());
                 debug_assert!(
                     name == names[0] || name == suffixed[0],

@@ -4777,9 +4777,9 @@ impl ResolvedFile {
         root: &borzoi_cst::syntax::SyntaxNode,
         env: &AssemblyEnv,
     ) -> ExtensionNames {
-        super::extension_names::file_extension_names(root, false, &|range, written, question| {
+        super::extension_names::file_extension_names(root, false, &|range, question| {
             !self.attribute_resolutions.contains_key(&range)
-                || self.attribute_may_be(range, written, env, |h| {
+                || self.attribute_may_be(range, env, |h| {
                     env.is_extension_attribute(h)
                         || (question == MarkerQuestion::ExtensionOrAutoOpen
                             && env.is_auto_open_attribute(h))
@@ -4788,9 +4788,8 @@ impl ResolvedFile {
     }
 
     /// Whether the attribute written at `range` (its name's range, the
-    /// [`Self::attribute_resolutions`] key), whose last identifier is
-    /// `written` (unquoted, as `id_text` spells it), may denote a type
-    /// `is_target` picks out:
+    /// [`Self::attribute_resolutions`] key) may denote a type `is_target`
+    /// picks out:
     ///
     /// - a [`Resolution::Deferred`] verdict may be anything;
     /// - a committed [`Resolution::Entity`] is the target exactly when
@@ -4802,14 +4801,10 @@ impl ResolvedFile {
     /// - no record at all means both candidates missed everywhere with no
     ///   shadow possible: FCS errors and binds nothing.
     ///
-    /// `is_target` is only ever asked about a concrete type. In debug
-    /// builds, a committed [`Resolution::Local`] asserts that `written` names
-    /// it, as FCS's `ResolveAttributeType` does: the declaration is `written`
-    /// or `writtenAttribute`.
+    /// `is_target` is only ever asked about a concrete type.
     pub fn attribute_may_be(
         &self,
         range: TextRange,
-        written: &str,
         env: &AssemblyEnv,
         is_target: impl Fn(EntityHandle) -> bool,
     ) -> bool {
@@ -4817,14 +4812,9 @@ impl ResolvedFile {
             None => false,
             Some(Resolution::Deferred(_)) => true,
             Some(Resolution::Entity(h)) => env.is_abbreviation(*h) || is_target(*h),
-            Some(Resolution::Local(id)) => {
-                let name = env.names().text(self.def(*id).name());
-                debug_assert!(
-                    name == written || name.strip_suffix("Attribute") == Some(written),
-                    "the attribute written `{written}` resolved to the in-file `{name}`"
-                );
-                self.own_abbrev_type_simple_names.contains(name)
-            }
+            Some(Resolution::Local(id)) => self
+                .own_abbrev_type_simple_names
+                .contains(env.names().text(self.def(*id).name())),
             // No other variant is ever recorded for an attribute; if one
             // appears, defer rather than trust it.
             Some(_) => true,
