@@ -82,27 +82,42 @@ fn every_nuget_guard_matches() {
 /// `nuget_guards`.
 #[test]
 fn nuget_guards_agree_on_every_hostile_value() {
-    use borzoi_oracle_harness::hostile::{coverage, value};
+    use borzoi_oracle_harness::hostile::{Dimension, coverage, value};
     use std::collections::BTreeSet;
-    let census = coverage::open(file!(), "nuget_guards", &[]);
+    let census = coverage::open(
+        file!(),
+        "nuget_guards",
+        &[(
+            Dimension::OverwrittenLater,
+            "a guard is one atom of one condition, read once: no later write reaches it",
+        )],
+    );
     let mut failures = Vec::new();
-    for entry in value::alphabet().entries() {
-        for plain in ["", "true", "F#"] {
-            let compared = entry.value.render(plain);
-            for (name, op, _) in crate::NUGET_GUARDS {
-                let atom = format!("'$({name})' {op} '{compared}'");
-                let ours = crate::nuget_group_atom(&atom);
-                if ours != nuget_group_atom_before(&atom) {
-                    failures.push(format!("{atom:?}: table {ours}"));
-                }
-                census.reached(
-                    &BTreeSet::from([entry.dimension]),
-                    if ours { "match" } else { "no match" },
-                );
+    let mut check = |compared: &str, hostile: BTreeSet<Dimension>| {
+        for (name, op, _) in crate::NUGET_GUARDS {
+            let atom = format!("'$({name})' {op} '{compared}'");
+            let ours = crate::nuget_group_atom(&atom);
+            if ours != nuget_group_atom_before(&atom) {
+                failures.push(format!("{atom:?}: table {ours}"));
             }
+            census.reached(&hostile, if ours { "match" } else { "no match" });
+        }
+    };
+    for entry in value::alphabet().entries() {
+        if entry.value.write == value::Write::ThenPlain {
+            continue;
+        }
+        for plain in ["", "true", "F#"] {
+            check(
+                &entry.value.render(plain),
+                BTreeSet::from([entry.dimension]),
+            );
         }
     }
-    census.reached(&BTreeSet::new(), "plain");
+    // The harness's own values, through the same comparison.
+    for plain in ["", "true", "F#", "net10.0"] {
+        check(plain, BTreeSet::new());
+    }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
     census.finish(
         "BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-msbuild --lib \

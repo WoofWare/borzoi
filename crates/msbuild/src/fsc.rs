@@ -2259,7 +2259,7 @@ mod tests {
             )],
         );
         let mut failures = Vec::new();
-        let mut check = |environment: HashMap<String, String>, dimension: Dimension| {
+        let mut check = |environment: HashMap<String, String>, dimension: Option<Dimension>| {
             for name in environment.keys() {
                 if !classify_variable(name).admitted() != declined_before(name) {
                     failures.push(format!("{name:?}: {:?}", classify_variable(name)));
@@ -2278,7 +2278,7 @@ mod tests {
                 failures.push(format!("{environment:?}: {declined:?}"));
             }
             census.reached(
-                &BTreeSet::from([dimension]),
+                &dimension.into_iter().collect::<BTreeSet<_>>(),
                 if declined.is_some() {
                     "decline"
                 } else {
@@ -2292,15 +2292,21 @@ mod tests {
                 .iter()
                 .map(|(name, value)| (name.to_string(), value.to_string()))
                 .collect();
-            check(environment, entry.dimension);
+            check(environment, Some(entry.dimension));
         }
         for entry in name::as_text("BorzoiVar", "") {
             check(
                 HashMap::from([(entry.value.clone(), "v".to_string())]),
-                entry.dimension,
+                Some(entry.dimension),
             );
         }
-        census.reached(&BTreeSet::new(), "plain");
+        // The harness's own environments: a graded variable, and one on no
+        // list, through the same comparison.
+        check(HashMap::from([("LANG".to_string(), "C".to_string())]), None);
+        check(
+            HashMap::from([("BorzoiVar".to_string(), "v".to_string())]),
+            None,
+        );
         assert!(failures.is_empty(), "{}", failures.join("\n"));
         census.finish(
             "BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-msbuild --lib \

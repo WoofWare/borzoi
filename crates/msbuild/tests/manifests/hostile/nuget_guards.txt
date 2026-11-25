@@ -11,7 +11,7 @@ value.long-value	owed
 value.number-spelling	owed
 value.option	owed
 value.option-after-line-break	owed
-value.overwritten-later	owed
+value.overwritten-later	excluded: a guard is one atom of one condition, read once: no later write reaches it
 value.padded	owed
 value.padded-option	owed
 value.path-separator	owed
