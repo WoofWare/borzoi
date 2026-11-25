@@ -125,7 +125,14 @@ again), so a value whose worlds agree is *committed determinate*, not degraded.
   any absolute probe on the path that asks no file system, declines
   (`PathAdjustmentUndecided`); project text's relative probe is taken to miss
   (the gap below). A condition operand is expanded, and adjusted, only when
-  MSBuild's scanner saw something to expand in it. Targets run in the project's
+  MSBuild's scanner saw something to expand in it. Before that, MSBuild's
+  `FixFilePath` turns each `\` written in an import's `Project`, SDK or plain,
+  and in the argument of a condition's `Exists` or `HasTrailingSlash`, into
+  `/` on Unix (`path_fixup::fix_file_path`), for every reader of the text: the
+  walk following the import, the rejection judgement, and the condition
+  evaluator and its judges. An SDK import written rooted that keeps a `\` a
+  property or an escape supplied declines, since MSBuild's `..` there pops
+  the segment the `\` joins. Targets run in the project's
   directory, so the executor declines every relative probe
   (`substitute_in_target`). `path_fixup_expansion_diff` runs MSBuild from the
   project's directory, with and without the relative segments, and from four

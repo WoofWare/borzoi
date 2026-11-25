@@ -63,7 +63,7 @@ use std::ops::Range;
 use super::observed::Observer;
 use super::properties::escaping::Escaped;
 use super::properties::{
-    Issue, MAX_EXPRESSION_NESTING, PropertyMap, substitute, substitute_with_fs,
+    Issue, MAX_EXPRESSION_NESTING, PropertyMap, path_fixup, substitute, substitute_with_fs,
 };
 
 /// The file-system queries a condition may make: `exists` answers
@@ -1848,9 +1848,11 @@ enum BoolExpr {
     And(Vec<BoolExpr>),
     /// A chain `a Or b Or …`, held flat like [`BoolExpr::And`].
     Or(Vec<BoolExpr>),
+    /// `Exists('…')`: the quote-stripped argument text as MSBuild expands it,
+    /// each written `\` a `/` on Unix (`path_fixup::fix_file_path`).
     Exists(String),
-    /// `HasTrailingSlash('…')`: the raw (quote-stripped, pre-substitution)
-    /// argument text.
+    /// `HasTrailingSlash('…')`: its argument, as [`BoolExpr::Exists`] holds
+    /// one.
     HasTrailingSlash(String),
     MsbuildVersionFunction(String),
     /// A scalar standing alone as a boolean, coerced through MSBuild's
@@ -2013,15 +2015,21 @@ impl<'a> Parser<'a> {
                 self.bump();
                 Ok(BoolExpr::False)
             }
+            // MSBuild turns each `\` written in either argument into `/`
+            // before it expands it (`FixFilePath`), so every reader of the
+            // argument, the evaluator and the walk's judges of what it reads
+            // and may throw on alike, reads the text MSBuild expands.
             Some(Token::Exists) => {
                 self.bump();
-                Ok(BoolExpr::Exists(self.parse_single_string_argument()?))
+                Ok(BoolExpr::Exists(path_fixup::fix_file_path(
+                    &self.parse_single_string_argument()?,
+                )))
             }
             Some(Token::HasTrailingSlash) => {
                 self.bump();
-                Ok(BoolExpr::HasTrailingSlash(
-                    self.parse_single_string_argument()?,
-                ))
+                Ok(BoolExpr::HasTrailingSlash(path_fixup::fix_file_path(
+                    &self.parse_single_string_argument()?,
+                )))
             }
             Some(Token::MsbuildVersionFunction(inner)) => {
                 let inner = inner.clone();

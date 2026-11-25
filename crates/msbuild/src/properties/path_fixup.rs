@@ -21,6 +21,20 @@ use std::path::Path;
 use crate::dotnet_io;
 use crate::observed::Observer;
 
+/// `FileUtilities.FixFilePath`: on Unix each `\` of `raw` is a `/`; on
+/// Windows `raw` is left as it is. MSBuild applies it to text as written,
+/// before expanding it, in an import's `Project` (`ProjectImportElement`)
+/// and in the argument of a condition's `Exists` and `HasTrailingSlash`
+/// (oracle-pinned: `Exists('$(S.Contains(`\`)).txt')` asks about
+/// `True.txt` for `S` = `a/b`), so a property function there reads a `/`.
+pub(crate) fn fix_file_path(raw: &str) -> String {
+    if cfg!(windows) {
+        raw.to_owned()
+    } else {
+        raw.replace('\\', "/")
+    }
+}
+
 /// The **rewrite** the fixup would apply if it fires, or `None` when the fixup
 /// cannot fire at all (so the value is unambiguous — MSBuild returns it raw).
 ///

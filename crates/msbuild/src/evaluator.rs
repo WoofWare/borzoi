@@ -6127,9 +6127,16 @@ fn follow_import_after_gate(node: Node<'_, '_>, current_file_dir: &Path, state: 
         // (`Project="Sdk.$(Flavor).props"`) resolves to the expanded
         // relative path. Expansion issues (residual `$(...)` or
         // empty substitution) skip the import silently, mirroring the
-        // non-SDK path below.
-        let expansion = state.expand(project_attr_raw, node.range());
-        if expansion.had_issue() || expansion.unpinned_root.is_some() {
+        // non-SDK path below. A rooted path that keeps a `\` is declined
+        // with them ([`sdk_import_keeps_a_rooted_backslash`]).
+        let expansion = state.expand(&import_project_as_expanded(project_attr_raw), node.range());
+        if expansion.had_issue()
+            || expansion.unpinned_root.is_some()
+            || sdk_import_keeps_a_rooted_backslash(
+                project_attr_raw,
+                expansion.value.ignoring_trust(),
+            )
+        {
             // An SDK import whose Project path we couldn't resolve is dropped;
             // an *unpinned* path (assembled from a property the property pass
             // couldn't pin down) is just as ambiguous — a real build may
@@ -6343,10 +6350,7 @@ fn follow_import_after_gate(node: Node<'_, '_>, current_file_dir: &Path, state: 
         state.note_unloadable_import(node, crate::UnloadableImport::NoPath);
         return;
     };
-    // MSBuild turns each `\` of the attribute as written into `/`
-    // (`ProjectImportElement.Project`'s `FixFilePath`) before it expands it,
-    // so only a `\` a property or an escape supplies survives expansion.
-    let fixed_raw = raw_path.replace('\\', "/");
+    let fixed_raw = import_project_as_expanded(raw_path);
     let expansion = state.expand(&fixed_raw, node.range());
     if expansion.had_issue() || expansion.unpinned_root.is_some() {
         // The expanded path has residual `$(...)`, substituted to "", or
@@ -6643,6 +6647,24 @@ fn sdk_project_under_root<'a>(raw: &str, relative: &'a str) -> &'a str {
     } else {
         relative.trim_start_matches('/')
     }
+}
+
+/// Whether an SDK import's `Project`, written as `raw` and expanded to
+/// `value`, is rooted and keeps a `\`: the path bypasses the SDK root, and
+/// MSBuild's `..` pops a segment the `\` joins to its neighbour, which the
+/// walk, reading every `\` as a separator, does not model.
+pub(super) fn sdk_import_keeps_a_rooted_backslash(raw: &str, value: &Escaped) -> bool {
+    // On Windows a `\` is a separator MSBuild reads as the walk does.
+    cfg!(not(windows)) && sdk_project_written_rooted(raw) && value.as_escaped().contains('\\')
+}
+
+/// An import's `Project` attribute, written as `raw`, as MSBuild expands it
+/// ([`properties::path_fixup::fix_file_path`]): only a `\` a property or an
+/// escape supplies survives expansion. Every reader that expands the
+/// attribute (following the import, judging whether it may load nothing or
+/// names its path for certain) expands this, plain import or SDK.
+pub(super) fn import_project_as_expanded(raw: &str) -> String {
+    properties::path_fixup::fix_file_path(raw)
 }
 
 /// Whether an SDK import's `Project`, written as `raw`, is rooted as written,

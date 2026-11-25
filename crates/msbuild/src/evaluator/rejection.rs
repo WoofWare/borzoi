@@ -377,7 +377,8 @@ fn speculative_write(node: Node<'_, '_>, state: &mut State<'_>) {
 /// Whether the walk names the `Project` of the import at `node` from certain
 /// values ([`operands_are_certain`]), with nothing it leaves as text.
 pub(super) fn import_path_is_certain(node: Node<'_, '_>, state: &State<'_>) -> bool {
-    let project = attribute(node, "Project").unwrap_or_default();
+    let project =
+        super::import_project_as_expanded(&attribute(node, "Project").unwrap_or_default());
     !expand_silent(&project, state).had_unsupported && operands_are_certain(state, &project)
 }
 
@@ -1805,6 +1806,9 @@ pub(super) fn taken_import_with_undecided_path(
 /// `<ImportGroup>` around it, which gates it as much, has that `Exists` as a
 /// conjunct. An SDK import's path is not the `Exists` argument's, so none is.
 fn requires_own_file(node: Node<'_, '_>, project: &str) -> bool {
+    // The `Exists` argument the condition holds is the text MSBuild expands
+    // (`condition::BoolExpr::Exists`), and so is the import's.
+    let project = super::import_project_as_expanded(project);
     let is_own_file = |arg: &str| arg == project;
     let requires = |gate: Node<'_, '_>| {
         attribute(gate, "Condition")
@@ -1831,8 +1835,7 @@ fn may_load_nothing(
     if let Some(sdk) = attribute(node, "Sdk") {
         return sdk_import_may_load_nothing(&sdk, project, seen, state);
     }
-    // MSBuild turns the attribute's own `\` into `/` before it expands it.
-    let expansion = expand_silent(&project.replace('\\', "/"), state);
+    let expansion = expand_silent(&super::import_project_as_expanded(project), state);
     if path_undecided(project, state, expansion.had_unsupported) {
         return (!requires_own_file).then_some(UnloadableImport::PathUndecided);
     }
@@ -1897,8 +1900,12 @@ fn sdk_import_may_load_nothing(
     let resolution = state
         .sdk_resolver
         .and_then(|resolver| resolver(sdk, state.observer).ok())?;
-    let expansion = expand_silent(project, state);
-    if path_undecided(project, state, expansion.had_unsupported) {
+    let expansion = expand_silent(&super::import_project_as_expanded(project), state);
+    // A rooted path that keeps a `\` is one the walk does not follow
+    // (`follow_import_after_gate`).
+    if path_undecided(project, state, expansion.had_unsupported)
+        || super::sdk_import_keeps_a_rooted_backslash(project, expansion.value.ignoring_trust())
+    {
         return Some(UnloadableImport::PathUndecided);
     }
     // Judged name by name just above.

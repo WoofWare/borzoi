@@ -11348,3 +11348,113 @@ fn item_definitions_are_not_items() {
     );
     assert!(foreign.item_metadata.contains_key("m"));
 }
+
+/// On Unix, MSBuild turns each `\` written in the argument of `Exists` into
+/// `/` before expanding it (oracle-pinned: with only `False.txt` present,
+/// `Exists('$(S.Contains(`\`)).txt')` is false for `S` = `a/b`, while a
+/// comparison of the same expansion reads `\`).
+#[test]
+#[cfg(not(windows))]
+fn a_backslash_written_in_an_exists_argument_is_a_slash_before_expansion() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    std::fs::write(root.join("False.txt"), "").unwrap();
+    let source = r#"<Project><PropertyGroup>
+    <S>a/b</S>
+    <E Condition="Exists('$(S.Contains(`\`)).txt')">yes</E>
+    <C Condition="'$(S.Contains(`\`))' == 'False'">yes</C>
+  </PropertyGroup></Project>"#;
+    let p = crate::parse_fsproj_with_imports(
+        &crate::ProjectFile::buffer(&root.join("Demo.fsproj"), source).unwrap(),
+        &HashMap::new(),
+        &HashMap::new(),
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(
+        matches!(p.property("E"), crate::PropertyRead::Unset),
+        "{:?}",
+        p.property("E")
+    );
+    assert_eq!(p.property("C"), crate::PropertyRead::Value("yes".into()));
+}
+
+/// An import whose written `\` MSBuild turns into `/` names one file from
+/// every startup directory, and a missing one is a certain rejection.
+#[test]
+#[cfg(not(windows))]
+fn a_missing_import_spelled_with_written_backslashes_is_a_certain_rejection() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    let source = r#"<Project><Import Project="seg\\missing.props" /></Project>"#;
+    let p = crate::parse_fsproj_with_imports(
+        &crate::ProjectFile::buffer(&root.join("Demo.fsproj"), source).unwrap(),
+        &HashMap::new(),
+        &HashMap::new(),
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        p.rejection.map(|r| r.certainty),
+        Some(crate::RejectionCertainty::Certain)
+    );
+}
+
+/// `Exists`'s argument is respelled before it is expanded with no file
+/// system too: `S.Split('\')` splits on `/` on Unix, and `[1]` is `b`.
+#[test]
+#[cfg(not(windows))]
+fn exists_without_a_file_system_respells_its_argument() {
+    let p = parse(
+        r#"<Project><PropertyGroup><S>a/b</S></PropertyGroup>
+  <PropertyGroup Condition="Exists('$(S.Split(`\`)[1])')"><M>m</M></PropertyGroup>
+  <PropertyGroup><After>ok</After></PropertyGroup></Project>"#,
+    );
+    assert!(p.rejection.is_none(), "{:#?}", p.rejection);
+}
+
+/// `HasTrailingSlash` reads its argument as `Exists` does: a `\` written in
+/// it is a `/` before it is expanded, so `S.Split('\')` splits `a/` at its
+/// slash.
+#[test]
+#[cfg(not(windows))]
+fn a_backslash_written_in_a_has_trailing_slash_argument_is_a_slash_before_expansion() {
+    let p = parse(
+        r#"<Project><PropertyGroup>
+    <S>a/</S>
+    <H Condition="HasTrailingSlash('$(S.Split(`\`)[0])')">yes</H>
+  </PropertyGroup></Project>"#,
+    );
+    assert_eq!(p.property("H"), crate::PropertyRead::Unset);
+}
+
+/// An `Exists` guard written with a `\` is the import's own guard when the
+/// import's `Project` is written alike: both are `/` before they are
+/// expanded, so the walk reads the one as requiring the other's file, as it
+/// does with no `\` written, though it cannot compute the path.
+#[test]
+#[cfg(not(windows))]
+fn an_exists_guard_written_with_a_backslash_is_its_imports_own() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    let rejection = |separator: &str| {
+        let source = format!(
+            r#"<Project>
+  <PropertyGroup><P>$([System.String]::Copy('sub'))</P></PropertyGroup>
+  <Import Project="$(P){separator}missing.props" Condition="Exists('$(P){separator}missing.props')" />
+</Project>"#
+        );
+        crate::parse_fsproj_with_imports(
+            &crate::ProjectFile::buffer(&root.join("Demo.fsproj"), &source).unwrap(),
+            &HashMap::new(),
+            &HashMap::new(),
+            None,
+            None,
+        )
+        .unwrap()
+        .rejection
+    };
+    assert_eq!(rejection("\\"), rejection("/"));
+}
