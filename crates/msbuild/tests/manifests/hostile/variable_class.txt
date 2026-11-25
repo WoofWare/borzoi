@@ -32,3 +32,21 @@ name.switch-shaped	owed
 name.utf16-width	owed
 name.xml-markup	owed
 plain	owed
+value.blank	owed
+value.boolean-spelling	owed
+value.case-folding	owed
+value.item-expression	owed
+value.item-separator	owed
+value.long-value	owed
+value.number-spelling	owed
+value.option	owed
+value.option-after-line-break	owed
+value.overwritten-later	excluded: a variable is set once, before the build: no later write reaches it
+value.padded	owed
+value.padded-option	owed
+value.path-separator	owed
+value.quoted-argument	owed
+value.reads-the-build	owed
+value.response-file	owed
+value.self-set-property	owed
+value.version-spelling	owed

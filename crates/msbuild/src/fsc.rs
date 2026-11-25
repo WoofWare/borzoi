@@ -29,7 +29,8 @@
 //! one of three kinds ([`classify_variable`]):
 //!
 //! - the toolchain's own, by exact name ([`TOOLCHAIN_VARIABLES`]), each value
-//!   held to its shape (an absolute path, or a list of them). The grading
+//!   held to its shape (an absolute path, a list of them, or an on-off
+//!   switch). The grading
 //!   holds these fixed rather than perturbs them: its builds run in its own
 //!   environment, so it cannot grade another value of one. That is sound
 //!   because what they choose reaches fsc only through what the derivation
@@ -356,27 +357,10 @@ pub const ALLOWED_METADATA: &[&str] = &[
 /// each graded inert by `fsproj_assembly_name_perturbation_diff` (set to
 /// line-break and option-shaped values, held to fsc's `-o:` and to the plain
 /// project's whole command line). None is a property a verified SDK's files
-/// read ([`environment_reads`]). The `DOTNET_` ones are the CLI's switches the
-/// devshell sets, so the grading's own builds run under them.
+/// read ([`environment_reads`]).
 pub const ALLOWED_ENVIRONMENT: &[&str] = &[
-    "DOTNET_CLI_TELEMETRY_OPTOUT",
-    "DOTNET_NOLOGO",
-    "DOTNET_NUGET_SIGNATURE_VERIFICATION",
-    "DOTNET_SKIP_FIRST_TIME_EXPERIENCE",
-    "DOTNET_SKIP_WORKLOAD_INTEGRITY_CHECK",
-    "EDITOR",
-    "LANG",
-    "LC_ALL",
-    "LC_CTYPE",
-    "LOGNAME",
-    "OLDPWD",
-    "PAGER",
-    "PWD",
-    "SHELL",
-    "SHLVL",
-    "TERM",
-    "TZ",
-    "USER",
+    "EDITOR", "LANG", "LC_ALL", "LC_CTYPE", "LOGNAME", "OLDPWD", "PAGER", "PWD", "SHELL", "SHLVL",
+    "TERM", "TZ", "USER",
 ];
 
 /// The shape a toolchain variable's value must have.
@@ -387,18 +371,28 @@ pub enum ToolchainValue {
     /// A list of absolute paths, as the platform separates `PATH`'s.
     SearchPath,
     /// A `;`-separated list of package sources, each an absolute path or an
-    /// `http(s)` URL.
+    /// `http(s)` URL with a host.
     Sources,
+    /// One of the CLI's on-off switches: `1`, `0`, `true` or `false`, in any
+    /// case.
+    Switch,
 }
 
 impl ToolchainValue {
     /// Whether `value` has this shape: no control character anywhere, and
     /// every path absolute, so it names one place whatever directory reads it.
     pub fn admits(self, value: &str) -> bool {
-        let path = |p: &str| {
-            !p.is_empty()
-                && !p.chars().any(char::is_control)
-                && std::path::Path::new(p).is_absolute()
+        if value.chars().any(char::is_control) {
+            return false;
+        }
+        let path = |p: &str| !p.is_empty() && std::path::Path::new(p).is_absolute();
+        let url = |e: &str| {
+            ["https://", "http://"].iter().any(|scheme| {
+                e.strip_prefix(scheme).is_some_and(|rest| {
+                    let host = rest.split(['/', '?', '#']).next().unwrap_or_default();
+                    !host.is_empty() && !host.contains(char::is_whitespace)
+                })
+            })
         };
         match self {
             ToolchainValue::Path => path(value),
@@ -412,13 +406,11 @@ impl ToolchainValue {
                     .map(str::trim)
                     .filter(|e| !e.is_empty())
                     .collect();
-                !entries.is_empty()
-                    && entries.iter().all(|e| {
-                        path(e)
-                            || ((e.starts_with("https://") || e.starts_with("http://"))
-                                && !e.chars().any(char::is_control))
-                    })
+                !entries.is_empty() && entries.iter().all(|e| path(e) || url(e))
             }
+            ToolchainValue::Switch => ["1", "0", "true", "false"]
+                .iter()
+                .any(|switch| switch.eq_ignore_ascii_case(value)),
         }
     }
 }
@@ -430,15 +422,30 @@ impl ToolchainValue {
 /// state, `HOME`, `NUGET_PACKAGES` and `RestoreSources` NuGet's settings,
 /// package folder and feeds, `TMPDIR` the temporary directory, and
 /// `MSBuildUserExtensionsPath` is what MSBuild computes for itself and an
-/// evaluation is handed as a variable.
+/// evaluation is handed as a variable. The CLI's switches the grading's own
+/// builds run under are held fixed too, not graded: NuGet reads
+/// `DOTNET_NUGET_SIGNATURE_VERIFICATION` itself while it extracts packages,
+/// which no scan of the SDK's files sees, and what the restore does reaches
+/// fsc only through its result, which the derivation reads.
 pub const TOOLCHAIN_VARIABLES: &[(&str, ToolchainValue)] = &[
     ("DOTNET_CLI_HOME", ToolchainValue::Path),
+    ("DOTNET_CLI_TELEMETRY_OPTOUT", ToolchainValue::Switch),
+    ("DOTNET_NOLOGO", ToolchainValue::Switch),
+    (
+        "DOTNET_NUGET_SIGNATURE_VERIFICATION",
+        ToolchainValue::Switch,
+    ),
     ("DOTNET_ROOT", ToolchainValue::Path),
     ("HOME", ToolchainValue::Path),
     ("MSBuildUserExtensionsPath", ToolchainValue::Path),
     ("NUGET_PACKAGES", ToolchainValue::Path),
     ("PATH", ToolchainValue::SearchPath),
     ("RestoreSources", ToolchainValue::Sources),
+    ("DOTNET_SKIP_FIRST_TIME_EXPERIENCE", ToolchainValue::Switch),
+    (
+        "DOTNET_SKIP_WORKLOAD_INTEGRITY_CHECK",
+        ToolchainValue::Switch,
+    ),
     ("TMPDIR", ToolchainValue::Path),
 ];
 
@@ -2422,15 +2429,37 @@ mod tests {
     use proptest::prelude::*;
     use std::collections::HashMap;
 
+    /// `ALLOWED_ENVIRONMENT` as it stood before the allow-list (#1064 PR 1),
+    /// frozen, so the rule's movement is measured from a fixed point.
+    const OLD_GRADED: &[&str] = &[
+        "EDITOR", "LANG", "LC_ALL", "LC_CTYPE", "LOGNAME", "OLDPWD", "PAGER", "PWD", "SHELL",
+        "SHLVL", "TERM", "TZ", "USER",
+    ];
+
+    /// Names this PR adds to `ALLOWED_ENVIRONMENT`, each a widening the claim
+    /// states: none.
+    const WIDENED: &[&str] = &[];
+
+    /// `ALLOWED_ENVIRONMENT` is the frozen list and the stated widenings, so
+    /// a name added without being declared fails here.
+    #[test]
+    fn the_graded_list_widens_only_as_stated() {
+        let now: std::collections::BTreeSet<&str> = ALLOWED_ENVIRONMENT.iter().copied().collect();
+        let stated: std::collections::BTreeSet<&str> =
+            OLD_GRADED.iter().chain(WIDENED).copied().collect();
+        assert_eq!(now, stated);
+    }
+
     /// The environment rule as it stood before the allow-list (#1064 PR 1),
-    /// kept verbatim: the reference the rule's movement is measured from.
+    /// kept verbatim with its graded list frozen: the reference the rule's
+    /// movement is measured from.
     fn declined_before(name: &str) -> bool {
         let toolchain = matches!(
             name,
             "PATH" | "HOME" | "TMPDIR" | "RestoreSources" | "MSBuildUserExtensionsPath"
         ) || name.starts_with("DOTNET_")
             || name.starts_with("NUGET_");
-        let graded = ALLOWED_ENVIRONMENT
+        let graded = OLD_GRADED
             .iter()
             .any(|allowed| allowed.eq_ignore_ascii_case(name));
         let property = ALLOWED_PROPERTIES
@@ -2443,6 +2472,11 @@ mod tests {
     /// apart from `TOOLCHAIN_VARIABLES`, with the shape each value must have.
     const TOOLCHAIN: &[(&str, &str)] = &[
         ("DOTNET_CLI_HOME", "path"),
+        ("DOTNET_CLI_TELEMETRY_OPTOUT", "switch"),
+        ("DOTNET_NOLOGO", "switch"),
+        ("DOTNET_NUGET_SIGNATURE_VERIFICATION", "switch"),
+        ("DOTNET_SKIP_FIRST_TIME_EXPERIENCE", "switch"),
+        ("DOTNET_SKIP_WORKLOAD_INTEGRITY_CHECK", "switch"),
         ("DOTNET_ROOT", "path"),
         ("HOME", "path"),
         ("MSBuildUserExtensionsPath", "path"),
@@ -2452,25 +2486,35 @@ mod tests {
         ("TMPDIR", "path"),
     ];
 
-    /// Whether `value` has the shape `shape` names: absolute paths without a
-    /// control character, as the allow-list states it.
+    /// Whether `value` has the shape `shape` names, as the allow-list states
+    /// it: no control character; absolute paths; a source an absolute path or
+    /// an `http(s)` URL with a host; a switch `1`, `0`, `true` or `false`.
     fn shaped(shape: &str, value: &str) -> bool {
-        let path = |p: &str| p.starts_with('/') && !p.chars().any(char::is_control);
+        if value.chars().any(char::is_control) {
+            return false;
+        }
+        let path = |p: &str| p.starts_with('/');
+        let url = |e: &str| {
+            ["https://", "http://"].iter().any(|scheme| {
+                e.strip_prefix(scheme).is_some_and(|rest| {
+                    let host = rest.split(['/', '?', '#']).next().unwrap_or_default();
+                    !host.is_empty() && !host.contains(char::is_whitespace)
+                })
+            })
+        };
         match shape {
             "path" => path(value),
             "search path" => !value.is_empty() && value.split(':').all(path),
+            "switch" => ["1", "0", "true", "false"]
+                .iter()
+                .any(|s| s.eq_ignore_ascii_case(value)),
             _ => {
                 let entries: Vec<&str> = value
                     .split(';')
                     .map(str::trim)
                     .filter(|e| !e.is_empty())
                     .collect();
-                !entries.is_empty()
-                    && entries.iter().all(|e| {
-                        path(e)
-                            || ((e.starts_with("https://") || e.starts_with("http://"))
-                                && !e.chars().any(char::is_control))
-                    })
+                !entries.is_empty() && entries.iter().all(|e| path(e) || url(e))
             }
         }
     }
@@ -2488,8 +2532,9 @@ mod tests {
             return !shaped(shape, value);
         }
         let by_prefix = name.starts_with("DOTNET_") || name.starts_with("NUGET_");
-        let graded = ALLOWED_ENVIRONMENT
+        let graded = OLD_GRADED
             .iter()
+            .chain(WIDENED)
             .any(|allowed| allowed.eq_ignore_ascii_case(name));
         let property = ALLOWED_PROPERTIES
             .iter()
@@ -2594,6 +2639,8 @@ mod tests {
     fn variable_value() -> impl Strategy<Value = String> {
         let own = prop_oneof![
             Just(String::new()),
+            prop::sample::select(vec!["1", "0", "true", "False", "yes"]).prop_map(str::to_string),
+            "https?://[a-z]{0,6}(/[a-z]{0,3})?",
             "/[a-z]{1,6}(/[a-z]{1,6}){0,2}",
             "/[a-z]{1,4}:/[a-z]{1,4}",
             "[a-z]{1,6}(/[a-z]{1,4})?",
@@ -2659,15 +2706,21 @@ mod tests {
     /// environments through the same comparison.
     #[test]
     fn the_rule_moves_only_what_it_claims_on_every_hostile_environment() {
-        use borzoi_oracle_harness::hostile::{Dimension, coverage, env, name};
+        use borzoi_oracle_harness::hostile::{Dimension, coverage, env, name, value};
         use std::collections::BTreeSet;
         let census = coverage::open(
             file!(),
             "variable_class",
-            &[(
-                Dimension::NonUtf8,
-                "the derivation takes the environment as UTF-8 text, as its caller reads it",
-            )],
+            &[
+                (
+                    Dimension::NonUtf8,
+                    "the derivation takes the environment as UTF-8 text, as its caller reads it",
+                ),
+                (
+                    Dimension::OverwrittenLater,
+                    "a variable is set once, before the build: no later write reaches it",
+                ),
+            ],
         );
         let mut failures = Vec::new();
         let mut check = |environment: HashMap<String, String>, dimension: Option<Dimension>| {
@@ -2697,6 +2750,27 @@ mod tests {
                 HashMap::from([(entry.value.clone(), "v".to_string())]),
                 Some(entry.dimension),
             );
+        }
+        // Every hostile property value (`hostile::value`), as the value of a
+        // toolchain variable of each shape, of a graded one and of an allowed
+        // property, each rendered on a plain value of its own.
+        for entry in value::alphabet().entries() {
+            if entry.value.write == value::Write::ThenPlain {
+                continue;
+            }
+            for (name, plain) in [
+                ("HOME", "/home/borzoi"),
+                ("PATH", "/usr/bin:/bin"),
+                ("RestoreSources", "/feed"),
+                ("DOTNET_NOLOGO", "1"),
+                ("LANG", "C"),
+                ("Configuration", "Debug"),
+            ] {
+                check(
+                    HashMap::from([(name.to_string(), entry.value.render(plain))]),
+                    Some(entry.dimension),
+                );
+            }
         }
         // The harness's own environments: a graded variable, a toolchain one
         // at an absolute path, and one on no list.
@@ -2807,8 +2881,23 @@ mod tests {
             assert!(!ToolchainValue::SearchPath.admits(value), "{value:?}");
         }
         assert!(ToolchainValue::Sources.admits("/feed;https://api.nuget.org/v3/index.json"));
-        for value in ["", ";", "feed", "/feed;relative", "ftp://x"] {
+        for value in [
+            "",
+            ";",
+            "feed",
+            "/feed;relative",
+            "ftp://x",
+            "https://",
+            "/feed\n",
+            "/feed;\thttps://x",
+        ] {
             assert!(!ToolchainValue::Sources.admits(value), "{value:?}");
+        }
+        for value in ["1", "0", "TRUE", "false"] {
+            assert!(ToolchainValue::Switch.admits(value), "{value:?}");
+        }
+        for value in ["", "yes", "2", "1\n"] {
+            assert!(!ToolchainValue::Switch.admits(value), "{value:?}");
         }
     }
 
@@ -2844,7 +2933,10 @@ mod tests {
             VariableClass::AllowedProperty(Grammar::FileName)
         );
         assert_eq!(classify_variable("lang"), VariableClass::Graded);
-        assert_eq!(classify_variable("DOTNET_NOLOGO"), VariableClass::Graded);
+        assert_eq!(
+            classify_variable("DOTNET_NOLOGO"),
+            VariableClass::Toolchain(ToolchainValue::Switch)
+        );
         assert_eq!(classify_variable("LD_PRELOAD"), VariableClass::Launcher);
         assert_eq!(classify_variable("BORZOI_X"), VariableClass::Unlisted);
         assert_eq!(classify_variable("path"), VariableClass::Unlisted);

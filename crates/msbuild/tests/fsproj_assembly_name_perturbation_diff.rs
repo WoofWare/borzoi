@@ -283,6 +283,11 @@ fn held_to_plain_arguments(case: &Case) -> bool {
 /// toolchain's by mistake fails rather than is excused.
 const HELD_FIXED: &[&str] = &[
     "DOTNET_CLI_HOME",
+    "DOTNET_CLI_TELEMETRY_OPTOUT",
+    "DOTNET_NOLOGO",
+    "DOTNET_NUGET_SIGNATURE_VERIFICATION",
+    "DOTNET_SKIP_FIRST_TIME_EXPERIENCE",
+    "DOTNET_SKIP_WORKLOAD_INTEGRITY_CHECK",
     "DOTNET_ROOT",
     "HOME",
     "MSBuildUserExtensionsPath",
@@ -388,8 +393,10 @@ fn environment_declines() -> Vec<Case> {
     ] {
         cases.push(must_decline(name, value));
     }
-    let sdk = verified_sdks().next().expect("an SDK is verified");
-    let reads = environment_reads(sdk).expect("the verified SDK's reads are pinned");
+    // The SDK being graded: on a bump, the new one, whose reads are pinned
+    // before it is verified.
+    let sdk = graded_sdk();
+    let reads = environment_reads(sdk).expect("the graded SDK's reads are pinned");
     let read: Vec<&String> = reads
         .properties
         .iter()
@@ -408,6 +415,13 @@ fn environment_declines() -> Vec<Case> {
         }
     }
     cases
+}
+
+/// The SDK under grading: the devshell's, which every case's evaluation
+/// resolves ([`devshell_sdk`]), once per run.
+fn graded_sdk() -> &'static str {
+    static SDK: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    SDK.get_or_init(|| devshell_sdk().0)
 }
 
 /// The plain SDK project, which must commit to its own name.

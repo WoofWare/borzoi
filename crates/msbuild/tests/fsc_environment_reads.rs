@@ -154,7 +154,14 @@ fn sdk_documents(dotnet_root: &Path, sdk: &str) -> Vec<(PathBuf, String)> {
         .into_iter()
         .filter_map(|file| {
             let bytes = host_fs::read(&file).unwrap_or_else(|e| panic!("{}: {e}", file.display()));
-            let body = decoded(&bytes)?;
+            let Some(body) = decoded(&bytes) else {
+                assert!(
+                    !starts_like_xml(&bytes),
+                    "{} looks like an XML document in an encoding this scan cannot read",
+                    file.display()
+                );
+                return None;
+            };
             // Any XML document whose root is `Project` is one MSBuild may
             // import, so one the walk's reader refuses fails the scan.
             let candidate = roxmltree::Document::parse_with_options(
@@ -177,6 +184,29 @@ fn sdk_documents(dotnet_root: &Path, sdk: &str) -> Vec<(PathBuf, String)> {
             Some((file, body))
         })
         .collect()
+}
+
+/// Whether `bytes`, which [`decoded`] cannot read, start like XML: a file
+/// MSBuild may import in another encoding (it reads an XML encoding
+/// declaration), whose reads would go unlisted. A binary (an assembly, a
+/// native image) starts otherwise.
+fn starts_like_xml(bytes: &[u8]) -> bool {
+    bytes
+        .iter()
+        .position(|b| !b.is_ascii_whitespace())
+        .is_some_and(|i| bytes[i] == b'<')
+}
+
+/// A Latin-1 project file is no text this scan decodes, and fails the scan;
+/// an assembly holding the same bytes does not.
+#[test]
+fn an_undecodable_xml_document_fails_the_scan() {
+    let latin1 = b"<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?>\n<Project><PropertyGroup><X>\xe9$(Read)</X></PropertyGroup></Project>";
+    assert_eq!(decoded(latin1), None);
+    assert!(starts_like_xml(latin1));
+    let assembly = b"MZ\x90\x00<Project\xff";
+    assert_eq!(decoded(assembly), None);
+    assert!(!starts_like_xml(assembly));
 }
 
 /// `bytes` as text: UTF-16 behind its byte-order mark, else UTF-8 (its mark
@@ -239,6 +269,69 @@ fn texts(node: roxmltree::Node<'_, '_>) -> Vec<String> {
     out
 }
 
+/// The text from the start of `after` (just past a `$(`) to the parenthesis
+/// that closes it, nested ones counted, or `None` when none does (MSBuild
+/// then reads the text as it stands).
+fn parenthesised(after: &str) -> Option<&str> {
+    let mut depth = 1usize;
+    for (i, c) in after.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&after[..i]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The name a property reference's interior reads: the text before its first
+/// `.` or `:` outside parentheses (a property function or a member's start).
+fn name_part(interior: &str) -> &str {
+    let mut depth = 0usize;
+    for (i, c) in interior.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            '.' | ':' if depth == 0 => return &interior[..i],
+            _ => {}
+        }
+    }
+    interior
+}
+
+/// A property whose name the SDK computes from an item's identity and more,
+/// or from a name and an identity, is no shape the scan can list: it fails.
+#[test]
+fn computed_names_beyond_an_identity_fail_the_scan() {
+    for (text, listed) in [
+        ("$(%(PropertyNames.Identity))", true),
+        ("$( %(PropertyNames.Identity) )", true),
+        ("$(%(PropertyNames.Identity).Length)", true),
+        ("$(%(PropertyNames.Identity)Bar)", false),
+        ("$(Foo%(Names.Identity))", false),
+        ("$($(Inner))", false),
+        ("$(@(Items))", false),
+    ] {
+        let interior = parenthesised(&text[2..]).unwrap().trim();
+        let name = name_part(interior).trim();
+        let item = name
+            .strip_prefix("%(")
+            .and_then(|rest| rest.strip_suffix(')'))
+            .and_then(|inside| inside.trim().strip_suffix(".Identity"))
+            .map(str::trim)
+            .filter(|item| !item.contains(['(', ')', '$', '@', '%', '.']));
+        assert_eq!(item.is_some(), listed, "{text}");
+    }
+    assert_eq!(name_part("Foo.Replace('a', '$(B)')"), "Foo");
+    assert_eq!(parenthesised("A) rest"), Some("A"));
+    assert_eq!(parenthesised("unclosed"), None);
+}
+
 /// The literal text of `spec` before its first expansion.
 fn literal_head(spec: &str) -> &str {
     let end = ["$(", "@(", "%("]
@@ -279,38 +372,38 @@ fn sdk_properties(dotnet_root: &Path, sdk: &str) -> (BTreeSet<String>, BTreeSet<
                 for name in property_references(&text) {
                     names.insert(name.to_ascii_lowercase());
                 }
-                // A name the reference scan cannot see: `$(` before
-                // something other than a name or a static call.
+                // A name the reference scan cannot see: one computed from
+                // an expansion anywhere in the name (before its first `.` or
+                // `:` outside parentheses). The one shape listed is a name
+                // that is exactly an item's identity.
                 for (at, _) in text.match_indices("$(") {
-                    let interior = text[at + 2..].trim_start();
-                    let computed = match interior.chars().next() {
-                        Some('%') => {
-                            let item = interior
-                                .strip_prefix("%(")
-                                .and_then(|rest| rest.split_once(')'))
-                                .and_then(|(inside, _)| {
-                                    inside
-                                        .trim()
-                                        .strip_suffix(".Identity")
-                                        .map(|t| t.trim().to_ascii_lowercase())
-                                });
-                            match item {
-                                Some(item) => {
-                                    computed_from.insert(item);
-                                    continue;
-                                }
-                                None => true,
-                            }
-                        }
-                        Some('$' | '@') => true,
-                        _ => false,
+                    let Some(interior) = parenthesised(&text[at + 2..]) else {
+                        continue;
                     };
-                    assert!(
-                        !computed,
-                        "{} reads a property whose name it computes in a way this scan \
-                         cannot list: {text:?}",
-                        file.display()
-                    );
+                    let interior = interior.trim();
+                    if interior.starts_with('[') {
+                        continue;
+                    }
+                    let name = name_part(interior).trim();
+                    if !name.contains(['$', '@', '%']) {
+                        continue;
+                    }
+                    let item = name
+                        .strip_prefix("%(")
+                        .and_then(|rest| rest.strip_suffix(')'))
+                        .and_then(|inside| inside.trim().strip_suffix(".Identity"))
+                        .map(str::trim)
+                        .filter(|item| !item.contains(['(', ')', '$', '@', '%', '.']));
+                    match item {
+                        Some(item) => {
+                            computed_from.insert(item.to_ascii_lowercase());
+                        }
+                        None => panic!(
+                            "{} reads a property whose name it computes in a way this scan \
+                             cannot list: {text:?}",
+                            file.display()
+                        ),
+                    }
                 }
             }
         }
