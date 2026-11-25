@@ -1,0 +1,12 @@
+# Mutants no test can tell from the original, by set. Tab-separated:
+#
+#   <set>  <manifest key>  <site>  <why no test can observe the mutation>
+#
+# The site is the source line the mutation starts on, its whitespace runs
+# collapsed to single spaces: a key's ` #<n>` passes to another mutant when one
+# with the same description is added before it, and the row must not follow.
+#
+# The reason is an argument that the mutated program behaves identically on
+# every input, not that no test checks it today: a mutant only a missing test
+# would catch is a survivor to kill, not an entry here. A row whose mutant the
+# run caught, or that names no mutant of its set, fails `mutants-manifest`.

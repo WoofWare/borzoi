@@ -353,10 +353,29 @@ pub fn compare_with(
     regenerate: &str,
     update: bool,
 ) -> Result<(), String> {
-    let header = format!(
+    compare_described(path, actual, "", regenerate, update)
+}
+
+/// [`compare_with`], with `description` written into the regenerated file's
+/// header above the usual lines. Comparison ignores the header, so a
+/// description that names the run (its source commit, its counts) moves
+/// nothing a check sees.
+pub fn compare_described(
+    path: &Path,
+    actual: &Manifest,
+    description: &str,
+    regenerate: &str,
+    update: bool,
+) -> Result<(), String> {
+    let mut header = String::new();
+    if !description.is_empty() {
+        header.push_str(description);
+        header.push_str("\n\n");
+    }
+    header.push_str(&format!(
         "Generated; do not edit by hand. One line per graded item, sorted.\n\
          Regenerate with:\n  {regenerate}"
-    );
+    ));
     let existing = std::fs::read_to_string(path).ok();
     if update {
         if let Some(Ok(old)) = existing.as_deref().map(Manifest::parse) {

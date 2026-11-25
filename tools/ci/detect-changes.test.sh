@@ -65,6 +65,8 @@ assert_eq "crates/printfoo is not print" "$(expect)"           "$(classify 'crat
 assert_eq "sema crate"               "$(expect sema)"          "$(classify 'crates/sema/src/infer/mod.rs')"
 assert_eq "spawn is workspace"       "$(expect workspace)"     "$(classify 'crates/spawn/src/lib.rs')"
 assert_eq "oracle-harness is workspace" "$(expect workspace)"  "$(classify 'crates/oracle-harness/src/lib.rs')"
+assert_eq "mutation canary is workspace" "$(expect workspace)" "$(classify 'tools/mutants/canary.sh')"
+assert_eq "mutants config is workspace" "$(expect workspace)"  "$(classify '.cargo/mutants.toml')"
 assert_eq "msbuild-condition-oracle" "$(expect msbuild)"       "$(classify 'tools/msbuild-condition-oracle/Program.fs')"
 assert_eq "crates/semafoo is not sema" "$(expect)"             "$(classify 'crates/semafoo/x.rs')"
 assert_eq "spawnfoo is not spawn"    "$(expect)"               "$(classify 'crates/spawnfoo/x.rs')"

@@ -251,6 +251,7 @@ crates/nuget/tests/all/version_properties.rs	not-applicable	its inputs are versi
 crates/oracle-harness/src/fcs_position.rs	pending	3
 crates/oracle-harness/src/manifest.rs	pending	3
 crates/oracle-harness/src/module_tree.rs	pending	3
+crates/oracle-harness/src/mutants.rs	not-applicable	the generator draws cargo-mutants outcomes over the repo's own source files to test the manifest keys; a hostile file name cannot reach it (a tab or line break in one fails the manifest as a malformed entry)
 crates/oracle-harness/src/project_graph.rs	pending	2
 crates/oracle-harness/src/repetition_shapes.rs	pending	3
 crates/oracle-harness/src/xml_pump.rs	pending	3

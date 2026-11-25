@@ -61,7 +61,10 @@ filter_prefixes() {
     # crates/oracle-harness (drives every resident oracle) underpin the whole
     # suite, so — like the build-config entries — a change to either runs
     # everything. Each still has its own test job, gated on `workspace`.
-    workspace) echo "Cargo.toml Cargo.lock flake.nix flake.lock nix rust-toolchain.toml .github/workflows tools/ci crates/spawn crates/oracle-harness" ;;
+    # The mutation-testing sandbox (`tools/mutants`, `.cargo/mutants.toml`) is
+    # held to its refusal tests by crates/oracle-harness's suite, so a change
+    # to it runs that job too.
+    workspace) echo "Cargo.toml Cargo.lock flake.nix flake.lock nix rust-toolchain.toml .github/workflows tools/ci crates/spawn crates/oracle-harness tools/mutants .cargo" ;;
     *)         echo "filter_prefixes: unknown filter '$1'" >&2; exit 2 ;;
   esac
 }

@@ -73,6 +73,19 @@ answered by adding a dimension there, which every harness of that kind then
 owes, not by a fix at the one site. `crates/oracle-harness/AGENTS.md` has the
 rest.
 
+## Mutation testing
+
+`tools/mutants/` runs cargo-mutants over named sets of files
+(`tools/mutants/sets.tsv`), each pinned in an exact manifest of one verdict
+per mutant (`tools/mutants/manifests/<set>.txt`). A mutant is arbitrary code,
+so it runs only in a Linux sandbox: on a Mac, `tools/mutants/run.sh SET` (in
+Apple's `container`, with a read-only Nix store, no network, and bounded memory
+and time), or in CI's own job, `tools/ci/mutants.sh SET`. Every test binary
+runs through a canary (`.cargo/mutants.toml`, `tools/mutants/canary.sh`), so
+a bare `cargo mutants` anywhere else fails its baseline and runs no mutant.
+A survivor is killed with a test where one belongs; only a mutant no test
+*can* observe goes in `tools/mutants/equivalent.tsv`, with the argument.
+
 ## One test binary per crate
 
 `cst`, `sema`, `assembly`, `nuget` and `lsp` each have exactly one integration-test
