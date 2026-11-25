@@ -1491,6 +1491,50 @@ fn the_deepest_composed_climb_stays_in_the_temporary_directory() {
     probed_names([text.as_str()], "/nowhere");
 }
 
+/// MSBuild turns each `\` written in an `Exists` or `HasTrailingSlash`
+/// argument into `/` before it expands it (`FileUtilities.FixFilePath`), so
+/// a property function there reads `/`: beside `a.fs`, each condition below
+/// answers one way if it does and the other if it does not, but the
+/// controls (`T`, a `/` written as one, and a comparison, which MSBuild does
+/// not respell). The walk commits
+/// each, from every start, served and supplied.
+#[test]
+fn a_backslash_written_in_a_path_argument_is_a_slash_before_expansion() {
+    let mut world = World::for_hand_written(6);
+    const CONDITIONS: &[&str] = &[
+        "Exists('$(S.Split(`\\`)[0]).fs')",
+        "Exists('$(S.Split(`/`)[0]).fs')",
+        "Exists('$(T.Split(`\\`)[0]).fs')",
+        "HasTrailingSlash('$(U.Split(`\\`)[0])')",
+        "HasTrailingSlash('$(U)')",
+        "'$(U.Split(`\\`)[0])' == 'a/'",
+    ];
+    for condition in CONDITIONS {
+        let xml = format!(
+            "<Project>\n  <PropertyGroup>\n    <S>a/b</S>\n    <T>c/a</T>\n    <U>a/</U>\n    \
+             <R Condition=\"{}\">hit</R>\n  </PropertyGroup>\n</Project>\n",
+            xml_attribute(condition)
+        );
+        let point = Point {
+            source: Source::Literal,
+            site: Site::Exists,
+            xml,
+            globals: Vec::new(),
+            project: world.fixture.root.join("proj-empty").join("Demo.fsproj"),
+            starts: PROJECTS[1].1,
+            read: Read::Property("R"),
+            value: (*condition).to_owned(),
+            probes: Vec::new(),
+        };
+        let seen = check(&mut world, &point);
+        assert!(seen.served, "{condition}: the served walk commits");
+        assert_eq!(
+            seen.supplied, 5,
+            "{condition}: every supplied start commits"
+        );
+    }
+}
+
 /// The indexer's splices are each a piece MSBuild adjusts, so each is a name
 /// the full starts hold.
 #[test]

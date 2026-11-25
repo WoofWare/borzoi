@@ -935,3 +935,374 @@ fn web_sdk_before_common_targets_is_imported() {
     assert_eq!(theirs, "true", "MSBuild no longer exercises the import");
     assert_eq!(ours, theirs);
 }
+
+/// MSBuild turns each `\` written in an import's `Project` into `/` before it
+/// expands it, SDK import or plain: a property function reading a `\` written
+/// in its argument reads a `/`.
+#[test]
+fn a_backslash_written_in_the_attribute_is_a_slash_before_expansion() {
+    let layout = Layout::new();
+    let sdk_root = layout.sdk_root();
+    for (name, marker) in [("True.props", "slash"), ("False.props", "backslash")] {
+        std::fs::write(
+            sdk_root.join(name),
+            format!(
+                "<Project><PropertyGroup><Seen>$(Seen);{marker}</Seen></PropertyGroup></Project>"
+            ),
+        )
+        .expect("write marker");
+    }
+    let prelude = "  <PropertyGroup><Slash>a/b</Slash></PropertyGroup>\n";
+    let imports = vec![r"$(Slash.Contains('\')).props".to_owned()];
+    // On Windows, `FixFilePath` leaves the attribute as written.
+    let expected = if cfg!(windows) {
+        ";backslash"
+    } else {
+        ";slash"
+    };
+    for kind in KINDS {
+        let (xml, parsed, theirs) = evaluate_both_after(&layout, kind, prelude, &imports);
+        assert_eq!(
+            theirs.as_deref(),
+            Ok(expected),
+            "{kind:?}: MSBuild's import"
+        );
+        assert_certain_implies_exact(&format!("{kind:?}"), &xml, &parsed, theirs, true);
+    }
+}
+
+/// A root-level name no host has as a directory, which the rooted-import cases
+/// climb out of: a `..` after it pops it in every spelling, and an absolute
+/// probe of it misses.
+fn absent_root() -> &'static str {
+    const ROOT: &str = "/borzoi-absent-root";
+    assert!(
+        host_fs::metadata(ROOT).is_err(),
+        "{ROOT} is on this host, which the rooted-import cases need absent"
+    );
+    ROOT
+}
+
+/// A rooted SDK import bypasses the SDK root, and a `..` after a property's
+/// `\` pops `seg/child`'s last segment where `seg/` is under the startup
+/// directory and `seg\child` whole elsewhere: MSBuild opens `work/seg/T.props`
+/// or `work/T.props`. The walk commits neither.
+#[test]
+#[cfg(not(windows))]
+fn a_rooted_sdk_import_through_a_backslash_and_a_parent_hop_declines() {
+    let layout = Layout::new();
+    let work = layout.root.join("work");
+    std::fs::create_dir_all(work.join("seg")).expect("mkdir work/seg");
+    for (file, marker) in [("T.props", "top"), ("seg/T.props", "seg")] {
+        std::fs::write(
+            work.join(file),
+            format!(
+                "<Project><PropertyGroup><Seen>$(Seen);{marker}</Seen></PropertyGroup></Project>"
+            ),
+        )
+        .expect("write marker");
+    }
+    let prelude = "  <PropertyGroup><G>seg\\child</G></PropertyGroup>\n";
+    let import = format!("{}/..{}/$(G)/../T.props", absent_root(), work.display());
+    let (xml, parsed, _) = evaluate_both_after(&layout, Kind::Sdk, prelude, &[import]);
+    // MSBuild's answer moves with its startup directory.
+    let proj = layout.root.join("proj").join("p.proj");
+    let env = child_environment(&layout);
+    let with_seg = layout.root.join("cwd-seg");
+    std::fs::create_dir_all(with_seg.join("seg")).expect("mkdir cwd-seg/seg");
+    assert_eq!(
+        msbuild_seen_from(&proj, &env, &with_seg).as_deref(),
+        Ok(";seg"),
+        "from a directory holding seg/\n{xml}"
+    );
+    assert_eq!(
+        msbuild_seen_from(&proj, &env, &layout.empty_cwd()).as_deref(),
+        Ok(";top"),
+        "from one holding none\n{xml}"
+    );
+    // MSBuild sets `Seen` from every start, so a definite absence is as
+    // wrong as either value.
+    assert!(
+        matches!(
+            parsed.property("Seen"),
+            borzoi_msbuild::PropertyRead::Untrusted(_)
+                | borzoi_msbuild::PropertyRead::UnsetInexact(_)
+        ),
+        "we committed {:?}\n{xml}",
+        parsed.property("Seen")
+    );
+}
+
+/// A rooted SDK import that keeps a property's `\` with no `.` or `..` after
+/// it names one file from every startup directory: the `..` before it pops
+/// what it pops in every spelling. The walk follows it.
+#[test]
+#[cfg(not(windows))]
+fn a_rooted_sdk_import_keeping_a_backslash_after_its_parent_hop_is_followed() {
+    let layout = Layout::new();
+    let work = layout.root.join("work");
+    std::fs::create_dir_all(work.join("sub")).expect("mkdir work/sub");
+    std::fs::write(
+        work.join("sub/T.props"),
+        "<Project><PropertyGroup><Seen>$(Seen);sub</Seen></PropertyGroup></Project>",
+    )
+    .expect("write marker");
+    let prelude = "  <PropertyGroup><G>sub\\T.props</G></PropertyGroup>\n";
+    let import = format!("{}/..{}/$(G)", absent_root(), work.display());
+    let (xml, parsed, theirs) = evaluate_both_after(&layout, Kind::Sdk, prelude, &[import]);
+    assert_eq!(theirs.as_deref(), Ok(";sub"), "MSBuild's import\n{xml}");
+    let proj = layout.root.join("proj").join("p.proj");
+    let env = child_environment(&layout);
+    let with_sub = layout.root.join("cwd-sub");
+    std::fs::create_dir_all(with_sub.join("sub")).expect("mkdir cwd-sub/sub");
+    assert_eq!(
+        msbuild_seen_from(&proj, &env, &with_sub).as_deref(),
+        Ok(";sub"),
+        "from a directory holding sub/\n{xml}"
+    );
+    assert_eq!(
+        parsed.property("Seen"),
+        borzoi_msbuild::PropertyRead::Value(";sub".to_owned()),
+        "{xml}"
+    );
+}
+
+/// With the startup directory supplied and no `seg/` there, a rooted SDK
+/// import keeps the property's `\`, and MSBuild's `..` pops `seg\child`
+/// whole: it opens `work/T.props`. The walk does not model that spelling, and
+/// declines.
+#[test]
+#[cfg(not(windows))]
+fn a_rooted_sdk_import_keeping_a_backslash_declines_with_a_start() {
+    let layout = Layout::new();
+    let work = layout.root.join("work");
+    std::fs::create_dir_all(work.join("seg")).expect("mkdir work/seg");
+    for (file, marker) in [("T.props", "top"), ("seg/T.props", "seg")] {
+        std::fs::write(
+            work.join(file),
+            format!(
+                "<Project><PropertyGroup><Seen>$(Seen);{marker}</Seen></PropertyGroup></Project>"
+            ),
+        )
+        .expect("write marker");
+    }
+    let start = layout.empty_cwd();
+    let sdk_root = layout.sdk_root();
+    let resolver = |name: &str,
+                    _observer: &borzoi_msbuild::observed::Observer|
+     -> Result<SdkResolution, SdkResolveError> {
+        if name == "MySdk" {
+            Ok(SdkResolution::Single(SdkPaths {
+                root: sdk_root.clone(),
+                props: sdk_root.join("Sdk.props"),
+                targets: sdk_root.join("Sdk.targets"),
+            }))
+        } else {
+            Err(SdkResolveError::NotFound)
+        }
+    };
+    let xml = format!(
+        "<Project>\n  <PropertyGroup><G>seg\\child</G></PropertyGroup>\n  \
+         <Import Sdk=\"MySdk\" Project=\"{}/..{}/$(G)/../T.props\" />\n</Project>\n",
+        absent_root(),
+        work.display()
+    );
+    let proj = layout.root.join("proj").join("p.proj");
+    std::fs::create_dir_all(proj.parent().unwrap()).expect("mkdir proj");
+    std::fs::write(&proj, &xml).expect("write project");
+    let (parsed, _) = borzoi_msbuild::test_support::parse_fsproj_reads(
+        &borzoi_msbuild::ProjectFile::buffer(&proj, &xml).expect("a full path"),
+        &HashMap::new(),
+        &child_environment(&layout),
+        Some(&resolver),
+        None,
+        Some(&start),
+        &borzoi_msbuild::test_support::ReadProbe::default(),
+    )
+    .expect("well-formed");
+    // MSBuild sets `Seen` from every start, so a definite absence is as
+    // wrong as either value.
+    assert!(
+        matches!(
+            parsed.property("Seen"),
+            borzoi_msbuild::PropertyRead::Untrusted(_)
+                | borzoi_msbuild::PropertyRead::UnsetInexact(_)
+        ),
+        "we committed {:?}\n{xml}",
+        parsed.property("Seen")
+    );
+}
+
+/// A missing SDK import named through a property's `\` names one file under
+/// the SDK root from every startup directory, so its failure is certain.
+#[test]
+#[cfg(not(windows))]
+fn a_missing_sdk_import_through_a_backslash_is_a_certain_rejection() {
+    let layout = Layout::new();
+    // Two backslashes: the whole value's pass collapses the run where it
+    // respells, so the worlds differ in more than separators.
+    let prelude = "  <PropertyGroup><S>seg\\\\Missing.props</S></PropertyGroup>\n";
+    let (xml, parsed, theirs) =
+        evaluate_both_after(&layout, Kind::Sdk, prelude, &["$(S)".to_owned()]);
+    assert!(theirs.is_err(), "MSBuild rejects it: {theirs:?}\n{xml}");
+    assert_eq!(
+        parsed.rejection.map(|r| r.certainty),
+        Some(borzoi_msbuild::RejectionCertainty::Certain),
+        "{xml}"
+    );
+}
+
+/// Whether an import under a gate the walk cannot decide may load nothing is
+/// judged on the file MSBuild would open: the attribute's written `\` is a
+/// `/` there too. Only `False.props` exists; MSBuild takes the gate (it folds
+/// `É` and `é` alike, which the walk does not model), opens `True.props`,
+/// and rejects the project.
+#[test]
+#[cfg(not(windows))]
+fn an_undecided_import_is_judged_on_the_file_msbuild_opens() {
+    let layout = Layout::new();
+    let sdk_root = layout.sdk_root();
+    std::fs::write(sdk_root.join("False.props"), "<Project/>").expect("write props");
+    std::fs::write(layout.root.join("False.props"), "<Project/>").expect("write props");
+    let env = child_environment(&layout);
+    let resolver = |name: &str,
+                    _observer: &borzoi_msbuild::observed::Observer|
+     -> Result<SdkResolution, SdkResolveError> {
+        if name == "MySdk" {
+            Ok(SdkResolution::Single(SdkPaths {
+                root: sdk_root.clone(),
+                props: sdk_root.join("Sdk.props"),
+                targets: sdk_root.join("Sdk.targets"),
+            }))
+        } else {
+            Err(SdkResolveError::NotFound)
+        }
+    };
+    for sdk in [" Sdk=\"MySdk\"", ""] {
+        let xml = format!(
+            "<Project>\n  <PropertyGroup><Slash>a/b</Slash></PropertyGroup>\n  \
+             <Import{sdk} Project=\"$(Slash.Contains('\\')).props\" Condition=\"'É' == 'é'\" />\n  \
+             <PropertyGroup><Seen>after</Seen></PropertyGroup>\n</Project>\n"
+        );
+        let proj = layout.root.join("p.proj");
+        std::fs::write(&proj, &xml).expect("write project");
+        let parsed = parse_fsproj_with_imports(
+            &borzoi_msbuild::ProjectFile::buffer(&proj, &xml).expect("a full path"),
+            &HashMap::new(),
+            &env,
+            Some(&resolver),
+            None,
+        )
+        .unwrap_or_else(|e| panic!("our parse: {e}\n{xml}"));
+        let theirs = msbuild_seen_from(&proj, &env, &layout.root);
+        assert!(
+            theirs.is_err(),
+            "{sdk}: MSBuild opens True.props: {theirs:?}"
+        );
+        assert!(
+            parsed.rejection.is_some(),
+            "{sdk}: we commit {:?}\n{xml}",
+            parsed.properties.get("Seen")
+        );
+    }
+}
+
+/// Under a gate the walk cannot decide, a rooted SDK import that keeps a
+/// property's `\` is judged as one the walk does not follow: MSBuild's `..`
+/// pops `seg\child` whole where the startup directory holds no `seg`, so it
+/// opens the missing `work/T.props`, not `work/seg/T.props`, and rejects.
+#[test]
+#[cfg(not(windows))]
+fn an_undecided_rooted_sdk_import_keeping_a_backslash_may_reject() {
+    let layout = Layout::new();
+    let work = layout.root.join("work");
+    std::fs::create_dir_all(work.join("seg")).expect("mkdir work/seg");
+    std::fs::write(work.join("seg/T.props"), "<Project/>").expect("write props");
+    let env = child_environment(&layout);
+    let sdk_root = layout.sdk_root();
+    let resolver = |name: &str,
+                    _observer: &borzoi_msbuild::observed::Observer|
+     -> Result<SdkResolution, SdkResolveError> {
+        if name == "MySdk" {
+            Ok(SdkResolution::Single(SdkPaths {
+                root: sdk_root.clone(),
+                props: sdk_root.join("Sdk.props"),
+                targets: sdk_root.join("Sdk.targets"),
+            }))
+        } else {
+            Err(SdkResolveError::NotFound)
+        }
+    };
+    let xml = format!(
+        "<Project>\n  <PropertyGroup><G>seg\\child</G></PropertyGroup>\n  \
+         <Import Sdk=\"MySdk\" Project=\"{}/..{}/$(G)/../T.props\" \
+         Condition=\"'É' == 'é'\" />\n  \
+         <PropertyGroup><Seen>after</Seen></PropertyGroup>\n</Project>\n",
+        absent_root(),
+        work.display()
+    );
+    let proj = layout.root.join("p.proj");
+    std::fs::write(&proj, &xml).expect("write project");
+    let start = layout.empty_cwd();
+    let theirs = msbuild_seen_from(&proj, &env, &start);
+    assert!(theirs.is_err(), "MSBuild opens work/T.props: {theirs:?}");
+    let parsed = parse_fsproj_with_imports(
+        &borzoi_msbuild::ProjectFile::buffer(&proj, &xml).expect("a full path"),
+        &HashMap::new(),
+        &env,
+        Some(&resolver),
+        None,
+    )
+    .unwrap_or_else(|e| panic!("our parse: {e}\n{xml}"));
+    assert!(
+        parsed.rejection.is_some(),
+        "we commit {:?}\n{xml}",
+        parsed.properties.get("Seen")
+    );
+}
+
+/// A resolver that returns no root gives MSBuild no file to open, whatever
+/// the `Project`: a rooted one that keeps a property's `\` imports nothing,
+/// followed or under a gate the walk cannot decide, and costs the walk
+/// nothing.
+#[test]
+#[cfg(not(windows))]
+fn a_rooted_backslash_under_no_sdk_root_imports_nothing() {
+    let layout = Layout::new();
+    let env = child_environment(&layout);
+    let resolver =
+        |_: &str,
+         _observer: &borzoi_msbuild::observed::Observer|
+         -> Result<SdkResolution, SdkResolveError> { Ok(SdkResolution::Roots(Vec::new())) };
+    let root = absent_root();
+    for gate in ["", " Condition=\"'É' == 'é'\""] {
+        let xml = format!(
+            "<Project>\n  <PropertyGroup><G>seg\\child</G></PropertyGroup>\n  \
+             <Import Sdk=\"MySdk\" Project=\"{root}/$(G)/../T.props\"{gate} />\n  \
+             <PropertyGroup><Seen>after</Seen></PropertyGroup>\n</Project>\n"
+        );
+        let proj = layout.root.join("p.proj");
+        let parsed = parse_fsproj_with_imports(
+            &borzoi_msbuild::ProjectFile::buffer(&proj, &xml).expect("a full path"),
+            &HashMap::new(),
+            &env,
+            Some(&resolver),
+            None,
+        )
+        .unwrap_or_else(|e| panic!("our parse: {e}\n{xml}"));
+        assert!(
+            parsed.rejection.is_none(),
+            "{gate}: {:#?}",
+            parsed.rejection
+        );
+        // An undecided gate leaves the items uncertain on its own.
+        if gate.is_empty() {
+            assert!(!parsed.items_uncertain, "{:#?}", parsed.diagnostics);
+        }
+        assert_eq!(
+            parsed.properties.get("Seen").map(String::as_str),
+            Some("after"),
+            "{gate}"
+        );
+    }
+}

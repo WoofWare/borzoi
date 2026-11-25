@@ -1694,3 +1694,225 @@ fn classified_judgement_sweep_soak() {
     let tally = classified_judgement_sweep(&mut rng, cases);
     eprintln!("classified judgement soak: {tally:?}");
 }
+
+/// What an entry of a guarded import's list names on disk.
+#[derive(Clone, Copy, Debug)]
+enum GuardedEntry {
+    /// A file that loads.
+    Loads,
+    /// A file MSBuild cannot load (malformed XML).
+    Malformed,
+    /// Nothing.
+    Missing,
+    /// A directory, which `Exists` sees and no import loads.
+    Directory,
+    /// A file that loads, spelled with a trailing slash, which names a
+    /// directory to `Exists` and to the import.
+    Slashed,
+    /// A file that loads, spelled after an escaped `\` (`%5c`), which decodes
+    /// after MSBuild has asked whether the path is rooted.
+    Escaped,
+}
+
+impl GuardedEntry {
+    const ALL: [GuardedEntry; 6] = [
+        GuardedEntry::Loads,
+        GuardedEntry::Malformed,
+        GuardedEntry::Missing,
+        GuardedEntry::Directory,
+        GuardedEntry::Slashed,
+        GuardedEntry::Escaped,
+    ];
+}
+
+/// Every guarded import over a list of one or two entries of each kind
+/// ([`GuardedEntry`]), its `Exists` guard spelled as the import or with each
+/// `\` respelled, behind a conjunct the walk cannot decide that MSBuild takes
+/// true or false, before the guard or after it, on the import or on an
+/// `<ImportGroup>` around it: each held certain-implies-exact
+/// against MSBuild. Where MSBuild rejects the project, the walk commits no
+/// value of the property written after the import; where it evaluates it,
+/// the walk claims no certain rejection and commits MSBuild's value. And it
+/// must commit where the import loads every entry, or where a guard spelled
+/// as the import is false (an entry missing, or a file spelled as a
+/// directory): wherever MSBuild takes the undecided conjunct, the project
+/// evaluates.
+#[test]
+fn guarded_import_lists_are_judged_as_msbuild_judges_them() {
+    let mut oracle = Oracle::spawn();
+    let tmp = TempDir::new().unwrap();
+    let dir = borzoi_msbuild::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    // Each list's entries in a directory of their own, one file per position.
+    let spell = |kind: GuardedEntry, list: usize, at: usize| -> String {
+        std::fs::create_dir_all(dir.join(format!("d{list}"))).unwrap();
+        let name = format!("d{list}/e{at}.props");
+        let path = dir.join(&name);
+        match kind {
+            GuardedEntry::Loads | GuardedEntry::Slashed | GuardedEntry::Escaped => {
+                std::fs::write(&path, "<Project />").unwrap();
+            }
+            GuardedEntry::Malformed => std::fs::write(&path, "<Project>").unwrap(),
+            GuardedEntry::Missing => {}
+            GuardedEntry::Directory => std::fs::create_dir(&path).unwrap(),
+        }
+        match kind {
+            GuardedEntry::Slashed => format!("{name}/"),
+            GuardedEntry::Escaped => format!("%5c{name}"),
+            _ => name,
+        }
+    };
+    let mut lists: Vec<Vec<GuardedEntry>> = GuardedEntry::ALL.iter().map(|k| vec![*k]).collect();
+    for a in GuardedEntry::ALL {
+        for b in GuardedEntry::ALL {
+            lists.push(vec![a, b]);
+        }
+    }
+    let project_path = dir.join("Demo.fsproj");
+    let names = vec!["After".to_owned()];
+    let (mut graded, mut rejected, mut committed) = (0usize, 0usize, 0usize);
+    for (index, kinds) in lists.iter().enumerate() {
+        let entries: Vec<String> = kinds
+            .iter()
+            .enumerate()
+            .map(|(at, kind)| spell(*kind, index, at))
+            .collect();
+        let list = entries.join(";");
+        let loads = kinds.iter().all(|kind| matches!(kind, GuardedEntry::Loads));
+        let exists = kinds.iter().all(|kind| {
+            matches!(
+                kind,
+                GuardedEntry::Loads
+                    | GuardedEntry::Malformed
+                    | GuardedEntry::Directory
+                    | GuardedEntry::Escaped
+            )
+        });
+        for guard in [list.clone(), list.replace('/', "\\")] {
+            // Where the walk must commit, whatever MSBuild makes of the
+            // conjunct it cannot decide.
+            // An escaped `\` leaves the guard undecided, which the walk
+            // declines whatever the other entries say.
+            let escaped = kinds
+                .iter()
+                .any(|kind| matches!(kind, GuardedEntry::Escaped));
+            let own_guard_false = guard == list && !exists && !escaped;
+            for (gate, grouped) in [
+                format!("'É' == 'é' And Exists('{guard}')"),
+                format!("Exists('{guard}') And 'É' == 'é'"),
+                format!("'É' == 'Ê' And Exists('{guard}')"),
+            ]
+            .into_iter()
+            .flat_map(|gate| [(gate.clone(), false), (gate, true)])
+            {
+                // On the import, or on an `<ImportGroup>` around it, which
+                // MSBuild evaluates before the group's imports run.
+                let import = if grouped {
+                    format!(
+                        "  <ImportGroup Condition=\"{gate}\">\n    <Import Project=\"{list}\" />\n  \
+                         </ImportGroup>\n"
+                    )
+                } else {
+                    format!("  <Import Project=\"{list}\" Condition=\"{gate}\" />\n")
+                };
+                let xml = format!(
+                    "<Project>\n{import}  <PropertyGroup><After>ok</After></PropertyGroup>\n\
+                     </Project>\n"
+                );
+                let theirs = oracle.project(&xml, &names, Some(&project_path), &[]);
+                let parsed = parse_fsproj_with_imports(
+                    &borzoi_msbuild::ProjectFile::buffer(&project_path, &xml).unwrap(),
+                    &HashMap::new(),
+                    &HashMap::new(),
+                    None,
+                    None,
+                )
+                .unwrap();
+                let ours = parsed.property("After");
+                // The lists are literal, so a group's guard asks of the
+                // import's path what its own would.
+                let must_commit = loads || own_guard_false;
+                let context = format!("{kinds:?}, guard {guard:?}\n{xml}");
+                graded += 1;
+                assert!(
+                    !must_commit || matches!(ours, PropertyRead::Value(_)),
+                    "the project evaluates wherever MSBuild takes the gate, but we decline \
+                     {ours:?}: {context}"
+                );
+                match theirs {
+                    None => {
+                        rejected += 1;
+                        assert!(
+                            !matches!(ours, PropertyRead::Value(_)),
+                            "MSBuild rejects the project, but we commit {ours:?}: {context}"
+                        );
+                    }
+                    Some(values) => {
+                        assert!(
+                            parsed
+                                .rejection
+                                .as_ref()
+                                .is_none_or(|r| r.certainty != RejectionCertainty::Certain),
+                            "MSBuild evaluates the project, but we reject it: {context}"
+                        );
+                        if let PropertyRead::Value(value) = &ours {
+                            committed += 1;
+                            assert_eq!(
+                                Some(value),
+                                values.get("After"),
+                                "certain-implies-exact: {context}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    eprintln!(
+        "guarded import lists: {graded} graded, {rejected} MSBuild rejects, {committed} we commit"
+    );
+    // Each outcome is graded: a walk that withdrew every project, or a
+    // fixture MSBuild rejected wholesale, would pass the contract.
+    assert!(
+        rejected > 0 && committed > 0,
+        "{rejected} rejected, {committed} committed"
+    );
+}
+
+/// An `<ImportGroup>`'s guard is evaluated once, before its imports run: an
+/// earlier import that rewrites `P` (to a spelling naming a directory) does
+/// not reach it, so the later import of `$(P)` is made where `'É' == 'é'`
+/// holds, and fails. The walk may not ask the group's `Exists` of the
+/// rewritten `P`.
+#[test]
+fn an_import_group_guard_is_not_asked_again_after_its_imports_run() {
+    let mut oracle = Oracle::spawn();
+    let tmp = TempDir::new().unwrap();
+    let dir = borzoi_msbuild::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    std::fs::write(dir.join("ok.props"), "<Project />").unwrap();
+    std::fs::write(
+        dir.join("rewrite.props"),
+        "<Project><PropertyGroup><P>ok.props/</P></PropertyGroup></Project>",
+    )
+    .unwrap();
+    let project_path = dir.join("Demo.fsproj");
+    let xml = "<Project>\n  <PropertyGroup><P>ok.props</P></PropertyGroup>\n  \
+               <ImportGroup Condition=\"Exists('$(P)')\">\n    \
+               <Import Project=\"rewrite.props\" />\n    \
+               <Import Project=\"$(P)\" Condition=\"'É' == 'é'\" />\n  </ImportGroup>\n  \
+               <PropertyGroup><After>ok</After></PropertyGroup>\n</Project>\n";
+    let theirs = oracle.project(xml, &["After".to_owned()], Some(&project_path), &[]);
+    assert_eq!(theirs, None, "MSBuild rejects the project");
+    let parsed = parse_fsproj_with_imports(
+        &borzoi_msbuild::ProjectFile::buffer(&project_path, xml).unwrap(),
+        &HashMap::new(),
+        &HashMap::new(),
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(
+        !matches!(parsed.property("After"), PropertyRead::Value(_)),
+        "we commit {:?}",
+        parsed.property("After")
+    );
+}

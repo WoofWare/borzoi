@@ -63,8 +63,35 @@ use std::ops::Range;
 use super::observed::Observer;
 use super::properties::escaping::Escaped;
 use super::properties::{
-    Issue, MAX_EXPRESSION_NESTING, PropertyMap, substitute, substitute_with_fs,
+    Issue, MAX_EXPRESSION_NESTING, PropertyMap, path_fixup, substitute, substitute_with_fs,
 };
+
+/// MSBuild's `Exists` of its expanded argument `value`, each entry asked of
+/// `exists`, or `None` where the walk does not decide it. MSBuild expands
+/// the argument into an item list and asks about every entry: true when each
+/// exists, false for an empty list (`ExpandArgumentAsFileList`). The split
+/// and the trim happen in the escaped domain, as for `HasTrailingSlash`: an
+/// escaped `%3b` is filename data, not a separator, and an escaped `%20` is
+/// data, not padding. Oracle-pinned: `Exists('a;b')` is true with files `a`
+/// and `b` and none named `a;b`, `Exists('a%3bb')` asks about `a;b`, and
+/// `Exists('path%20')` about `path `. Every reader that asks what a
+/// condition's `Exists` decides asks this, the evaluator and the judge of a
+/// guarded import alike.
+pub(crate) fn exists_of_list(value: &Escaped, exists: &dyn Fn(&str) -> bool) -> Option<bool> {
+    let entries: Vec<Escaped> = value.split_list().collect();
+    // A `\` written as `%5c` decodes after MSBuild has asked whether the
+    // entry is rooted, and acts as a separator only after that.
+    // Oracle-pinned: `Exists('%5c<an existing absolute path>')` is false,
+    // while `Exists('d%5cg')` is true with `d/g` and `Exists('d/up%5c..%5cg')`
+    // collapses the `..` as text. Decline rather than model that order.
+    if entries
+        .iter()
+        .any(|entry| entry.as_escaped().to_ascii_lowercase().contains("%5c"))
+    {
+        return None;
+    }
+    Some(!entries.is_empty() && entries.iter().all(|entry| exists(&entry.unescape())))
+}
 
 /// The file-system queries a condition may make: `exists` answers
 /// `Exists('…')` for one decoded, trimmed entry of its argument's list,
@@ -359,6 +386,21 @@ fn parse_condition(source: &str) -> Result<Option<BoolExpr>, Reject> {
 
 /// [`parse_condition`] within the grammar we model.
 fn parse_modelled(source: &str) -> Result<Option<BoolExpr>, ()> {
+    parse_modelled_with(source, PathArguments::Respelled)
+}
+
+/// How a parse holds the arguments of `Exists` and `HasTrailingSlash`.
+#[derive(Clone, Copy)]
+enum PathArguments {
+    /// As MSBuild expands them: each written `\` a `/` on Unix
+    /// (`path_fixup::fix_file_path`).
+    Respelled,
+    /// As written.
+    AsWritten,
+}
+
+/// [`parse_modelled`], holding path arguments as `paths` says.
+fn parse_modelled_with(source: &str, paths: PathArguments) -> Result<Option<BoolExpr>, ()> {
     if source.is_empty() {
         return Ok(None);
     }
@@ -402,6 +444,7 @@ fn parse_modelled(source: &str) -> Result<Option<BoolExpr>, ()> {
         tokens: &tokens,
         pos: 0,
         depth: 0,
+        paths,
     };
     let expr = parser.parse_or()?;
     if parser.pos != parser.tokens.len() {
@@ -1255,7 +1298,10 @@ pub fn decided_conjunctwise(
 /// whose conjuncts is an `Exists` whose raw argument `is_the_exists` accepts:
 /// the condition is false whenever that `Exists` is.
 pub fn requires_exists(source: &str, is_the_exists: &dyn Fn(&str) -> bool) -> bool {
-    let Ok(Some(expr)) = parse_condition(source) else {
+    // Compared as written: MSBuild compares the respelled arguments, which
+    // match more spellings, so a guard written apart from the text
+    // `is_the_exists` looks for only goes unrecognised.
+    let Ok(Some(expr)) = parse_modelled_with(source, PathArguments::AsWritten) else {
         return false;
     };
     let mut pending = vec![&expr];
@@ -1848,9 +1894,11 @@ enum BoolExpr {
     And(Vec<BoolExpr>),
     /// A chain `a Or b Or …`, held flat like [`BoolExpr::And`].
     Or(Vec<BoolExpr>),
+    /// `Exists('…')`: the quote-stripped argument text as MSBuild expands it,
+    /// each written `\` a `/` on Unix (`path_fixup::fix_file_path`).
     Exists(String),
-    /// `HasTrailingSlash('…')`: the raw (quote-stripped, pre-substitution)
-    /// argument text.
+    /// `HasTrailingSlash('…')`: its argument, as [`BoolExpr::Exists`] holds
+    /// one.
     HasTrailingSlash(String),
     MsbuildVersionFunction(String),
     /// A scalar standing alone as a boolean, coerced through MSBuild's
@@ -1911,9 +1959,21 @@ struct Parser<'a> {
     pos: usize,
     /// Parentheses and `!`s enclosing the factor being parsed.
     depth: usize,
+    /// How the path arguments are held.
+    paths: PathArguments,
 }
 
 impl<'a> Parser<'a> {
+    /// The argument of `Exists` or `HasTrailingSlash`, held as
+    /// [`Parser::paths`] says.
+    fn path_argument(&mut self) -> Result<String, ()> {
+        let argument = self.parse_single_string_argument()?;
+        Ok(match self.paths {
+            PathArguments::Respelled => path_fixup::fix_file_path(&argument),
+            PathArguments::AsWritten => argument,
+        })
+    }
+
     fn peek(&self) -> Option<&'a Token> {
         self.tokens.get(self.pos)
     }
@@ -2013,15 +2073,17 @@ impl<'a> Parser<'a> {
                 self.bump();
                 Ok(BoolExpr::False)
             }
+            // MSBuild turns each `\` written in either argument into `/`
+            // before it expands it (`FixFilePath`), so every reader of the
+            // argument, the evaluator and the walk's judges of what it reads
+            // and may throw on alike, reads the text MSBuild expands.
             Some(Token::Exists) => {
                 self.bump();
-                Ok(BoolExpr::Exists(self.parse_single_string_argument()?))
+                Ok(BoolExpr::Exists(self.path_argument()?))
             }
             Some(Token::HasTrailingSlash) => {
                 self.bump();
-                Ok(BoolExpr::HasTrailingSlash(
-                    self.parse_single_string_argument()?,
-                ))
+                Ok(BoolExpr::HasTrailingSlash(self.path_argument()?))
             }
             Some(Token::MsbuildVersionFunction(inner)) => {
                 let inner = inner.clone();
@@ -2175,31 +2237,7 @@ fn eval_bool(
                 return Err(Reject::Undecided);
             };
             let value = expand_for_condition(raw, props, fs, undefined)?;
-            // MSBuild expands the argument into an item list and asks about
-            // every entry: true when each exists, false for an empty list
-            // (`ExpandArgumentAsFileList`). The split and the trim happen in
-            // the escaped domain, as for `HasTrailingSlash` below: an escaped
-            // `%3b` is filename data, not a separator, and an escaped `%20` is
-            // data, not padding. Oracle-pinned: `Exists('a;b')` is true with
-            // files `a` and `b` and none named `a;b`, `Exists('a%3bb')` asks
-            // about `a;b`, and `Exists('path%20')` about `path `.
-            let entries: Vec<Escaped> = value.split_list().collect();
-            // A `\` written as `%5c` decodes after MSBuild has asked whether
-            // the entry is rooted, and acts as a separator only after that.
-            // Oracle-pinned: `Exists('%5c<an existing absolute path>')` is
-            // false, while `Exists('d%5cg')` is true with `d/g` and
-            // `Exists('d/up%5c..%5cg')` collapses the `..` as text. Decline
-            // rather than model that order.
-            if entries
-                .iter()
-                .any(|entry| entry.as_escaped().to_ascii_lowercase().contains("%5c"))
-            {
-                return Err(Reject::Undecided);
-            }
-            Ok(!entries.is_empty()
-                && entries
-                    .iter()
-                    .all(|entry| (probes.exists)(&entry.unescape())))
+            exists_of_list(&value, probes.exists).ok_or(Reject::Undecided)
         }
         BoolExpr::HasTrailingSlash(raw) => {
             let value = expand_for_condition(raw, props, fs, undefined)
@@ -3276,6 +3314,7 @@ mod tests {
                 tokens: &tokens,
                 pos: 0,
                 depth: 0,
+                paths: super::PathArguments::Respelled,
             };
             let expr = parser.parse_or().expect("parses");
             let mut out = Vec::new();
