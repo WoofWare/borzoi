@@ -2200,7 +2200,7 @@ mod tests {
                 "NUGET_PACKAGES",
             ])
             .collect();
-        prop_oneof![
+        let own = prop_oneof![
             (prop::sample::select(listed), 0..3usize, "[A-Za-z_]{0,2}").prop_map(
                 |(name, case, tail)| {
                     let name = match case {
@@ -2212,7 +2212,37 @@ mod tests {
                 }
             ),
             "[A-Za-z_][A-Za-z0-9_.()-]{0,12}",
-        ]
+        ];
+        // A hostile name (`hostile::name`, as a variable's name) in one case
+        // in `hostile::RATE`.
+        let hostile = borzoi_oracle_harness::hostile::name::as_text("BorzoiVar", "");
+        (own, any::<u64>()).prop_map(move |(own, entropy)| {
+            match borzoi_oracle_harness::hostile::sample(&hostile, entropy) {
+                Some(entry) if !entry.value.is_empty() && !entry.value.contains(['=', '\0']) => {
+                    entry.value.clone()
+                }
+                _ => own,
+            }
+        })
+    }
+
+    /// An environment: generated variables, and in one case in
+    /// `hostile::RATE` a hostile environment's (`hostile::env`) beside them,
+    /// at their own values.
+    fn environment() -> impl Strategy<Value = HashMap<String, String>> {
+        (prop::collection::vec(variable_name(), 0..6), any::<u64>()).prop_map(|(names, entropy)| {
+            let mut environment: HashMap<String, String> = names
+                .into_iter()
+                .map(|name| (name, "v".to_string()))
+                .collect();
+            let entries = borzoi_oracle_harness::hostile::env::alphabet().entries();
+            if let Some(entry) = borzoi_oracle_harness::hostile::sample(entries, entropy) {
+                for (name, value) in entry.value {
+                    environment.insert(name.to_string(), value.to_string());
+                }
+            }
+            environment
+        })
     }
 
     proptest! {
@@ -2225,11 +2255,7 @@ mod tests {
         /// An environment declines exactly when it holds a variable the rule
         /// declined, and names such a variable.
         #[test]
-        fn the_environment_declines_as_it_did(
-            names in prop::collection::vec(variable_name(), 0..6)
-        ) {
-            let environment: HashMap<String, String> =
-                names.into_iter().map(|name| (name, "v".to_string())).collect();
+        fn the_environment_declines_as_it_did(environment in environment()) {
             match environment_decline(&environment) {
                 Some(NameDecline::Environment(name)) => {
                     prop_assert!(environment.contains_key(&name), "{name} is not set");

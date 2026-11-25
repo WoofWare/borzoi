@@ -21,7 +21,8 @@ fn nuget_group_atom_before(atom: &str) -> bool {
 
 /// An atom shaped like a guard: one of the guards' names or another, in
 /// either case, an operator, and a value that may expand, hold a quote or a
-/// line break or tab, with the spacing perturbed.
+/// line break or tab, or be a hostile property value, with the spacing
+/// perturbed.
 fn nuget_guard_atom() -> impl proptest::strategy::Strategy<Value = String> {
     use proptest::prelude::*;
     let name = prop::sample::select(vec![
@@ -33,13 +34,25 @@ fn nuget_guard_atom() -> impl proptest::strategy::Strategy<Value = String> {
         "Configuration",
     ]);
     let op = prop::sample::select(vec!["==", "!=", "=", "<"]);
-    let value = prop_oneof![
+    let own = prop_oneof![
         prop::sample::select(vec![
             "", "true", "false", "F#", "net10.0", "a'b", "$(X)", "@(Y)", "%(Z)", "$"
         ])
         .prop_map(str::to_string),
         "[ -~\t\n\r]{0,6}",
     ];
+    // A hostile property value (`hostile::value`, rendered on the generated
+    // one) in one case in `hostile::RATE`; a later write is no value one
+    // atom can hold.
+    let entries = borzoi_oracle_harness::hostile::value::alphabet().filtered(|entry| {
+        entry.value.write != borzoi_oracle_harness::hostile::value::Write::ThenPlain
+    });
+    let value = (own, any::<u64>()).prop_map(move |(own, entropy)| {
+        match borzoi_oracle_harness::hostile::sample(&entries, entropy) {
+            Some(entry) => entry.value.render(&own),
+            None => own,
+        }
+    });
     let spacing = prop::sample::select(vec![" ", "", "  "]);
     (name, op, value, spacing.clone(), spacing).prop_map(|(name, op, value, before, after)| {
         format!("'$({name})'{before}{op}{after}'{value}'")
