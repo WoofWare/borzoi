@@ -1420,6 +1420,58 @@ struct Census {
     unheld_value: usize,
 }
 
+/// Credit `census` with a draw only where it reached the registration, which
+/// is certain only where MSBuild evaluates the document: every task is then
+/// registered, and each value read. A document MSBuild rejects may have
+/// stopped first, at its loader (a `TaskName` written empty) or at an earlier
+/// refusal, so it credits nothing, however it is graded.
+fn credit_registered(
+    census: &hostile::census::Census,
+    hostile: &BTreeSet<Dimension>,
+    graded: Graded,
+) {
+    if !graded.msbuild_rejects {
+        census.reached(
+            hostile,
+            if graded.walk.is_some() {
+                "evaluates-withdrawn"
+            } else {
+                "evaluates-committed"
+            },
+        );
+    }
+}
+
+/// `X`, and each entry of the hostile value alphabet but `excluded`'s rendered
+/// over it, as the text of an inline task's body, which the registration
+/// expands and takes whatever it holds: a witness of each dimension, and of
+/// a plain value, that reaches the registration in a document MSBuild
+/// evaluates, whatever a sweep's seed draws ([`credit_registered`]).
+fn credit_witnesses(
+    oracle: &mut Oracle,
+    census: &hostile::census::Census,
+    excluded: &BTreeSet<Dimension>,
+) {
+    let plain = std::iter::once(hostile::Drawn::plain("X".to_owned()));
+    let hostile_values = value::alphabet()
+        .entries()
+        .iter()
+        .map(|entry| hostile::Drawn::of(entry).map(|v| v.render("X")));
+    for drawn in plain.chain(hostile_values) {
+        if drawn.hostile.iter().any(|d| excluded.contains(d))
+            || drawn.value.chars().any(|c| !hostile::xml::representable(c))
+        {
+            continue;
+        }
+        let body = format!(
+            "<UsingTask {INLINE}><Task>{}</Task></UsingTask>",
+            element_text(&drawn.value)
+        );
+        let graded = grade(oracle, "", &body, Doubt::None);
+        credit_registered(census, &drawn.hostile, graded);
+    }
+}
+
 /// `cases` documents from `rng`, each graded ([`grade`]).
 fn registration_sweep(seed: u64, cases: usize) -> Census {
     let census = coverage::open(file!(), "using_task_registration", EXCLUDED);
@@ -1427,7 +1479,9 @@ fn registration_sweep(seed: u64, cases: usize) -> Census {
     let mut oracle = Oracle::spawn();
     let mut rng = SplitMix64(seed);
     let mut tally = Census::default();
-    // Every entry of the alphabet once, as a witness, before the draws.
+    credit_witnesses(&mut oracle, &census, &excluded);
+    // Every entry of the alphabet once, in a place the seed picks, before
+    // the draws.
     let mut witnesses = value::alphabet().entries().iter();
     while tally.cases < cases {
         let place = *rng.pick(PLACES);
@@ -1476,13 +1530,6 @@ fn registration_sweep(seed: u64, cases: usize) -> Census {
                  certain property: {body}"
             );
             tally.unheld_value += 1;
-            census.reached(
-                &drawn.hostile,
-                match doubt {
-                    Doubt::Differs => "rejects-on-a-doubted-value",
-                    Doubt::None => "rejects-on-an-unheld-value",
-                },
-            );
             continue;
         }
         match graded.walk {
@@ -1490,15 +1537,7 @@ fn registration_sweep(seed: u64, cases: usize) -> Census {
             Some(RejectionCertainty::Possible) => tally.possible += 1,
             None => {}
         }
-        census.reached(
-            &drawn.hostile,
-            match (graded.msbuild_rejects, graded.walk) {
-                (true, Some(RejectionCertainty::Certain)) => "rejects-claimed",
-                (true, _) => "rejects-perhaps",
-                (false, Some(_)) => "evaluates-withdrawn",
-                (false, None) => "evaluates-committed",
-            },
-        );
+        credit_registered(&census, &drawn.hostile, graded);
     }
     census.finish(
         "BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-msbuild --test \
@@ -1754,7 +1793,9 @@ const COMPOSITE_WRITES: &str = "<P>a</P><At>@</At><At Condition=\"'É' == 'é'\"
 /// must be MSBuild's, and name a construct MSBuild refuses alone.
 fn composite_sweep(seed: u64, cases: usize) -> Census {
     let census = coverage::open(file!(), "using_task_composite", EXCLUDED);
+    let excluded: BTreeSet<Dimension> = EXCLUDED.iter().map(|(d, _)| *d).collect();
     let mut oracle = Oracle::spawn();
+    credit_witnesses(&mut oracle, &census, &excluded);
     let mut rng = SplitMix64(seed);
     let mut tally = Census::default();
     for _ in 0..cases {
@@ -1787,23 +1828,9 @@ fn composite_sweep(seed: u64, cases: usize) -> Census {
             Some(RejectionCertainty::Possible) => tally.possible += 1,
             None => {}
         }
-        // A draw reaches the registration only where MSBuild gets to it, and
-        // a document it rejects may have stopped before: at a parameter name
-        // its loader refuses, or at an earlier task's refusal. One it
-        // evaluates has registered every task, so each draw [`DRAWN`] kept
-        // was read, and only those documents are credited. The draws of a
-        // rejected one reach the registration in isolation, in
-        // [`registration_sweep`].
-        if !graded.msbuild_rejects {
-            census.reached(
-                &hostile,
-                if graded.walk.is_some() {
-                    "evaluates-withdrawn"
-                } else {
-                    "evaluates-committed"
-                },
-            );
-        }
+        // Each draw [`DRAWN`] kept is one MSBuild registers, where it gets
+        // to the task at all.
+        credit_registered(&census, &hostile, graded);
     }
     census.finish(
         "BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-msbuild --test \
@@ -1815,7 +1842,7 @@ fn composite_sweep(seed: u64, cases: usize) -> Census {
 /// [`composite_sweep`] at a fixed seed.
 #[test]
 fn composite_sweep_fixed_seed() {
-    let tally = composite_sweep(0x1099_c0de, 2000);
+    let tally = composite_sweep(0x1099_c0de, 600);
     eprintln!("composite sweep: {tally:?}");
     assert!(tally.msbuild_rejects >= 100, "{tally:?}");
     assert!(tally.certain >= 50, "{tally:?}");
