@@ -46,7 +46,7 @@
 //! | The reference set | every path the caller builds its assembly env from ([`ReferencePaths`]) is absolute, without control characters, not option-shaped |
 //! | Package content files | every build action is on [`ADMITTED_CONTENT_ACTIONS`] ([`ContentFiles`]) |
 //! | Documents | no build code outside the install; no condition outside the install but in NuGet's restore files (#993: the walk cannot tell every value a condition compares, MSBuild respelling a backslash by its working directory); no item wildcard outside the install (a glob's match keeps the glob's spelling, which the walk's path does not); no expansion (`$(`, `@(`, `%(`) outside the install but in NuGet's restore files (MSBuild sets properties the walk takes for unset, `_MSBUILDTLENABLED`); no response file beside MSBuild, beside the project or above it ([`crate::AutoResponseFile::Absent`]); no `NotImported` site's file imported; no workload manifest from outside the install, and none a grading run of the SDK did not load ([`verified_manifests`]: manifests change apart from the SDK); the project's path without control characters |
-//! | The environment | the toolchain's own ([`toolchain_variable`]) held fixed; others on `ALLOWED_ENVIRONMENT` or `ALLOWED_PROPERTIES` |
+//! | The environment | each variable as [`classify_variable`] finds it: the toolchain's own ([`toolchain_variable`]) held fixed; others on `ALLOWED_ENVIRONMENT` or `ALLOWED_PROPERTIES` ([`environment_decline`]) |
 //! | The SDK | fixed per install; only an SDK a whole sweep has graded commits ([`verified_sdks`]) |
 //!
 //! Assumed rather than checked: that the assets file is the restore of the
@@ -350,6 +350,54 @@ pub fn toolchain_variable(name: &str) -> bool {
         || name.starts_with("NUGET_")
 }
 
+/// What an environment variable is to the derivation ([`classify_variable`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VariableClass {
+    /// One of the build's own ([`toolchain_variable`]), held fixed.
+    Toolchain,
+    /// One of [`ALLOWED_PROPERTIES`] (in any case), whose value must match
+    /// this grammar.
+    AllowedProperty(Grammar),
+    /// One of [`ALLOWED_ENVIRONMENT`] (in any case).
+    Graded,
+    /// On no list: declined.
+    Unlisted,
+}
+
+impl VariableClass {
+    /// Whether a variable of this class keeps the evaluation in the domain
+    /// (an allowed property's value aside, which the derivation checks with
+    /// the rest).
+    pub fn admitted(self) -> bool {
+        self != VariableClass::Unlisted
+    }
+}
+
+/// What the variable `name` is to the derivation: the toolchain's own, an
+/// allowed property, one of [`ALLOWED_ENVIRONMENT`], or on no list, in that
+/// order.
+pub fn classify_variable(name: &str) -> VariableClass {
+    if toolchain_variable(name) {
+        VariableClass::Toolchain
+    } else if let Some(grammar) = allowed_property(name) {
+        VariableClass::AllowedProperty(grammar)
+    } else if on_list(ALLOWED_ENVIRONMENT, name) {
+        VariableClass::Graded
+    } else {
+        VariableClass::Unlisted
+    }
+}
+
+/// Why the environment `environment` takes an evaluation out of the domain,
+/// or `None` when it does not (an allowed property's value aside): a
+/// variable [`classify_variable`] does not admit.
+pub fn environment_decline(environment: &HashMap<String, String>) -> Option<NameDecline> {
+    environment
+        .keys()
+        .find(|name| !classify_variable(name).admitted())
+        .map(|name| NameDecline::Environment(name.clone()))
+}
+
 /// The name of the assembly a project compiles to, as FCS names it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompiledAssemblyName {
@@ -409,7 +457,7 @@ pub enum NameDecline {
     /// Item metadata not on [`ALLOWED_METADATA`] is set outside the .NET
     /// install.
     Metadata(String),
-    /// An environment variable on no list is set.
+    /// An environment variable on no list is set ([`classify_variable`]).
     Environment(String),
     /// An allowed property held a value outside its grammar, or one the walk
     /// is not certain of, at some point of the evaluation (its final value,
@@ -1963,12 +2011,8 @@ fn decide(
     }) {
         return Err(NameDecline::Metadata(name.clone()));
     }
-    if let Some(name) = environment.keys().find(|name| {
-        !toolchain_variable(name)
-            && !on_list(ALLOWED_ENVIRONMENT, name)
-            && allowed_property(name).is_none()
-    }) {
-        return Err(NameDecline::Environment(name.clone()));
+    if let Some(decline) = environment_decline(environment) {
+        return Err(decline);
     }
 
     // Every value an allowed property held is in its grammar: its final value,
@@ -2110,8 +2154,205 @@ fn sources_read_as_files(project_path: &Path, parsed: &ParsedProject) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{DefaultItemFiles, Grammar, default_item_files, may_read_as_option};
+    use super::{
+        ALLOWED_ENVIRONMENT, ALLOWED_PROPERTIES, DefaultItemFiles, Grammar, NameDecline,
+        VariableClass, classify_variable, default_item_files, environment_decline,
+        may_read_as_option,
+    };
     use crate::observed::Observer;
+    use proptest::prelude::*;
+    use std::collections::HashMap;
+
+    /// The environment rule as it stood before it was a classifier, kept
+    /// verbatim as the reference the classifier must equal.
+    fn declined_before(name: &str) -> bool {
+        let toolchain = matches!(
+            name,
+            "PATH" | "HOME" | "TMPDIR" | "RestoreSources" | "MSBuildUserExtensionsPath"
+        ) || name.starts_with("DOTNET_")
+            || name.starts_with("NUGET_");
+        let graded = ALLOWED_ENVIRONMENT
+            .iter()
+            .any(|allowed| allowed.eq_ignore_ascii_case(name));
+        let property = ALLOWED_PROPERTIES
+            .iter()
+            .any(|(allowed, _)| allowed.eq_ignore_ascii_case(name));
+        !toolchain && !graded && !property
+    }
+
+    /// A name for a variable: each listed name and the toolchain's, in its
+    /// own case, lower case or upper case, with or without a tail; a
+    /// `DOTNET_`/`NUGET_` name in either case; or any short name.
+    fn variable_name() -> impl Strategy<Value = String> {
+        let listed: Vec<&'static str> = ALLOWED_ENVIRONMENT
+            .iter()
+            .copied()
+            .chain(ALLOWED_PROPERTIES.iter().map(|(name, _)| *name))
+            .chain([
+                "PATH",
+                "HOME",
+                "TMPDIR",
+                "RestoreSources",
+                "MSBuildUserExtensionsPath",
+                "DOTNET_",
+                "NUGET_",
+                "DOTNET_ROOT",
+                "NUGET_PACKAGES",
+            ])
+            .collect();
+        let own = prop_oneof![
+            (prop::sample::select(listed), 0..3usize, "[A-Za-z_]{0,2}").prop_map(
+                |(name, case, tail)| {
+                    let name = match case {
+                        0 => name.to_string(),
+                        1 => name.to_ascii_lowercase(),
+                        _ => name.to_ascii_uppercase(),
+                    };
+                    format!("{name}{tail}")
+                }
+            ),
+            "[A-Za-z_][A-Za-z0-9_.()-]{0,12}",
+        ];
+        // A hostile name (`hostile::name`, as a variable's name) in one case
+        // in `hostile::RATE`.
+        let hostile = borzoi_oracle_harness::hostile::name::as_text("BorzoiVar", "");
+        (own, any::<u64>()).prop_map(move |(own, entropy)| {
+            match borzoi_oracle_harness::hostile::sample(&hostile, entropy) {
+                Some(entry) if !entry.value.is_empty() && !entry.value.contains(['=', '\0']) => {
+                    entry.value.clone()
+                }
+                _ => own,
+            }
+        })
+    }
+
+    /// An environment: generated variables, and in one case in
+    /// `hostile::RATE` a hostile environment's (`hostile::env`) beside them,
+    /// at their own values.
+    fn environment() -> impl Strategy<Value = HashMap<String, String>> {
+        (prop::collection::vec(variable_name(), 0..6), any::<u64>()).prop_map(|(names, entropy)| {
+            let mut environment: HashMap<String, String> = names
+                .into_iter()
+                .map(|name| (name, "v".to_string()))
+                .collect();
+            let entries = borzoi_oracle_harness::hostile::env::alphabet().entries();
+            if let Some(entry) = borzoi_oracle_harness::hostile::sample(entries, entropy) {
+                for (name, value) in entry.value {
+                    environment.insert(name.to_string(), value.to_string());
+                }
+            }
+            environment
+        })
+    }
+
+    proptest! {
+        /// The classifier admits exactly what the rule did before it.
+        #[test]
+        fn the_classifier_is_the_rule_it_replaced(name in variable_name()) {
+            prop_assert_eq!(!classify_variable(&name).admitted(), declined_before(&name));
+        }
+
+        /// An environment declines exactly when it holds a variable the rule
+        /// declined, and names such a variable.
+        #[test]
+        fn the_environment_declines_as_it_did(environment in environment()) {
+            match environment_decline(&environment) {
+                Some(NameDecline::Environment(name)) => {
+                    prop_assert!(environment.contains_key(&name), "{name} is not set");
+                    prop_assert!(declined_before(&name));
+                }
+                Some(other) => prop_assert!(false, "{other:?}"),
+                None => prop_assert!(!environment.keys().any(|name| declined_before(name))),
+            }
+        }
+    }
+
+    /// Every hostile environment (`hostile::env`), its variables at their own
+    /// values, and every hostile file-name template rendered as a variable's
+    /// name (`hostile::name`): the classifier and the environment's verdict
+    /// are the rule they replaced, each recorded in the census
+    /// `variable_class`.
+    #[test]
+    fn the_classifier_agrees_on_every_hostile_environment() {
+        use borzoi_oracle_harness::hostile::{Dimension, coverage, env, name};
+        use std::collections::BTreeSet;
+        let census = coverage::open(
+            file!(),
+            "variable_class",
+            &[(
+                Dimension::NonUtf8,
+                "the derivation takes the environment as UTF-8 text, as its caller reads it",
+            )],
+        );
+        let mut failures = Vec::new();
+        let mut check = |environment: HashMap<String, String>, dimension: Option<Dimension>| {
+            for name in environment.keys() {
+                if !classify_variable(name).admitted() != declined_before(name) {
+                    failures.push(format!("{name:?}: {:?}", classify_variable(name)));
+                }
+            }
+            let declined = environment_decline(&environment);
+            let declined_name = match &declined {
+                Some(NameDecline::Environment(name)) => Some(name.clone()),
+                _ => None,
+            };
+            let agrees = match &declined_name {
+                Some(name) => environment.contains_key(name) && declined_before(name),
+                None => declined.is_none() && !environment.keys().any(|n| declined_before(n)),
+            };
+            if !agrees {
+                failures.push(format!("{environment:?}: {declined:?}"));
+            }
+            census.reached(
+                &dimension.into_iter().collect::<BTreeSet<_>>(),
+                if declined.is_some() {
+                    "decline"
+                } else {
+                    "admit"
+                },
+            );
+        };
+        for entry in env::alphabet().entries() {
+            let environment = entry
+                .value
+                .iter()
+                .map(|(name, value)| (name.to_string(), value.to_string()))
+                .collect();
+            check(environment, Some(entry.dimension));
+        }
+        for entry in name::as_text("BorzoiVar", "") {
+            check(
+                HashMap::from([(entry.value.clone(), "v".to_string())]),
+                Some(entry.dimension),
+            );
+        }
+        // The harness's own environments: a graded variable, and one on no
+        // list, through the same comparison.
+        check(HashMap::from([("LANG".to_string(), "C".to_string())]), None);
+        check(
+            HashMap::from([("BorzoiVar".to_string(), "v".to_string())]),
+            None,
+        );
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+        census.finish(
+            "BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-msbuild --lib \
+             fsc::tests::the_classifier_agrees_on_every_hostile_environment",
+        );
+    }
+
+    /// Each class is reached, so the property above compares every arm.
+    #[test]
+    fn every_class_is_reached() {
+        assert_eq!(classify_variable("PATH"), VariableClass::Toolchain);
+        assert_eq!(classify_variable("DOTNET_ROOT"), VariableClass::Toolchain);
+        assert_eq!(
+            classify_variable("assemblyname"),
+            VariableClass::AllowedProperty(Grammar::FileName)
+        );
+        assert_eq!(classify_variable("lang"), VariableClass::Graded);
+        assert_eq!(classify_variable("BORZOI_X"), VariableClass::Unlisted);
+        assert_eq!(classify_variable("path"), VariableClass::Unlisted);
+    }
     use std::fs::{create_dir_all, write};
     use std::path::Path;
 

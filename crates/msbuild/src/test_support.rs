@@ -38,6 +38,13 @@ pub fn judge(condition: &str, props: &PropertyMap, uncertain: &dyn Fn(&str) -> b
 }
 pub use crate::properties::MAX_EXPRESSION_NESTING;
 pub use crate::properties::escaping::{escape, unescape};
+
+/// Whether `atom` is one of the guards on the groups NuGet's restore writes
+/// (`NUGET_GUARDS`), for the allocation count of
+/// `tests/nuget_guard_allocations.rs`.
+pub fn nuget_group_atom(atom: &str) -> bool {
+    crate::nuget_group_atom(atom)
+}
 pub use crate::properties::path_fixup::worlds as path_fixup_worlds;
 pub use crate::properties::{Issue, PropertyMap};
 pub use crate::sdk_resolver::global_json::GLOBAL_JSON_MAX_DEPTH;
