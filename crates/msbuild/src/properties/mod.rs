@@ -380,16 +380,6 @@ impl PropertyMap {
         }
     }
 
-    /// Mark `key`'s value, if it is bound, stale under `cause`: one MSBuild
-    /// rewrites outside the documents, by a rule the walk does not model.
-    pub(crate) fn mark_stale(&mut self, key: &str, cause: &trust::StaleCause) {
-        if let Some(entry) = self.inner.get_mut(&key.to_ascii_lowercase())
-            && entry.value.is_some()
-        {
-            entry.trust.go_stale(cause);
-        }
-    }
-
     /// The trust of `key`'s entry, `None` where it has none: what
     /// [`Self::restore_trust`] puts back after verdicts that leave every value
     /// alone.

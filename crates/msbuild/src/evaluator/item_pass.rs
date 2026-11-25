@@ -269,19 +269,7 @@ impl<'r> State<'r> {
 /// pass encountered it. Called once per walk, after the property pass has
 /// consumed the entry body and every import.
 pub(super) fn replay_deferred_item_groups(entry_doc: &Document<'_>, state: &mut State<'_>) {
-    // Between the passes MSBuild prepends the most recently written of the
-    // project and its imports to `MSBuildAllProjects`
-    // (`Evaluator.SetAllProjectsProperty`, MSBuild 18.9), by file times the
-    // walk does not read: every read of the name from here on, the final
-    // table's among them, is of a value the walk does not hold. Unbound, the
-    // name is one the toolset may define, and already reads inexact
-    // (`is_toolset_initial_property_name`).
-    state.lookup.mark_stale(
-        "MSBuildAllProjects",
-        &Arc::new(crate::properties::trust::OpacityCause::Unentered(
-            "MSBuild's write of `MSBuildAllProjects` between its property and item passes".into(),
-        )),
-    );
+    state.write_all_projects();
     let groups = std::mem::take(&mut state.deferred_item_groups);
     let files = std::mem::take(&mut state.retained_imported_files);
     let definition_groups = groups

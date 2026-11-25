@@ -1518,6 +1518,30 @@ impl Expansion {
 }
 
 impl<'r> State<'r> {
+    /// MSBuild's own write of `MSBuildAllProjects` between its property and
+    /// item passes (`Evaluator.SetAllProjectsProperty`, MSBuild 18.9): it
+    /// prepends the most recently written of the project and its imports, by
+    /// file times the walk does not read. So the write is one the walk
+    /// refuses to compute, as it refuses a document's write it cannot
+    /// evaluate: the binding goes, the name is marked refused, and every read
+    /// of it from here on (an item's gate, spec or metadata, a reference's,
+    /// the final table's) is of a value the walk does not hold, decided
+    /// without it where it can be.
+    fn write_all_projects(&mut self) {
+        const NAME: &str = "MSBuildAllProjects";
+        self.lookup.unbind(NAME);
+        self.written.remove(&NAME.to_ascii_lowercase());
+        self.apply_property_provenance(
+            NAME,
+            PropertyProvenance {
+                taint: TaintOutcome::Keep,
+                unpinned: UnpinnedOutcome::Clear,
+                refused: RefusedOutcome::Set,
+                stale: StaleOutcome::Keep,
+            },
+        );
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn new(
         project_path: &Path,
