@@ -276,21 +276,27 @@ fn held_to_plain_arguments(case: &Case) -> bool {
         })
 }
 
-/// Whether the grading holds the variable `name` fixed, so a commit under a
-/// value of it the oracle cannot build is counted ([`Outcome::HeldFixed`])
-/// rather than failed: the build environment's own names
-/// ([`BUILD_ENVIRONMENT_NAMES`]), `MSBuildUserExtensionsPath` (which MSBuild
-/// computes for itself), and the .NET host's and NuGet's `DOTNET_*` and
-/// `NUGET_*` families, which no case here builds under. Pinned here, apart
-/// from the derivation's `toolchain_variable`, so a variable the derivation
-/// comes to admit as the toolchain's by mistake fails rather than is excused.
-/// The families are as wide as the derivation's rule today; #1064 narrows
-/// that rule to exact names, and this list with it.
+/// The toolchain's own variables, by exact name, which the grading holds
+/// fixed: its builds run in its own environment, so it cannot build under
+/// another value of one. Pinned here, apart from the derivation's
+/// `TOOLCHAIN_VARIABLES`, so a variable the derivation comes to admit as the
+/// toolchain's by mistake fails rather than is excused.
+const HELD_FIXED: &[&str] = &[
+    "DOTNET_CLI_HOME",
+    "DOTNET_ROOT",
+    "HOME",
+    "MSBuildUserExtensionsPath",
+    "NUGET_PACKAGES",
+    "PATH",
+    "RestoreSources",
+    "TMPDIR",
+];
+
+/// Whether the grading holds the variable `name` fixed ([`HELD_FIXED`]), so a
+/// commit under a value of it the oracle cannot build is counted
+/// ([`Outcome::HeldFixed`]) rather than failed.
 fn held_fixed(name: &str) -> bool {
-    BUILD_ENVIRONMENT_NAMES.contains(&name)
-        || name == "MSBuildUserExtensionsPath"
-        || name.starts_with("DOTNET_")
-        || name.starts_with("NUGET_")
+    HELD_FIXED.contains(&name)
 }
 
 /// The source of a [`Place::Variables`] case's project: it compiles, with
@@ -328,6 +334,80 @@ fn hostile_environment_cases() -> Vec<(Case, Dimension)> {
         ));
     }
     out
+}
+
+/// The variables that must decline, whatever the build does, graded in every
+/// run:
+///
+/// - each property an `Fsc` parameter is fed from that is not an allowed
+///   one, set as a variable to a line break and an output switch. They are
+///   chosen from the register (`FSC_PARAMETERS`), not from the derivation's
+///   lists, so a list that came to admit one fails here;
+/// - the loader's and the launcher's, which act before any of the install's
+///   code runs;
+/// - a sample of the properties the SDK's files read (list (a)) that are no
+///   allowed property and no toolchain variable, spread over the list, in
+///   upper case;
+/// - each `DOTNET_`/`NUGET_` variable of the hostile environments that is no
+///   toolchain variable and not graded: the prefix that once admitted them.
+fn environment_declines() -> Vec<Case> {
+    use borzoi_msbuild::fsc::{FSC_PARAMETERS, Feed, environment_reads};
+    let must_decline = |name: &str, value: &str| Case {
+        must_decline: true,
+        ..Case::variables(&[(name, value)])
+    };
+    let admitted = |name: &str| {
+        ALLOWED_PROPERTIES
+            .iter()
+            .any(|(allowed, _)| allowed.eq_ignore_ascii_case(name))
+            || HELD_FIXED.iter().any(|t| t.eq_ignore_ascii_case(name))
+            || ALLOWED_ENVIRONMENT
+                .iter()
+                .any(|graded| graded.eq_ignore_ascii_case(name))
+    };
+    let mut cases = Vec::new();
+    let fed: BTreeSet<&str> = FSC_PARAMETERS
+        .iter()
+        .filter_map(|p| match p.feed {
+            Feed::Properties(names) => Some(names.iter().copied()),
+            _ => None,
+        })
+        .flatten()
+        .filter(|name| !admitted(name))
+        .collect();
+    assert!(!fed.is_empty(), "the register feeds fsc from properties");
+    for name in fed {
+        cases.push(must_decline(name, "x\n--out:obj/Evil.dll"));
+    }
+    for (name, value) in [
+        ("LD_PRELOAD", "/nonexistent/borzoi/evil.so"),
+        ("DYLD_INSERT_LIBRARIES", "/nonexistent/borzoi/evil.dylib"),
+        ("BASH_ENV", "/nonexistent/borzoi/evil.sh"),
+        ("BASH_FUNC_dotnet%%", "() { exit 1; }"),
+        ("ENV", "/nonexistent/borzoi/evil.sh"),
+    ] {
+        cases.push(must_decline(name, value));
+    }
+    let sdk = verified_sdks().next().expect("an SDK is verified");
+    let reads = environment_reads(sdk).expect("the verified SDK's reads are pinned");
+    let read: Vec<&String> = reads
+        .properties
+        .iter()
+        .filter(|name| !admitted(name))
+        .collect();
+    let step = (read.len() / 12).max(1);
+    for (i, name) in read.into_iter().step_by(step).take(12).enumerate() {
+        cases.push(must_decline(&name.to_ascii_uppercase(), env_value(i)));
+    }
+    for entry in hostile_env::alphabet().entries() {
+        for (name, value) in entry.value {
+            let by_prefix = name.starts_with("DOTNET_") || name.starts_with("NUGET_");
+            if by_prefix && !admitted(name) {
+                cases.push(must_decline(name, value));
+            }
+        }
+    }
+    cases
 }
 
 /// The plain SDK project, which must commit to its own name.
@@ -701,6 +781,7 @@ fn cases() -> Vec<Case> {
             rest.push(Case::variables(&[(name, value)]));
         }
     }
+    cases.extend(environment_declines());
     cases.extend(rest);
     cases
 }

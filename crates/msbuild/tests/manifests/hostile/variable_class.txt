@@ -1,6 +1,6 @@
 # Generated; do not edit by hand. One line per graded item, sorted.
 # Regenerate with:
-#   BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-msbuild --lib fsc::tests::the_classifier_agrees_on_every_hostile_environment
+#   BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-msbuild --lib fsc::tests::the_rule_moves_only_what_it_claims_on_every_hostile_environment
 env.build-set-variable	owed
 env.case-variant-name	owed
 env.compiler-selector	owed
