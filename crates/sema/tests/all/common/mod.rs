@@ -25,6 +25,7 @@ pub mod member_hiding_corpus;
 pub mod module_value_corpus;
 pub mod overload_corpus;
 pub mod project_grade;
+pub mod referenced;
 pub mod scope_gen;
 pub mod tier_corpus;
 pub mod use_grade;
@@ -34,7 +35,7 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use borzoi_cst::language_version::LanguageVersion;
@@ -74,7 +75,7 @@ static BUILD_LOCK: Mutex<()> = Mutex::new(());
 
 /// The workspace root, two `..` jumps above the sema crate's `CARGO_MANIFEST_DIR`.
 /// `tools/fcs-dump` lives there.
-fn workspace_root() -> PathBuf {
+pub fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("crates/ parent")
@@ -298,27 +299,327 @@ pub fn try_invoke_fcs_dump_with_refs(
     }
 }
 
-/// The number of resident `fcs-dump` pools in this test binary; the child budget
-/// (`BORZOI_FCS_CHILDREN`, default three a pool) is split evenly between them,
-/// mirroring `cst`'s harness. Three: the single-file `file-batch` pool
-/// ([`fcs_file_batch_pool`]), the multi-file `uses-project` pool
-/// ([`fcs_project_batch_pool`]), and the legacy oracle's `file-batch` pool
+/// The number of resident `fcs-dump` pools in this test binary, which sizes
+/// the default child budget (three a pool). Four: the single-file
+/// `file-batch` pool ([`fcs_file_batch_pool`]), the multi-file `uses-project`
+/// pool ([`fcs_project_batch_pool`]), the legacy oracle's `file-batch` pool
 /// ([`legacy_file_batch_pool`]), which spawns only for a check below the
-/// support floor.
-const FCS_POOLS: usize = 3;
+/// support floor, and the project-graph pool ([`fcs_graph_batch_pool`]).
+const FCS_POOLS: usize = 4;
 
-/// Process-wide cap on resident `fcs-dump` children, split evenly across the
-/// [`FCS_POOLS`] pools. Each child is a warm FCS/.NET process holding hundreds of
-/// MB and lives until the test binary exits, so the default is deliberately
-/// modest (and, like `cst`, a machine with sibling worktrees running their own
-/// suites should not be crowded out); override with `BORZOI_FCS_CHILDREN`.
+/// Process-wide cap on live resident `fcs-dump` children, the pools' and
+/// [`with_fcs_graph_child`]'s together ([`CHILDREN`]). Each child is a warm
+/// FCS/.NET process holding hundreds of MB and lives until the test binary
+/// exits, so the default is deliberately modest (and, like `cst`, a machine
+/// with sibling worktrees running their own suites should not be crowded
+/// out); override with `BORZOI_FCS_CHILDREN`, any count from one up.
 fn fcs_children_budget() -> usize {
     std::env::var("BORZOI_FCS_CHILDREN")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
         .filter(|n| *n > 0)
         .unwrap_or(3 * FCS_POOLS)
-        .max(FCS_POOLS)
+}
+
+/// How many children may live at once, and how many do. A child is counted
+/// from just before it is spawned until it is ended; a pool's children live
+/// until the process exits unless evicted to make room
+/// ([`ChildBudget::acquire`]).
+struct ChildBudget {
+    cap: usize,
+    counts: Mutex<Counts>,
+    changed: std::sync::Condvar,
+    /// How long a caller waits for a change before looking again, a
+    /// backstop: every change wakes it ([`ChildBudget::idle`],
+    /// [`ChildBudget::release`]).
+    poll: Duration,
+}
+
+/// What [`ChildBudget`] counts.
+struct Counts {
+    live: usize,
+    /// Bumped whenever a child is ended or becomes idle, so a caller that
+    /// found nothing to evict knows whether anything changed since it looked.
+    changes: u64,
+}
+
+impl ChildBudget {
+    fn new(cap: usize) -> Self {
+        Self::polling(cap, Duration::from_millis(200))
+    }
+
+    fn polling(cap: usize, poll: Duration) -> Self {
+        assert!(cap > 0, "a child budget of zero admits no child");
+        ChildBudget {
+            cap,
+            counts: Mutex::new(Counts {
+                live: 0,
+                changes: 0,
+            }),
+            changed: std::sync::Condvar::new(),
+            poll,
+        }
+    }
+
+    fn counts(&self) -> MutexGuard<'_, Counts> {
+        self.counts.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// How many children are counted.
+    fn live(&self) -> usize {
+        self.counts().live
+    }
+
+    /// Count one more child, waiting until it fits under the cap. While none
+    /// fits, `evict` is asked to end an idle child somewhere (it returns
+    /// whether it did, having its count given back); with none idle, this
+    /// waits until a child is ended or becomes idle, unless one already has
+    /// since it looked.
+    fn acquire(&self, mut evict: impl FnMut() -> bool) {
+        loop {
+            let mut counts = self.counts();
+            if counts.live < self.cap {
+                counts.live += 1;
+                return;
+            }
+            let seen = counts.changes;
+            drop(counts);
+            if evict() {
+                continue;
+            }
+            let counts = self.counts();
+            if counts.live >= self.cap && counts.changes == seen {
+                let _ = self
+                    .changed
+                    .wait_timeout(counts, self.poll)
+                    .unwrap_or_else(|p| p.into_inner());
+            }
+        }
+    }
+
+    /// Count one child fewer.
+    fn release(&self) {
+        let mut counts = self.counts();
+        counts.live -= 1;
+        counts.changes += 1;
+        self.changed.notify_all();
+    }
+
+    /// A child has just become idle: wake whoever waits to evict one.
+    fn idle(&self) {
+        self.counts().changes += 1;
+        self.changed.notify_all();
+    }
+}
+
+/// Run `f` on the slot `guard` holds, then free the slot and only then say a
+/// child is idle, so a woken caller finds it free to evict.
+fn serve<T, R>(
+    budget: &ChildBudget,
+    mut guard: MutexGuard<'_, Option<T>>,
+    f: impl FnOnce(&mut Option<T>) -> R,
+) -> R {
+    let answer = f(&mut guard);
+    drop(guard);
+    budget.idle();
+    answer
+}
+
+/// One child's count against a [`ChildBudget`], given back when dropped,
+/// unwinding from a panic included: a failed build, spawn or request never
+/// keeps a count it no longer uses.
+struct Permit<'a>(&'a ChildBudget);
+
+impl ChildBudget {
+    /// [`ChildBudget::acquire`], as a [`Permit`].
+    fn permit(&self, evict: impl FnMut() -> bool) -> Permit<'_> {
+        self.acquire(evict);
+        Permit(self)
+    }
+}
+
+impl Drop for Permit<'_> {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+
+/// A pooled child and its count. Dropping it kills the child and gives the
+/// count back.
+struct PooledChild {
+    child: BatchChild,
+    _permit: Permit<'static>,
+}
+
+/// `slot`'s guard if it is free, and whether taking it dropped what a
+/// panicking holder left there. A slot whose holder panicked mid-request is
+/// free: what it held is dropped (a pooled child killed, its count given back)
+/// and the slot emptied, so a failure costs its own request, never the rest
+/// of the suite.
+fn try_lock_slot<T>(slot: &Mutex<Option<T>>) -> Option<(MutexGuard<'_, Option<T>>, bool)> {
+    match slot.try_lock() {
+        Ok(guard) => Some((guard, false)),
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+            let mut guard = poisoned.into_inner();
+            let held = guard.take().is_some();
+            slot.clear_poison();
+            Some((guard, held))
+        }
+        Err(std::sync::TryLockError::WouldBlock) => None,
+    }
+}
+
+/// `slot`'s guard, waiting for it, emptied as [`try_lock_slot`] empties a
+/// slot a panicking holder left.
+fn lock_slot<T>(slot: &Mutex<Option<T>>) -> MutexGuard<'_, Option<T>> {
+    slot.lock().unwrap_or_else(|poisoned| {
+        let mut guard = poisoned.into_inner();
+        *guard = None;
+        slot.clear_poison();
+        guard
+    })
+}
+
+/// End one idle child held in `slots` with `end`, or drop what a panicking
+/// holder left in one; whether either happened.
+fn evict_from<T>(slots: &[Mutex<Option<T>>], end: impl FnOnce(T)) -> bool {
+    for slot in slots {
+        if let Some((mut guard, reclaimed)) = try_lock_slot(slot) {
+            if reclaimed {
+                return true;
+            }
+            if let Some(held) = guard.take() {
+                end(held);
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// The process's [`ChildBudget`], [`fcs_children_budget`] of them.
+static CHILDREN: std::sync::LazyLock<ChildBudget> =
+    std::sync::LazyLock::new(|| ChildBudget::new(fcs_children_budget()));
+
+/// Every pool made so far, so that room for a child of one can be made by
+/// ending an idle child of another ([`evict_an_idle_child`]).
+static POOLS: Mutex<Vec<&'static BatchPool>> = Mutex::new(Vec::new());
+
+/// End one idle pooled child, if any is idle, giving back its count.
+fn evict_an_idle_child() -> bool {
+    let pools: Vec<&'static BatchPool> = POOLS.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    pools.iter().any(|pool| {
+        evict_from(&pool.slots, |pooled: PooledChild| {
+            let PooledChild { child, _permit } = pooled;
+            child.finish(Duration::from_secs(10));
+        })
+    })
+}
+
+/// A request that panics while it holds a slot, or a spawn that panics
+/// while it holds a count, gives the count back: under a cap of one, the next
+/// caller still gets a child rather than waiting for ever.
+#[test]
+fn a_panicking_holder_gives_its_count_back() {
+    let _silence = borzoi_oracle_harness::panic_silence::silence_panics_here();
+    let budget: &'static ChildBudget = Box::leak(Box::new(ChildBudget::new(1)));
+    // A spawn that panics with its count in hand.
+    let spawn = std::panic::catch_unwind(|| {
+        let _permit = budget.permit(|| false);
+        panic!("the spawn failed");
+    });
+    assert!(spawn.is_err());
+    assert_eq!(budget.live(), 0, "the failed spawn kept its count");
+    // A request that panics holding the slot of the only child.
+    let slots: &'static [Mutex<Option<Permit<'static>>>; 1] =
+        Box::leak(Box::new([Mutex::new(Some(budget.permit(|| false)))]));
+    let request = std::thread::spawn(|| {
+        let _silence = borzoi_oracle_harness::panic_silence::silence_panics_here();
+        let _guard = slots[0].lock().expect("the slot");
+        panic!("the request failed");
+    });
+    assert!(request.join().is_err());
+    assert!(slots[0].is_poisoned());
+    let (done, answer) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _permit = budget.permit(|| evict_from(slots, drop));
+        done.send(()).expect("the test is waiting");
+    });
+    answer
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the next caller waits for ever behind the panicked request");
+}
+
+/// A caller waiting for room is woken by the slot it waits on coming free,
+/// and finds it free: under a cap of one and a poll far longer than the
+/// test, it gets its child at once.
+#[test]
+fn a_waiting_caller_is_woken_when_a_child_comes_free() {
+    let budget: &'static ChildBudget =
+        Box::leak(Box::new(ChildBudget::polling(1, Duration::from_secs(600))));
+    let slots: &'static [Mutex<Option<Permit<'static>>>; 1] =
+        Box::leak(Box::new([Mutex::new(Some(budget.permit(|| false)))]));
+    let busy = slots[0].lock().expect("the slot");
+    let (done, answer) = std::sync::mpsc::channel();
+    let (found_busy, seen_busy) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _permit = budget.permit(|| {
+            let evicted = evict_from(slots, drop);
+            if !evicted {
+                // It goes on to wait; the test frees the slot only now.
+                let _ = found_busy.send(());
+            }
+            evicted
+        });
+        done.send(()).expect("the test is waiting");
+    });
+    seen_busy
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the caller never found the only child busy");
+    serve(budget, busy, |_| ());
+    answer
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the waiting caller was not woken when the child came free");
+}
+
+/// The cap holds however many callers want a child at once, a caller still
+/// gets one under a cap of one while another's child sits idle, and every
+/// count is given back.
+#[test]
+fn the_child_budget_holds_its_cap_and_evicts_idle_children() {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    let budget = Arc::new(ChildBudget::new(2));
+    let peak = Arc::new(AtomicUsize::new(0));
+    let threads: Vec<_> = (0..8)
+        .map(|_| {
+            let (budget, peak) = (Arc::clone(&budget), Arc::clone(&peak));
+            std::thread::spawn(move || {
+                budget.acquire(|| false);
+                let live = budget.live();
+                peak.fetch_max(live, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(20));
+                budget.release();
+            })
+        })
+        .collect();
+    for t in threads {
+        t.join().expect("a caller");
+    }
+    assert!(peak.load(Ordering::SeqCst) <= 2, "the cap was exceeded");
+    assert_eq!(budget.live(), 0, "a count was kept");
+    // A cap of one, its child idle in another pool: the eviction makes room.
+    let one = ChildBudget::new(1);
+    one.acquire(|| false);
+    let idle = AtomicBool::new(true);
+    one.acquire(|| {
+        let was = idle.swap(false, Ordering::SeqCst);
+        if was {
+            one.release();
+        }
+        was
+    });
+    assert_eq!(one.live(), 1);
 }
 
 /// The lowest language version the current oracle's compiler supports
@@ -361,12 +662,15 @@ struct BatchPool {
     /// than the per-snippet default, and a bound tight enough to kill a healthy
     /// project would be worse than no bound at all.
     request_timeout: Duration,
-    slots: Vec<Mutex<Option<BatchChild>>>,
+    slots: Vec<Mutex<Option<PooledChild>>>,
 }
 
 impl BatchPool {
+    /// A pool of up to the machine's parallelism of slots, at most the
+    /// budget's three-a-pool share, registered so that its idle children can
+    /// make room for another pool's ([`CHILDREN`] holds the process-wide cap).
     fn new(oracle: Oracle, subcommand: &'static str, request_timeout: Duration) -> Self {
-        let share = fcs_children_budget() / FCS_POOLS;
+        let share = (fcs_children_budget() / FCS_POOLS).max(1);
         let n = std::thread::available_parallelism().map_or(4, |n| n.get());
         Self {
             oracle,
@@ -376,28 +680,42 @@ impl BatchPool {
         }
     }
 
+    /// `pool`, now in [`POOLS`]: made once per `OnceLock`, so each is
+    /// registered once.
+    fn registered(pool: &'static BatchPool) -> &'static BatchPool {
+        POOLS.lock().unwrap_or_else(|p| p.into_inner()).push(pool);
+        pool
+    }
+
     /// Ask an idle child about `request`, holding it for the whole round-trip.
     /// Falls back to blocking on a round-robin slot when every child is busy, so
     /// a saturated pool queues rather than spawning without bound.
     fn request(&self, request: &str) -> String {
         for slot in &self.slots {
-            if let Ok(mut guard) = slot.try_lock() {
-                return self.round_trip(&mut guard, request);
+            if let Some((guard, _)) = try_lock_slot(slot) {
+                return serve(&CHILDREN, guard, |slot| self.round_trip(slot, request));
             }
         }
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let i = NEXT.fetch_add(1, Ordering::Relaxed) % self.slots.len();
-        let mut guard = self.slots[i]
-            .lock()
-            .expect("fcs-dump batch mutex poisoned (a previous request failed)");
-        self.round_trip(&mut guard, request)
+        let guard = lock_slot(&self.slots[i]);
+        serve(&CHILDREN, guard, |slot| self.round_trip(slot, request))
     }
 
-    fn round_trip(&self, slot: &mut Option<BatchChild>, request: &str) -> String {
-        slot.get_or_insert_with(|| {
-            spawn_fcs_batch_child(self.oracle, self.subcommand, self.request_timeout)
-        })
-        .request(request)
+    fn round_trip(&self, slot: &mut Option<PooledChild>, request: &str) -> String {
+        let pooled = match slot {
+            Some(pooled) => pooled,
+            None => {
+                let permit = CHILDREN.permit(evict_an_idle_child);
+                let child =
+                    spawn_fcs_batch_child(self.oracle, self.subcommand, self.request_timeout, 2);
+                slot.insert(PooledChild {
+                    child,
+                    _permit: permit,
+                })
+            }
+        };
+        pooled.child.request(request)
     }
 }
 
@@ -412,7 +730,22 @@ fn spawn_fcs_batch_child(
     oracle: Oracle,
     subcommand: &'static str,
     timeout: Duration,
+    attempts: u32,
 ) -> BatchChild {
+    spawn_fcs_batch_child_with_env(oracle, subcommand, timeout, attempts, &[])
+}
+
+/// [`spawn_fcs_batch_child`], with `env` set in the child's environment
+/// beside what it inherits. `attempts` is [`BatchChild::with_factory`]'s: how
+/// many processes a request may be tried on, a wedged one replaced.
+fn spawn_fcs_batch_child_with_env(
+    oracle: Oracle,
+    subcommand: &'static str,
+    timeout: Duration,
+    attempts: u32,
+    env: &[(&'static str, &'static str)],
+) -> BatchChild {
+    let env = env.to_vec();
     let (variable, tool) = match oracle {
         Oracle::Current => ("BORZOI_FCS_DUMP", "fcs-dump"),
         Oracle::Legacy => ("BORZOI_FCS_DUMP_LEGACY", "fcs-dump-legacy"),
@@ -420,7 +753,7 @@ fn spawn_fcs_batch_child(
     let make: Box<dyn FnMut() -> Command + Send> = if let Some(bin) = std::env::var_os(variable) {
         Box::new(move || {
             let mut c = Command::new(&bin);
-            c.arg(subcommand);
+            c.arg(subcommand).envs(env.iter().copied());
             c
         })
     } else {
@@ -430,11 +763,11 @@ fn spawn_fcs_batch_child(
             .to_owned();
         Box::new(move || {
             let mut c = Command::new("dotnet");
-            c.arg(&dll).arg(subcommand);
+            c.arg(&dll).arg(subcommand).envs(env.iter().copied());
             c
         })
     };
-    BatchChild::with_factory(make, format!("{tool} {subcommand}"), timeout, 2)
+    BatchChild::with_factory(make, format!("{tool} {subcommand}"), timeout, attempts)
 }
 
 /// The resident single-file oracle pool (`fcs-dump file-batch`): `uses`,
@@ -442,15 +775,27 @@ fn spawn_fcs_batch_child(
 /// `{ kind, path, refs }` JSON request. Snippets, so the harness default
 /// per-request deadline is ample.
 fn fcs_file_batch_pool() -> &'static BatchPool {
-    static P: OnceLock<BatchPool> = OnceLock::new();
-    P.get_or_init(|| BatchPool::new(Oracle::Current, "file-batch", default_timeout()))
+    static P: OnceLock<&'static BatchPool> = OnceLock::new();
+    P.get_or_init(|| {
+        BatchPool::registered(Box::leak(Box::new(BatchPool::new(
+            Oracle::Current,
+            "file-batch",
+            default_timeout(),
+        ))))
+    })
 }
 
 /// [`fcs_file_batch_pool`] over the legacy oracle, for the checks pinned below
 /// [`ORACLE_SUPPORT_FLOOR`].
 fn legacy_file_batch_pool() -> &'static BatchPool {
-    static P: OnceLock<BatchPool> = OnceLock::new();
-    P.get_or_init(|| BatchPool::new(Oracle::Legacy, "file-batch", default_timeout()))
+    static P: OnceLock<&'static BatchPool> = OnceLock::new();
+    P.get_or_init(|| {
+        BatchPool::registered(Box::leak(Box::new(BatchPool::new(
+            Oracle::Legacy,
+            "file-batch",
+            default_timeout(),
+        ))))
+    })
 }
 
 /// Turn a resident batch handler's `{ "BatchError": <msg> }` failure sentinel
@@ -543,8 +888,58 @@ pub fn try_invoke_fcs_dump_project_with_refs(
 /// [`PROJECT_TIMEOUT`] per request — one request type-checks a whole Compile
 /// order, the same scale the one-shot `uses-project` budgeted for.
 fn fcs_project_batch_pool() -> &'static BatchPool {
-    static P: OnceLock<BatchPool> = OnceLock::new();
-    P.get_or_init(|| BatchPool::new(Oracle::Current, "uses-project-batch", PROJECT_TIMEOUT))
+    static P: OnceLock<&'static BatchPool> = OnceLock::new();
+    P.get_or_init(|| {
+        BatchPool::registered(Box::leak(Box::new(BatchPool::new(
+            Oracle::Current,
+            "uses-project-batch",
+            PROJECT_TIMEOUT,
+        ))))
+    })
+}
+
+/// The resident project-graph oracle pool (`fcs-dump uses-project-graph-batch`,
+/// `borzoi_oracle_harness::project_graph`): each request checks, compiles or
+/// reads a graph of projects, so it keeps [`PROJECT_TIMEOUT`].
+fn fcs_graph_batch_pool() -> &'static BatchPool {
+    static P: OnceLock<&'static BatchPool> = OnceLock::new();
+    P.get_or_init(|| {
+        BatchPool::registered(Box::leak(Box::new(BatchPool::new(
+            Oracle::Current,
+            "uses-project-graph-batch",
+            PROJECT_TIMEOUT,
+        ))))
+    })
+}
+
+/// One request line to the project-graph oracle, and its response line,
+/// which may be a `BatchError` (the caller parses it with
+/// `borzoi_oracle_harness::project_graph::parse_response`).
+pub fn invoke_fcs_dump_graph(line: &str) -> String {
+    fcs_graph_batch_pool().request(line)
+}
+
+/// Run `f` on a project-graph oracle child of its own, outside the pool,
+/// with `env` set beside what it inherits: for a test that must know which
+/// requests one child has answered. The child is counted against the
+/// process-wide cap ([`CHILDREN`]), tries each request on itself alone (a
+/// replacement process would answer from fresh state, which such a test must
+/// not mistake for this child's), and is ended cleanly once `f` returns.
+pub fn with_fcs_graph_child<T>(
+    env: &[(&'static str, &'static str)],
+    f: impl FnOnce(&mut BatchChild) -> T,
+) -> T {
+    let _permit = CHILDREN.permit(evict_an_idle_child);
+    let mut child = spawn_fcs_batch_child_with_env(
+        Oracle::Current,
+        "uses-project-graph-batch",
+        PROJECT_TIMEOUT,
+        1,
+        env,
+    );
+    let answer = f(&mut child);
+    child.finish(Duration::from_secs(10));
+    answer
 }
 
 /// Run `fcs-dump uses-census-batch` over `paths` (any order; **each file is

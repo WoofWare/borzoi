@@ -54,6 +54,21 @@ fattens a frame on a walk's recursion fails there, naming the shape. A walk
 that declines at the top of a tree survives any stack, so how deep each
 walk reached into each case is pinned in
 `tests/manifests/walk_stack_bound.txt`.
+What a dependant reads of an F# project handed to FCS from source is
+`fcs-dump`'s `referenced` op, read through `tests/all/common/referenced.rs`:
+the signature streams that cross the `FSharpReference` boundary, decoded
+into `borzoi_assembly::existence` rows, which the reader holds to FCS's own
+view of the imported assembly and to the DLL FCS compiles from the same
+arguments (D1), or why no reading is known: a refusal
+(`borzoi_oracle_harness::project_graph::RefusalCause`), or a signature the
+decoder cannot read. FCS's view never stands in for an undecodable
+signature. A producer is described once, as a
+`borzoi_oracle_harness::project_graph::GraphCell`, and the oracle's
+requests and the subject's input (`common::referenced::parse_cell`, the
+reference list) are all built from it. `tests/all/referenced_oracle.rs`
+tests the oracle itself: an inventory of producers with each verdict
+pinned, a trigger and a near miss for each way a producer goes ungraded,
+and a probe that a cache planted across requests is caught.
 
 ## Working here
 

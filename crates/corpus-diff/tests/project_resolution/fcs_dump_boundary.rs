@@ -352,7 +352,7 @@ const JSON_OPS: &[JsonOp] = &[
             json!({
                 "op": "check",
                 "projects": [{
-                    "id": "a", "assemblyName": "A", "target": "library",
+                    "id": "a", "assemblyName": "A", "target": "library", "langVersion": "10.0",
                     "sources": files, "defines": [],
                     "references": project_graph::framework_references()
                         .iter()

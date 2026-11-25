@@ -130,7 +130,7 @@ fn graph_request(a: &str) -> Value {
     json!({
         "op": "check",
         "projects": [{
-            "id": "a", "assemblyName": "A", "target": "library",
+            "id": "a", "assemblyName": "A", "target": "library", "langVersion": "10.0",
             "sources": [a], "defines": [],
             "references": borzoi_oracle_harness::project_graph::framework_references()
                 .iter()

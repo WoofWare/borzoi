@@ -6,13 +6,19 @@
 //! project's sources and reads its signature from memory. That is the
 //! semantics borzoi resolves `<ProjectReference>`s against, so it is the
 //! oracle. A [`GraphRequest`] describes one such check as values: each
-//! project's id, assembly name, target, sources, defines and references, a
-//! reference being a DLL or a project of the request. `fcs-dump` builds the
-//! fsc argument vector from one template (no framework but the references, a
-//! fixed language version, the assembly name as `-o:`), so no raw compiler
-//! switch crosses the wire, and the references are exactly the list the
-//! borzoi side loads. The same template drives `fcs-dump`'s `compile` op,
-//! which builds a project's DLL with FCS's own compiler.
+//! project's id, assembly name, target, language version, sources, defines
+//! and references, a reference being a DLL or a project of the request.
+//! `fcs-dump` builds the fsc argument vector from one template (no framework
+//! but the references, the project's language version, the assembly name as
+//! `-o:`), so no raw compiler switch crosses the wire, and the references are
+//! exactly the list the borzoi side loads. The same template drives
+//! `fcs-dump`'s `compile` op, which builds a project's DLL with FCS's own
+//! compiler, and its `referenced` op, which reports what a project's
+//! dependant reads of it from source.
+//!
+//! A [`GraphCell`] is one producer project described once: the `referenced`
+//! and `compile` requests and the subject's input (its parse symbols,
+//! language version, source paths and reference list) are all built from it.
 //!
 //! # D1(G, C)
 //!
@@ -92,6 +98,38 @@ impl Target {
     }
 }
 
+/// An F# language version a graph project is checked and compiled under,
+/// spelled `<major>.<minor>`: always a number, never an alias (`latest`,
+/// `default`, `preview`), whose meaning is whatever the compiler at hand says.
+/// It crosses the wire as the project's `langVersion`, so the oracle's
+/// argument vector and the subject's parse read one value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct LangVersion {
+    major: u8,
+    minor: u8,
+}
+
+impl LangVersion {
+    /// F# 10.0, the version a graph fixture is written for unless it says
+    /// otherwise.
+    pub const F10: LangVersion = LangVersion {
+        major: 10,
+        minor: 0,
+    };
+
+    pub fn new(major: u8, minor: u8) -> Self {
+        LangVersion { major, minor }
+    }
+}
+
+impl fmt::Display for LangVersion {
+    /// `<major>.<minor>`, the spelling `fcs-dump` accepts and passes to
+    /// `--langversion`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}.{}", self.major, self.minor)
+    }
+}
+
 /// One reference of a project, in its place in the reference order (which
 /// matters: of two references declaring one name, FCS takes the later).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -109,6 +147,7 @@ pub struct GraphProject {
     /// The assembly name, which `fcs-dump` passes as `-o:<dir>/<name>.dll`.
     pub assembly_name: PlainName,
     pub target: Target,
+    pub lang_version: LangVersion,
     /// Absolute source paths, in Compile order.
     pub sources: Vec<PathBuf>,
     /// Conditional-compilation symbols.
@@ -223,6 +262,7 @@ impl GraphProject {
             "id": self.id.as_str(),
             "assemblyName": self.assembly_name.as_str(),
             "target": self.target.as_str(),
+            "langVersion": self.lang_version.to_string(),
             "sources": self.sources.iter().map(|s| path(s)).collect::<Vec<_>>(),
             "defines": self.defines,
             "references": self.references.iter().map(|r| match r {
@@ -302,6 +342,31 @@ impl GraphRequest {
         let projects: Vec<Value> = self.projects.iter().map(GraphProject::to_json).collect();
         serde_json::json!({ "op": "check", "projects": projects, "check": self.check.as_str() })
             .to_string()
+    }
+
+    /// The `referenced` request asking what crosses the `FSharpReference`
+    /// boundary from `target`, a project the checked project references, as
+    /// one line of JSON ([`ReferencedResponse`]).
+    pub fn referenced_line(&self, target: &PlainName) -> Result<String, String> {
+        let checked = self
+            .projects
+            .iter()
+            .find(|p| p.id == self.check)
+            .expect("`new` checked that the checked project is one of the request");
+        if !checked.project_refs().any(|q| q == target) {
+            return Err(format!(
+                "{target} is no project reference of {}",
+                self.check
+            ));
+        }
+        let projects: Vec<Value> = self.projects.iter().map(GraphProject::to_json).collect();
+        Ok(serde_json::json!({
+            "op": "referenced",
+            "projects": projects,
+            "check": self.check.as_str(),
+            "target": target.as_str(),
+        })
+        .to_string())
     }
 }
 
@@ -438,6 +503,131 @@ impl CompileResponse {
     pub fn errors(&self) -> impl Iterator<Item = &Value> {
         errors_of(&self.diagnostics)
     }
+}
+
+/// A `referenced` response ([`GraphRequest::referenced_line`]): what FCS
+/// reads of the target project from source, or why the oracle describes no
+/// such reading.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub enum ReferencedResponse {
+    Found(ReferencedFound),
+    Refused(ReferencedRefusal),
+}
+
+/// What crosses the `FSharpReference` boundary from a target FCS reads from
+/// source, as the checked project reads it.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "PascalCase", deny_unknown_fields)]
+pub struct ReferencedFound {
+    /// FCS's view of the imported assembly: the `assembly-entities` kind's
+    /// entity rows.
+    pub entities: Vec<crate::assembly_entities::FcsEntity>,
+    /// FCS's view of the imported assembly: the `assembly-entities` kind's
+    /// extension universe.
+    pub extension_members: Vec<crate::assembly_entities::FcsExtensionMember>,
+    /// A property read that threw while walking FCS's view.
+    pub read_errors: Vec<String>,
+    /// The raw signature data that crosses the boundary.
+    pub signature: RawSignature,
+    /// The target's own whole-project diagnostics.
+    pub diagnostics: Vec<Value>,
+}
+
+impl ReferencedFound {
+    pub fn errors(&self) -> impl Iterator<Item = &Value> {
+        errors_of(&self.diagnostics)
+    }
+}
+
+/// Why the oracle describes no source reading of the target.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "PascalCase", deny_unknown_fields)]
+pub struct ReferencedRefusal {
+    pub cause: RefusalCause,
+    /// The oracle's own account, for a reader.
+    pub detail: String,
+}
+
+/// Every reason the `referenced` op refuses. Each is a statement about what
+/// FCS does with the request, never about a subject.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize)]
+pub enum RefusalCause {
+    /// FCS reads the target, or a project the target reads from source, from
+    /// its DLL: its assembly data is `Unavailable` and its check passed (a
+    /// type provider). The detail names the project.
+    ReadsDll,
+    /// The target's check fails, or that of a project it reads from source,
+    /// and FCS built it no assembly data. FCS answers `Unavailable` alike for
+    /// that and for a type provider, and may then read the project's DLL, so
+    /// which it is cannot be told. The detail names the project.
+    MayReadDll,
+    /// A source may hold a line directive, which moves what FCS reports
+    /// (`fcs-dump`'s `refuseUndescribedSources`): the compile D1 compares
+    /// against would refuse it too.
+    LineDirective,
+    /// FCS resolved, for the target or a project it reads from source, an
+    /// assembly the request does not name, so the signature describes an
+    /// environment the request does not.
+    UnnamedReference,
+}
+
+impl RefusalCause {
+    /// Every cause, in declaration order.
+    pub const ALL: [RefusalCause; 4] = [
+        RefusalCause::ReadsDll,
+        RefusalCause::MayReadDll,
+        RefusalCause::LineDirective,
+        RefusalCause::UnnamedReference,
+    ];
+}
+
+/// The target's raw signature data (FCS's `IRawFSharpAssemblyData`): each
+/// CCU's streams, uncompressed, and the assembly-level strings that travel
+/// beside them.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "PascalCase", deny_unknown_fields)]
+pub struct RawSignature {
+    pub streams: Vec<SignatureStreams>,
+    /// `GetInternalsVisibleToAttributes`.
+    pub internals_visible_to: Vec<String>,
+    /// `GetAutoOpenAttributes`: the assembly-level `AutoOpen` paths.
+    pub auto_opens: Vec<String>,
+}
+
+/// One CCU's signature streams, in hex.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "PascalCase", deny_unknown_fields)]
+pub struct SignatureStreams {
+    pub ccu: String,
+    pub primary: String,
+    pub b: Option<String>,
+}
+
+impl SignatureStreams {
+    /// The primary stream's bytes.
+    pub fn primary_bytes(&self) -> Result<Vec<u8>, String> {
+        from_hex(&self.primary)
+    }
+
+    /// The B stream's bytes, if there is one.
+    pub fn b_bytes(&self) -> Result<Option<Vec<u8>>, String> {
+        self.b.as_deref().map(from_hex).transpose()
+    }
+}
+
+fn from_hex(text: &str) -> Result<Vec<u8>, String> {
+    if !text.len().is_multiple_of(2) {
+        return Err("a hex stream of odd length".to_owned());
+    }
+    (0..text.len())
+        .step_by(2)
+        .map(|i| {
+            text.get(i..i + 2)
+                .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+                .ok_or_else(|| format!("not hex at {i}"))
+        })
+        .collect()
 }
 
 fn errors_of(diagnostics: &[Value]) -> impl Iterator<Item = &Value> {
@@ -590,11 +780,12 @@ pub struct FixtureProject {
     pub project_refs: Vec<PlainName>,
     pub defines: Vec<String>,
     pub target: Target,
+    pub lang_version: LangVersion,
 }
 
 impl FixtureProject {
-    /// A library named `name`, assembly name included, with no references or
-    /// defines.
+    /// A library named `name`, assembly name included, at
+    /// [`LangVersion::F10`], with no references or defines.
     pub fn new(name: PlainName, files: Vec<FixtureFile>) -> Self {
         FixtureProject {
             assembly_name: name.clone(),
@@ -603,6 +794,7 @@ impl FixtureProject {
             project_refs: Vec::new(),
             defines: Vec::new(),
             target: Target::Library,
+            lang_version: LangVersion::F10,
         }
     }
 }
@@ -745,6 +937,7 @@ impl ProjectGraphFixture {
             id: p.name.clone(),
             assembly_name: p.assembly_name.clone(),
             target: p.target,
+            lang_version: p.lang_version,
             sources: self.paths(name),
             defines: p.defines.clone(),
             references,
@@ -762,6 +955,18 @@ impl ProjectGraphFixture {
         framework: &[PathBuf],
         from_dll: &BTreeMap<PlainName, PathBuf>,
     ) -> GraphRequest {
+        self.try_request(check, framework, from_dll)
+            .expect("a fixture's request is well formed")
+    }
+
+    /// [`ProjectGraphFixture::request`], or why the request type has no such
+    /// request (a project named like one of `framework`'s assemblies, say).
+    pub fn try_request(
+        &self,
+        check: &PlainName,
+        framework: &[PathBuf],
+        from_dll: &BTreeMap<PlainName, PathBuf>,
+    ) -> Result<GraphRequest, String> {
         let projects: Vec<GraphProject> = self
             .closure(check)
             .into_iter()
@@ -769,7 +974,7 @@ impl ProjectGraphFixture {
             .chain(std::iter::once(check.clone()))
             .map(|q| self.graph_project(&q, framework, from_dll))
             .collect();
-        GraphRequest::new(projects, check.clone()).expect("a fixture's request is well formed")
+        GraphRequest::new(projects, check.clone())
     }
 
     /// The `compile` request for `name`, every project of its closure
@@ -781,12 +986,215 @@ impl ProjectGraphFixture {
         framework: &[PathBuf],
         compiled: &BTreeMap<PlainName, PathBuf>,
     ) -> CompileRequest {
-        for q in self.closure(name) {
-            assert!(compiled.contains_key(&q), "{name} needs {q} compiled first");
+        self.try_compile_request(name, framework, compiled)
+            .expect("a fixture's compile request is well formed")
+    }
+
+    /// [`ProjectGraphFixture::compile_request`], or why the request type has
+    /// no such request.
+    pub fn try_compile_request(
+        &self,
+        name: &PlainName,
+        framework: &[PathBuf],
+        compiled: &BTreeMap<PlainName, PathBuf>,
+    ) -> Result<CompileRequest, String> {
+        if let Some(q) = self
+            .closure(name)
+            .into_iter()
+            .find(|q| !compiled.contains_key(q))
+        {
+            return Err(format!("{name} needs {q} compiled first"));
         }
         let project = self.graph_project(name, framework, compiled);
         compile_request_line(&project, &self.root.join("out").join(name.as_str()))
-            .expect("a fixture's compile request is well formed")
+    }
+}
+
+/// A library the producer of a [`GraphCell`] references, compiled from source
+/// by the oracle's `compile` op before the cell is read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RefLib {
+    pub assembly_name: PlainName,
+    /// In Compile order.
+    pub files: Vec<FixtureFile>,
+}
+
+/// One producer project, described once: its assembly name, target, language
+/// version, defines, sources, and the libraries it references. Everything the
+/// oracle is asked ([`PreparedCell::referenced_line`],
+/// [`PreparedCell::compile_line`]) and everything the subject reads
+/// ([`GraphCell::parse_symbols`], [`GraphCell::lang_version`],
+/// [`PreparedCell::references`], [`PreparedCell::paths`]) is built from this
+/// one value, so no setting can differ between the two.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GraphCell {
+    pub assembly_name: PlainName,
+    pub target: Target,
+    pub lang_version: LangVersion,
+    pub defines: Vec<String>,
+    /// In Compile order.
+    pub files: Vec<FixtureFile>,
+    /// After the framework, in reference order.
+    pub ref_libs: Vec<RefLib>,
+}
+
+/// The project that reads a [`GraphCell`]'s producer from source. Its name is
+/// refused for a producer or a reference library.
+pub const CELL_CONSUMER: &str = "ReferencedConsumer";
+
+impl GraphCell {
+    /// A library at [`LangVersion::F10`], with no defines and no reference
+    /// beyond the framework.
+    pub fn library(assembly_name: PlainName, files: Vec<FixtureFile>) -> Self {
+        GraphCell {
+            assembly_name,
+            target: Target::Library,
+            lang_version: LangVersion::F10,
+            defines: Vec::new(),
+            files,
+            ref_libs: Vec::new(),
+        }
+    }
+
+    /// The conditional-compilation symbols FCS's check of the producer
+    /// defines: the cell's own, and `COMPILED`, which FCS defines for every
+    /// project it does not check as a script (`IncrementalBuild.fs`).
+    pub fn parse_symbols(&self) -> Vec<String> {
+        self.defines
+            .iter()
+            .cloned()
+            .chain(std::iter::once("COMPILED".to_owned()))
+            .collect()
+    }
+
+    /// Write the cell's projects to a fresh directory and compile its
+    /// reference libraries against `framework` (normally
+    /// [`framework_references`]), each through `round_trip` (one request line
+    /// to the project-graph oracle, one response line back).
+    pub fn prepare(
+        &self,
+        framework: &[PathBuf],
+        round_trip: &mut dyn FnMut(&str) -> String,
+    ) -> Result<PreparedCell, String> {
+        let consumer = PlainName::new(CELL_CONSUMER)?;
+        let libs: Vec<PlainName> = self
+            .ref_libs
+            .iter()
+            .map(|l| l.assembly_name.clone())
+            .collect();
+        if self.assembly_name == consumer || libs.contains(&consumer) {
+            return Err(format!("{consumer} is the consumer's name"));
+        }
+        let mut projects: Vec<FixtureProject> = self
+            .ref_libs
+            .iter()
+            .map(|l| FixtureProject {
+                lang_version: self.lang_version,
+                ..FixtureProject::new(l.assembly_name.clone(), l.files.clone())
+            })
+            .collect();
+        projects.push(FixtureProject {
+            project_refs: libs.clone(),
+            defines: self.defines.clone(),
+            target: self.target,
+            lang_version: self.lang_version,
+            ..FixtureProject::new(self.assembly_name.clone(), self.files.clone())
+        });
+        projects.push(FixtureProject {
+            project_refs: vec![self.assembly_name.clone()],
+            lang_version: self.lang_version,
+            ..FixtureProject::new(
+                consumer.clone(),
+                vec![FixtureFile {
+                    name: "Consumer.fs".to_owned(),
+                    text: format!("module {CELL_CONSUMER}.Use\nlet x = 1\n"),
+                }],
+            )
+        });
+        let fixture = ProjectGraphFixture::materialise(projects)?;
+        let mut compiled = BTreeMap::new();
+        for lib in &libs {
+            let line = fixture.try_compile_request(lib, framework, &compiled)?;
+            let out: CompileResponse = parse_response(&round_trip(line.as_line()))
+                .map_err(|e| format!("compile reference library {lib}: {e:?}"))?;
+            let dll = out.output.ok_or_else(|| {
+                format!(
+                    "reference library {lib} does not compile: {:?}",
+                    out.diagnostics
+                )
+            })?;
+            compiled.insert(lib.clone(), dll);
+        }
+        // Every request the cell will make, made once here, so a cell the
+        // request type has no request for is refused now, not when used.
+        fixture.try_request(&consumer, framework, &compiled)?;
+        fixture.try_compile_request(&self.assembly_name, framework, &compiled)?;
+        Ok(PreparedCell {
+            fixture,
+            framework: framework.to_vec(),
+            producer: self.assembly_name.clone(),
+            consumer,
+            compiled,
+        })
+    }
+}
+
+/// A [`GraphCell`] written to disk, its reference libraries compiled.
+#[derive(Debug)]
+pub struct PreparedCell {
+    fixture: ProjectGraphFixture,
+    framework: Vec<PathBuf>,
+    producer: PlainName,
+    consumer: PlainName,
+    /// Each reference library's DLL.
+    compiled: BTreeMap<PlainName, PathBuf>,
+}
+
+impl PreparedCell {
+    fn request(&self) -> GraphRequest {
+        self.fixture
+            .request(&self.consumer, &self.framework, &self.compiled)
+    }
+
+    /// The producer's references, in order: the framework, then each
+    /// reference library's DLL. Read from the request itself, so it is the
+    /// list FCS is handed.
+    pub fn references(&self) -> Vec<PathBuf> {
+        let request = self.request();
+        let producer = request
+            .projects()
+            .iter()
+            .find(|p| p.id == self.producer)
+            .expect("the producer is a project of the request");
+        producer
+            .references
+            .iter()
+            .map(|r| match r {
+                Reference::Dll(p) => p.clone(),
+                Reference::Project(q) => {
+                    unreachable!("every reference library is compiled, not {q}")
+                }
+            })
+            .collect()
+    }
+
+    /// The producer's source paths, in Compile order.
+    pub fn paths(&self) -> Vec<PathBuf> {
+        self.fixture.paths(&self.producer)
+    }
+
+    /// The `referenced` request for the producer, as the consumer reads it.
+    pub fn referenced_line(&self) -> String {
+        self.request()
+            .referenced_line(&self.producer)
+            .expect("the consumer references the producer")
+    }
+
+    /// The `compile` request for the producer, on the argument vector its
+    /// check reads.
+    pub fn compile_line(&self) -> CompileRequest {
+        self.fixture
+            .compile_request(&self.producer, &self.framework, &self.compiled)
     }
 }
 
@@ -808,6 +1216,7 @@ mod tests {
             id: name(id),
             assembly_name: name(id),
             target: Target::Library,
+            lang_version: LangVersion::F10,
             sources: vec![PathBuf::from(format!("/src/{id}/{id}.fs"))],
             defines: vec!["A_DEFINE".to_owned()],
             references: core()
@@ -987,6 +1396,13 @@ mod tests {
                 Reference::Dll(PathBuf::from("/out/Mid.dll"))
             ]
         );
+        // A project whose dependency is not compiled yet has no compile
+        // request, and says which.
+        let unbuilt = fixture.try_compile_request(&name("Mid"), &core(), &BTreeMap::new());
+        assert!(
+            unbuilt.as_ref().is_err_and(|e| e.contains("Lib")),
+            "{unbuilt:?}"
+        );
         let line = fixture.compile_request(&name("Mid"), &core(), &compiled);
         let v: Value = serde_json::from_str(line.as_line()).expect("json");
         assert_eq!(v["op"], "compile");
@@ -1082,6 +1498,85 @@ mod tests {
             }
             Err(e) => assert!(e.contains("mkdir"), "{e}"),
         }
+    }
+
+    /// Every setting of a [`GraphCell`] reaches every request built from it,
+    /// for the producer and alike for the consumer where the consumer has
+    /// one, and the reference list the subject reads is the producer's in the
+    /// request.
+    #[test]
+    fn one_cell_builds_every_request() {
+        let file = |n: &str, t: &str| FixtureFile {
+            name: n.to_owned(),
+            text: t.to_owned(),
+        };
+        let cell = GraphCell {
+            assembly_name: name("Prod"),
+            target: Target::Exe,
+            lang_version: LangVersion::new(9, 0),
+            defines: vec!["FOO".to_owned()],
+            files: vec![file("A.fs", "module A\n"), file("B.fs", "module B\n")],
+            ref_libs: vec![RefLib {
+                assembly_name: name("Dep"),
+                files: vec![file("Dep.fs", "module Dep\n")],
+            }],
+        };
+        assert_eq!(cell.parse_symbols(), ["FOO", "COMPILED"]);
+        let mut asked = Vec::new();
+        let prepared = cell
+            .prepare(&core(), &mut |line| {
+                asked.push(serde_json::from_str::<Value>(line).expect("json"));
+                r#"{"Diagnostics":[],"Output":"/out/Dep.dll"}"#.to_owned()
+            })
+            .expect("prepared");
+        assert_eq!(asked.len(), 1, "one compile per reference library");
+        assert_eq!(asked[0]["op"], "compile");
+        assert_eq!(asked[0]["project"]["langVersion"], "9.0");
+        let referenced: Value = serde_json::from_str(&prepared.referenced_line()).expect("json");
+        assert_eq!(referenced["op"], "referenced");
+        assert_eq!(referenced["target"], "Prod");
+        assert_eq!(referenced["check"], CELL_CONSUMER);
+        let projects = referenced["projects"].as_array().expect("projects");
+        let producer = projects
+            .iter()
+            .find(|p| p["id"] == "Prod")
+            .expect("the producer");
+        let consumer = projects
+            .iter()
+            .find(|p| p["id"] == CELL_CONSUMER)
+            .expect("the consumer");
+        assert_eq!(producer["assemblyName"], "Prod");
+        assert_eq!(producer["target"], "exe");
+        assert_eq!(producer["langVersion"], "9.0");
+        assert_eq!(producer["defines"], serde_json::json!(["FOO"]));
+        assert_eq!(consumer["langVersion"], "9.0");
+        let compile: Value = serde_json::from_str(prepared.compile_line().as_line()).expect("json");
+        assert_eq!(
+            &compile["project"], producer,
+            "check and compile read one project"
+        );
+        let dlls: Vec<Value> = prepared
+            .references()
+            .iter()
+            .map(|p| serde_json::json!({ "dll": p.to_str().expect("utf-8") }))
+            .collect();
+        assert_eq!(producer["references"], Value::Array(dlls));
+        assert_eq!(
+            prepared.references().last(),
+            Some(&PathBuf::from("/out/Dep.dll"))
+        );
+        let sources: Vec<String> = prepared
+            .paths()
+            .iter()
+            .map(|p| p.to_str().expect("utf-8").to_owned())
+            .collect();
+        assert_eq!(producer["sources"], serde_json::json!(sources));
+        let bad = GraphCell::library(name(CELL_CONSUMER), vec![file("A.fs", "module A\n")]);
+        assert!(bad.prepare(&core(), &mut |_| unreachable!()).is_err());
+        // A producer named like a framework assembly has no request.
+        let framework = [core(), vec![PathBuf::from("/fw/System.Runtime.dll")]].concat();
+        let clash = GraphCell::library(name("System.Runtime"), vec![file("A.fs", "module A\n")]);
+        assert!(clash.prepare(&framework, &mut |_| unreachable!()).is_err());
     }
 
     #[test]

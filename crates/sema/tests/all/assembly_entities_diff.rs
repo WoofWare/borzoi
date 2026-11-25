@@ -158,10 +158,19 @@ type RowNames<'a> = (&'a [String], Option<bool>);
 /// and FCS's extension members, both ways: each member FCS reads must be a
 /// row of the index at its place answering to its logical and compiled
 /// names (and, for an F# extension, of its instance-ness), and each row must
-/// answer to a member FCS reads there.
-fn pickle_extension_failures(index: &ExistenceIndex, entities: &AssemblyEntities) -> Vec<String> {
-    let place = |ns: &str, enclosing: &[String]| format!("{ns} | {}", enclosing.join("+"));
-    let mut ours: BTreeMap<String, Vec<RowNames<'_>>> = BTreeMap::new();
+/// answer to a member FCS reads there (when `every_row_read`: FCS's
+/// `MembersFunctionsAndValues` lists no class `let`, whose val the pickle
+/// holds, so a project read from source with a marked one has rows FCS's view
+/// lacks).
+pub(crate) fn pickle_extension_failures(
+    index: &ExistenceIndex,
+    members: &[crate::common::assembly_entities::FcsExtensionMember],
+    every_row_read: bool,
+) -> Vec<String> {
+    // A place is the dotted namespace (FCS spells it no other way) and the
+    // enclosing entities as segments, so a quoted `A+B` is not `A` then `B`.
+    let place = |ns: &str, enclosing: &[String]| (ns.to_owned(), enclosing.to_vec());
+    let mut ours: BTreeMap<(String, Vec<String>), Vec<RowNames<'_>>> = BTreeMap::new();
     for row in index
         .extensions
         .iter()
@@ -172,7 +181,7 @@ fn pickle_extension_failures(index: &ExistenceIndex, entities: &AssemblyEntities
             .push((&row.names, row.instance));
     }
     let mut failures = Vec::new();
-    for m in &entities.fcs.extension_members {
+    for m in members {
         let at = place(&m.namespace, &m.enclosing);
         let found = ours.get(&at).is_some_and(|rows| {
             rows.iter().any(|(names, instance)| {
@@ -183,25 +192,25 @@ fn pickle_extension_failures(index: &ExistenceIndex, entities: &AssemblyEntities
         });
         if !found {
             failures.push(format!(
-                "  FCS reads {:?} extension {} ({}, instance {}) at {at}; the index has no such row",
+                "  FCS reads {:?} extension {} ({}, instance {}) at {at:?}; the index has no such row",
                 m.style, m.logical_name, m.compiled_name, m.is_instance
             ));
         }
     }
-    let mut theirs: BTreeMap<String, BTreeSet<&str>> = BTreeMap::new();
-    for m in &entities.fcs.extension_members {
+    let mut theirs: BTreeMap<(String, Vec<String>), BTreeSet<&str>> = BTreeMap::new();
+    for m in members {
         let names = theirs.entry(place(&m.namespace, &m.enclosing)).or_default();
         names.insert(&m.logical_name);
         names.insert(&m.compiled_name);
     }
-    for (at, rows) in &ours {
+    for (at, rows) in ours.iter().filter(|_| every_row_read) {
         for (names, _) in rows {
             let read = theirs
                 .get(at)
                 .is_some_and(|fcs| names.iter().any(|n| fcs.contains(n.as_str())));
             if !read {
                 failures.push(format!(
-                    "  the index lists extension {names:?} at {at}; FCS reads none of them there"
+                    "  the index lists extension {names:?} at {at:?}; FCS reads none of them there"
                 ));
             }
         }
@@ -312,7 +321,8 @@ fn compare(graded: &[PathBuf], support: &[PathBuf]) -> (Vec<String>, usize, usiz
                 let theirs = pickle_theirs(entities);
                 pickle_rows += theirs.len();
                 extension_rows += entities.fcs.extension_members.len();
-                let moved = pickle_extension_failures(&index, entities);
+                let moved =
+                    pickle_extension_failures(&index, &entities.fcs.extension_members, true);
                 if !moved.is_empty() {
                     failures.push(format!(
                         "{file}: the pickle layer's extension members differ\n{}",

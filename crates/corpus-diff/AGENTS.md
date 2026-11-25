@@ -22,10 +22,14 @@ It also drives the project-graph oracle (`ProjectGraphOracle`,
 `borzoi_oracle_harness::project_graph`): FCS checking a project with each
 F# project reference handed to it from source, as an `FSharpReference`,
 which is the semantics borzoi resolves `<ProjectReference>`s against. A
-request is a value per project (id, assembly name, target, sources,
-defines, references) and `fcs-dump` builds the argument vector from one
-template, so no compiler switch crosses the wire; its `compile` op builds a
-DLL with FCS's own compiler on the same vector.
+request is a value per project (id, assembly name, target, language
+version, sources, defines, references) and `fcs-dump` builds the argument
+vector from one template, so no compiler switch crosses the wire; its
+`compile` op builds a DLL with FCS's own compiler on the same vector, and
+its `referenced` op reports what a dependant reads of a project from source
+(held to FCS by `crates/sema/tests/all/referenced_oracle.rs`). Each request
+is answered from fresh checker state, and a type provider is refused as a
+reference.
 `tests/project_resolution/source_references.rs` holds it to **D1(G, C)**:
 over generated graphs G (`tests/project_resolution/source_reference_gen.rs`:
 every declaration kind a library exports, `.fsi` hiding, `internal` with and
