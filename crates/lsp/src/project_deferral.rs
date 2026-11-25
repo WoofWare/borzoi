@@ -788,9 +788,8 @@ fn undecided_frameworks_cause(eval: ProjectEvaluation<'_>) -> Option<String> {
             declared_tfms_undecided: true,
             ..
         } => Some(
-            "I cannot tell which target frameworks this project declares (a \
-             `TargetFramework` or `TargetFrameworks` write sits under a condition I could \
-             not decide), so I cannot tell which build's references the compiler sees"
+            "I could not determine which target frameworks this project declares, so I \
+             cannot tell which build's references the compiler sees"
                 .to_string(),
         ),
         _ => None,

@@ -218,11 +218,12 @@ struct EvaluatedProject {
     /// arcade idiom) vanishes from the re-evaluated `parsed`'s properties, so
     /// reading the list off `parsed` would under-count.
     declared_tfms: Vec<String>,
-    /// Whether `declared_tfms` is no answer: the walk does not hold the
-    /// framework declarations for certain ([`target_frameworks_undecided`]),
-    /// or the plural is untrusted ([`tfm_policy::plural_untrusted`]: a write
-    /// the evaluator skipped under a gate it could not decide may have
-    /// declared other frameworks).
+    /// Whether `declared_tfms` is no answer where it decides the build: no
+    /// `TargetFramework` pins one (the caller's, or the body's own singular),
+    /// and the walk does not hold the framework declarations for certain
+    /// ([`target_frameworks_undecided`]), or the plural is untrusted
+    /// ([`tfm_policy::plural_untrusted`]: a write the evaluator skipped under a
+    /// gate it could not decide may have declared other frameworks).
     declared_tfms_undecided: bool,
     /// The first pass's body-written non-empty `TargetFramework`, i.e.
     /// whether the project pins its own singular TFM
@@ -3024,9 +3025,13 @@ fn evaluate_project(
     // (a `TfmChoice::Reseed` replaces `parsed` with an inner-build pass in
     // which an outer-gated `<TargetFrameworks>` may no longer exist).
     let declared_tfms = target_frameworks(&parsed);
-    let declared_tfms_undecided =
-        target_frameworks_undecided(&parsed) || tfm_policy::plural_untrusted(&parsed);
     let body_target_framework = tfm_policy::body_target_framework(&parsed);
+    // The declarations decide which build runs only where nothing pins one:
+    // a non-empty `TargetFramework` the caller supplies, or the project's own
+    // body-written singular, is the build whatever the plural says.
+    let build_pinned = caller_owns_target_framework(&extras) || body_target_framework.is_some();
+    let declared_tfms_undecided = !build_pinned
+        && (target_frameworks_undecided(&parsed) || tfm_policy::plural_untrusted(&parsed));
     let pass1_untrusted = tfm_policy::tfm_untrusted(&parsed);
     let served = select_target_framework(
         parsed,
@@ -3394,6 +3399,72 @@ mod tests {
     use proptest::prelude::*;
     use std::fs;
     use tempfile::TempDir;
+
+    /// A pinned build keeps its references whatever the plural says: a
+    /// `TargetFramework` the caller supplies, or the body's own singular,
+    /// selects the build, so an undecided `TargetFrameworks` write decides
+    /// nothing, and an unconditional `<ProjectReference>` is the compiler's.
+    #[test]
+    fn a_pinned_build_keeps_its_references_beside_an_undecided_list() {
+        let tmp = TempDir::new().unwrap();
+        let proj = tmp.path().join("Sample.fsproj");
+        write_file(&tmp.path().join("Lib.fsproj"), "<Project />");
+        for (singular, extra) in [
+            (
+                "",
+                HashMap::from([("TargetFramework".to_string(), "net8.0".to_string())]),
+            ),
+            ("<TargetFramework>net8.0</TargetFramework>", HashMap::new()),
+        ] {
+            write_file(
+                &proj,
+                &format!(
+                    r#"<Project>
+  <PropertyGroup>
+    {singular}
+    <TargetFrameworks Condition="'É' == 'é'">net8.0;net9.0</TargetFrameworks>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="Lib.fsproj" />
+  </ItemGroup>
+</Project>"#
+                ),
+            );
+            let mut ws = Workspace::with_env_and_extra_build_properties(
+                SdkDiscoveryEnv::default(),
+                extra.clone(),
+            );
+            assert!(
+                !ws.project_evaluation(&proj).drops_reference_edges(),
+                "{singular:?} {extra:?}"
+            );
+            let ws = Workspace::with_env_and_extra_build_properties(
+                SdkDiscoveryEnv::default(),
+                extra.clone(),
+            );
+            let graph = ws.project_graph_with_producer_tfms(
+                &proj,
+                &BTreeMap::new(),
+                &borzoi_msbuild::observed::Observer::new(),
+            );
+            let node = graph
+                .nodes
+                .iter()
+                .find(|n| paths_equal(&n.path, &proj))
+                .expect("entry node");
+            assert_eq!(
+                node.tfm,
+                NodeTfm::Known("net8.0".to_string()),
+                "{singular:?}"
+            );
+            assert_eq!(
+                node.references.len(),
+                1,
+                "{singular:?}: {:?}",
+                node.references
+            );
+        }
+    }
 
     /// Under an explicitly empty `TargetFramework` global, a project whose
     /// framework list the walk does not hold for certain (one written under
