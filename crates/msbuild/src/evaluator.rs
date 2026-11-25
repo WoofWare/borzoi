@@ -5497,8 +5497,9 @@ pub(crate) fn toolset_assembly_version(version_dir: &Path) -> Option<&'static st
 /// them `VisualStudioVersion` and `MSBuildAssemblyVersion` (each seeded only
 /// where the SDK's version says what the toolset defines), and the names
 /// MSBuild's evaluator seeds from the process's profile when the environment
-/// lacks them (`Utilities.GetEnvironmentProperties`: `LocalAppData` and the
-/// extension paths). Lowercase.
+/// lacks them (`Utilities.GetEnvironmentProperties`: `LocalAppData`, the
+/// extension paths, and `MSBuildUserExtensionsPath` under the first).
+/// Lowercase.
 ///
 /// Whenever the walk holds no value for one of these, the real build still
 /// does, so the absence is never a fact (see
@@ -5520,6 +5521,7 @@ pub(crate) const TOOLSET_PREDEFINED_NAMES: &[&str] = &[
     "msbuildsdkspath",
     "visualstudioversion",
     "localappdata",
+    "msbuilduserextensionspath",
 ];
 
 fn is_toolset_predefined_name(lower: &str) -> bool {
