@@ -971,6 +971,18 @@ fn a_backslash_written_in_the_attribute_is_a_slash_before_expansion() {
     }
 }
 
+/// A root-level name no host has as a directory, which the rooted-import cases
+/// climb out of: a `..` after it pops it in every spelling, and an absolute
+/// probe of it misses.
+fn absent_root() -> &'static str {
+    const ROOT: &str = "/borzoi-absent-root";
+    assert!(
+        host_fs::metadata(ROOT).is_err(),
+        "{ROOT} is on this host, which the rooted-import cases need absent"
+    );
+    ROOT
+}
+
 /// A rooted SDK import bypasses the SDK root, and a `..` after a property's
 /// `\` pops `seg/child`'s last segment where `seg/` is under the startup
 /// directory and `seg\child` whole elsewhere: MSBuild opens `work/seg/T.props`
@@ -991,7 +1003,7 @@ fn a_rooted_sdk_import_through_a_backslash_and_a_parent_hop_declines() {
         .expect("write marker");
     }
     let prelude = "  <PropertyGroup><G>seg\\child</G></PropertyGroup>\n";
-    let import = format!("/missing/..{}/$(G)/../T.props", work.display());
+    let import = format!("{}/..{}/$(G)/../T.props", absent_root(), work.display());
     let (xml, parsed, _) = evaluate_both_after(&layout, Kind::Sdk, prelude, &[import]);
     // MSBuild's answer moves with its startup directory.
     let proj = layout.root.join("proj").join("p.proj");
@@ -1008,10 +1020,13 @@ fn a_rooted_sdk_import_through_a_backslash_and_a_parent_hop_declines() {
         Ok(";top"),
         "from one holding none\n{xml}"
     );
+    // MSBuild sets `Seen` from every start, so a definite absence is as
+    // wrong as either value.
     assert!(
-        !matches!(
+        matches!(
             parsed.property("Seen"),
-            borzoi_msbuild::PropertyRead::Value(_)
+            borzoi_msbuild::PropertyRead::Untrusted(_)
+                | borzoi_msbuild::PropertyRead::UnsetInexact(_)
         ),
         "we committed {:?}\n{xml}",
         parsed.property("Seen")
@@ -1033,7 +1048,7 @@ fn a_rooted_sdk_import_keeping_a_backslash_after_its_parent_hop_is_followed() {
     )
     .expect("write marker");
     let prelude = "  <PropertyGroup><G>sub\\T.props</G></PropertyGroup>\n";
-    let import = format!("/missing/..{}/$(G)", work.display());
+    let import = format!("{}/..{}/$(G)", absent_root(), work.display());
     let (xml, parsed, theirs) = evaluate_both_after(&layout, Kind::Sdk, prelude, &[import]);
     assert_eq!(theirs.as_deref(), Ok(";sub"), "MSBuild's import\n{xml}");
     let proj = layout.root.join("proj").join("p.proj");
@@ -1088,7 +1103,8 @@ fn a_rooted_sdk_import_keeping_a_backslash_declines_with_a_start() {
     };
     let xml = format!(
         "<Project>\n  <PropertyGroup><G>seg\\child</G></PropertyGroup>\n  \
-         <Import Sdk=\"MySdk\" Project=\"/missing/..{}/$(G)/../T.props\" />\n</Project>\n",
+         <Import Sdk=\"MySdk\" Project=\"{}/..{}/$(G)/../T.props\" />\n</Project>\n",
+        absent_root(),
         work.display()
     );
     let proj = layout.root.join("proj").join("p.proj");
@@ -1104,10 +1120,13 @@ fn a_rooted_sdk_import_keeping_a_backslash_declines_with_a_start() {
         &borzoi_msbuild::test_support::ReadProbe::default(),
     )
     .expect("well-formed");
+    // MSBuild sets `Seen` from every start, so a definite absence is as
+    // wrong as either value.
     assert!(
-        !matches!(
+        matches!(
             parsed.property("Seen"),
-            borzoi_msbuild::PropertyRead::Value(_)
+            borzoi_msbuild::PropertyRead::Untrusted(_)
+                | borzoi_msbuild::PropertyRead::UnsetInexact(_)
         ),
         "we committed {:?}\n{xml}",
         parsed.property("Seen")
@@ -1216,9 +1235,10 @@ fn an_undecided_rooted_sdk_import_keeping_a_backslash_may_reject() {
     };
     let xml = format!(
         "<Project>\n  <PropertyGroup><G>seg\\child</G></PropertyGroup>\n  \
-         <Import Sdk=\"MySdk\" Project=\"/missing/..{}/$(G)/../T.props\" \
+         <Import Sdk=\"MySdk\" Project=\"{}/..{}/$(G)/../T.props\" \
          Condition=\"'É' == 'é'\" />\n  \
          <PropertyGroup><Seen>after</Seen></PropertyGroup>\n</Project>\n",
+        absent_root(),
         work.display()
     );
     let proj = layout.root.join("p.proj");
@@ -1254,10 +1274,11 @@ fn a_rooted_backslash_under_no_sdk_root_imports_nothing() {
         |_: &str,
          _observer: &borzoi_msbuild::observed::Observer|
          -> Result<SdkResolution, SdkResolveError> { Ok(SdkResolution::Roots(Vec::new())) };
+    let root = absent_root();
     for gate in ["", " Condition=\"'É' == 'é'\""] {
         let xml = format!(
             "<Project>\n  <PropertyGroup><G>seg\\child</G></PropertyGroup>\n  \
-             <Import Sdk=\"MySdk\" Project=\"/missing/$(G)/../T.props\"{gate} />\n  \
+             <Import Sdk=\"MySdk\" Project=\"{root}/$(G)/../T.props\"{gate} />\n  \
              <PropertyGroup><Seen>after</Seen></PropertyGroup>\n</Project>\n"
         );
         let proj = layout.root.join("p.proj");
