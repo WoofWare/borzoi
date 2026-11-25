@@ -119,6 +119,7 @@ impl Output {
         prescan: Prescan,
         item_base: u32,
         recovery: &SyntaxRecovery,
+        walk: super::Walk,
     ) -> ResolvedFile {
         // Exhaustive, so a field added to `Output` is a compile error here
         // until it is published.
@@ -149,6 +150,15 @@ impl Output {
             namespace_opens,
         } = contributions;
         let (declaration_defs, local_defs) = defs.into_spaces();
+        // A surface walk's file lends only its surface, so no request looks
+        // a type up in it.
+        let placed_type_of_def = (walk == super::Walk::Full).then(|| {
+            placed_types
+                .iter()
+                .enumerate()
+                .map(|(index, t)| (t.def, index))
+                .collect()
+        });
         ResolvedFile {
             local_defs,
             surface: FileSurface {
@@ -186,6 +196,7 @@ impl Output {
             attribute_resolutions,
             field_labels,
             own_abbrev_type_simple_names: prescan.own_abbrev_type_simple_names,
+            placed_type_of_def,
             unknowables,
             // Stamped by the Compile-order fold; a single file has no
             // preceding files.
