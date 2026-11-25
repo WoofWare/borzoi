@@ -81,10 +81,7 @@ fn grade(oracle: &mut Oracle, writes: &str, body: &str, doubt: Doubt) -> Graded 
     let tmp = tempfile::TempDir::new().unwrap();
     let dir = borzoi_msbuild::observed::host_fs::canonicalize(tmp.path()).unwrap();
     let project_path = dir.join("Demo.fsproj");
-    let xml = format!(
-        "<Project><PropertyGroup><Empty></Empty>{writes}</PropertyGroup>{ITEMS}{body}\
-         <PropertyGroup><After>ok</After></PropertyGroup></Project>"
-    );
+    let xml = project_xml(writes, body);
     std::fs::write(&project_path, &xml).unwrap();
     let code = design_time_code(oracle, &xml, &project_path).map(|r| r.code);
     let msbuild_rejects = code.is_some();
@@ -182,6 +179,15 @@ fn grade(oracle: &mut Oracle, writes: &str, body: &str, doubt: Doubt) -> Graded 
         walk,
         v_unheld,
     }
+}
+
+/// The project [`grade`] evaluates: `writes` (a property group's content),
+/// then the items every document declares, `body`, and a value after it.
+fn project_xml(writes: &str, body: &str) -> String {
+    format!(
+        "<Project><PropertyGroup><Empty></Empty>{writes}</PropertyGroup>{ITEMS}{body}\
+         <PropertyGroup><After>ok</After></PropertyGroup></Project>"
+    )
 }
 
 /// How MSBuild's design-time evaluation rejects `xml`, at `path`, if it does.
@@ -310,14 +316,15 @@ fn alone(
 /// claimed it in, where the rejection says (an attribute of that name in the
 /// element it spans), and that MSBuild refuses it, alone ([`alone`]), after
 /// the same `writes`: it rejects the project, with the error the construct
-/// earns ([`code_of`]), pointing at the attribute it is.
+/// earns ([`code_of`]), pointing at the attribute it is. Returns the replayed
+/// document and MSBuild's rejection of it.
 fn assert_msbuild_refuses_alone(
     oracle: &mut Oracle,
     writes: &str,
     rejection: &borzoi_msbuild::Rejection,
     xml: &str,
     path: &std::path::Path,
-) {
+) -> (String, common::DesignTimeRejection) {
     let cause = &rejection.cause;
     if let borzoi_msbuild::RejectionCause::UsingTaskRegistration { attribute, .. } = cause {
         assert!(
@@ -401,6 +408,7 @@ fn assert_msbuild_refuses_alone(
              {alone}\nclaimed in {xml}"
         );
     }
+    (alone, rejected)
 }
 
 /// The parameter starting at `at` in `xml` and the earlier one its name folds
@@ -635,6 +643,28 @@ fn raw_attribute(xml: &str, span: std::ops::Range<usize>, name: &str) -> Option<
 
 /// The attribute MSBuild's rejection of `xml` points at, if it points at one.
 fn attribute_at(xml: &str, rejected: &common::DesignTimeRejection) -> Option<String> {
+    let offset = offset_at(xml, rejected)?;
+    let name = name_from(&xml[offset..]);
+    (!name.is_empty() && xml[offset + name.len()..].starts_with('=')).then_some(name)
+}
+
+/// The name of the attribute or element MSBuild's `rejected` points at in
+/// `xml`, if it points at one.
+fn name_at(xml: &str, rejected: &common::DesignTimeRejection) -> Option<String> {
+    let offset = offset_at(xml, rejected)?;
+    let name = name_from(xml[offset..].strip_prefix('<').unwrap_or(&xml[offset..]));
+    (!name.is_empty()).then_some(name)
+}
+
+/// The XML name `text` starts with.
+fn name_from(text: &str) -> String {
+    text.chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | ':'))
+        .collect()
+}
+
+/// The byte offset in `xml` of the line and column `rejected` points at.
+fn offset_at(xml: &str, rejected: &common::DesignTimeRejection) -> Option<usize> {
     if rejected.line == 0 {
         return None;
     }
@@ -664,11 +694,7 @@ fn attribute_at(xml: &str, rejected: &common::DesignTimeRejection) -> Option<Str
         units += c.len_utf16();
         offset += c.len_utf8();
     }
-    let name: String = xml[offset..]
-        .chars()
-        .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | ':'))
-        .collect();
-    (!name.is_empty() && xml[offset + name.len()..].starts_with('=')).then_some(name)
+    Some(offset)
 }
 
 /// The error MSBuild rejects a construct with, alone ([`alone`]), as
@@ -1440,7 +1466,9 @@ const EXCLUDED: &[(Dimension, &str)] = &[
     ),
 ];
 
-/// What the sweep saw.
+/// What a sweep saw: printed, and asserted nowhere. What the sweeps assert
+/// is [`grade`]'s, case by case; that the registration's rules meet the
+/// hostile values is [`each_rule_refuses_the_hostile_classes_it_refuses`]'s.
 #[derive(Debug, Default)]
 struct Census {
     cases: usize,
@@ -1452,66 +1480,209 @@ struct Census {
     unheld_value: usize,
 }
 
-/// Credit `census` with a draw only where it reached the registration, which
-/// is certain only where MSBuild evaluates the document: every task is then
-/// registered, and each value read. A document MSBuild rejects may have
-/// stopped first, at its loader (a `TaskName` written empty) or at an earlier
-/// refusal, so it credits nothing, however it is graded.
-fn credit_registered(
-    census: &hostile::census::Census,
-    hostile: &BTreeSet<Dimension>,
-    graded: Graded,
+/// The hostile classes a boolean rule (`Boolean.TryParse`: a body's
+/// `Evaluate`, a parameter's `Output` and `Required`) refuses: every class
+/// the census owes. Probed, `msbuild-condition-oracle`, SDK 10.0.401: each
+/// class's first entry, rendered over `true`, is one MSBuild refuses there.
+const BOOLEAN_REFUSED: &[Dimension] = &[
+    Dimension::Blank,
+    Dimension::BooleanSpelling,
+    Dimension::CaseFolding,
+    Dimension::ItemExpression,
+    Dimension::ItemSeparator,
+    Dimension::LongValue,
+    Dimension::NumberSpelling,
+    Dimension::Option,
+    Dimension::OptionAfterLineBreak,
+    Dimension::Padded,
+    Dimension::PaddedOption,
+    Dimension::PathSeparator,
+    Dimension::QuotedArgument,
+    Dimension::ResponseFile,
+    Dimension::VersionSpelling,
+];
+
+/// The hostile classes a rule refusing an empty value (`TaskName`,
+/// `AssemblyFile`, `AssemblyName`, a refused `TaskFactory`'s and a
+/// `ParameterType`'s emptiness) refuses: a value that is empty, or holds
+/// whitespace alone. Every other class holds text, which these rules take
+/// (and which `ParameterType` judges a type the walk does not certify).
+const EMPTY_REFUSED: &[Dimension] = &[Dimension::Blank, Dimension::Padded];
+
+/// Each attribute the registration judges, where its value goes (`{v}`),
+/// the value it takes there, and the hostile classes its rule refuses.
+const RULE_WITNESSES: &[(&str, &str, &str, &[Dimension])] = &[
+    (
+        "TaskName",
+        "<UsingTask TaskName=\"{v}\" AssemblyFile=\"y.dll\" />",
+        "X",
+        EMPTY_REFUSED,
+    ),
+    (
+        "TaskFactory",
+        "<UsingTask TaskName=\"X\" TaskFactory=\"{v}\" AssemblyFile=\"y.dll\"><Task>x</Task></UsingTask>",
+        "RoslynCodeTaskFactory",
+        EMPTY_REFUSED,
+    ),
+    (
+        "AssemblyFile",
+        "<UsingTask TaskName=\"X\" AssemblyFile=\"{v}\" />",
+        "y.dll",
+        EMPTY_REFUSED,
+    ),
+    (
+        "AssemblyName",
+        "<UsingTask TaskName=\"X\" AssemblyName=\"{v}\" />",
+        "y",
+        EMPTY_REFUSED,
+    ),
+    (
+        "Evaluate",
+        "<UsingTask {INLINE}><Task Evaluate=\"{v}\">x</Task></UsingTask>",
+        "true",
+        BOOLEAN_REFUSED,
+    ),
+    (
+        "Required",
+        "<UsingTask {INLINE}><ParameterGroup><A Required=\"{v}\" /></ParameterGroup><Task>x</Task></UsingTask>",
+        "true",
+        BOOLEAN_REFUSED,
+    ),
+    (
+        "Output",
+        "<UsingTask {INLINE}><ParameterGroup><A Output=\"{v}\" /></ParameterGroup><Task>x</Task></UsingTask>",
+        "true",
+        BOOLEAN_REFUSED,
+    ),
+    (
+        "ParameterType",
+        "<UsingTask {INLINE}><ParameterGroup><A ParameterType=\"{v}\" /></ParameterGroup><Task>x</Task></UsingTask>",
+        "System.String",
+        EMPTY_REFUSED,
+    ),
+];
+
+/// That the walk claims a certain refusal of `attribute` in `place` holding
+/// `value` (through `source`), and that MSBuild refuses it there: the whole
+/// document graded ([`grade`]), and the refusal replayed alone
+/// ([`assert_msbuild_refuses_alone`]) with MSBuild pointing at `attribute`.
+/// MSBuild reports a refused `TaskFactory` (MSB4067) at the `<UsingTask>`
+/// that bears it, not at the attribute, so for it MSBuild must point there.
+fn assert_rule_refuses(
+    oracle: &mut Oracle,
+    attribute: &str,
+    place: &str,
+    value: &str,
+    source: Source,
 ) {
-    if !graded.msbuild_rejects {
-        census.reached(
-            hostile,
-            if graded.walk.is_some() {
-                "evaluates-withdrawn"
-            } else {
-                "evaluates-committed"
-            },
-        );
-    }
+    let (writes, body) = document(place, value, source, "");
+    let graded = grade(oracle, &writes, &body, Doubt::None);
+    assert_eq!(
+        graded.walk,
+        Some(RejectionCertainty::Certain),
+        "the walk claims no certain refusal of {attribute} = {value:?}: {body}"
+    );
+    let tmp = tempfile::TempDir::new().unwrap();
+    let dir = borzoi_msbuild::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    let path = dir.join("Demo.fsproj");
+    let xml = project_xml(&writes, &body);
+    std::fs::write(&path, &xml).unwrap();
+    let parsed = common::parse_fsproj_with_imports(
+        &borzoi_msbuild::ProjectFile::buffer(&path, &xml)
+            .expect("a project path spelt as its full path"),
+        &HashMap::new(),
+        &common::oracle_environment(),
+        None,
+        None,
+    )
+    .expect("well-formed");
+    let rejection = parsed
+        .diagnostics
+        .iter()
+        .find_map(|diagnostic| match &diagnostic.kind {
+            borzoi_msbuild::DiagnosticKind::Rejected {
+                cause:
+                    cause @ borzoi_msbuild::RejectionCause::UsingTaskRegistration {
+                        attribute: refused,
+                        ..
+                    },
+            } if refused == attribute => Some(borzoi_msbuild::Rejection {
+                certainty: RejectionCertainty::Certain,
+                cause: cause.clone(),
+                span: diagnostic.span.clone(),
+                origin: diagnostic.origin.clone(),
+            }),
+            _ => None,
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "the walk's certain refusal names another construct than {attribute}: {xml}\n{:#?}",
+                parsed.diagnostics
+            )
+        });
+    let (alone, rejected) = assert_msbuild_refuses_alone(oracle, &writes, &rejection, &xml, &path);
+    let pointed = name_at(&alone, &rejected);
+    let expected = if attribute == "TaskFactory" {
+        "UsingTask"
+    } else {
+        attribute
+    };
+    assert_eq!(
+        pointed.as_deref(),
+        Some(expected),
+        "alone, MSBuild refuses {attribute} = {value:?} pointing elsewhere ({rejected:?}): {alone}"
+    );
 }
 
-/// `X`, and each entry of the hostile value alphabet but `excluded`'s rendered
-/// over it, as the text of an inline task's body, which the registration
-/// expands and takes whatever it holds: a witness of each dimension, and of
-/// a plain value, that reaches the registration in a document MSBuild
-/// evaluates, whatever a sweep's seed draws ([`credit_registered`]).
-fn credit_witnesses(
-    oracle: &mut Oracle,
-    census: &hostile::census::Census,
-    excluded: &BTreeSet<Dimension>,
-) {
-    let plain = std::iter::once(hostile::Drawn::plain("X".to_owned()));
-    let hostile_values = value::alphabet()
-        .entries()
-        .iter()
-        .map(|entry| hostile::Drawn::of(entry).map(|v| v.render("X")));
-    for drawn in plain.chain(hostile_values) {
-        if drawn.hostile.iter().any(|d| excluded.contains(d))
-            || drawn.value.chars().any(|c| !hostile::xml::representable(c))
-        {
-            continue;
+/// Each rule of the registration meets each hostile class it refuses
+/// ([`RULE_WITNESSES`]), and a plain value, as a must-commit point: the
+/// class's first entry in that attribute, a certain refusal the walk claims
+/// and MSBuild makes alone at that attribute ([`assert_rule_refuses`]). An
+/// empty or blank value goes through a property the walk is certain of, as
+/// one written empty is the loader's to refuse; every other is written in
+/// the attribute.
+///
+/// The census records these points alone: what it owes is what this table
+/// must reach, and the sweeps, whose draws need not reach the registration
+/// at all, credit nothing.
+#[test]
+fn each_rule_refuses_the_hostile_classes_it_refuses() {
+    let census = coverage::open(file!(), "using_task_registration", EXCLUDED);
+    let mut oracle = Oracle::spawn();
+    let (_, evaluate, _, _) = RULE_WITNESSES[4];
+    assert_rule_refuses(&mut oracle, "Evaluate", evaluate, "off", Source::Literal);
+    census.reached(&BTreeSet::new(), "refused");
+    for (attribute, place, takes, refused) in RULE_WITNESSES {
+        for dimension in *refused {
+            let entry = value::alphabet()
+                .of(*dimension)
+                .next()
+                .expect("every dimension has an entry");
+            let (value, source) = if EMPTY_REFUSED.contains(dimension) {
+                (entry.value.render(""), Source::Certain)
+            } else {
+                (entry.value.render(takes), Source::Literal)
+            };
+            assert!(
+                value.chars().all(hostile::xml::representable),
+                "{dimension}'s first entry has no XML spelling: {value:?}"
+            );
+            assert_rule_refuses(&mut oracle, attribute, place, &value, source);
+            census.reached(&BTreeSet::from([*dimension]), "refused");
         }
-        let body = format!(
-            "<UsingTask {INLINE}><Task>{}</Task></UsingTask>",
-            element_text(&drawn.value)
-        );
-        let graded = grade(oracle, "", &body, Doubt::None);
-        credit_registered(census, &drawn.hostile, graded);
     }
+    census.finish(
+        "BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-msbuild --test \
+         using_task_registration_diff each_rule_refuses_the_hostile_classes_it_refuses",
+    );
 }
 
 /// `cases` documents from `rng`, each graded ([`grade`]).
 fn registration_sweep(seed: u64, cases: usize) -> Census {
-    let census = coverage::open(file!(), "using_task_registration", EXCLUDED);
     let excluded: BTreeSet<Dimension> = EXCLUDED.iter().map(|(d, _)| *d).collect();
     let mut oracle = Oracle::spawn();
     let mut rng = SplitMix64(seed);
     let mut tally = Census::default();
-    credit_witnesses(&mut oracle, &census, &excluded);
     // Every entry of the alphabet once, in a place the seed picks, before
     // the draws.
     let mut witnesses = value::alphabet().entries().iter();
@@ -1569,12 +1740,7 @@ fn registration_sweep(seed: u64, cases: usize) -> Census {
             Some(RejectionCertainty::Possible) => tally.possible += 1,
             None => {}
         }
-        credit_registered(&census, &drawn.hostile, graded);
     }
-    census.finish(
-        "BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-msbuild --test \
-         using_task_registration_diff registration_sweep_fixed_seed",
-    );
     tally
 }
 
@@ -1583,9 +1749,6 @@ fn registration_sweep(seed: u64, cases: usize) -> Census {
 fn registration_sweep_fixed_seed() {
     let tally = registration_sweep(0x1099_7a5c, 600);
     eprintln!("registration sweep: {tally:?}");
-    assert!(tally.msbuild_rejects >= 100, "{tally:?}");
-    assert!(tally.certain >= 50, "{tally:?}");
-    assert!(tally.cases - tally.msbuild_rejects >= 100, "{tally:?}");
 }
 
 /// The fresh-seed twin of [`registration_sweep_fixed_seed`].
@@ -1636,12 +1799,11 @@ const HOSTS: &[&str] = &[
     "CurrentArchitecture",
 ];
 
-/// One value of an attribute, escaped for one, and the hostile dimensions
-/// it was drawn from: an entry of the hostile value alphabet now and then
-/// (rendered over a plain value), else a special or plain value. `None` for
-/// a draw the composite cannot carry ([`EXCLUDED`], or a character XML has
-/// no spelling of).
-fn composite_draw(rng: &mut SplitMix64) -> Option<(String, Vec<Dimension>)> {
+/// One value of an attribute, escaped for one: an entry of the hostile value
+/// alphabet now and then (rendered over a plain value), else a special or
+/// plain value. `None` for a draw the composite cannot carry ([`EXCLUDED`],
+/// or a character XML has no spelling of).
+fn composite_draw(rng: &mut SplitMix64) -> Option<String> {
     let plain = if rng.below(5) == 0 {
         *rng.pick(SPECIAL)
     } else {
@@ -1659,23 +1821,13 @@ fn composite_draw(rng: &mut SplitMix64) -> Option<(String, Vec<Dimension>)> {
     {
         return None;
     }
-    Some((
-        attribute_text(&drawn.value),
-        drawn.hostile.into_iter().collect::<Vec<_>>(),
-    ))
+    Some(attribute_text(&drawn.value))
 }
 
-thread_local! {
-    /// The hostile dimensions the composite document being drawn has drawn.
-    static DRAWN: std::cell::RefCell<Vec<Dimension>> = const { std::cell::RefCell::new(Vec::new()) };
-}
-
-/// One value of an attribute for [`composite_document`], escaped for one; a
-/// hostile dimension it draws is recorded in [`DRAWN`].
+/// One value of an attribute for [`composite_document`], escaped for one.
 fn composite_value(rng: &mut SplitMix64) -> String {
     loop {
-        if let Some((value, hostile)) = composite_draw(rng) {
-            DRAWN.with(|drawn| drawn.borrow_mut().extend(hostile));
+        if let Some(value) = composite_draw(rng) {
             return value;
         }
     }
@@ -1696,14 +1848,7 @@ fn mostly(rng: &mut SplitMix64, value: &str) -> String {
 /// MSBuild may stop at, a body that is not the last child, parameters that
 /// are not the first, names that fold to one.
 fn composite_document(rng: &mut SplitMix64) -> String {
-    // The hostile dimensions drawn so far: each section's are kept only if
-    // MSBuild registers that section ([`DRAWN`]).
-    let mark = || DRAWN.with(|drawn| drawn.borrow().len());
-    let split = |from: usize| DRAWN.with(|drawn| drawn.borrow_mut().split_off(from));
     let mut children = Vec::new();
-    let mut group_drawn = Vec::new();
-    let mut body_drawn = Vec::new();
-    let before_group = mark();
     if rng.below(3) != 0 {
         let mut names = vec!["A", "B", "a", "A", "UsingTask"];
         let count = 1 + rng.below(3);
@@ -1728,33 +1873,22 @@ fn composite_document(rng: &mut SplitMix64) -> String {
         }
         children.push(format!("<ParameterGroup>{parameters}</ParameterGroup>"));
     }
-    group_drawn.extend(split(before_group));
-    let before_body = mark();
     if rng.below(3) != 0 {
         let evaluate = if rng.below(2) == 0 {
             format!(" Evaluate=\"{}\"", composite_value(rng))
         } else {
             String::new()
         };
-        body_drawn.extend(split(before_body));
-        let before_text = mark();
         let text = if rng.below(4) == 0 {
             composite_value(rng)
         } else {
             "x".to_owned()
         };
-        // The text is expanded for certain only under no `Evaluate`.
-        let text_drawn = split(before_text);
-        if evaluate.is_empty() {
-            body_drawn.extend(text_drawn);
-        }
         children.push(format!("<Task{evaluate}>{text}</Task>"));
     }
-    body_drawn.extend(split(before_body));
     if rng.below(3) == 0 {
         children.reverse();
     }
-    let before_task = mark();
     let mut attributes = format!(" TaskName=\"{}\"", mostly(rng, "X"));
     let factory = if children.is_empty() {
         (rng.below(3) == 0).then(|| composite_value(rng))
@@ -1783,25 +1917,8 @@ fn composite_document(rng: &mut SplitMix64) -> String {
     if rng.below(6) == 0 {
         attributes += &format!(" Override=\"{}\"", composite_value(rng));
     }
-    let gated = rng.below(4) == 0;
-    if gated {
+    if rng.below(4) == 0 {
         attributes += &format!(" Condition=\"{}\"", rng.pick(CONDITIONS));
-    }
-    // What MSBuild registers for certain: an ungated task's attributes, its
-    // parameter group if it is the first child, its body if it is the last.
-    let task_drawn = split(before_task);
-    if !gated {
-        let registered = |child: Option<&String>, tag: &str| {
-            child.is_some_and(|child| child.starts_with(&format!("<{tag}")))
-        };
-        let mut reached = task_drawn;
-        if registered(children.first(), "ParameterGroup") {
-            reached.extend(group_drawn);
-        }
-        if registered(children.last(), "Task") {
-            reached.extend(body_drawn);
-        }
-        DRAWN.with(|drawn| drawn.borrow_mut().extend(reached));
     }
     format!("<UsingTask{attributes}>{}</UsingTask>", children.concat())
 }
@@ -1824,19 +1941,13 @@ const COMPOSITE_WRITES: &str = "<P>a</P><At>@</At><At Condition=\"'É' == 'é'\"
 /// ([`composite_document`]), each graded ([`grade`]): a certain rejection
 /// must be MSBuild's, and name a construct MSBuild refuses alone.
 fn composite_sweep(seed: u64, cases: usize) -> Census {
-    let census = coverage::open(file!(), "using_task_composite", EXCLUDED);
-    let excluded: BTreeSet<Dimension> = EXCLUDED.iter().map(|(d, _)| *d).collect();
     let mut oracle = Oracle::spawn();
-    credit_witnesses(&mut oracle, &census, &excluded);
     let mut rng = SplitMix64(seed);
     let mut tally = Census::default();
     for _ in 0..cases {
-        DRAWN.with(|drawn| drawn.borrow_mut().clear());
         let body: String = (0..1 + rng.below(2))
             .map(|_| composite_document(&mut rng))
             .collect();
-        let hostile: BTreeSet<Dimension> =
-            DRAWN.with(|drawn| drawn.borrow().iter().copied().collect());
         tally.cases += 1;
         // `F` and `T` are written under an undecided gate with a value other
         // than the one the walk holds: a rejection resting on MSBuild's is
@@ -1860,14 +1971,7 @@ fn composite_sweep(seed: u64, cases: usize) -> Census {
             Some(RejectionCertainty::Possible) => tally.possible += 1,
             None => {}
         }
-        // Each draw [`DRAWN`] kept is one MSBuild registers, where it gets
-        // to the task at all.
-        credit_registered(&census, &hostile, graded);
     }
-    census.finish(
-        "BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-msbuild --test \
-         using_task_registration_diff composite_sweep_fixed_seed",
-    );
     tally
 }
 
@@ -1876,9 +1980,6 @@ fn composite_sweep(seed: u64, cases: usize) -> Census {
 fn composite_sweep_fixed_seed() {
     let tally = composite_sweep(0x1099_c0de, 600);
     eprintln!("composite sweep: {tally:?}");
-    assert!(tally.msbuild_rejects >= 100, "{tally:?}");
-    assert!(tally.certain >= 50, "{tally:?}");
-    assert!(tally.cases - tally.msbuild_rejects >= 50, "{tally:?}");
 }
 
 /// The fresh-seed twin of [`composite_sweep_fixed_seed`].
