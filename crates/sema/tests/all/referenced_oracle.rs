@@ -755,16 +755,25 @@ fn a_type_provider_project_anywhere_in_the_graph_is_refused() {
             .collect(),
     };
     // (shape, the producer's text, the producer's project references)
-    let shapes: [(&str, &str, &[&str]); 2] = [
+    // (shape, the producer's text, its project references, the consumer's)
+    // Below, the consumer reaches the provider only through the producer.
+    type Shape<'a> = (&'a str, &'a str, &'a [&'a str], &'a [&'a str]);
+    let shapes: [Shape<'_>; 2] = [
         (
             "below",
             "namespace Producer\ntype Ab = Provider.T\n",
             &["Provider"],
+            &["Producer"],
         ),
-        ("beside", "namespace Producer\ntype T = int\n", &[]),
+        (
+            "beside",
+            "namespace Producer\ntype T = int\n",
+            &[],
+            &["Provider", "Producer"],
+        ),
     ];
     let mut failures = Vec::new();
-    for (shape, producer_text, producer_refs) in shapes {
+    for (shape, producer_text, producer_refs, consumer_refs) in shapes {
         let request = GraphRequest::new(
             vec![
                 project(
@@ -786,7 +795,7 @@ fn a_type_provider_project_anywhere_in_the_graph_is_refused() {
                         "referenced_tp_consumer",
                         "module Consumer.Use\nlet x = 1\n",
                     )],
-                    &["Provider", "Producer"],
+                    consumer_refs,
                 ),
             ],
             plain("Consumer"),
@@ -848,15 +857,22 @@ fn a_language_version_the_compiler_cannot_check_is_refused() {
 #[test]
 fn the_cells_language_version_reaches_fcs() {
     let text = "module Testers\ntype U = A | B\nlet isA (u: U) = u.IsA\n";
+    // A reading's errors, which a refusal (which reports none) is not.
     let errors_at = |major: u8| {
-        read(&GraphCell {
+        let reading = read(&GraphCell {
             lang_version: LangVersion::new(major, 0),
             ..one(text)
-        })
-        .errors
+        });
+        assert!(
+            matches!(reading.view, View::Found(_)),
+            "F# {major}: {}",
+            reading.verdict()
+        );
+        reading.errors
     };
     let (eight, nine, ten) = (errors_at(8), errors_at(9), errors_at(10));
-    assert!(!eight.is_empty(), "F# 8 accepted a case tester");
+    // FS39: F# 8 generates no case testers, so `IsA` is not defined.
+    assert_eq!(eight, ["FS39"], "F# 8 accepted a case tester");
     assert!(nine.is_empty(), "F# 9 rejected a case tester: {nine:?}");
     assert!(ten.is_empty(), "F# 10 rejected a case tester: {ten:?}");
 }
@@ -868,12 +884,13 @@ fn the_cells_language_version_reaches_fcs() {
 fn essence(line: &str, producer: &str) -> String {
     match parse_response::<ReferencedResponse>(line) {
         Ok(ReferencedResponse::Found(found)) => format!(
-            "found {:?} {:?} {:?} {:?} {:?} {:?}",
+            "found {:?} {:?} {:?} {:?} {:?} {:?} {:?}",
             crate::common::referenced::decode(producer, &found),
             found.signature.auto_opens,
             found.signature.internals_visible_to,
             found.entities,
             found.extension_members,
+            found.read_errors,
             found.diagnostics,
         ),
         Ok(ReferencedResponse::Refused(refusal)) => format!("refused {:?}", refusal.cause),

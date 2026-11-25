@@ -561,12 +561,21 @@ fn a_waiting_caller_is_woken_when_a_child_comes_free() {
         Box::leak(Box::new([Mutex::new(Some(budget.permit(|| false)))]));
     let busy = slots[0].lock().expect("the slot");
     let (done, answer) = std::sync::mpsc::channel();
+    let (found_busy, seen_busy) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _permit = budget.permit(|| evict_from(slots, drop));
+        let _permit = budget.permit(|| {
+            let evicted = evict_from(slots, drop);
+            if !evicted {
+                // It goes on to wait; the test frees the slot only now.
+                let _ = found_busy.send(());
+            }
+            evicted
+        });
         done.send(()).expect("the test is waiting");
     });
-    // Let the caller find the only child busy and wait.
-    std::thread::sleep(Duration::from_millis(300));
+    seen_busy
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the caller never found the only child busy");
     serve(budget, busy, |_| ());
     answer
         .recv_timeout(Duration::from_secs(10))
