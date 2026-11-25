@@ -563,6 +563,28 @@ fn compile_update_strand_without_a_pending_batch_declines() {
     assert!(p.items_uncertain, "{:?}", p.diagnostics);
 }
 
+/// An `Update` whose own walk names the fragment it strands at is declined
+/// once, by that name.
+#[test]
+fn a_strand_the_walk_names_is_declined_once() {
+    let p = parse(
+        r#"<Project><ItemGroup>
+    <Compile Include="A.fs" />
+    <Compile Update="Z.fs" Link="z" />
+    <Compile Update="A.fs;A.fs" CompileOrder="CompileLast" />
+  </ItemGroup></Project>"#,
+    );
+    assert!(p.items_uncertain);
+    let kinds: Vec<_> = p.diagnostics.iter().map(|d| &d.kind).collect();
+    assert!(
+        matches!(
+            kinds.as_slice(),
+            [DiagnosticKind::StrandedUpdatePrefix { fragment, .. }] if fragment == "A.fs"
+        ),
+        "{kinds:?}"
+    );
+}
+
 /// The walk computed `p`'s Compile order, and declines it only because an
 /// `Update` may leave MSBuild's batch of `Update`s past its first fragment.
 fn assert_only_the_batch_declines(p: &ParsedProject) {

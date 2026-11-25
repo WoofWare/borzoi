@@ -990,7 +990,22 @@ pub(super) enum PackageItemKind {
 fn walk_item_child(node: Node<'_, '_>, state: &mut State<'_>) {
     #[cfg(any(test, feature = "test-support"))]
     let causes_before = state.package_reference_uncertainties.len();
+    // MSBuild's batch of `Update`s, judged for the types whose `Update`s the
+    // walk models, whatever the element's condition: see
+    // [`update_may_strand`]. Where walking the element names the fragment
+    // its spec strands at ([`DiagnosticKind::StrandedUpdatePrefix`]), that
+    // decline stands alone.
+    let may_strand = batched_item_type(node).filter(|_| update_may_strand(node, state));
+    let diagnostics_before = state.diagnostics.len();
     walk_item_child_unattributed(node, state);
+    let named_a_strand = state.diagnostics[diagnostics_before..].iter().any(|d| {
+        matches!(&d.kind, DiagnosticKind::StrandedUpdatePrefix { fragment, .. } if !fragment.is_empty())
+    });
+    if let Some(item_type) = may_strand
+        && !named_a_strand
+    {
+        note_update_may_strand(node, item_type, state);
+    }
     // What the package set's causes say about another dependency list is the
     // probe's business only.
     #[cfg(any(test, feature = "test-support"))]
@@ -1000,14 +1015,6 @@ fn walk_item_child(node: Node<'_, '_>, state: &mut State<'_>) {
 }
 
 fn walk_item_child_unattributed(node: Node<'_, '_>, state: &mut State<'_>) {
-    // MSBuild's batch of `Update`s, judged for the types whose `Update`s the
-    // walk models, whatever the element's condition: see
-    // [`update_may_strand`].
-    if let Some(item_type) = batched_item_type(node)
-        && update_may_strand(node, state)
-    {
-        note_update_may_strand(node, item_type, state);
-    }
     // PackageReference/FrameworkReference are the NuGet dependency set — a
     // separate concern from Compile order / project edges, with their own
     // bucket, metadata, and uncertainty flag. SDK dependency items participate
