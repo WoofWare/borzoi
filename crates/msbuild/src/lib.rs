@@ -1060,16 +1060,20 @@ pub(crate) const NUGET_GUARDS: &[(&str, &str, Option<&str>)] = &[
 
 /// Whether `atom`, one conjunct of a group's condition, is one of
 /// [`NUGET_GUARDS`].
-fn nuget_group_atom(atom: &str) -> bool {
+pub(crate) fn nuget_group_atom(atom: &str) -> bool {
     NUGET_GUARDS.iter().any(|(name, op, value)| {
-        let head = format!("'$({name})' {op} '");
-        match value {
-            Some(value) => atom == format!("{head}{value}'"),
-            None => atom
-                .strip_prefix(head.as_str())
-                .and_then(|rest| rest.strip_suffix('\''))
-                .is_some_and(|value| !expands(value) && !value.contains('\'')),
-        }
+        // `'$(name)' op 'compared'`, read off by borrowed slices.
+        let compared = atom
+            .strip_prefix("'$(")
+            .and_then(|rest| rest.strip_prefix(*name))
+            .and_then(|rest| rest.strip_prefix(")' "))
+            .and_then(|rest| rest.strip_prefix(*op))
+            .and_then(|rest| rest.strip_prefix(" '"))
+            .and_then(|rest| rest.strip_suffix('\''));
+        compared.is_some_and(|compared| match value {
+            Some(value) => compared == *value,
+            None => !expands(compared) && !compared.contains('\''),
+        })
     })
 }
 
