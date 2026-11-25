@@ -1,6 +1,6 @@
-# The walk at 193c28caa40196db155c4ed0b3ac631cbbfecf85 over path_fixup_expansion_diff's fixed-seed points:
+# The walk at 1f06d1eeba52f4d7a1eef1bfa7b6326b28d4edee over path_fixup_expansion_diff's fixed-seed points:
 # case, FNV-1a of its inputs (document, meta, environment, layout), each mode's claim.
-# Regenerate: bash tools/path-fixup-baseline.sh 193c28caa40196db155c4ed0b3ac631cbbfecf85
+# Regenerate: bash tools/path-fixup-baseline.sh 1f06d1eeba52f4d7a1eef1bfa7b6326b28d4edee
 case0000	d6c69deeac08235e	wi -	rd -	pu -	s:cwd-empty -	s:cwd-full -	s:cwd-seg -	s:cwd-obj -	s:proj-full -
 case0001	62311af079fe296d	wi -	rd -	pu -	s:cwd-empty -	s:cwd-full -	s:cwd-seg -	s:cwd-obj -	s:proj-full -
 case0002	4035ff030ccd9f30	wi -	rd -	pu -	s:cwd-empty -	s:cwd-full -	s:cwd-seg -	s:cwd-obj -	s:proj-full -

@@ -36,7 +36,10 @@ use std::path::PathBuf;
 
 use crate::common::parse_fsproj_with_imports;
 use borzoi_msbuild::test_support::{ReadProbe, parse_fsproj_reads};
-use borzoi_msbuild::{ProjectFileError, PropertyRead, RejectionCertainty, parse_fsproj};
+use borzoi_msbuild::{
+    ProjectFileError, PropertyRead, Rejection, RejectionCause, RejectionCertainty,
+    UnloadableImport, parse_fsproj,
+};
 #[cfg(unix)]
 use common::path_spelling;
 use common::{
@@ -755,6 +758,55 @@ fn a_project_path_naming_no_file_is_refused() {
             "{at}: {refused:?}"
         );
     }
+}
+
+/// An `Exists` guard says nothing of an import whose path the walk cannot
+/// compute. Here the path is a property function the walk does not model,
+/// and it names a directory beside the project: `Exists` is true of it, and
+/// MSBuild then fails to import a directory, rejecting the project. A walk
+/// that let the guard rule the rejection out would publish `After` as the
+/// build's for a project MSBuild refuses.
+#[test]
+fn an_exists_guard_does_not_rule_out_rejecting_an_uncomputed_import() {
+    let tmp = TempDir::new().unwrap();
+    let root = borzoi_msbuild::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    std::fs::create_dir_all(root.join("proj/sub")).unwrap();
+    let project = root.join("proj/Demo.fsproj");
+    let xml = "<Project>\n  <PropertyGroup><P>$([System.IO.Path]::GetFileName('x/sub'))</P></PropertyGroup>\n  \
+               <Import Project=\"$(P)\" Condition=\"Exists('$(P)')\" />\n  \
+               <PropertyGroup><After>y</After></PropertyGroup>\n</Project>\n";
+    let mut oracle = Oracle::spawn();
+    assert_eq!(
+        oracle.project(xml, &["After".to_owned()], Some(&project), &[]),
+        None,
+        "MSBuild imports the directory `Exists` admits, and rejects the project"
+    );
+    let parsed = parse_fsproj_with_imports(
+        &borzoi_msbuild::ProjectFile::buffer(&project, xml).unwrap(),
+        &HashMap::new(),
+        &common::oracle_environment(),
+        None,
+        None,
+    )
+    .unwrap();
+    // The rejection names the path the walk does not compute, not a directory
+    // it found.
+    assert!(
+        matches!(
+            parsed.rejection,
+            Some(Rejection {
+                certainty: RejectionCertainty::Possible,
+                cause: RejectionCause::Import {
+                    why: UnloadableImport::PathUndecided,
+                    ..
+                },
+                ..
+            })
+        ),
+        "{:#?}",
+        parsed.rejection
+    );
+    assert!(!parsed.property("After").is_exact());
 }
 
 /// On Unix, an import whose path holds a backslash once expanded imports the
@@ -2123,8 +2175,30 @@ fn import_failures_commit_nothing_for_a_project_msbuild_rejects() {
             // whenever it would fail: a gate decided false, and one that
             // requires the file, MSBuild's `Exists` of which is false where
             // nothing is. Withdrawing there is a decline MSBuild gives no cause
-            // for.
-            if PROBES_ITS_OWN_FILE_OR_IS_FALSE.contains(&gate_template) {
+            // for, but of a path the walk computes: `Exists` is true of a
+            // directory too, so of a path it cannot compute the walk claims
+            // only a possible rejection, naming that cause.
+            // A gate decided false rules the import out whatever its path;
+            // only an `Exists` gate's discharge turns on computing it.
+            let computes_its_path =
+                !before.contains(UNDECIDED_TRUE) || !gate_template.contains("Exists");
+            if PROBES_ITS_OWN_FILE_OR_IS_FALSE.contains(&gate_template) && !computes_its_path {
+                assert!(
+                    parsed.rejection.as_ref().is_none_or(|r| matches!(
+                        r,
+                        Rejection {
+                            certainty: RejectionCertainty::Possible,
+                            cause: RejectionCause::Import {
+                                why: UnloadableImport::PathUndecided,
+                                ..
+                            },
+                            ..
+                        }
+                    )),
+                    "an uncomputed path declines by name\n--- xml ---\n{xml}\n{:?}",
+                    parsed.rejection
+                );
+            } else if PROBES_ITS_OWN_FILE_OR_IS_FALSE.contains(&gate_template) {
                 assert_eq!(
                     parsed.rejection, None,
                     "MSBuild evaluates the project, and the gate rules the import out \

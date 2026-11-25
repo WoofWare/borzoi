@@ -1916,3 +1916,44 @@ fn an_import_group_guard_is_not_asked_again_after_its_imports_run() {
         parsed.property("After")
     );
 }
+
+/// An `<ImportGroup>`'s `Exists` guard says nothing of an import whose path
+/// the walk cannot compute: the group's first import rewrites `P` through a
+/// function the walk does not model, to a file that does not exist, after
+/// the group's gate admitted the old `P`. MSBuild then makes the second
+/// import where `'É' == 'é'` holds, and fails (MSB4019).
+#[test]
+fn a_group_guard_does_not_rule_out_rejecting_an_uncomputed_import() {
+    let mut oracle = Oracle::spawn();
+    let tmp = TempDir::new().unwrap();
+    let dir = borzoi_msbuild::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    std::fs::write(dir.join("ok.props"), "<Project />").unwrap();
+    std::fs::write(
+        dir.join("rewrite.props"),
+        "<Project><PropertyGroup><P>$([System.String]::Copy('missing.props'))</P>\
+         </PropertyGroup></Project>",
+    )
+    .unwrap();
+    let project_path = dir.join("Demo.fsproj");
+    let xml = "<Project>\n  <PropertyGroup><P>ok.props</P></PropertyGroup>\n  \
+               <ImportGroup Condition=\"Exists('$(P)')\">\n    \
+               <Import Project=\"rewrite.props\" />\n    \
+               <Import Project=\"$(P)\" Condition=\"'É' == 'é'\" />\n  </ImportGroup>\n  \
+               <PropertyGroup><After>ok</After></PropertyGroup>\n</Project>\n";
+    let theirs = oracle.project(xml, &["After".to_owned()], Some(&project_path), &[]);
+    assert_eq!(theirs, None, "MSBuild rejects the project");
+    let parsed = parse_fsproj_with_imports(
+        &borzoi_msbuild::ProjectFile::buffer(&project_path, xml).unwrap(),
+        &HashMap::new(),
+        &HashMap::new(),
+        None,
+        None,
+    )
+    .unwrap();
+    // Neither a value nor an exact absence: MSBuild rejects the project.
+    assert!(
+        !parsed.property("After").is_exact(),
+        "we claim {:?}",
+        parsed.property("After")
+    );
+}
