@@ -43,7 +43,6 @@ fn evaluated(parsed: &ParsedProject) -> ProjectEvaluation<'_> {
     ProjectEvaluation::Evaluated {
         parsed,
         not_an_inner_build: false,
-        dispatch_undecided: false,
     }
 }
 
@@ -674,7 +673,6 @@ fn the_outer_dispatch_build_reports_its_dropped_edges() {
     let eval = ProjectEvaluation::Evaluated {
         parsed: &parsed,
         not_an_inner_build: true,
-        dispatch_undecided: false,
     };
     assert!(eval.drops_reference_edges());
     let ds = deferrals(eval, FoldOutcome::Unknown);
@@ -695,21 +693,18 @@ fn the_edge_verdict_and_the_reported_capability_are_one_fact() {
     let mut parsed = certain_project();
     for uncertain in [false, true] {
         for outer in [false, true] {
-            for undecided in [false, true] {
-                parsed.project_references_uncertain = uncertain;
-                let eval = ProjectEvaluation::Evaluated {
-                    parsed: &parsed,
-                    not_an_inner_build: outer,
-                    dispatch_undecided: undecided,
-                };
-                assert_eq!(
-                    eval.drops_reference_edges(),
-                    deferrals(eval, FoldOutcome::Unknown)
-                        .iter()
-                        .any(|d| d.capability() == DeferredCapability::ProjectReferenceEdges),
-                    "uncertain={uncertain} outer={outer} undecided={undecided}"
-                );
-            }
+            parsed.project_references_uncertain = uncertain;
+            let eval = ProjectEvaluation::Evaluated {
+                parsed: &parsed,
+                not_an_inner_build: outer,
+            };
+            assert_eq!(
+                eval.drops_reference_edges(),
+                deferrals(eval, FoldOutcome::Unknown)
+                    .iter()
+                    .any(|d| d.capability() == DeferredCapability::ProjectReferenceEdges),
+                "uncertain={uncertain} outer={outer}"
+            );
         }
     }
 }
@@ -846,7 +841,6 @@ fn an_unknown_fold_still_publishes_a_known_reference_loss() {
     let eval = ProjectEvaluation::Evaluated {
         parsed: &parsed,
         not_an_inner_build: true,
-        dispatch_undecided: false,
     };
     let fresh = deferrals(eval, FoldOutcome::Unknown);
     assert_eq!(fresh.len(), 1);
@@ -948,7 +942,6 @@ fn the_outer_dispatch_build_states_its_reason() {
         ProjectEvaluation::Evaluated {
             parsed: &parsed,
             not_an_inner_build: true,
-            dispatch_undecided: false,
         },
         FoldOutcome::Unknown,
     );
@@ -1009,7 +1002,6 @@ fn a_discarded_inner_build_explains_its_fold_decline_too() {
         ProjectEvaluation::Evaluated {
             parsed: &parsed,
             not_an_inner_build: true,
-            dispatch_undecided: false,
         },
         FoldOutcome::Unknown,
     );

@@ -58,7 +58,7 @@ use std::path::{Component, Path, PathBuf};
 use borzoi_cst::language_version::LanguageVersion;
 use borzoi_msbuild::{
     GlobResolver, ParsedProject, ProjectFile, ResolvedItem, SdkResolution, SdkResolver, SdkVersion,
-    parse_fsproj_with_imports_reusing, target_frameworks, target_frameworks_undecided,
+    parse_fsproj_with_imports_reusing, target_frameworks,
 };
 
 use crate::paths::{lexically_normalize, paths_equal};
@@ -218,18 +218,6 @@ struct EvaluatedProject {
     /// arcade idiom) vanishes from the re-evaluated `parsed`'s properties, so
     /// reading the list off `parsed` would under-count.
     declared_tfms: Vec<String>,
-    /// Whether `declared_tfms` is no answer where it decides the build: no
-    /// `TargetFramework` pins one (the caller's, or the body's own singular),
-    /// and the walk does not hold the framework declarations for certain
-    /// ([`target_frameworks_undecided`]), or the plural is untrusted
-    /// ([`tfm_policy::plural_untrusted`]: a write the evaluator skipped under a
-    /// gate it could not decide may have declared other frameworks).
-    declared_tfms_undecided: bool,
-    /// Whether the project may dispatch to inner builds the walk cannot
-    /// enumerate: `declared_tfms_undecided` on the plural's account (the
-    /// plural is untrusted or inexactly unset). An unknown singular alone is
-    /// one build whose framework is unknown, which keeps its edges.
-    dispatch_undecided: bool,
     /// The first pass's body-written non-empty `TargetFramework`, i.e.
     /// whether the project pins its own singular TFM
     /// (`select_target_framework` case 2). Distinguishes "TFM known" from
@@ -1511,9 +1499,6 @@ impl Workspace {
                 }
                 match &e.chosen_tfm {
                     Some(tfm) => ServedTfm::Tfm(tfm.clone()),
-                    // A declaration that is no answer is no proof that the
-                    // project declares no framework.
-                    None if e.declared_tfms_undecided => ServedTfm::Untrusted,
                     None => ServedTfm::NoneDeclared,
                 }
             }
@@ -2117,7 +2102,6 @@ impl Workspace {
             Some(evaluated) => ProjectEvaluation::Evaluated {
                 parsed: &evaluated.parsed,
                 not_an_inner_build: evaluated.not_an_inner_build,
-                dispatch_undecided: evaluated.dispatch_undecided,
             },
             None => ProjectEvaluation::Failed,
         };
@@ -2601,21 +2585,6 @@ fn resolve_node_uncached(
             references_uncertain: outer_suppressed,
         };
     }
-    if outer.declared_tfms_undecided {
-        // The declared list is no answer (the walk does not hold it for
-        // certain): no framework of the list in hand is known to be current,
-        // so none validates a restore's seed, and the node's output declines
-        // with its TFM. No inner build can be enumerated to show which of this
-        // evaluation's edges survive into the one the compiler sees, so a
-        // compile closure takes none (`references_suppressed`, the predicate
-        // the deferral message explains).
-        return NodeResult::Resolved {
-            edges: outer_edges,
-            tfm: NodeTfm::Unresolved,
-            output_name: None,
-            references_uncertain: outer_suppressed,
-        };
-    }
     let declared = &outer.declared_tfms;
     if declared.len() <= 1 {
         // Single-target (or no TFM declared at all): there is only one build
@@ -2808,7 +2777,6 @@ fn references_suppressed(evaluated: &EvaluatedProject, purpose: GraphWalkPurpose
         && ProjectEvaluation::Evaluated {
             parsed: &evaluated.parsed,
             not_an_inner_build: evaluated.not_an_inner_build,
-            dispatch_undecided: evaluated.dispatch_undecided,
         }
         .drops_reference_edges()
 }
@@ -3031,19 +2999,6 @@ fn evaluate_project(
     // which an outer-gated `<TargetFrameworks>` may no longer exist).
     let declared_tfms = target_frameworks(&parsed);
     let body_target_framework = tfm_policy::body_target_framework(&parsed);
-    // The declarations decide which build runs only where nothing pins one:
-    // a non-empty `TargetFramework` the caller supplies, or the project's own
-    // body-written singular, is the build whatever the plural says.
-    let build_pinned = caller_owns_target_framework(&extras) || body_target_framework.is_some();
-    let plural_unknown = tfm_policy::plural_untrusted(&parsed)
-        || matches!(
-            parsed.property("TargetFrameworks"),
-            borzoi_msbuild::PropertyRead::Untrusted(_)
-                | borzoi_msbuild::PropertyRead::UnsetInexact(_)
-        );
-    let declared_tfms_undecided =
-        !build_pinned && (target_frameworks_undecided(&parsed) || plural_unknown);
-    let dispatch_undecided = !build_pinned && plural_unknown;
     let pass1_untrusted = tfm_policy::tfm_untrusted(&parsed);
     let served = select_target_framework(
         parsed,
@@ -3085,8 +3040,6 @@ fn evaluate_project(
             compiler,
             chosen_tfm,
             declared_tfms,
-            declared_tfms_undecided,
-            dispatch_undecided,
             body_target_framework,
             tfm_untrusted,
             not_an_inner_build,
@@ -3412,18 +3365,18 @@ mod tests {
     use proptest::prelude::*;
     use std::fs;
     use tempfile::TempDir;
-
     /// Every combination of a `TargetFramework` global (none, empty, a
     /// framework), a body singular (none, written, written under a gate the
     /// walk cannot decide) and a plural (none, one framework, written under
     /// that gate, one framework replaced under it), each beside an
     /// unconditional `<ProjectReference>`. The reference is the compiler's in
-    /// every build, so the undecided plural drops it only where the project
-    /// may dispatch to inner builds the walk cannot enumerate: the plural is
-    /// unknown and nothing pins the build (a non-empty global, or, with no
-    /// global, a written singular). The edges kept are exactly those no
-    /// other suppression (an outer dispatch build, an uncertain reference
-    /// list) drops.
+    /// every build, so the compile closure drops it only where pass 1 may be
+    /// an outer dispatch build to inner builds the walk cannot enumerate:
+    /// nothing pins the build (a non-empty global, or, with no global, a
+    /// written singular), and the plural is unknown, or present beside a
+    /// singular the walk cannot decide. There, pass 1's Compile items,
+    /// defines and references are all withheld; an unknown singular alone is
+    /// one build, and keeps them.
     #[test]
     fn undecided_framework_writes_drop_edges_only_where_the_build_may_dispatch() {
         const GATE: &str = "'É' == 'é'";
@@ -3473,11 +3426,14 @@ mod tests {
                         })
                         .unwrap_or_default();
                     let plural_unknown = plural.contains("GATED") || plural.contains("OVERRIDE");
+                    let plural_present = plural.starts_with("<TargetFrameworks>");
+                    // A global, empty or not, outranks the body's singular.
+                    let singular_unknown = global.is_none() && singular == "GATED";
                     let pinned = match global {
                         Some(tfm) => !tfm.is_empty(),
                         None => singular.starts_with("<TargetFramework>"),
                     };
-                    let drops = plural_unknown && !pinned;
+                    let drops = !pinned && (plural_unknown || (plural_present && singular_unknown));
                     let context =
                         format!("global {global:?}, singular {singular:?}, plural {plural:?}");
                     let mut ws = Workspace::with_env_and_extra_build_properties(
@@ -3485,20 +3441,16 @@ mod tests {
                         extra.clone(),
                     );
                     let evaluation = ws.project_evaluation(&proj);
-                    let crate::project_deferral::ProjectEvaluation::Evaluated {
-                        parsed,
-                        not_an_inner_build,
-                        dispatch_undecided,
-                    } = evaluation
+                    let crate::project_deferral::ProjectEvaluation::Evaluated { parsed, .. } =
+                        evaluation
                     else {
                         panic!("{context}: the project evaluates");
                     };
-                    assert_eq!(dispatch_undecided, drops, "{context}");
-                    let dropped = evaluation.drops_reference_edges();
+                    assert_eq!(evaluation.drops_reference_edges(), drops, "{context}");
                     assert_eq!(
-                        dropped,
-                        drops || not_an_inner_build || parsed.project_references_uncertain,
-                        "{context}"
+                        (parsed.items_uncertain, parsed.define_constants_uncertain),
+                        (drops, drops),
+                        "{context}: the Compile items and defines go with the edges"
                     );
                     let ws = Workspace::with_env_and_extra_build_properties(
                         SdkDiscoveryEnv::default(),
@@ -3516,7 +3468,7 @@ mod tests {
                         .expect("entry node");
                     assert_eq!(
                         node.references.len(),
-                        usize::from(!dropped),
+                        usize::from(!drops),
                         "{context}: {:?}",
                         node.references
                     );
@@ -3705,15 +3657,11 @@ mod tests {
             evaluation,
             crate::project_deferral::FoldOutcome::Unknown,
         );
-        let edges = deferrals
-            .iter()
-            .find(|d| {
-                d.capability() == crate::project_deferral::DeferredCapability::ProjectReferenceEdges
-            })
-            .expect("the dropped edges are reported");
         assert!(
-            edges.causes().recorded()[0].contains("target frameworks"),
-            "{edges:?}"
+            deferrals.iter().any(|d| {
+                d.capability() == crate::project_deferral::DeferredCapability::ProjectReferenceEdges
+            }),
+            "the dropped edges are reported: {deferrals:?}"
         );
         // The entry's served framework says the same: no current framework
         // was established, so no restored target's assemblies are served.

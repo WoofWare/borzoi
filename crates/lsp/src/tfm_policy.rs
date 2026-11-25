@@ -17,9 +17,7 @@
 
 use std::collections::HashMap;
 
-use borzoi_msbuild::{
-    InexactUnset, ParsedProject, PropertyRead, target_frameworks, target_frameworks_undecided,
-};
+use borzoi_msbuild::{InexactUnset, ParsedProject, PropertyRead, target_frameworks};
 
 /// The served-TFM decision for one project, as computed from its first
 /// (unseeded, or caller-seeded) evaluation.
@@ -118,13 +116,16 @@ impl TfmChoice {
 ///    any value — `None` when it's empty). The caller owns the choice: an
 ///    empty read-only global is an explicit "no TFM", and re-seeding would
 ///    both override that input and trip the evaluator's case-insensitive
-///    duplicate-key validation, failing the whole evaluation;
+///    duplicate-key validation, failing the whole evaluation. An empty global
+///    beside an untrusted plural is case 4: pass 1 may be the outer dispatch
+///    build of frameworks the walk cannot name;
 /// 2. else the body-written `<TargetFramework>` when non-empty. MSBuild's
 ///    outer/inner gate is `'$(TargetFrameworks)' != '' and
 ///    '$(TargetFramework)' == ''`, so a non-empty singular is a single-target
 ///    build even when the plural is also set. Pass 1 already evaluated under
 ///    it — no second pass;
-/// 3. else, the plural trusted, the **first** [`target_frameworks`] entry, under which the project
+/// 3. else, the plural trusted, the **first** [`target_frameworks`] entry,
+///    under which the project
 ///    is re-evaluated with `TargetFramework` seeded as a read-only global —
 ///    exactly what an MSBuild inner build does — so `$(TargetFramework)`-gated
 ///    defines and Compile items become evaluable instead of flipping the
@@ -145,6 +146,12 @@ impl TfmChoice {
 pub(crate) fn tfm_choice(pass1: &ParsedProject, extras: &HashMap<String, String>) -> TfmChoice {
     if let Some(value) = lookup_property_ci(extras, "TargetFramework") {
         let trimmed = value.trim();
+        // An empty global chooses no framework: where the plural is unknown,
+        // pass 1 may be the outer dispatch build of frameworks the walk cannot
+        // name, exact for itself and for no inner build.
+        if trimmed.is_empty() && plural_untrusted(pass1) {
+            return TfmChoice::PluralUnknown;
+        }
         return TfmChoice::CallerOwned((!trimmed.is_empty()).then(|| trimmed.to_string()));
     }
     if let Some(body) = body_target_framework(pass1) {
@@ -165,14 +172,13 @@ pub(crate) fn tfm_choice(pass1: &ParsedProject, extras: &HashMap<String, String>
     }
     match target_frameworks(pass1).first() {
         Some(first) => TfmChoice::Reseed(first.clone()),
-        None if target_frameworks_undecided(pass1) => TfmChoice::PluralUnknown,
         None => TfmChoice::NoneDeclared,
     }
 }
 
 /// Whether the plural `TargetFrameworks` is too weakly established to call
 /// unset, by the same classification [`tfm_untrusted`] gives the singular.
-pub(crate) fn plural_untrusted(parsed: &ParsedProject) -> bool {
+fn plural_untrusted(parsed: &ParsedProject) -> bool {
     read_untrusted(parsed.property("TargetFrameworks"))
 }
 

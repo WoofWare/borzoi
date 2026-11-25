@@ -83,11 +83,6 @@ pub enum ProjectEvaluation<'a> {
         /// `'$(TargetFramework)' == ''` perfectly cleanly. See
         /// `workspace::EvaluatedProject::not_an_inner_build`.
         not_an_inner_build: bool,
-        /// The project may dispatch to inner builds the walk cannot
-        /// enumerate: its plural `TargetFrameworks` is no answer and nothing
-        /// pins the build, so a compile closure takes none of the evaluation's
-        /// edges. See `workspace::EvaluatedProject::dispatch_undecided`.
-        dispatch_undecided: bool,
     },
     /// The `.fsproj` did not evaluate at all — malformed XML, an unreadable
     /// file, a rejected project path. The buffer's own diagnostics say which;
@@ -112,8 +107,7 @@ impl ProjectEvaluation<'_> {
             ProjectEvaluation::Evaluated {
                 parsed,
                 not_an_inner_build,
-                dispatch_undecided,
-            } => parsed.project_references_uncertain || *not_an_inner_build || *dispatch_undecided,
+            } => parsed.project_references_uncertain || *not_an_inner_build,
         }
     }
 }
@@ -581,16 +575,13 @@ pub fn deferrals(eval: ProjectEvaluation<'_>, fold: FoldOutcome<'_>) -> Vec<Defe
         //
         // With no structural cause at all, `Causes::Unrecorded` states the
         // absence rather than inventing one.
-        let causes = outer_build_cause(eval)
-            .into_iter()
-            .chain(undecided_frameworks_cause(eval))
-            .chain(
-                parsed
-                    .compile_item_uncertainties
-                    .iter()
-                    .filter(|cause| explains_dropped_references(&cause.kind))
-                    .map(render_compile_cause),
-            );
+        let causes = outer_build_cause(eval).into_iter().chain(
+            parsed
+                .compile_item_uncertainties
+                .iter()
+                .filter(|cause| explains_dropped_references(&cause.kind))
+                .map(render_compile_cause),
+        );
         out.push(Deferral::new(
             DeferredCapability::ProjectReferenceEdges,
             DeclineStage::Evaluation,
@@ -770,23 +761,6 @@ fn outer_build_cause(eval: ProjectEvaluation<'_>) -> Option<String> {
             ..
         } => Some(
             "this project opts `TargetFramework` out of the build globals              (`TreatAsLocalProperty`), so it overwrites the target framework I select and              no evaluation of it is the build that actually runs"
-                .to_string(),
-        ),
-        _ => None,
-    }
-}
-
-/// The reason a project that may dispatch to inner builds the walk cannot
-/// enumerate drops its reference edges
-/// ([`ProjectEvaluation::Evaluated::dispatch_undecided`]).
-fn undecided_frameworks_cause(eval: ProjectEvaluation<'_>) -> Option<String> {
-    match eval {
-        ProjectEvaluation::Evaluated {
-            dispatch_undecided: true,
-            ..
-        } => Some(
-            "I could not determine which target frameworks this project declares, so I \
-             cannot tell which build's references the compiler sees"
                 .to_string(),
         ),
         _ => None,
