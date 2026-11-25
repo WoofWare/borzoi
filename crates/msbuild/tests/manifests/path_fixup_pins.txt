@@ -92,6 +92,11 @@ case0171 s:cwd-empty	Global/Index from cwd-empty,cwd-seg,cwd-obj
 case0171 s:cwd-obj	Global/Index from cwd-empty,cwd-seg,cwd-obj
 case0171 s:cwd-seg	Global/Index from cwd-empty,cwd-seg,cwd-obj
 case0171 wi	Global/Index from cwd-empty,cwd-seg,cwd-obj
+case0188 rd	Copied/Condition from cwd-full,cwd-obj,proj-full
+case0188 s:cwd-full	Copied/Condition from cwd-full,cwd-obj,proj-full
+case0188 s:cwd-obj	Copied/Condition from cwd-full,cwd-obj,proj-full
+case0188 s:proj-full	Copied/Condition from cwd-full,cwd-obj,proj-full
+case0188 wi	Copied/Condition from cwd-full,cwd-obj,proj-full
 case0193 pu	Written/Body from cwd-full
 case0193 rd	Written/Body from cwd-full
 case0193 s:cwd-full	Written/Body from cwd-full
@@ -175,6 +180,7 @@ case0415 rd	Written/Body from cwd-full,cwd-seg
 case0415 s:cwd-full	Written/Body from cwd-full,cwd-seg
 case0415 s:cwd-seg	Written/Body from cwd-full,cwd-seg
 case0415 wi	Written/Body from cwd-full,cwd-seg
+case0416 pu	Copied/Gate from cwd-empty,cwd-full,cwd-seg,cwd-obj,proj-empty
 case0442 pu	Environment/Index from cwd-empty,cwd-full,cwd-seg,cwd-obj,proj-empty
 case0460 pu	Environment/Index from cwd-empty,cwd-full,cwd-seg,cwd-obj,proj-empty
 case0460 rd	Environment/Index from cwd-empty,cwd-full,cwd-seg,cwd-obj,proj-empty
@@ -211,6 +217,10 @@ case0526 rd	Environment/Condition from cwd-full
 case0526 s:cwd-full	Environment/Condition from cwd-full
 case0526 wi	Environment/Condition from cwd-full
 case0535 pu	Written/Gate from cwd-empty,cwd-full,cwd-seg,cwd-obj,proj-full
+case0548 rd	Copied/Condition from cwd-full,proj-full
+case0548 s:cwd-full	Copied/Condition from cwd-full,proj-full
+case0548 s:proj-full	Copied/Condition from cwd-full,proj-full
+case0548 wi	Copied/Condition from cwd-full,proj-full
 case0558 pu	Literal/Index from cwd-empty,cwd-full,cwd-seg,cwd-obj,proj-empty
 case0558 rd	Literal/Index from cwd-empty,cwd-full,cwd-seg,cwd-obj,proj-empty
 case0558 s:cwd-empty	Literal/Index from cwd-empty,cwd-full,cwd-seg,cwd-obj,proj-empty
@@ -353,6 +363,7 @@ case0797 pu	Environment/Body from cwd-full
 case0797 rd	Environment/Body from cwd-full
 case0797 s:cwd-full	Environment/Body from cwd-full
 case0797 wi	Environment/Body from cwd-full
+case0800 pu	Copied/Gate from cwd-empty,cwd-seg,cwd-obj
 case0845 pu	Environment/Gate from cwd-empty,cwd-full,cwd-seg,cwd-obj,proj-full
 case0876 pu	Literal/Index from cwd-empty,cwd-full,cwd-seg,cwd-obj,proj-empty
 case0876 rd	Literal/Index from cwd-empty,cwd-full,cwd-seg,cwd-obj,proj-empty
