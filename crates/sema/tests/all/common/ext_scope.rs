@@ -9,8 +9,8 @@ use super::{
     GradedDumps, ensure_ext_universe_fixture_built, ext_universe_env,
     invoke_fcs_dump_types_project_with_refs, temp_fs_tree,
 };
-use borzoi_cst::parser::parse;
-use borzoi_cst::syntax::{AstNode, ImplFile, TextRange, TextSize};
+use borzoi_cst::parser::{parse, parse_sig};
+use borzoi_cst::syntax::{AstNode, ImplFile, SigFile, TextRange, TextSize};
 use borzoi_sema::{
     GateInput, Incomplete, ProjectFile, SourceFile, SyntaxRecovery, infer_project, qualified_names,
     resolve_project_files,
@@ -59,6 +59,8 @@ pub struct Checked {
     pub unsound: Vec<String>,
     /// Per probed call, in order.
     pub calls: Vec<CallOutcome>,
+    /// Every error FCS reported, as `<file>: FS<code>`.
+    pub fcs_errors: Vec<String>,
 }
 
 /// The method a call's text names: the member accessed on a parenthesised
@@ -90,7 +92,7 @@ fn probe_range(source: &str, probe: &Probe) -> Option<TextRange> {
     Some(TextRange::new(at(start), at(start + probe.text.len())))
 }
 
-/// Check `sources` (Compile order; implementation files only) as one
+/// Check `sources` (Compile order; a `.fsi` name is a signature) as one
 /// project. The `calls` must be the last bindings of the last file, in order,
 /// each binding's census entry being the call's.
 pub fn check(sources: &[(&str, String)], calls: &[Call]) -> Checked {
@@ -131,8 +133,8 @@ pub struct Probe {
     pub text: String,
 }
 
-/// Check `sources` (Compile order; implementation files only) as one project
-/// with `refs` referenced, inference reading `env`, which must hold exactly
+/// Check `sources` (Compile order; a `.fsi` name is a signature) as one
+/// project with `refs` referenced, inference reading `env`, which must hold exactly
 /// the assemblies the oracle reads (the SDK's and `refs`). Each file's probes
 /// must be its last bindings, in order, each binding's census entry being the
 /// call's; the outcomes come back in the probes' order.
@@ -142,19 +144,28 @@ pub fn check_files(
     sources: &[(&str, String)],
     probes: &[Probe],
 ) -> Checked {
-    let parsed: Vec<(ImplFile, SyntaxRecovery)> = sources
+    let parsed: Vec<(SourceFile, SyntaxRecovery)> = sources
         .iter()
-        .map(|(_, s)| {
-            let p = parse(s);
-            let recovery = SyntaxRecovery::of(&p);
-            (ImplFile::cast(p.root).expect("impl file"), recovery)
+        .map(|(name, s)| {
+            if name.ends_with(".fsi") {
+                let p = parse_sig(s);
+                let recovery = SyntaxRecovery::of(&p);
+                (
+                    SourceFile::Sig(SigFile::cast(p.root).expect("sig file")),
+                    recovery,
+                )
+            } else {
+                let p = parse(s);
+                let recovery = SyntaxRecovery::of(&p);
+                (
+                    SourceFile::Impl(ImplFile::cast(p.root).expect("impl file")),
+                    recovery,
+                )
+            }
         })
         .collect();
     let paths: Vec<PathBuf> = sources.iter().map(|(p, _)| (*p).into()).collect();
-    let files: Vec<SourceFile> = parsed
-        .iter()
-        .map(|(f, _)| SourceFile::Impl(f.clone()))
-        .collect();
+    let files: Vec<SourceFile> = parsed.iter().map(|(f, _)| f.clone()).collect();
     let project: Vec<ProjectFile> = files
         .iter()
         .cloned()
@@ -172,16 +183,23 @@ pub fn check_files(
     let _ = std::fs::remove_dir_all(&root);
 
     let mut unsound = Vec::new();
+    let mut fcs_errors = Vec::new();
     let mut fcs_at: Vec<Option<String>> = vec![None; probes.len()];
     for (idx, (types_json, binders_json)) in dumps.iter().enumerate() {
         let (path, source) = &sources[idx];
-        let Some(dump) = GradedDumps::read(types_json, binders_json, source, Some(&parsed[idx].0))
+        let Some(dump) =
+            GradedDumps::read(types_json, binders_json, source, parsed[idx].0.as_impl())
         else {
             unsound.push(format!(
                 "{path}: an unconverted declaration could not be placed"
             ));
             continue;
         };
+        fcs_errors.extend(
+            dump.errors
+                .iter()
+                .map(|e| format!("{path}: FS{:04}", e.code)),
+        );
         for (k, probe) in probes.iter().enumerate().filter(|(_, p)| p.file == idx) {
             fcs_at[k] = probe_range(source, probe).and_then(|r| {
                 dump.types
@@ -274,10 +292,12 @@ pub fn check_files(
         return Checked {
             unsound,
             calls: Vec::new(),
+            fcs_errors,
         };
     }
     Checked {
         unsound,
         calls: outcomes.into_iter().flatten().collect(),
+        fcs_errors,
     }
 }

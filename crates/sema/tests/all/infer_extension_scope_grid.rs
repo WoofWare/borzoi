@@ -1128,3 +1128,157 @@ fn an_unbuilt_reference_keeps_every_open_but_an_assembly_namespace_wholesale() {
         failures.join("\n")
     );
 }
+
+/// A signature's augmentation puts `with` directly on the definition, with no
+/// representation. A later file sees the signature, so its members are the
+/// project's extension names: FCS binds a later file's call to the
+/// signature's extension whether the implementation declares it too or not
+/// (FS0193, an edit in progress), and the gate must decline the call. The
+/// call's literal receiver needs no resolution, so a gate that let the
+/// intrinsic `Equals(obj)` stand commits `bool` where FCS says `int64`.
+#[test]
+fn a_signature_augmentation_names_its_members() {
+    const CALL: Call = Call {
+        binder: "c1",
+        text: "\"abc\".Equals(1)",
+    };
+    // The consumer reaches the `[<AutoOpen>]` module through its own
+    // namespace, with no `open` for the gate to read as unenumerated.
+    let signature = "namespace ExtNs\n\
+                     [<AutoOpen>]\n\
+                     module M =\n    \
+                     type System.String with\n        \
+                     member Equals: i: int -> int64\n";
+    let consumer = format!("module ExtNs.Use\nlet {} x = {}\n", CALL.binder, CALL.text);
+    for (label, implementation) in [
+        (
+            "implemented",
+            "namespace ExtNs\n\
+             [<AutoOpen>]\n\
+             module M =\n    \
+             type System.String with\n        \
+             member this.Equals(i: int) = 0L\n",
+        ),
+        (
+            "unimplemented",
+            "namespace ExtNs\n[<AutoOpen>]\nmodule M =\n    type Unrelated = A\n",
+        ),
+    ] {
+        let checked = check(
+            &[
+                ("Ext.fsi", signature.to_owned()),
+                ("Ext.fs", implementation.to_owned()),
+                ("Use.fs", consumer.clone()),
+            ],
+            &[CALL],
+        );
+        assert!(checked.unsound.is_empty(), "{label}: {:?}", checked.unsound);
+        let call = &checked.calls[0];
+        assert_eq!(
+            call.fcs.as_deref(),
+            Some("System.Int64"),
+            "{label}: FCS must bind the signature's extension, or this pins nothing"
+        );
+        assert_eq!(call.gate, Some(GateInput::ProjectName), "{label}");
+        assert_eq!(call.ours, None, "{label}");
+    }
+}
+
+/// What a signature's augmentation declines is what it names, and only once
+/// a later file can see it. Each case's call `"abc".Equals(1)` is one FCS
+/// binds to the intrinsic `Equals(obj)` (`bool`), so the gate must let it
+/// pass and inference commit it:
+///
+/// - a `static member Equals` joins no instance call's group;
+/// - a constructor (`new: unit -> T`) names no group at all;
+/// - a file between the signature and its implementation reads neither: FCS
+///   adds the signature to what later files see at the implementation.
+#[test]
+fn a_signature_augmentation_declines_only_what_it_names_where_it_is_seen() {
+    const CALL: Call = Call {
+        binder: "c1",
+        text: "\"abc\".Equals(1)",
+    };
+    let consumer = format!("module ExtNs.Use\nlet {} x = {}\n", CALL.binder, CALL.text);
+    let auto_open = |body: &str| format!("namespace ExtNs\n[<AutoOpen>]\nmodule M =\n{body}");
+    let instance_sig =
+        auto_open("    type System.String with\n        member Equals: i: int -> int64\n");
+    let instance_impl =
+        auto_open("    type System.String with\n        member this.Equals(i: int) = 0L\n");
+    let cases: [(&str, Vec<(&str, String)>); 3] = [
+        (
+            "static",
+            vec![
+                (
+                    "Ext.fsi",
+                    auto_open(
+                        "    type System.String with\n        \
+                         static member Equals: i: int -> int64\n",
+                    ),
+                ),
+                (
+                    "Ext.fs",
+                    auto_open(
+                        "    type System.String with\n        \
+                         static member Equals(i: int) = 0L\n",
+                    ),
+                ),
+                ("Use.fs", consumer.clone()),
+            ],
+        ),
+        (
+            "constructor",
+            vec![
+                (
+                    "Ext.fsi",
+                    auto_open(
+                        "    type Widget\n    type Widget with\n        new: unit -> Widget\n",
+                    ),
+                ),
+                (
+                    "Ext.fs",
+                    auto_open("    [<Sealed>]\n    type Widget() =\n        member _.X = 1\n"),
+                ),
+                ("Use.fs", consumer.clone()),
+            ],
+        ),
+        (
+            "between",
+            vec![
+                ("Ext.fsi", instance_sig),
+                ("Use.fs", consumer.clone()),
+                ("Ext.fs", instance_impl),
+            ],
+        ),
+    ];
+    for (label, sources) in cases {
+        let probes = [crate::common::ext_scope::Probe {
+            file: sources
+                .iter()
+                .position(|(n, _)| *n == "Use.fs")
+                .expect("Use.fs"),
+            binder: CALL.binder.to_owned(),
+            text: CALL.text.to_owned(),
+        }];
+        let checked = crate::common::ext_scope::check_files(
+            crate::common::ext_universe_env(),
+            &[crate::common::ensure_ext_universe_fixture_built()],
+            &sources,
+            &probes,
+        );
+        assert!(checked.unsound.is_empty(), "{label}: {:?}", checked.unsound);
+        assert!(
+            checked.fcs_errors.is_empty(),
+            "{label}: FCS must accept the project, or this pins nothing: {:?}",
+            checked.fcs_errors
+        );
+        let call = &checked.calls[0];
+        assert_eq!(
+            call.fcs.as_deref(),
+            Some("System.Boolean"),
+            "{label}: FCS binds the intrinsic"
+        );
+        assert_eq!(call.gate, None, "{label}");
+        assert_eq!(call.ours.as_deref(), Some("System.Boolean"), "{label}");
+    }
+}
