@@ -678,13 +678,15 @@ fn an_update_that_may_strand_declines_however_it_is_gated() {
     }
 }
 
-/// MSBuild's batch of `Update`s takes only the operations it runs, and keys
-/// as written what it cannot normalise: two shapes where main's model of it
-/// committed an order MSBuild does not produce (probed, SDK 10.0.401: `B.fs`
-/// first, then `C.fs` first). Neither keys nor reach is followed now, so both
-/// decline.
+/// Two batches whose strands turn on what the walk does not follow. A
+/// condition-false `Update` is none of MSBuild's batch, so `A.fs;A.fs`
+/// leaves with no batch pending and strands `A.fs`, and `B.fs;A.fs` strands
+/// `B.fs` (MSBuild compiles `B.fs` first). A rooted `A.fs` is removed from
+/// the batch by its spelling, so `A.fs;B.fs;B.fs` joins afresh and strands
+/// `B.fs`, and `C.fs;B.fs` strands `C.fs` (MSBuild compiles `C.fs` first;
+/// both probed, SDK 10.0.401). Both decline.
 #[test]
-fn shapes_main_got_wrong_decline() {
+fn a_skipped_update_or_a_key_removed_by_its_spelling_declines() {
     let false_first = parse(&format!(
         r#"<Project>{UNTRUSTED_F}
   <ItemGroup><Compile Update="Z.fs" Condition="'$(NeverSet)' == 'true'" Link="z" /></ItemGroup>
@@ -5165,31 +5167,28 @@ fn duplicate_identity_package_update_marks_the_set_uncertain() {
     // Update preceding the Include modifies nothing. (`Delta;Gamma` may leave
     // the batch of `Update`s past its first fragment, which the walk does
     // not follow: see `a_multi_fragment_update_declines_its_list`.)
-    for update in ["Gamma"] {
-        let src = format!(
-            r#"<Project>
+    let p = parse(
+        r#"<Project>
   <ItemGroup>
-    <PackageReference Update="{update}" VersionOverride="1.0" />
+    <PackageReference Update="Gamma" VersionOverride="1.0" />
     <PackageReference Include="Alpha;Gamma" Version="1.0" />
   </ItemGroup>
-</Project>"#
-        );
-        let p = parse(&src);
-        assert!(
-            !p.package_references_uncertain,
-            "unique Update spec {update:?} must stay certain: {:?}",
-            p.package_reference_uncertainties
-        );
-        let gamma = p
-            .package_references
-            .iter()
-            .find(|r| r.id == "Gamma")
-            .expect("Gamma captured");
-        assert_eq!(
-            gamma.version_override, None,
-            "an Update before the Include is a no-op for spec {update:?}"
-        );
-    }
+</Project>"#,
+    );
+    assert!(
+        !p.package_references_uncertain,
+        "a unique Update spec must stay certain: {:?}",
+        p.package_reference_uncertainties
+    );
+    let gamma = p
+        .package_references
+        .iter()
+        .find(|r| r.id == "Gamma")
+        .expect("Gamma captured");
+    assert_eq!(
+        gamma.version_override, None,
+        "an Update before the Include is a no-op"
+    );
 }
 
 #[test]
