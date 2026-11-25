@@ -1,6 +1,6 @@
 # Generated; do not edit by hand. One line per graded item, sorted.
 # Regenerate with:
-#   BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-msbuild --test using_task_registration_diff registration_sweep_fixed_seed
+#   BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-msbuild --test using_task_registration_diff each_rule_refuses_the_hostile_classes_it_refuses
 plain	owed
 value.blank	owed
 value.boolean-spelling	owed
