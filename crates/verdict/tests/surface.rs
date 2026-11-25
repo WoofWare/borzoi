@@ -1,163 +1,160 @@
 //! The crate's whole surface, held to an exact list.
 //!
 //! The crate exists to have no reading of an incomplete answer as a complete
-//! one, and such a reading can be added under any name, or on any platform: an
-//! `is_found`, an `ok`, a derived `Default`, one derived only under a
-//! `cfg_attr`, a trait impl. A `compile_fail` doctest catches only the name it
-//! spells, on the platform it runs on. So this test reads `src/lib.rs` and
-//! lists every item in it:
+//! one, and such a reading can be added under any name, on any platform, or
+//! by loosening a signature: an `is_found`, an `ok`, a derived `Default`, one
+//! derived only under a `cfg_attr`, a trait impl, an `FnOnce` bound made
+//! `Fn`. A `compile_fail` doctest catches only what it spells, on the platform
+//! it runs on. So this test reads `src/lib.rs` and lists all of it but what
+//! cannot change the surface: doc comments and function bodies. Nothing else
+//! is modelled or left out, so no dimension of the surface can be missed.
 //!
-//! - each type, with every attribute on it but its docs, and each variant
-//!   with its fields and attributes;
-//! - each inherent method, with its visibility and attributes;
-//! - each trait impl, by its header and attributes;
-//! - the crate's inner attributes;
-//! - any other item, by kind and text.
-//!
-//! A plain `derive` is listed by its sorted names, so reordering one moves
-//! nothing; every other attribute (`cfg`, `cfg_attr`, `default`, …) is listed
-//! as written, so adding one moves the listing. The list must equal
-//! [`SURFACE`] exactly. Adding an operation means adding its line here,
-//! together with its laws in `tests/laws.rs`.
+//! Each item is a line: a type with its attributes, variants and fields, a
+//! free item as written, the crate's own attributes. An impl is a line for its
+//! header and a line for each member under it, so a moved signature shows as
+//! one line. A plain `derive` is listed with its names sorted, so reordering
+//! one moves nothing. The list must equal [`SURFACE`] exactly. Adding an
+//! operation means adding its line here, together with its laws in
+//! `tests/laws.rs`.
 
 use quote::ToTokens;
 
-/// Every item of `src/lib.rs`, one per line, sorted.
-const SURFACE: &str = "\
-crate #![forbid(unsafe_code)]
-crate #![no_std]
-enum Lookup<T,C> pub derive(Clone,Copy,Debug,Eq,Hash,PartialEq)
-enum Lookup<T,C> variant Found(T)
-enum Lookup<T,C> variant ProvedAbsent
-enum Lookup<T,C> variant Unknown(C)
-enum Reading<C> private derive()
-enum Reading<C> variant Ended
-enum Reading<C> variant Unknown(C)
-enum Reading<C> variant Values
-enum Verdict<T,C> pub derive(Clone,Copy,Debug,Eq,Hash,PartialEq)
-enum Verdict<T,C> variant Certain(T)
-enum Verdict<T,C> variant Unknown(C)
-impl<T,C,I:Iterator<Item=Verdict<T,C>>>IteratorforUntilUnknown<I,C>
-impl<T,C,V:FromIterator<T>>FromIterator<Verdict<T,C>>forVerdict<V,C>
-inherent Lookup<T,C> fn and_then pub
-inherent Lookup<T,C> fn as_ref pub
-inherent Lookup<T,C> fn into_verdict pub
-inherent Lookup<T,C> fn map pub
-inherent Lookup<T,C> fn map_cause pub
-inherent Lookup<T,C> fn or_shadowed pub
-inherent Verdict<Option<T>,C> fn into_lookup pub
-inherent Verdict<T,C> fn and_then pub
-inherent Verdict<T,C> fn as_ref pub
-inherent Verdict<T,C> fn map pub
-inherent Verdict<T,C> fn map_cause pub
-inherent Verdict<T,C> fn zip pub
-struct UntilUnknown<I,C> private derive()
-";
+/// Every line of `src/lib.rs`'s listing, sorted.
+const SURFACE: &str = r#"
+# ! [forbid (unsafe_code)]
+# ! [no_std]
+# [derive (Clone , Copy , Debug , Eq , Hash , PartialEq)] pub enum Lookup < T , C > { Found (T) , ProvedAbsent , Unknown (C) , }
+# [derive (Clone , Copy , Debug , Eq , Hash , PartialEq)] pub enum Verdict < T , C > { Certain (T) , Unknown (C) , }
+enum Reading < C > { Values , Ended , Unknown (C) , }
+impl < T , C , I : Iterator < Item = Verdict < T , C > > > Iterator for UntilUnknown < I , C > { }
+impl < T , C , I : Iterator < Item = Verdict < T , C > > > Iterator for UntilUnknown < I , C > { } => fn next (& mut self) -> Option < T > { }
+impl < T , C , I : Iterator < Item = Verdict < T , C > > > Iterator for UntilUnknown < I , C > { } => fn size_hint (& self) -> (usize , Option < usize >) { }
+impl < T , C , I : Iterator < Item = Verdict < T , C > > > Iterator for UntilUnknown < I , C > { } => type Item = T ;
+impl < T , C , V : FromIterator < T > > FromIterator < Verdict < T , C > > for Verdict < V , C > { }
+impl < T , C , V : FromIterator < T > > FromIterator < Verdict < T , C > > for Verdict < V , C > { } => fn from_iter < I : IntoIterator < Item = Verdict < T , C > > > (iter : I) -> Self { }
+impl < T , C > Lookup < T , C > { }
+impl < T , C > Lookup < T , C > { } => pub fn and_then < U > (self , f : impl FnOnce (T) -> Lookup < U , C >) -> Lookup < U , C > { }
+impl < T , C > Lookup < T , C > { } => pub fn as_ref (& self) -> Lookup < & T , & C > { }
+impl < T , C > Lookup < T , C > { } => pub fn into_verdict (self) -> Verdict < Option < T > , C > { }
+impl < T , C > Lookup < T , C > { } => pub fn map < U > (self , f : impl FnOnce (T) -> U) -> Lookup < U , C > { }
+impl < T , C > Lookup < T , C > { } => pub fn map_cause < D > (self , f : impl FnOnce (C) -> D) -> Lookup < T , D > { }
+impl < T , C > Lookup < T , C > { } => pub fn or_shadowed (self , outer : impl FnOnce () -> Lookup < T , C >) -> Lookup < T , C > { }
+impl < T , C > Verdict < Option < T > , C > { }
+impl < T , C > Verdict < Option < T > , C > { } => pub fn into_lookup (self) -> Lookup < T , C > { }
+impl < T , C > Verdict < T , C > { }
+impl < T , C > Verdict < T , C > { } => pub fn and_then < U > (self , f : impl FnOnce (T) -> Verdict < U , C >) -> Verdict < U , C > { }
+impl < T , C > Verdict < T , C > { } => pub fn as_ref (& self) -> Verdict < & T , & C > { }
+impl < T , C > Verdict < T , C > { } => pub fn map < U > (self , f : impl FnOnce (T) -> U) -> Verdict < U , C > { }
+impl < T , C > Verdict < T , C > { } => pub fn map_cause < D > (self , f : impl FnOnce (C) -> D) -> Verdict < T , D > { }
+impl < T , C > Verdict < T , C > { } => pub fn zip < U > (self , other : Verdict < U , C >) -> Verdict < (T , U) , C > { }
+struct UntilUnknown < I , C > { source : I , state : Reading < C > , }
+"#;
 
-fn tokens(t: &impl ToTokens) -> String {
-    t.to_token_stream().to_string().replace(' ', "")
-}
-
-fn visibility(v: &syn::Visibility) -> &'static str {
-    match v {
-        syn::Visibility::Public(_) => "pub",
-        syn::Visibility::Restricted(_) => "restricted",
-        syn::Visibility::Inherited => "private",
-    }
-}
-
-/// The attributes, docs aside: a plain `derive` by its sorted names, every
-/// other attribute as written, in order.
-fn attributes(attrs: &[syn::Attribute]) -> String {
-    let mut derived = Vec::new();
-    let mut others = Vec::new();
-    for attr in attrs {
-        if attr.path().is_ident("doc") {
+/// Drops what cannot change the surface (doc comments) and sorts the names
+/// of each plain `derive`.
+fn normalise_attributes(attrs: &mut Vec<syn::Attribute>) {
+    attrs.retain(|a| !a.path().is_ident("doc"));
+    for attr in attrs.iter_mut() {
+        if !attr.path().is_ident("derive") {
             continue;
         }
-        if attr.path().is_ident("derive") {
-            attr.parse_nested_meta(|meta| {
-                derived.push(tokens(&meta.path));
-                Ok(())
-            })
-            .expect("a derive list");
-        } else {
-            others.push(tokens(attr));
-        }
+        let mut names = Vec::new();
+        attr.parse_nested_meta(|meta| {
+            names.push(meta.path.to_token_stream().to_string());
+            Ok(())
+        })
+        .expect("a derive list");
+        names.sort();
+        let sorted = format!("#[derive({})]", names.join(", "));
+        let mut parsed = syn::parse::Parser::parse_str(syn::Attribute::parse_outer, &sorted)
+            .expect("a derive attribute");
+        *attr = parsed.pop().expect("one attribute");
     }
-    derived.sort();
-    let mut listed = format!("derive({})", derived.join(","));
-    for other in others {
-        listed.push(' ');
-        listed.push_str(&other);
-    }
-    listed
 }
 
-/// The attributes other than docs, as written, prefixed by a space; empty
-/// when there are none.
-fn other_attributes(attrs: &[syn::Attribute]) -> String {
-    attrs
-        .iter()
-        .filter(|a| !a.path().is_ident("doc"))
-        .map(|a| format!(" {}", tokens(a)))
-        .collect()
+/// The item without its docs (its own, its variants', its fields' and its
+/// members') or its function bodies, which cannot change the surface.
+fn normalise_item(item: &mut syn::Item) {
+    if let Some(attrs) = item_attributes(item) {
+        normalise_attributes(attrs);
+    }
+    let fields = |fields: &mut syn::Fields| {
+        for field in fields.iter_mut() {
+            normalise_attributes(&mut field.attrs);
+        }
+    };
+    match item {
+        syn::Item::Fn(f) => f.block.stmts.clear(),
+        syn::Item::Enum(e) => {
+            for variant in &mut e.variants {
+                normalise_attributes(&mut variant.attrs);
+                fields(&mut variant.fields);
+            }
+        }
+        syn::Item::Struct(s) => fields(&mut s.fields),
+        syn::Item::Impl(i) => {
+            for member in &mut i.items {
+                match member {
+                    syn::ImplItem::Const(c) => normalise_attributes(&mut c.attrs),
+                    syn::ImplItem::Fn(f) => {
+                        normalise_attributes(&mut f.attrs);
+                        f.block.stmts.clear();
+                    }
+                    syn::ImplItem::Type(t) => normalise_attributes(&mut t.attrs),
+                    syn::ImplItem::Macro(m) => normalise_attributes(&mut m.attrs),
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The attributes of an item, for the kinds that carry them.
+fn item_attributes(item: &mut syn::Item) -> Option<&mut Vec<syn::Attribute>> {
+    Some(match item {
+        syn::Item::Const(i) => &mut i.attrs,
+        syn::Item::Enum(i) => &mut i.attrs,
+        syn::Item::ExternCrate(i) => &mut i.attrs,
+        syn::Item::Fn(i) => &mut i.attrs,
+        syn::Item::ForeignMod(i) => &mut i.attrs,
+        syn::Item::Impl(i) => &mut i.attrs,
+        syn::Item::Macro(i) => &mut i.attrs,
+        syn::Item::Mod(i) => &mut i.attrs,
+        syn::Item::Static(i) => &mut i.attrs,
+        syn::Item::Struct(i) => &mut i.attrs,
+        syn::Item::Trait(i) => &mut i.attrs,
+        syn::Item::TraitAlias(i) => &mut i.attrs,
+        syn::Item::Type(i) => &mut i.attrs,
+        syn::Item::Union(i) => &mut i.attrs,
+        syn::Item::Use(i) => &mut i.attrs,
+        _ => return None,
+    })
 }
 
 fn surface(source: &str) -> Vec<String> {
-    let file = syn::parse_file(source).expect("the source parses");
+    let mut file = syn::parse_file(source).expect("the source parses");
+    normalise_attributes(&mut file.attrs);
+    for item in &mut file.items {
+        normalise_item(item);
+    }
     let mut lines: Vec<String> = file
         .attrs
         .iter()
-        .filter(|a| !a.path().is_ident("doc"))
-        .map(|a| format!("crate {}", tokens(a)))
+        .map(|a| a.to_token_stream().to_string())
         .collect();
     for item in &file.items {
         match item {
-            syn::Item::Enum(e) => {
-                let owner = format!("{}{}", e.ident, tokens(&e.generics));
-                lines.push(format!(
-                    "enum {owner} {} {}",
-                    visibility(&e.vis),
-                    attributes(&e.attrs)
-                ));
-                for variant in &e.variants {
-                    lines.push(format!(
-                        "enum {owner} variant {}{}{}",
-                        variant.ident,
-                        tokens(&variant.fields),
-                        other_attributes(&variant.attrs)
-                    ));
-                }
-            }
-            syn::Item::Struct(s) => lines.push(format!(
-                "struct {}{} {} {}",
-                s.ident,
-                tokens(&s.generics),
-                visibility(&s.vis),
-                attributes(&s.attrs)
-            )),
-            syn::Item::Impl(i) if i.trait_.is_none() => {
-                let owner = format!("{}{}", tokens(&i.self_ty), other_attributes(&i.attrs));
-                for member in &i.items {
-                    match member {
-                        syn::ImplItem::Fn(f) => lines.push(format!(
-                            "inherent {owner} fn {} {}{}",
-                            f.sig.ident,
-                            visibility(&f.vis),
-                            other_attributes(&f.attrs)
-                        )),
-                        other => lines.push(format!("inherent {owner} {}", tokens(other))),
-                    }
-                }
-            }
             syn::Item::Impl(i) => {
                 let mut header = i.clone();
                 header.items.clear();
-                header.attrs.retain(|a| !a.path().is_ident("doc"));
-                lines.push(tokens(&header).trim_end_matches("{}").to_string());
+                let header = header.to_token_stream().to_string();
+                for member in &i.items {
+                    lines.push(format!("{header} => {}", member.to_token_stream()));
+                }
+                lines.push(header);
             }
-            other => lines.push(format!("other {}", tokens(other))),
+            other => lines.push(other.to_token_stream().to_string()),
         }
     }
     lines.sort();
@@ -167,11 +164,18 @@ fn surface(source: &str) -> Vec<String> {
 #[test]
 fn the_surface_is_exactly_the_listed_operations() {
     let actual = surface(include_str!("../src/lib.rs"));
-    let expected: Vec<String> = SURFACE.lines().map(str::to_string).collect();
-    assert_eq!(
-        actual, expected,
+    let expected: Vec<String> = SURFACE
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect();
+    let missing: Vec<&String> = expected.iter().filter(|l| !actual.contains(l)).collect();
+    let extra: Vec<&String> = actual.iter().filter(|l| !expected.contains(l)).collect();
+    assert!(
+        missing.is_empty() && extra.is_empty() && actual == expected,
         "the crate's surface moved; every operation needs its laws in tests/laws.rs \
-         and its line in SURFACE, and no reading as Option/bool/Default may be added"
+         and its line in SURFACE, and no reading as Option/bool/Default may be added\n\
+         listed but absent: {missing:#?}\npresent but unlisted: {extra:#?}"
     );
 }
 
@@ -186,9 +190,15 @@ pub enum E<T> {
     A(T),
     B,
 }
+struct S<C> {
+    /// Docs.
+    c: C,
+}
 impl<T> E<T> {
     /// Docs.
-    pub fn m(&self) {}
+    pub fn m(&self, f: impl FnOnce() -> T) -> Option<T> {
+        Some(f())
+    }
 }
 impl<T> core::iter::FromIterator<T> for E<T> {
     fn from_iter<I: IntoIterator<Item = T>>(_: I) -> Self { E::B }
@@ -219,17 +229,25 @@ fn the_listing_moves_with_every_change_to_the_surface() {
         ),
         FIXTURE.replace("    B,", "    #[default]\n    B,"),
         FIXTURE.replace("    B,", "    #[cfg_attr(unix, default)]\n    B,"),
-        // A new variant, or a changed one.
+        // A new variant, a changed one, a changed field.
         FIXTURE.replace("    B,", "    B,\n    C,"),
         FIXTURE.replace("    A(T),", "    A(T, T),"),
-        // A method made conditional, or visible, or added in a conditional impl.
+        FIXTURE.replace("    c: C,", "    c: Option<C>,"),
+        // A signature: a bound loosened, a parameter, a return type, a
+        // generic bound on the impl, a where clause, visibility.
+        FIXTURE.replace("impl FnOnce() -> T", "impl Fn() -> T"),
+        FIXTURE.replace("f: impl FnOnce() -> T", "f: impl FnOnce() -> T, g: bool"),
+        FIXTURE.replace("-> Option<T> {", "-> bool {"),
+        FIXTURE.replace("impl<T> E<T> {", "impl<T: Copy> E<T> {"),
+        FIXTURE.replace("impl<T> E<T> {", "impl<T> E<T> where T: Copy {"),
+        FIXTURE.replace("pub fn m(", "fn m("),
+        FIXTURE.replace("Item = T>>(_: I)", "Item = T> + Clone>(_: I)"),
+        // A method made conditional, or added in a conditional impl.
         FIXTURE.replace(
             "    /// Docs.\n    pub fn m",
             "    #[cfg(unix)]\n    pub fn m",
         ),
-        FIXTURE.replace("pub fn m(&self)", "fn m(&self)"),
         FIXTURE.replace("impl<T> E<T> {", "#[cfg(unix)]\nimpl<T> E<T> {"),
-        // An impl made conditional.
         FIXTURE.replace(
             "impl<T> core::iter::FromIterator",
             "#[cfg(unix)]\nimpl<T> core::iter::FromIterator",
@@ -244,14 +262,17 @@ fn the_listing_moves_with_every_change_to_the_surface() {
         assert_ne!(changed.as_str(), FIXTURE, "the change applied");
         assert_ne!(surface(changed), base, "{changed}");
     }
-    // What does not change the surface does not move the listing.
+    // What does not change the surface does not move the listing: derive
+    // order, docs, formatting and function bodies.
     let unmoved = [
         FIXTURE.replace(
             "#[derive(Debug, Clone, Copy)]",
             "#[derive(Copy, Debug, Clone)]",
         ),
         FIXTURE.replace("/// Docs.\n#[derive", "/// Other docs.\n#[derive"),
+        FIXTURE.replace("    /// Docs.\n    c: C,", "    c: C,"),
         FIXTURE.replace("{ E::B }", "{\n        E::B\n    }"),
+        FIXTURE.replace("Some(f())", "let x = f();\n        Some(x)"),
     ];
     for unchanged in &unmoved {
         assert_ne!(unchanged.as_str(), FIXTURE, "the change applied");

@@ -14,9 +14,9 @@ may not have seen everything, read as complete. So the crate deliberately has
 no conversion from or to `Option`/`bool`, no `Default`, no iteration and no
 `or` on `Verdict`. The crate docs say why for each, and their `compile_fail`
 doctests spell the absences out. A reading can be added under any name, so
-`tests/surface.rs` holds every item of `src/lib.rs` (each type and variant
-with every attribute on it, conditional ones included, each method, each
-trait impl, the crate's own attributes) to an exact list. Do not add any such
+`tests/surface.rs` holds all of `src/lib.rs` but its doc comments and
+function bodies (every item, attribute, variant, field and signature, `cfg`
+ones included) to an exact list. Do not add any such
 reading; a consumer that needs one writes the `match` that makes its choice
 visible.
 
