@@ -6,8 +6,12 @@
 //! derived only under a `cfg_attr`, a trait impl, an `FnOnce` bound made
 //! `Fn`. A `compile_fail` doctest catches only what it spells, on the platform
 //! it runs on. So this test reads `src/lib.rs` and lists all of it but what
-//! cannot change the surface: doc comments and function bodies. Nothing else
-//! is modelled or left out, so no dimension of the surface can be missed.
+//! cannot change the surface: doc comments, and the statements of function
+//! bodies. What a body holds that can reach the surface is listed: each item
+//! declared in it (an impl there adds methods callable from outside), listed
+//! as a top-level one is, and each macro it invokes, which may expand to one.
+//! Nothing else is modelled or left out, so no dimension of the surface can be
+//! missed.
 //!
 //! Each item is a line: a type with its attributes, variants and fields, a
 //! free item as written, the crate's own attributes. An impl is a line for its
@@ -28,6 +32,7 @@ const SURFACE: &str = r#"
 enum Reading < C > { Values , Ended , Unknown (C) , }
 impl < T , C , I : Iterator < Item = Verdict < T , C > > > Iterator for UntilUnknown < I , C > { }
 impl < T , C , I : Iterator < Item = Verdict < T , C > > > Iterator for UntilUnknown < I , C > { } => fn next (& mut self) -> Option < T > { }
+impl < T , C , I : Iterator < Item = Verdict < T , C > > > Iterator for UntilUnknown < I , C > { } => fn next => macro matches !
 impl < T , C , I : Iterator < Item = Verdict < T , C > > > Iterator for UntilUnknown < I , C > { } => fn size_hint (& self) -> (usize , Option < usize >) { }
 impl < T , C , I : Iterator < Item = Verdict < T , C > > > Iterator for UntilUnknown < I , C > { } => type Item = T ;
 impl < T , C , V : FromIterator < T > > FromIterator < Verdict < T , C > > for Verdict < V , C > { }
@@ -132,18 +137,69 @@ fn item_attributes(item: &mut syn::Item) -> Option<&mut Vec<syn::Attribute>> {
     })
 }
 
-fn surface(source: &str) -> Vec<String> {
-    let mut file = syn::parse_file(source).expect("the source parses");
-    normalise_attributes(&mut file.attrs);
-    for item in &mut file.items {
-        normalise_item(item);
+/// What a function body holds that can reach the surface: the items declared
+/// in it (an impl there adds methods callable from outside), and the macros it
+/// invokes (a macro may expand to items), by path.
+#[derive(Default)]
+struct BodyContents {
+    items: Vec<syn::Item>,
+    macros: std::collections::BTreeSet<String>,
+}
+
+impl<'ast> syn::visit::Visit<'ast> for BodyContents {
+    fn visit_item(&mut self, item: &'ast syn::Item) {
+        // Listed in full by the caller, so not descended into here.
+        self.items.push(item.clone());
     }
-    let mut lines: Vec<String> = file
-        .attrs
-        .iter()
-        .map(|a| a.to_token_stream().to_string())
-        .collect();
-    for item in &file.items {
+
+    fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+        self.macros.insert(mac.path.to_token_stream().to_string());
+    }
+}
+
+fn body_contents(block: &syn::Block) -> BodyContents {
+    let mut contents = BodyContents::default();
+    syn::visit::Visit::visit_block(&mut contents, block);
+    contents
+}
+
+/// Lists what a function body holds that can reach the surface, under
+/// `context`: each nested item, listed as a top-level one is, and each
+/// macro the body invokes.
+fn list_body(context: &str, block: &syn::Block, lines: &mut Vec<String>) {
+    let contents = body_contents(block);
+    for mac in &contents.macros {
+        lines.push(format!("{context} => macro {mac} !"));
+    }
+    let mut nested = Vec::new();
+    list_items(contents.items, &mut nested);
+    for line in nested {
+        lines.push(format!("{context} => nested {line}"));
+    }
+}
+
+/// Lists `items` into `lines`: each item but its docs and function bodies, an
+/// impl as its header and a line per member, and what each body holds that can
+/// reach the surface.
+fn list_items(items: Vec<syn::Item>, lines: &mut Vec<String>) {
+    for mut item in items {
+        match &item {
+            syn::Item::Fn(f) => list_body(&format!("fn {}", f.sig.ident), &f.block, lines),
+            syn::Item::Impl(i) => {
+                let mut header = i.clone();
+                header.items.clear();
+                let mut normalised_header = syn::Item::Impl(header);
+                normalise_item(&mut normalised_header);
+                let header = normalised_header.to_token_stream().to_string();
+                for member in &i.items {
+                    if let syn::ImplItem::Fn(f) = member {
+                        list_body(&format!("{header} => fn {}", f.sig.ident), &f.block, lines);
+                    }
+                }
+            }
+            _ => {}
+        }
+        normalise_item(&mut item);
         match item {
             syn::Item::Impl(i) => {
                 let mut header = i.clone();
@@ -157,6 +213,17 @@ fn surface(source: &str) -> Vec<String> {
             other => lines.push(other.to_token_stream().to_string()),
         }
     }
+}
+
+fn surface(source: &str) -> Vec<String> {
+    let mut file = syn::parse_file(source).expect("the source parses");
+    normalise_attributes(&mut file.attrs);
+    let mut lines: Vec<String> = file
+        .attrs
+        .iter()
+        .map(|a| a.to_token_stream().to_string())
+        .collect();
+    list_items(file.items, &mut lines);
     lines.sort();
     lines
 }
@@ -252,6 +319,20 @@ fn the_listing_moves_with_every_change_to_the_surface() {
             "impl<T> core::iter::FromIterator",
             "#[cfg(unix)]\nimpl<T> core::iter::FromIterator",
         ),
+        // An item declared in a function body: an impl there adds methods
+        // callable from outside the crate. And a macro a body invokes, which
+        // may expand to one.
+        FIXTURE.replace(
+            "Some(f())",
+            "mod hidden { impl<T> super::E<T> { pub fn did_find(&self) -> bool { true } } }\n        Some(f())",
+        ),
+        FIXTURE.replace(
+            "{ E::B }",
+            "{ impl<T> E<T> { pub fn found(&self) -> bool { true } } E::B }",
+        ),
+        FIXTURE.replace("Some(f())", "{ let _ = { fn inner() {} }; Some(f()) }"),
+        FIXTURE.replace("Some(f())", "include!(\"more.rs\"); Some(f())"),
+        FIXTURE.replace("Some(f())", "Some(core::convert::identity(stamp!(f())))"),
         // A crate attribute.
         FIXTURE.replace(
             "#![no_std]",
