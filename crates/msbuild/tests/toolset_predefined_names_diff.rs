@@ -176,8 +176,11 @@ fn predefined_names_without_an_sdk_are_exact_or_declined() {
     const OVERRIDABLE: &[&str] = &[
         "MSBuildExtensionsPath",
         "MSBuildExtensionsPath32",
+        "MSBuildExtensionsPath64",
         "MSBuildSDKsPath",
         "VisualStudioVersion",
+        "LocalAppData",
+        "MSBuildUserExtensionsPath",
     ];
     const RESERVED: &[&str] = &[
         "MSBuildToolsPath",
@@ -255,6 +258,119 @@ fn predefined_names_without_an_sdk_are_exact_or_declined() {
             violations.push(format!(
                 "{label}: we committed {ours_value:?}, MSBuild reads {theirs:?}"
             ));
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "certain-implies-exact violated:\n{}",
+        violations.join("\n")
+    );
+}
+
+/// The names MSBuild's evaluator defines from the process's profile or
+/// environment before any project text runs, whatever the environment holds
+/// (`Utilities.GetEnvironmentProperties`, MSBuild 18.9): the extension paths,
+/// and `LocalAppData` (the profile's local application data folder, else its
+/// application data folder, else the tools directory) with
+/// `MSBuildUserExtensionsPath` under it. An environment variable of the name
+/// overrides the value; none is set here, so the walk holds no value for one
+/// it does not seed, and MSBuild holds one for every one.
+const PROFILE_SEEDED: &[&str] = &[
+    "MSBuildExtensionsPath",
+    "MSBuildExtensionsPath32",
+    "MSBuildExtensionsPath64",
+    "LocalAppData",
+    "MSBuildUserExtensionsPath",
+];
+
+/// Each of [`PROFILE_SEEDED`], spelt in three cases, read directly, through a
+/// gate on its emptiness either way, through the SDK's self-default idiom,
+/// and through a write gated on it being set (the `TasksAssembly` shape a
+/// `<UsingTask>` reads): each read is exact, or declined.
+#[test]
+fn profile_seeded_names_are_exact_or_declined() {
+    let mut cases: Vec<(String, String)> = Vec::new();
+    for name in PROFILE_SEEDED {
+        for spelt in [
+            (*name).to_owned(),
+            name.to_ascii_lowercase(),
+            name.to_ascii_uppercase(),
+        ] {
+            cases.push((
+                format!("{spelt}/direct"),
+                format!("<Probe>$({spelt})</Probe>"),
+            ));
+            cases.push((
+                format!("{spelt}/gate"),
+                format!(
+                    "<Probe Condition=\"'$({spelt})' == ''\">empty</Probe>\
+                     <Probe Condition=\"'$({spelt})' != ''\">nonempty</Probe>"
+                ),
+            ));
+            cases.push((
+                format!("{spelt}/set-gate"),
+                format!(
+                    "<TasksAssembly Condition=\"'$({spelt})' != ''\">x.dll</TasksAssembly>\
+                     <Probe>[$(TasksAssembly)]</Probe>"
+                ),
+            ));
+            cases.push((
+                format!("{spelt}/self-default"),
+                format!(
+                    "<{name} Condition=\"'$({spelt})' == ''\">/FALLBACK</{name}>\
+                     <Probe>$({spelt})</Probe>"
+                ),
+            ));
+        }
+    }
+
+    // The walk's environment as the oracle child's, without the names under
+    // test: `oracle_environment` mirrors MSBuild's `MSBuildUserExtensionsPath`
+    // into it, which would seed the very name the cases leave unseeded.
+    let environment: std::collections::HashMap<String, String> = common::oracle_environment()
+        .into_iter()
+        .filter(|(key, _)| {
+            !PROFILE_SEEDED
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case(key))
+        })
+        .collect();
+    let probe = "Probe".to_string();
+    let mut oracle = common::Oracle::spawn();
+    let mut violations = Vec::new();
+    for (label, group) in &cases {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("NoSdk.proj");
+        let body = format!("<Project><PropertyGroup>{group}</PropertyGroup></Project>");
+        std::fs::write(&path, &body).expect("write project");
+        let theirs = oracle
+            .project_design_time(&body, std::slice::from_ref(&probe), Some(&path), &[])
+            .expect("MSBuild evaluates a project with no SDK");
+        let theirs = theirs.get(&probe);
+        // The fixture's claim: MSBuild defines the name, so no reader sees it
+        // empty and no self-default fires.
+        assert!(
+            theirs.is_some_and(|v| !v.is_empty() && v != "empty" && v != "/FALLBACK" && v != "[]"),
+            "{label}: MSBuild reads {theirs:?}, so the name is not seeded here"
+        );
+        let ours = common::parse_fsproj_with_imports(
+            &borzoi_msbuild::ProjectFile::buffer(&path, &body)
+                .expect("a project path spelt as its full path"),
+            &std::collections::HashMap::new(),
+            &environment,
+            None,
+            None,
+        )
+        .expect("well-formed XML parses");
+        // Exact (a value equal to MSBuild's; "unset" is exact too, and MSBuild
+        // holds a value), or declined.
+        match ours.property(&probe) {
+            borzoi_msbuild::PropertyRead::Value(value) if Some(&value) == theirs => {}
+            borzoi_msbuild::PropertyRead::UnsetInexact(_)
+            | borzoi_msbuild::PropertyRead::Untrusted(_) => {}
+            other => violations.push(format!(
+                "{label}: we publish {other:?}, MSBuild reads {theirs:?}"
+            )),
         }
     }
     assert!(
