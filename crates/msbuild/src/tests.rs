@@ -11458,3 +11458,33 @@ fn an_exists_guard_written_with_a_backslash_is_its_imports_own() {
     };
     assert_eq!(rejection("\\"), rejection("/"));
 }
+
+/// An `Exists` guard over an import's list, whatever its separators, is no
+/// proof that each entry it names loads: with `a.props` malformed and both
+/// present, MSBuild's guard holds where `'É' == 'é'` does, and the import
+/// rejects the project.
+#[test]
+#[cfg(not(windows))]
+fn an_exists_guard_over_an_import_list_does_not_discharge_it() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    std::fs::create_dir(root.join("sub")).unwrap();
+    std::fs::write(root.join("sub/a.props"), "<Project>").unwrap();
+    std::fs::write(root.join("sub/b.props"), "<Project />").unwrap();
+    for guard in ["sub\\a.props;sub\\b.props", "sub/a.props;sub/b.props"] {
+        let source = format!(
+            r#"<Project>
+  <Import Project="sub/a.props;sub/b.props" Condition="Exists('{guard}') And 'É' == 'é'" />
+</Project>"#
+        );
+        let p = crate::parse_fsproj_with_imports(
+            &crate::ProjectFile::buffer(&root.join("Demo.fsproj"), &source).unwrap(),
+            &HashMap::new(),
+            &HashMap::new(),
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(p.rejection.is_some(), "{guard}: {:#?}", p.diagnostics);
+    }
+}

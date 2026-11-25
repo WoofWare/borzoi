@@ -6135,6 +6135,7 @@ fn follow_import_after_gate(node: Node<'_, '_>, current_file_dir: &Path, state: 
             || sdk_import_keeps_a_rooted_backslash(
                 project_attr_raw,
                 expansion.value.ignoring_trust(),
+                &resolution,
             )
         {
             // An SDK import whose Project path we couldn't resolve is dropped;
@@ -6650,12 +6651,21 @@ fn sdk_project_under_root<'a>(raw: &str, relative: &'a str) -> &'a str {
 }
 
 /// Whether an SDK import's `Project`, written as `raw` and expanded to
-/// `value`, is rooted and keeps a `\`: the path bypasses the SDK root, and
-/// MSBuild's `..` pops a segment the `\` joins to its neighbour, which the
-/// walk, reading every `\` as a separator, does not model.
-pub(super) fn sdk_import_keeps_a_rooted_backslash(raw: &str, value: &Escaped) -> bool {
+/// `value`, names a file under `resolution` the walk does not model: one
+/// rooted that keeps a `\` bypasses the SDK root, and MSBuild's `..` pops a
+/// segment the `\` joins to its neighbour, which the walk, reading every `\`
+/// as a separator, does not. A resolution of no root names no file at all.
+pub(super) fn sdk_import_keeps_a_rooted_backslash(
+    raw: &str,
+    value: &Escaped,
+    resolution: &SdkResolution,
+) -> bool {
+    let names_a_file = !matches!(resolution, SdkResolution::Roots(roots) if roots.is_empty());
     // On Windows a `\` is a separator MSBuild reads as the walk does.
-    cfg!(not(windows)) && sdk_project_written_rooted(raw) && value.as_escaped().contains('\\')
+    cfg!(not(windows))
+        && names_a_file
+        && sdk_project_written_rooted(raw)
+        && value.as_escaped().contains('\\')
 }
 
 /// An import's `Project` attribute, written as `raw`, as MSBuild expands it

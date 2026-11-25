@@ -1188,3 +1188,48 @@ fn an_undecided_rooted_sdk_import_keeping_a_backslash_may_reject() {
         parsed.properties.get("Seen")
     );
 }
+
+/// A resolver that returns no root gives MSBuild no file to open, whatever
+/// the `Project`: a rooted one that keeps a property's `\` imports nothing,
+/// followed or under a gate the walk cannot decide, and costs the walk
+/// nothing.
+#[test]
+#[cfg(not(windows))]
+fn a_rooted_backslash_under_no_sdk_root_imports_nothing() {
+    let layout = Layout::new();
+    let env = child_environment(&layout);
+    let resolver =
+        |_: &str,
+         _observer: &borzoi_msbuild::observed::Observer|
+         -> Result<SdkResolution, SdkResolveError> { Ok(SdkResolution::Roots(Vec::new())) };
+    for gate in ["", " Condition=\"'É' == 'é'\""] {
+        let xml = format!(
+            "<Project>\n  <PropertyGroup><G>seg\\child</G></PropertyGroup>\n  \
+             <Import Sdk=\"MySdk\" Project=\"/missing/$(G)/../T.props\"{gate} />\n  \
+             <PropertyGroup><Seen>after</Seen></PropertyGroup>\n</Project>\n"
+        );
+        let proj = layout.root.join("p.proj");
+        let parsed = parse_fsproj_with_imports(
+            &borzoi_msbuild::ProjectFile::buffer(&proj, &xml).expect("a full path"),
+            &HashMap::new(),
+            &env,
+            Some(&resolver),
+            None,
+        )
+        .unwrap_or_else(|e| panic!("our parse: {e}\n{xml}"));
+        assert!(
+            parsed.rejection.is_none(),
+            "{gate}: {:#?}",
+            parsed.rejection
+        );
+        // An undecided gate leaves the items uncertain on its own.
+        if gate.is_empty() {
+            assert!(!parsed.items_uncertain, "{:#?}", parsed.diagnostics);
+        }
+        assert_eq!(
+            parsed.properties.get("Seen").map(String::as_str),
+            Some("after"),
+            "{gate}"
+        );
+    }
+}
