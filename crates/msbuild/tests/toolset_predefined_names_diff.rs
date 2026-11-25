@@ -180,6 +180,7 @@ fn predefined_names_without_an_sdk_are_exact_or_declined() {
         "MSBuildSDKsPath",
         "VisualStudioVersion",
         "LocalAppData",
+        "MSBuildUserExtensionsPath",
     ];
     const RESERVED: &[&str] = &[
         "MSBuildToolsPath",
@@ -323,6 +324,17 @@ fn profile_seeded_names_are_exact_or_declined() {
         }
     }
 
+    // The walk's environment as the oracle child's, without the names under
+    // test: `oracle_environment` mirrors MSBuild's `MSBuildUserExtensionsPath`
+    // into it, which would seed the very name the cases leave unseeded.
+    let environment: std::collections::HashMap<String, String> = common::oracle_environment()
+        .into_iter()
+        .filter(|(key, _)| {
+            !PROFILE_SEEDED
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case(key))
+        })
+        .collect();
     let probe = "Probe".to_string();
     let mut oracle = common::Oracle::spawn();
     let mut violations = Vec::new();
@@ -345,17 +357,20 @@ fn profile_seeded_names_are_exact_or_declined() {
             &borzoi_msbuild::ProjectFile::buffer(&path, &body)
                 .expect("a project path spelt as its full path"),
             &std::collections::HashMap::new(),
-            &common::oracle_environment(),
+            &environment,
             None,
             None,
         )
         .expect("well-formed XML parses");
-        let ours_value = ours.properties.get(&probe);
-        let committed = ours_value.is_some() && ours.property(&probe).untrusted_cause().is_none();
-        if committed && ours_value != theirs {
-            violations.push(format!(
-                "{label}: we committed {ours_value:?}, MSBuild reads {theirs:?}"
-            ));
+        // Exact (a value equal to MSBuild's; "unset" is exact too, and MSBuild
+        // holds a value), or declined.
+        match ours.property(&probe) {
+            borzoi_msbuild::PropertyRead::Value(value) if Some(&value) == theirs => {}
+            borzoi_msbuild::PropertyRead::UnsetInexact(_)
+            | borzoi_msbuild::PropertyRead::Untrusted(_) => {}
+            other => violations.push(format!(
+                "{label}: we publish {other:?}, MSBuild reads {theirs:?}"
+            )),
         }
     }
     assert!(
