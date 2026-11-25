@@ -851,3 +851,37 @@ fn nested_undecided_points_take_bounded_work() {
     );
     assert!(!parsed.property("Chain").is_exact());
 }
+
+/// A point's `Exists` guard says nothing of a path the walk cannot compute:
+/// here a function it does not model names a directory beside the project,
+/// which `Exists` is true of and MSBuild cannot import. The point is a
+/// possible rejection, named by its path.
+#[test]
+fn an_uncomputed_path_under_its_exists_guard_may_reject() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir(tmp.path().join("sub")).unwrap();
+    let project = write_at(
+        tmp.path(),
+        "p.fsproj",
+        "<Project Sdk=\"Std\">\n  <PropertyGroup>\n    \
+         <DirectoryBuildTargetsPath>$(MSBuildProjectDirectory)/$([System.IO.Path]::GetFileName('x/sub'))</DirectoryBuildTargetsPath>\n  \
+         </PropertyGroup>\n</Project>\n",
+    );
+    let parsed = parse_file_std(&project);
+    assert!(
+        matches!(
+            &parsed.rejection,
+            Some(crate::Rejection {
+                certainty: crate::RejectionCertainty::Possible,
+                cause: crate::RejectionCause::Import {
+                    project,
+                    why: crate::UnloadableImport::PathUndecided,
+                    ..
+                },
+                ..
+            }) if project == "$(DirectoryBuildTargetsPath)"
+        ),
+        "{:#?}",
+        parsed.rejection
+    );
+}

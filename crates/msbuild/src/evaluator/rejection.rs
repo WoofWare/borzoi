@@ -2042,8 +2042,10 @@ pub(super) fn may_load_nothing_at(
     certain: bool,
     guarded: bool,
 ) -> Option<UnloadableImport> {
+    // As for an ordinary import, a guard says nothing of a path the walk
+    // cannot compute (`may_load_nothing`).
     if !certain {
-        return (!guarded).then_some(UnloadableImport::PathUndecided);
+        return Some(UnloadableImport::PathUndecided);
     }
     let Some(path) = path else {
         return (!guarded).then_some(UnloadableImport::NoPath);

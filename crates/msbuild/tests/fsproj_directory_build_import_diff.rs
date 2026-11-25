@@ -271,8 +271,9 @@ fn cases() -> Vec<Case> {
         },
         // A redirect the walk cannot compute (a function it does not model)
         // to a directory: the point's `Exists` is true of it, and MSBuild
-        // fails to import a directory, rejecting the project. The point's
-        // guard says nothing of a path the walk does not hold.
+        // fails to import a directory, rejecting the project, which the walk
+        // must not commit. That the point itself is the possible rejection
+        // is `an_uncomputed_path_under_its_exists_guard_may_reject`'s.
         Case {
             name: "redirect-to-an-uncomputed-directory",
             files: vec![

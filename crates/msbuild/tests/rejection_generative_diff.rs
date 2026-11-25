@@ -1950,9 +1950,10 @@ fn a_group_guard_does_not_rule_out_rejecting_an_uncomputed_import() {
         None,
     )
     .unwrap();
+    // Neither a value nor an exact absence: MSBuild rejects the project.
     assert!(
-        !matches!(parsed.property("After"), PropertyRead::Value(_)),
-        "we commit {:?}",
+        !parsed.property("After").is_exact(),
+        "we claim {:?}",
         parsed.property("After")
     );
 }
