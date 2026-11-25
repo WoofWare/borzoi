@@ -265,6 +265,13 @@ struct EvaluatedProject {
     /// `WasmNativeWorkload` and `RestoreAdditionalProjectSources`), so this
     /// declines nothing anyone has been observed to write.
     not_an_inner_build: bool,
+    /// Pass 1 is served in place of inner builds the walk cannot enumerate:
+    /// the framework declarations decide whether it is the outer dispatch
+    /// build, and the walk does not hold them for certain
+    /// ([`tfm_policy::TfmChoice::pass1_is_the_build`]). Its Compile items,
+    /// defines and references are withheld (`discarded_inner_build`), and
+    /// this is the reason the deferral message names.
+    may_be_outer_build: bool,
 }
 
 /// What one generation of a [`Workspace`] observed
@@ -2102,6 +2109,7 @@ impl Workspace {
             Some(evaluated) => ProjectEvaluation::Evaluated {
                 parsed: &evaluated.parsed,
                 not_an_inner_build: evaluated.not_an_inner_build,
+                may_be_outer_build: evaluated.may_be_outer_build,
             },
             None => ProjectEvaluation::Failed,
         };
@@ -2777,6 +2785,7 @@ fn references_suppressed(evaluated: &EvaluatedProject, purpose: GraphWalkPurpose
         && ProjectEvaluation::Evaluated {
             parsed: &evaluated.parsed,
             not_an_inner_build: evaluated.not_an_inner_build,
+            may_be_outer_build: evaluated.may_be_outer_build,
         }
         .drops_reference_edges()
 }
@@ -3043,6 +3052,7 @@ fn evaluate_project(
             body_target_framework,
             tfm_untrusted,
             not_an_inner_build,
+            may_be_outer_build: served.tfm_unknown,
         }),
         reads,
         immutable,
@@ -3375,8 +3385,10 @@ mod tests {
     /// nothing pins the build (a non-empty global, or, with no global, a
     /// written singular), and the plural is unknown, or present beside a
     /// singular the walk cannot decide. There, pass 1's Compile items,
-    /// defines and references are all withheld; an unknown singular alone is
-    /// one build, and keeps them.
+    /// defines and references are all withheld. A pinned build, and an
+    /// unknown singular with no plural (one build), keep the reference. The
+    /// rows with a plural the walk holds and no pin are no part of this
+    /// claim, and are not graded.
     #[test]
     fn undecided_framework_writes_drop_edges_only_where_the_build_may_dispatch() {
         const GATE: &str = "'É' == 'é'";
@@ -3391,7 +3403,7 @@ mod tests {
             "GATED",
             "<TargetFrameworks>net8.0</TargetFrameworks>OVERRIDE",
         ];
-        let mut graded = 0usize;
+        let mut graded_rows = 0usize;
         for global in globals {
             for singular in singulars {
                 for plural in plurals {
@@ -3446,12 +3458,17 @@ mod tests {
                     else {
                         panic!("{context}: the project evaluates");
                     };
-                    assert_eq!(evaluation.drops_reference_edges(), drops, "{context}");
-                    assert_eq!(
-                        (parsed.items_uncertain, parsed.define_constants_uncertain),
-                        (drops, drops),
-                        "{context}: the Compile items and defines go with the edges"
-                    );
+                    // Graded: the rows the claim decides.
+                    let graded = drops || pinned || !plural_present;
+                    if drops {
+                        assert!(
+                            parsed.items_uncertain && parsed.define_constants_uncertain,
+                            "{context}: the Compile items and defines go with the edges"
+                        );
+                    }
+                    if graded {
+                        assert_eq!(evaluation.drops_reference_edges(), drops, "{context}");
+                    }
                     let ws = Workspace::with_env_and_extra_build_properties(
                         SdkDiscoveryEnv::default(),
                         extra,
@@ -3466,17 +3483,20 @@ mod tests {
                         .iter()
                         .find(|n| paths_equal(&n.path, &proj))
                         .expect("entry node");
-                    assert_eq!(
-                        node.references.len(),
-                        usize::from(!drops),
-                        "{context}: {:?}",
-                        node.references
-                    );
-                    graded += 1;
+                    if graded {
+                        assert_eq!(
+                            node.references.len(),
+                            usize::from(!drops),
+                            "{context}: {:?}",
+                            node.references
+                        );
+                        graded_rows += 1;
+                    }
                 }
             }
         }
-        assert_eq!(graded, 36);
+        // 36 combinations, less the 4 with a plural held and no pin.
+        assert_eq!(graded_rows, 32);
     }
 
     /// A pinned build keeps its references whatever the plural says: a
@@ -3657,12 +3677,20 @@ mod tests {
             evaluation,
             crate::project_deferral::FoldOutcome::Unknown,
         );
-        assert!(
-            deferrals.iter().any(|d| {
-                d.capability() == crate::project_deferral::DeferredCapability::ProjectReferenceEdges
-            }),
-            "the dropped edges are reported: {deferrals:?}"
-        );
+        // Both declines name the reason, which the flags alone do not.
+        for capability in [
+            crate::project_deferral::DeferredCapability::ProjectReferenceEdges,
+            crate::project_deferral::DeferredCapability::ProjectFold,
+        ] {
+            let deferral = deferrals
+                .iter()
+                .find(|d| d.capability() == capability)
+                .unwrap_or_else(|| panic!("{capability:?} is reported: {deferrals:?}"));
+            assert!(
+                deferral.causes().recorded()[0].contains("TargetFrameworks"),
+                "{deferral:?}"
+            );
+        }
         // The entry's served framework says the same: no current framework
         // was established, so no restored target's assemblies are served.
         let extra = HashMap::from([("TargetFramework".to_string(), String::new())]);

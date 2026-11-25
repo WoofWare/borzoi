@@ -54,21 +54,6 @@ pub fn target_frameworks(project: &ParsedProject) -> Vec<String> {
     Vec::new()
 }
 
-/// Whether [`target_frameworks`]'s empty answer is no answer rather than "no
-/// framework declared": the walk does not hold the plural or the singular
-/// for certain (a write it skipped under a gate it could not decide may have
-/// declared frameworks, or one it refused to compute).
-pub fn target_frameworks_undecided(project: &ParsedProject) -> bool {
-    let unknown = |name: &str| {
-        matches!(
-            project.property(name),
-            crate::PropertyRead::Untrusted(_) | crate::PropertyRead::UnsetInexact(_)
-        )
-    };
-    target_frameworks(project).is_empty()
-        && (unknown("TargetFrameworks") || unknown("TargetFramework"))
-}
-
 /// MSBuild property names are case-insensitive, but
 /// [`ParsedProject::properties`] preserves the project's spelling (see the
 /// evaluator's `into_parsed` comment). Look up the value with an ASCII
@@ -89,7 +74,7 @@ mod tests {
 
     use crate::parse_fsproj;
 
-    use super::{target_frameworks, target_frameworks_undecided};
+    use super::target_frameworks;
 
     fn parse(source: &str) -> crate::ParsedProject {
         parse_fsproj(
@@ -99,30 +84,6 @@ mod tests {
             &HashMap::new(),
         )
         .expect("well-formed XML parses")
-    }
-
-    /// An empty list is no answer where a declaration the walk does not hold
-    /// for certain may have named frameworks: a write under a gate it cannot
-    /// decide (`'É' == 'é'`, which MSBuild takes), plural or singular. With no
-    /// such declaration, or a list in hand, the answer stands.
-    #[test]
-    fn an_empty_list_behind_an_undecided_write_is_undecided() {
-        let undecided = |body: &str| {
-            target_frameworks_undecided(&parse(&format!(
-                "<Project>\n  <PropertyGroup>\n    {body}\n  </PropertyGroup>\n</Project>"
-            )))
-        };
-        assert!(undecided(
-            "<TargetFrameworks Condition=\"'É' == 'é'\">net8.0</TargetFrameworks>"
-        ));
-        assert!(undecided(
-            "<TargetFramework Condition=\"'É' == 'é'\">net8.0</TargetFramework>"
-        ));
-        assert!(!undecided("<Other>x</Other>"));
-        assert!(!undecided("<TargetFrameworks>net8.0</TargetFrameworks>"));
-        assert!(!undecided(
-            "<TargetFrameworks Condition=\"'a' == 'b'\">net8.0</TargetFrameworks>"
-        ));
     }
 
     #[test]

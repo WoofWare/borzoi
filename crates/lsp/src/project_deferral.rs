@@ -83,6 +83,12 @@ pub enum ProjectEvaluation<'a> {
         /// `'$(TargetFramework)' == ''` perfectly cleanly. See
         /// `workspace::EvaluatedProject::not_an_inner_build`.
         not_an_inner_build: bool,
+        /// Pass 1 is served in place of inner builds the walk cannot
+        /// enumerate, its framework declarations uncertain, so its Compile
+        /// items, defines and references are withheld. The flags say so, but
+        /// not why: this is the why. See
+        /// `workspace::EvaluatedProject::may_be_outer_build`.
+        may_be_outer_build: bool,
     },
     /// The `.fsproj` did not evaluate at all — malformed XML, an unreadable
     /// file, a rejected project path. The buffer's own diagnostics say which;
@@ -107,6 +113,7 @@ impl ProjectEvaluation<'_> {
             ProjectEvaluation::Evaluated {
                 parsed,
                 not_an_inner_build,
+                ..
             } => parsed.project_references_uncertain || *not_an_inner_build,
         }
     }
@@ -519,24 +526,27 @@ pub fn deferrals(eval: ProjectEvaluation<'_>, fold: FoldOutcome<'_>) -> Vec<Defe
         // evaluator records *nothing*: `workspace::discarded_inner_build` raises
         // the flags directly, so without it this clause would say "no specific
         // cause was recorded" about a reason we know exactly.
-        let causes = outer_build_cause(eval).into_iter().chain(
-            parsed
-                .compile_condition_uncertainties
-                .iter()
-                .map(render_condition_uncertainty)
-                .chain(
-                    parsed
-                        .compile_item_uncertainties
-                        .iter()
-                        .map(render_compile_cause),
-                )
-                .chain(
-                    parsed
-                        .define_constants_uncertainties
-                        .iter()
-                        .map(render_define_cause),
-                ),
-        );
+        let causes = outer_build_cause(eval)
+            .into_iter()
+            .chain(undecided_frameworks_cause(eval))
+            .chain(
+                parsed
+                    .compile_condition_uncertainties
+                    .iter()
+                    .map(render_condition_uncertainty)
+                    .chain(
+                        parsed
+                            .compile_item_uncertainties
+                            .iter()
+                            .map(render_compile_cause),
+                    )
+                    .chain(
+                        parsed
+                            .define_constants_uncertainties
+                            .iter()
+                            .map(render_define_cause),
+                    ),
+            );
         out.push(Deferral::new(
             DeferredCapability::ProjectFold,
             DeclineStage::Evaluation,
@@ -575,13 +585,16 @@ pub fn deferrals(eval: ProjectEvaluation<'_>, fold: FoldOutcome<'_>) -> Vec<Defe
         //
         // With no structural cause at all, `Causes::Unrecorded` states the
         // absence rather than inventing one.
-        let causes = outer_build_cause(eval).into_iter().chain(
-            parsed
-                .compile_item_uncertainties
-                .iter()
-                .filter(|cause| explains_dropped_references(&cause.kind))
-                .map(render_compile_cause),
-        );
+        let causes = outer_build_cause(eval)
+            .into_iter()
+            .chain(undecided_frameworks_cause(eval))
+            .chain(
+                parsed
+                    .compile_item_uncertainties
+                    .iter()
+                    .filter(|cause| explains_dropped_references(&cause.kind))
+                    .map(render_compile_cause),
+            );
         out.push(Deferral::new(
             DeferredCapability::ProjectReferenceEdges,
             DeclineStage::Evaluation,
@@ -761,6 +774,24 @@ fn outer_build_cause(eval: ProjectEvaluation<'_>) -> Option<String> {
             ..
         } => Some(
             "this project opts `TargetFramework` out of the build globals              (`TreatAsLocalProperty`), so it overwrites the target framework I select and              no evaluation of it is the build that actually runs"
+                .to_string(),
+        ),
+        _ => None,
+    }
+}
+
+/// Why pass 1 is withheld where it may be the outer dispatch build
+/// ([`ProjectEvaluation::Evaluated::may_be_outer_build`]): what the flags it
+/// raised cannot say themselves.
+fn undecided_frameworks_cause(eval: ProjectEvaluation<'_>) -> Option<String> {
+    match eval {
+        ProjectEvaluation::Evaluated {
+            may_be_outer_build: true,
+            ..
+        } => Some(
+            "I could not determine this project's `TargetFramework`/`TargetFrameworks` \
+             declarations, so the evaluation I have may be the outer build that dispatches to \
+             per-framework builds rather than one the compiler runs"
                 .to_string(),
         ),
         _ => None,
