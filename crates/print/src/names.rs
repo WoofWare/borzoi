@@ -190,6 +190,180 @@ fn is_plain_word(s: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '\'')
 }
 
+/// The characters F#'s checker refuses in the name of a type, module,
+/// namespace, union case or exception (FCS's
+/// `IllegalCharactersInTypeAndNamespaceNames`, FS0883). A backtick is one too,
+/// but no [`Ident`] holds one.
+const ENTITY_NAME_REFUSED: &[char] = &['.', '+', '$', '&', '[', ']', '/', '\\', '*', '"'];
+
+/// The name of a type, nested module, union case or exception: an [`Ident`]
+/// without the characters F#'s checker refuses there (FS0883).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct EntityName(Ident);
+
+impl EntityName {
+    /// `ident` as an entity's name, or `ident` back if it holds a character
+    /// F# refuses there.
+    pub fn new(ident: Ident) -> Result<Self, Ident> {
+        if ident.as_str().contains(ENTITY_NAME_REFUSED) {
+            Err(ident)
+        } else {
+            Ok(EntityName(ident))
+        }
+    }
+
+    pub fn ident(&self) -> &Ident {
+        &self.0
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+/// A dotted path of entity names, `A.B`: what a file's `module` or
+/// `namespace` declares.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct EntityPath(pub Vec1<EntityName>);
+
+impl EntityPath {
+    /// The segments, in order.
+    pub fn segments(&self) -> &[EntityName] {
+        self.0.as_slice()
+    }
+}
+
+/// The name of a union case: an [`EntityName`] that F# reads as starting with
+/// an upper-case letter, by `borzoi-cst`'s mirror of FCS's rule
+/// ([`borzoi_cst::parser::ident_leads_uppercase`]), or one of the names FCS
+/// gives `[]` and `::` (FS0053). F# 7 also admits a lower-case case in a type
+/// with the `RequireQualifiedAccess` attribute, which takes resolving the
+/// attribute's name to see, so the name refuses it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct UnionCaseName(EntityName);
+
+impl UnionCaseName {
+    /// `ident` as a union case's name, or `ident` back if F# refuses it as
+    /// one.
+    pub fn new(ident: Ident) -> Result<Self, Ident> {
+        let name = EntityName::new(ident)?;
+        if leads_uppercase(&name) || matches!(name.as_str(), "op_Nil" | "op_ColonColon") {
+            Ok(UnionCaseName(name))
+        } else {
+            Err(name.0)
+        }
+    }
+
+    pub fn ident(&self) -> &Ident {
+        self.0.ident()
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+
+    /// The name of the property F# 9 generates to test for the case:
+    /// `IsA` for `A`, and `IsEmpty` and `IsCons` for `[]` and `::`.
+    pub fn tester(&self) -> String {
+        match self.as_str() {
+            "op_Nil" => "IsEmpty".to_owned(),
+            "op_ColonColon" => "IsCons".to_owned(),
+            name => format!("Is{name}"),
+        }
+    }
+}
+
+/// The name of an exception: an [`EntityName`] that F# reads as starting with
+/// an upper-case letter (FS0053), with no exception for `[]` and `::`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ExceptionName(EntityName);
+
+impl ExceptionName {
+    /// `ident` as an exception's name, or `ident` back if F# refuses it as
+    /// one.
+    pub fn new(ident: Ident) -> Result<Self, Ident> {
+        let name = EntityName::new(ident)?;
+        if leads_uppercase(&name) {
+            Ok(ExceptionName(name))
+        } else {
+            Err(name.0)
+        }
+    }
+
+    pub fn ident(&self) -> &Ident {
+        self.0.ident()
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+/// Whether F# reads `name` as starting with an upper-case letter, by FCS's
+/// rule, which asks the .NET runtime's Unicode tables. Rust's are a different
+/// version, and Unicode moves letters between categories (U+0295 is a
+/// letter of another case to FCS, U+A7CE no letter at all), so only a
+/// capital whose case every version agrees on is admitted: ASCII's,
+/// Latin-1's, and basic Greek's and Cyrillic's.
+fn leads_uppercase(name: &EntityName) -> bool {
+    leads_stably_uppercase(name.as_str())
+}
+
+/// Whether `text` starts with a capital whose case every Unicode version
+/// agrees on: an ASCII, Latin-1, basic Greek or basic Cyrillic one, which
+/// FCS and `borzoi-cst`'s parser both read as upper case.
+pub fn leads_stably_uppercase(text: &str) -> bool {
+    text.chars().next().is_some_and(|c| {
+        matches!(c, 'A'..='Z' | 'À'..='Þ' | 'Α'..='Ω' | 'Ѐ'..='Я') && c.is_uppercase()
+    }) && borzoi_cst::parser::ident_leads_uppercase(text)
+}
+
+/// A name F# reads as a variable where a pattern may also name a constructor:
+/// an [`Ident`] that does not start with an upper-case letter. FCS reads an
+/// upper-case name there as a constructor's, or as a variable only if none
+/// resolves. Its rule asks the .NET runtime's Unicode tables, whose version
+/// differs from Rust's, so only a first character every version agrees is
+/// not upper case is admitted: an ASCII character other than a capital, or a
+/// lower-case letter of Latin-1, basic Greek or basic Cyrillic. A name spelled
+/// as an active pattern's is refused too ([`is_active_pattern_spelling`]).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct VarName(Ident);
+
+impl VarName {
+    /// `ident` as a variable's name, or `ident` back if F# could read it as a
+    /// constructor's.
+    pub fn new(ident: Ident) -> Result<Self, Ident> {
+        let stable = ident.as_str().chars().next().is_some_and(|c| {
+            (c.is_ascii() && !c.is_ascii_uppercase())
+                || (matches!(c, 'ß'..='ÿ' | 'α'..='ω' | 'а'..='џ') && c.is_lowercase())
+        });
+        if stable
+            && !is_active_pattern_spelling(ident.as_str())
+            && !borzoi_cst::parser::ident_leads_uppercase(ident.as_str())
+        {
+            Ok(VarName(ident))
+        } else {
+            Err(ident)
+        }
+    }
+
+    pub fn ident(&self) -> &Ident {
+        &self.0
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+/// Whether FCS may read `text` as an active pattern's name, quoted or not, as
+/// it reads `|A|B|`: a superset of its `IsActivePatternName`, any text of
+/// three characters or more between `|`s, so a pattern bound to such a name
+/// matches by an active pattern rather than binding (FS1209).
+pub fn is_active_pattern_spelling(text: &str) -> bool {
+    text.len() >= 3 && text.starts_with('|') && text.ends_with('|')
+}
+
 /// A dotted path of identifiers, `A.B.c`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct LongIdent(pub Vec1<Ident>);

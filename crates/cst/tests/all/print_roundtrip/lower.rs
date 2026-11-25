@@ -17,13 +17,17 @@
 //! reads them: `f (a, b)` and `f (x = c)` apply `f` to an argument list, and
 //! `f ((a, b))` to one tuple ([`application`]).
 
-use borzoi_print::names::{Ident, InfixOperator, LongIdent, Operator, TyparName, ValueName};
+use borzoi_print::names::{
+    EntityName, EntityPath, ExceptionName, Ident, InfixOperator, LongIdent, Operator, TyparName,
+    UnionCaseName, ValueName, VarName,
+};
 use borzoi_print::tree::{
-    Access, AndBang, Args, ArrayRank, Attribute, AttributeArgs, Binding, BindingHead, Comp,
-    CompClause, CompItem, Const, Context, Expr, Float32, Float64, ForDirection, ForSource,
-    ImplFile, LetBang, LetBindings, ListBody, ListComp, LocalBindings, MatchClause, ModuleDecl,
-    NamedModule, Namespace, NamespaceName, NestedModule, Pat, Range, RecordField, Stmt, StmtExpr,
-    Type, TypeDefn, TypeRepr, UnionCase, UnionField, UseBang, UseBinding, UseName,
+    Access, AliasPat, AndBang, Args, ArrayRank, AsAlias, Attribute, AttributeArgs, Binding,
+    BindingHead, Comp, CompClause, CompItem, Const, Context, DeclRefusal, ExceptionDefn, Expr,
+    Float32, Float64, ForDirection, ForSource, ImplFile, LetBang, LetBindings, ListBody, ListComp,
+    LocalBindings, MatchClause, ModuleBindings, ModuleBody, ModuleDecl, NamedModule, Namespace,
+    NamespaceName, NestedModule, Pat, Range, RecDecls, RecordField, Stmt, StmtExpr, Type, TypeDefn,
+    TypeRepr, UnionCase, UnionField, UseBang, UseBinding, UseName,
 };
 use borzoi_print::vec::{Vec1, Vec2};
 use borzoi_print::version::{Gate, Version};
@@ -87,7 +91,7 @@ fn file<V: Version>(root: &NormalisedRoot, tally: &mut Tally) -> L<ImplFile<V>> 
                 access: None,
                 decls,
             },
-        ] if attributes.is_empty() => Ok(ImplFile::AnonModule(decls_lossy(decls, tally))),
+        ] if attributes.is_empty() => Ok(ImplFile::AnonModule(decls_lossy(decls, tally, false))),
         [
             NormalisedModule {
                 kind:
@@ -103,9 +107,8 @@ fn file<V: Version>(root: &NormalisedRoot, tally: &mut Tally) -> L<ImplFile<V>> 
         ] => Ok(ImplFile::NamedModule(NamedModule {
             attributes: attributes_of(attributes)?,
             access: access.map(lower_access),
-            is_rec: *is_rec,
-            name: long_ident(long_id)?,
-            decls: decls_lossy(decls, tally),
+            name: entity_path(long_id)?,
+            body: module_body(*is_rec, decls_lossy(decls, tally, *is_rec))?,
         })),
         modules => {
             let mut namespaces = Vec::new();
@@ -117,15 +120,22 @@ fn file<V: Version>(root: &NormalisedRoot, tally: &mut Tally) -> L<ImplFile<V>> 
                     return decline("namespace attributes or access");
                 }
                 let name = match kind {
-                    NamedKind::Namespace => NamespaceName::Named(long_ident(long_id)?),
+                    NamedKind::Namespace => NamespaceName::Named(entity_path(long_id)?),
                     NamedKind::GlobalNamespace => NamespaceName::Global,
                     NamedKind::Module => return decline("file shape"),
                 };
-                namespaces.push(Namespace {
-                    is_rec: m.is_rec,
-                    name,
-                    decls: decls_lossy(&m.decls, tally),
-                });
+                // A namespace holds no value (FS0201): each `let` or
+                // expression in one, but a bare `()` or `do ()`, is dropped
+                // on its own, judged as written, before lowering strips its
+                // parentheses.
+                let (taken, values): (Vec<&NormalisedDecl>, Vec<&NormalisedDecl>) =
+                    m.decls.iter().partition(|d| namespace_takes(d));
+                tally
+                    .dropped
+                    .extend(values.iter().map(|_| Decline("namespace: a value")));
+                let decls = decls_lossy(taken, tally, m.is_rec);
+                namespaces
+                    .push(Namespace::new(name, module_body(m.is_rec, decls)?).map_err(refused)?);
             }
             Vec1::from_vec(namespaces)
                 .map(ImplFile::Namespaces)
@@ -134,8 +144,17 @@ fn file<V: Version>(root: &NormalisedRoot, tally: &mut Tally) -> L<ImplFile<V>> 
     }
 }
 
-fn decls_lossy<V: Version>(decls: &[NormalisedDecl], tally: &mut Tally) -> Vec<ModuleDecl<V>> {
+/// `decls` as a module's declarations, dropping each that does not lower;
+/// `in_rec` if the module is recursive, itself or in a recursive group.
+fn decls_lossy<'a, V: Version>(
+    decls: impl IntoIterator<Item = &'a NormalisedDecl>,
+    tally: &mut Tally,
+    in_rec: bool,
+) -> Vec<ModuleDecl<V>> {
     let mut out = Vec::new();
+    // In a recursive group, the rank of the last declaration kept: opens
+    // first, then module abbreviations, then the rest.
+    let mut rank = 0;
     for d in decls {
         if let NormalisedDecl::NestedModule {
             long_id,
@@ -149,21 +168,47 @@ fn decls_lossy<V: Version>(decls: &[NormalisedDecl], tally: &mut Tally) -> Vec<M
                 let [name] = long_id.as_slice() else {
                     return decline("dotted nested module name");
                 };
-                Ok((ident(name)?, attributes_of(attributes)?))
+                Ok((entity_name(name)?, attributes_of(attributes)?))
             })();
-            match header {
-                Ok((name, attributes)) => out.push(ModuleDecl::NestedModule(NestedModule {
+            // The module's declarations count as kept only if it is, and
+            // as dropped with it otherwise, its header's refusal included.
+            let mut inner = Tally::default();
+            let body = decls_lossy(decls, &mut inner, in_rec || *is_rec);
+            let module = header.and_then(|(name, attributes)| {
+                Ok(NestedModule {
                     attributes,
                     access: access.map(lower_access),
-                    is_rec: *is_rec,
                     name,
-                    decls: decls_lossy(decls, tally),
-                })),
-                Err(d) => tally.dropped.push(d),
+                    body: module_body(*is_rec, body)?,
+                })
+            });
+            match module {
+                Ok(m) => {
+                    tally.kept += inner.kept;
+                    out.push(ModuleDecl::NestedModule(m));
+                    // A module is of a recursive group's last rank.
+                    rank = 2;
+                }
+                // Each declaration the module would have kept is lost with it;
+                // a module with none to keep or drop is one loss.
+                Err(d) => {
+                    let lost = if inner.kept == 0 && inner.dropped.is_empty() {
+                        1
+                    } else {
+                        inner.kept
+                    };
+                    tally.dropped.extend(std::iter::repeat_n(d, lost));
+                }
             }
+            tally.dropped.extend(inner.dropped);
             continue;
         }
-        match decl(d) {
+        match decl(d, in_rec).and_then(|d| {
+            if in_rec {
+                rank = rec_rank_after(&d, rank)?;
+            }
+            Ok(d)
+        }) {
             Ok(d) => {
                 tally.kept += 1;
                 out.push(d);
@@ -174,11 +219,53 @@ fn decls_lossy<V: Version>(decls: &[NormalisedDecl], tally: &mut Tally) -> Vec<M
     out
 }
 
-fn decl<V: Version>(d: &NormalisedDecl) -> L<ModuleDecl<V>> {
+/// Whether a namespace takes `d` as written: anything but a `let` or an
+/// expression, and of expressions only a bare `()` or `do ()` (FS0201).
+fn namespace_takes(d: &NormalisedDecl) -> bool {
+    use NormalisedExpr as E;
+    let unit = |e: &E| matches!(e, E::Const(NormalisedConst::Unit));
+    match d {
+        NormalisedDecl::Let { .. } => false,
+        NormalisedDecl::Expr(e) => unit(e) || matches!(e, E::Do(inner) if unit(inner)),
+        _ => true,
+    }
+}
+
+/// The rank a recursive group reaches after `d`, or why the group refuses
+/// it: an open or module abbreviation after a declaration of a later rank
+/// (FS3200, FS3201), or a mutable or pattern `let` (FS0874, FS3521). Each
+/// such declaration is dropped alone, so its module's others are kept.
+fn rec_rank_after<V: Version>(d: &ModuleDecl<V>, rank: u8) -> L<u8> {
+    let this = match d {
+        ModuleDecl::Open(_) => 0,
+        ModuleDecl::ModuleAbbrev { .. } => 1,
+        _ => 2,
+    };
+    if this < rank {
+        return decline("module rec: an open or abbreviation after a declaration");
+    }
+    if let ModuleDecl::Let(group) = d {
+        let refused = group.bindings().as_slice().iter().any(|b| match &b.head {
+            BindingHead::Name { is_mutable, .. } => *is_mutable,
+            BindingHead::Function { .. } => false,
+            BindingHead::Pattern(p) => !matches!(p, Pat::Wildcard),
+        });
+        if refused {
+            return decline("module rec: a mutable or pattern let");
+        }
+    }
+    Ok(this)
+}
+
+/// A declaration, `in_rec` if it sits in a recursive module.
+fn decl<V: Version>(d: &NormalisedDecl, in_rec: bool) -> L<ModuleDecl<V>> {
     match d {
         NormalisedDecl::Expr(e) => Ok(ModuleDecl::Expr(expr(e)?)),
         NormalisedDecl::Let { is_rec, bindings } => {
-            Ok(ModuleDecl::Let(let_bindings(*is_rec, bindings)?))
+            let group = let_bindings(*is_rec, in_rec, bindings)?;
+            ModuleBindings::new(group)
+                .map(ModuleDecl::Let)
+                .map_err(|_| Decline("let: a group F# refuses in a module"))
         }
         NormalisedDecl::Open {
             target: NormalisedOpenTarget::ModuleOrNamespace(path),
@@ -203,7 +290,12 @@ fn decl<V: Version>(d: &NormalisedDecl) -> L<ModuleDecl<V>> {
             {
                 return decline("exception attributes, access, abbreviation or members");
             }
-            Ok(ModuleDecl::Exception(union_case(&exn.case)?))
+            let (name, fields) = case_parts(&exn.case)?;
+            let name =
+                ExceptionName::new(name).map_err(|_| Decline("name: refused for an exception"))?;
+            ExceptionDefn::new(name, fields)
+                .map(ModuleDecl::Exception)
+                .map_err(refused)
         }
         NormalisedDecl::Attributes(_) => decline("standalone attributes"),
         NormalisedDecl::HashDirective { .. } => decline("hash directive"),
@@ -252,12 +344,40 @@ fn type_defn<V: Version>(d: &NormalisedTypeDefn) -> L<TypeDefn<V>> {
         NormalisedTypeRepr::ObjectModel { .. } => return decline("class, struct or interface"),
         NormalisedTypeRepr::Delegate(_) => return decline("delegate type"),
     };
-    Ok(TypeDefn {
-        attributes: attributes_of(&d.attributes)?,
-        access: d.access.map(lower_access),
-        name: ident(name)?,
-        typars: d.typars.iter().map(typar_decl).collect::<L<_>>()?,
+    TypeDefn::new(
+        attributes_of(&d.attributes)?,
+        d.access.map(lower_access),
+        entity_name(name)?,
+        d.typars.iter().map(typar_decl).collect::<L<_>>()?,
         repr,
+    )
+    .map_err(refused)
+}
+
+/// `decls` as a module's body, recursive if `is_rec`.
+fn module_body<V: Version>(is_rec: bool, decls: Vec<ModuleDecl<V>>) -> L<ModuleBody<V>> {
+    if !is_rec {
+        return Ok(ModuleBody::NonRec(decls));
+    }
+    RecDecls::new(decls)
+        .map(ModuleBody::Rec)
+        .map_err(|_| Decline("module rec: declarations out of order, or a mutable"))
+}
+
+/// What a declaration constructor's refusal declines.
+fn refused(r: DeclRefusal) -> Decline {
+    Decline(match r {
+        DeclRefusal::DuplicateTypar(_) => "type: a type parameter twice",
+        DeclRefusal::UnusedTypar(_) => "type: an abbreviation's unused type parameter",
+        DeclRefusal::DuplicateField(_) => "type: a field twice",
+        DeclRefusal::DuplicateCase(_) => "type: a union case twice",
+        DeclRefusal::CaseNamedTags => "type: a union case named Tags",
+        DeclRefusal::FieldNamedAsGenerated(_) => "type: a field named as an unnamed one",
+        DeclRefusal::AnonymousType => "type: `_` in a declaration",
+        DeclRefusal::ValueInNamespace => "namespace: a value",
+        DeclRefusal::CaseNamedAsTester(_) => "type: a union case named as a tester",
+        DeclRefusal::UndeclaredTypar(_) => "type: an undeclared type parameter",
+        DeclRefusal::DuplicateTester(_) => "type: two union cases with one tester",
     })
 }
 
@@ -269,15 +389,22 @@ fn typar_decl(t: &NormalisedTypar) -> L<TyparName> {
 }
 
 fn union_case(c: &NormalisedUnionCase) -> L<UnionCase> {
+    let (name, fields) = case_parts(c)?;
+    let name = UnionCaseName::new(name).map_err(|_| Decline("name: refused for a union case"))?;
+    UnionCase::new(name, fields).map_err(refused)
+}
+
+/// A union case's or an exception's name and fields.
+fn case_parts(c: &NormalisedUnionCase) -> L<(Ident, Vec<UnionField>)> {
     if !c.attributes.is_empty() {
         return decline("union case attributes");
     }
     let NormalisedUnionCaseKind::Fields(fields) = &c.kind else {
         return decline("union case with a full type");
     };
-    Ok(UnionCase {
-        name: ident(&c.ident)?,
-        fields: fields
+    Ok((
+        ident(&c.ident)?,
+        fields
             .iter()
             .map(|f| {
                 if !f.attributes.is_empty() || f.access.is_some() || f.is_mutable || f.is_static {
@@ -289,10 +416,21 @@ fn union_case(c: &NormalisedUnionCase) -> L<UnionCase> {
                 })
             })
             .collect::<L<_>>()?,
-    })
+    ))
 }
 
-fn let_bindings<V: Version>(is_rec: bool, bindings: &[NormalisedBinding]) -> L<LetBindings<V>> {
+/// A `let` group, recursive if `is_rec`; `in_rec_module` if it sits in a
+/// recursive module, whose `let`s are all recursive.
+fn let_bindings<V: Version>(
+    is_rec: bool,
+    in_rec_module: bool,
+    bindings: &[NormalisedBinding],
+) -> L<LetBindings<V>> {
+    if (is_rec || in_rec_module) && bindings.iter().any(|b| is_parenthesised_wildcard(&b.pat)) {
+        // The tree prints `_` bare, which a recursive group admits and
+        // `(_)` it refuses (FS3521).
+        return decline("pat: a parenthesised `_` binding in a recursive group");
+    }
     if is_rec {
         Ok(LetBindings::Rec(vec1(bindings, binding)?))
     } else {
@@ -666,6 +804,11 @@ fn application<V: Version>(func: &NormalisedExpr, arg: &NormalisedExpr) -> L<Exp
     {
         return decline("expr: application of a parenthesised name");
     }
+    if is_parenthesised_unit(arg) {
+        // `f ()` and `f (())` call a method with no argument and with `()`;
+        // the tree's unit argument is the first.
+        return decline("expr: a parenthesised unit argument");
+    }
     let func = Box::new(expr(func)?);
     Ok(match argument_list(arg) {
         Some(elements) => Expr::MethodApp {
@@ -677,6 +820,18 @@ fn application<V: Version>(func: &NormalisedExpr, arg: &NormalisedExpr) -> L<Exp
             arg: Box::new(expr(arg)?),
         },
     })
+}
+
+/// Whether `arg` is `(())`, `((()))`, ….
+fn is_parenthesised_unit(arg: &NormalisedExpr) -> bool {
+    let NormalisedExpr::Paren(first) = arg else {
+        return false;
+    };
+    let mut inner: &NormalisedExpr = first;
+    while let NormalisedExpr::Paren(next) = inner {
+        inner = next;
+    }
+    matches!(inner, NormalisedExpr::Const(NormalisedConst::Unit))
 }
 
 /// The elements of `arg` if F#'s checker reads it as an argument list.
@@ -781,7 +936,7 @@ fn comp<V: Version, K: Context>(e: &NormalisedExpr) -> L<Comp<V, K>> {
 
 /// A `let` group in an expression or a computation expression.
 fn local_bindings<V: Version>(is_rec: bool, bindings: &[NormalisedBinding]) -> L<LocalBindings<V>> {
-    LocalBindings::new(let_bindings(is_rec, bindings)?)
+    LocalBindings::new(let_bindings(is_rec, false, bindings)?)
         .map_err(|_| Decline("local binding with access or attributes"))
 }
 
@@ -1145,7 +1300,7 @@ fn match_clause<V: Version>(c: &NormalisedMatchClause) -> L<MatchClause<V>> {
     })
 }
 
-fn pat(p: &NormalisedPat) -> L<Pat> {
+fn pat<V: Version>(p: &NormalisedPat) -> L<Pat<V>> {
     use NormalisedPat as P;
     let b = |p: &NormalisedPat| pat(p).map(Box::new);
     Ok(match p {
@@ -1175,10 +1330,17 @@ fn pat(p: &NormalisedPat) -> L<Pat> {
             elements,
         } => Pat::Tuple(vec2(elements, pat)?),
         P::Tuple { .. } => return decline("pat: struct tuple"),
-        P::As { lhs, rhs } => Pat::As {
-            pat: b(lhs)?,
-            alias: b(rhs)?,
-        },
+        P::As { lhs, rhs } => {
+            if is_parenthesised_type_test(lhs) {
+                // `(:? t) as x` binds `x` at the matched type, `:? t as x` at
+                // `t`; the tree's type test under `as` is the second.
+                return decline("pat: a parenthesised type test under `as`");
+            }
+            Pat::As {
+                pat: b(lhs)?,
+                alias: as_alias(rhs)?,
+            }
+        }
         P::ArrayOrList { is_array, elements } => {
             let items = elements.iter().map(pat).collect::<L<Vec<_>>>()?;
             if *is_array {
@@ -1202,6 +1364,53 @@ fn pat(p: &NormalisedPat) -> L<Pat> {
         P::QuoteExpr(_) => return decline("pat: quotation"),
         P::FromParseError(_) => return decline("pat: error"),
     })
+}
+
+/// Whether `p` is `(_)`, `((_))`, ….
+fn is_parenthesised_wildcard(p: &NormalisedPat) -> bool {
+    let NormalisedPat::Paren(first) = p else {
+        return false;
+    };
+    let mut inner: &NormalisedPat = first;
+    while let NormalisedPat::Paren(next) = inner {
+        inner = next;
+    }
+    matches!(inner, NormalisedPat::Wildcard)
+}
+
+/// Whether `p` is `(:? t)`, `((:? t))`, ….
+fn is_parenthesised_type_test(p: &NormalisedPat) -> bool {
+    let NormalisedPat::Paren(first) = p else {
+        return false;
+    };
+    let mut inner: &NormalisedPat = first;
+    while let NormalisedPat::Paren(next) = inner {
+        inner = next;
+    }
+    matches!(inner, NormalisedPat::IsInst { .. })
+}
+
+/// What follows `as`: a variable, or from F# 6 another pattern.
+fn as_alias<V: Version>(p: &NormalisedPat) -> L<AsAlias<V>> {
+    let gate = V::NonVariablePatternsToRightOfAsPatterns::WITNESS;
+    if gate.is_none() && matches!(p, NormalisedPat::Paren(_)) {
+        // Before F# 6, `p as (x)` is a pattern after `as`, which only F# 6
+        // admits; `p as x` is the variable.
+        return decline("pat: a pattern after `as` before F# 6");
+    }
+    let p = pat(p)?;
+    if let Pat::Name(path) = &p
+        && let [only] = path.segments()
+        && let Ok(v) = VarName::new(only.clone())
+    {
+        return Ok(AsAlias::Var(v));
+    }
+    let Some(gate) = gate else {
+        return decline("pat: a pattern after `as` before F# 6");
+    };
+    // Both constructors refuse a name spelled as an active pattern's.
+    let alias = AliasPat::new(gate, p).map_err(|_| Decline("pat: an alias the tree refuses"))?;
+    Ok(AsAlias::Pat(alias))
 }
 
 fn ty(t: &NormalisedType) -> L<Type> {
@@ -1292,6 +1501,17 @@ fn ident(s: &str) -> L<Ident> {
     Ident::new(s).map_err(|_| Decline("name: not an identifier"))
 }
 
+fn entity_name(s: &str) -> L<EntityName> {
+    EntityName::new(ident(s)?).map_err(|_| Decline("name: refused for a type, module or case"))
+}
+
+fn entity_path(path: &[String]) -> L<EntityPath> {
+    let names = path.iter().map(|s| entity_name(s)).collect::<L<Vec<_>>>()?;
+    Vec1::from_vec(names)
+        .map(EntityPath)
+        .ok_or(Decline("name: empty path"))
+}
+
 fn long_ident(path: &[String]) -> L<LongIdent> {
     let idents = path.iter().map(|s| ident(s)).collect::<L<Vec<_>>>()?;
     Vec1::from_vec(idents)
@@ -1318,4 +1538,98 @@ fn vec1<A, B>(items: &[A], f: impl Fn(&A) -> L<B>) -> L<Vec1<B>> {
 
 fn vec2<A, B>(items: &[A], f: impl Fn(&A) -> L<B>) -> L<Vec2<B>> {
     Vec2::from_vec(items.iter().map(f).collect::<L<Vec<_>>>()?).ok_or(Decline("short list"))
+}
+
+#[cfg(test)]
+mod tests {
+    use borzoi_print::version::{V5_0, V11_0, Version};
+
+    use super::{Decline, lower_file_strict};
+    use crate::common::normalised_ast::normalise_parse;
+
+    fn lowered<V: Version>(src: &str) -> Result<(), Decline> {
+        let parse = borzoi_cst::parser::parse(src);
+        assert!(parse.errors.is_empty(), "{src:?}: {:?}", parse.errors);
+        lower_file_strict::<V>(&normalise_parse(&parse)).map(|_| ())
+    }
+
+    #[test]
+    fn an_alias_both_constructors_refuse_declines() {
+        let src = "let f x = match x with | _ as ``|x+y|`` -> ()\n";
+        assert!(lowered::<V11_0>(src).is_err());
+    }
+
+    #[test]
+    fn a_parenthesised_alias_declines_below_f_sharp_6() {
+        let src = "let f x = match x with | _ as (y) -> y\n";
+        assert!(lowered::<V5_0>(src).is_err());
+        assert_eq!(lowered::<V11_0>(src), Ok(()));
+    }
+
+    #[test]
+    fn a_parenthesised_wildcard_declines_only_in_a_recursive_group() {
+        assert_eq!(lowered::<V11_0>("let (_) = 1\n"), Ok(()));
+        assert_eq!(lowered::<V11_0>("let f () = let (_) = 1 in ()\n"), Ok(()));
+        assert!(lowered::<V11_0>("let rec (_) = 1\n").is_err());
+        assert!(lowered::<V11_0>("let f () = let rec (_) = 1 in ()\n").is_err());
+        assert!(lowered::<V11_0>("module rec M =\n    let (_) = 1\n").is_err());
+        assert!(lowered::<V11_0>("module rec M =\n    module N =\n        let (_) = 1\n").is_err());
+        assert_eq!(lowered::<V11_0>("module rec M =\n    let _ = 1\n"), Ok(()));
+    }
+
+    fn lossy(src: &str) -> super::Tally {
+        let parse = borzoi_cst::parser::parse(src);
+        assert!(parse.errors.is_empty(), "{src:?}: {:?}", parse.errors);
+        super::lower_file_lossy::<V11_0>(&normalise_parse(&parse))
+            .expect("a file")
+            .1
+    }
+
+    #[test]
+    fn a_recursive_group_drops_only_what_it_refuses() {
+        let tally = lossy(
+            "namespace rec A\nmodule M =\n    let mutable x = 1\n    let y = 2\n    open System\nnamespace B\ntype T = int\n",
+        );
+        assert_eq!(
+            (tally.kept, tally.dropped.len()),
+            (2, 2),
+            "{:?}",
+            tally.dropped
+        );
+    }
+
+    #[test]
+    fn a_namespace_drops_only_its_values() {
+        let tally = lossy("namespace N\nlet x = 1\ntype T = int\n");
+        assert_eq!(
+            (tally.kept, tally.dropped.len()),
+            (1, 1),
+            "{:?}",
+            tally.dropped
+        );
+    }
+
+    #[test]
+    fn a_namespace_takes_unit_only_bare() {
+        let tally = lossy("namespace N\ndo (())\n(do ())\n(())\ndo ()\n()\n");
+        assert_eq!(
+            (tally.kept, tally.dropped.len()),
+            (2, 3),
+            "{:?}",
+            tally.dropped
+        );
+    }
+
+    #[test]
+    fn an_open_after_a_module_in_a_recursive_group_drops_alone() {
+        let tally = lossy(
+            "module rec M =\n    module N =\n        let y = 1\n    open System\n    let x = 1\n",
+        );
+        assert_eq!(
+            (tally.kept, tally.dropped.len()),
+            (2, 1),
+            "{:?}",
+            tally.dropped
+        );
+    }
 }

@@ -11,13 +11,17 @@
 //! tree targets as a parameter ([`crate::version`]), so a tree holds only what
 //! its version has.
 
+use std::collections::HashSet;
 use std::fmt::Debug;
 use std::hash::Hash;
 use std::marker::PhantomData;
 
-use crate::names::{Ident, InfixOperator, LongIdent, Operator, TyparName, ValueName};
+use crate::names::{
+    EntityName, EntityPath, ExceptionName, Ident, InfixOperator, LongIdent, Operator, TyparName,
+    UnionCaseName, ValueName, VarName,
+};
 use crate::vec::{Vec1, Vec2};
-use crate::version::{Available, Gate, Unavailable, Version};
+use crate::version::{Available, Gate, LanguageFeature, Unavailable, Version};
 
 /// An implementation file (`.fs`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,17 +39,35 @@ pub enum ImplFile<V: Version> {
 pub struct NamedModule<V: Version> {
     pub attributes: Vec<Attribute<V>>,
     pub access: Option<Access>,
-    pub is_rec: bool,
-    pub name: LongIdent,
-    pub decls: Vec<ModuleDecl<V>>,
+    pub name: EntityPath,
+    pub body: ModuleBody<V>,
 }
 
-/// A `namespace` section.
+/// A `namespace` section. A namespace holds no value: F#'s checker refuses a
+/// `let` or an expression directly in one (FS0201), but `()` and `do ()`, so
+/// [`Namespace::new`] refuses them ([`ModuleDecl::is_namespace_value`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Namespace<V: Version> {
-    pub is_rec: bool,
-    pub name: NamespaceName,
-    pub decls: Vec<ModuleDecl<V>>,
+    name: NamespaceName,
+    body: ModuleBody<V>,
+}
+
+impl<V: Version> Namespace<V> {
+    /// The section, or why F#'s checker refuses it.
+    pub fn new(name: NamespaceName, body: ModuleBody<V>) -> Result<Self, DeclRefusal> {
+        if body.decls().iter().any(ModuleDecl::is_namespace_value) {
+            return Err(DeclRefusal::ValueInNamespace);
+        }
+        Ok(Namespace { name, body })
+    }
+
+    pub fn name(&self) -> &NamespaceName {
+        &self.name
+    }
+
+    pub fn body(&self) -> &ModuleBody<V> {
+        &self.body
+    }
 }
 
 /// What a `namespace` section names.
@@ -54,7 +76,7 @@ pub enum NamespaceName {
     /// `namespace global`
     Global,
     /// `namespace A.B`
-    Named(LongIdent),
+    Named(EntityPath),
 }
 
 /// An accessibility modifier.
@@ -104,7 +126,7 @@ pub enum Args<V: Version> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModuleDecl<V: Version> {
     /// `let …` or `let rec … and …`.
-    Let(LetBindings<V>),
+    Let(ModuleBindings<V>),
     /// An expression evaluated for its effect.
     Expr(Expr<V>),
     /// `open A.B`
@@ -116,7 +138,22 @@ pub enum ModuleDecl<V: Version> {
     /// `type A = … and B = …`
     Types(Vec1<TypeDefn<V>>),
     /// `exception E of …`
-    Exception(UnionCase),
+    Exception(ExceptionDefn),
+}
+
+impl<V: Version> ModuleDecl<V> {
+    /// Whether F#'s checker refuses the declaration directly in a namespace
+    /// (FS0201): a `let`, or an expression other than `()` and `do ()`,
+    /// which the printer writes bare for a namespace to take.
+    pub fn is_namespace_value(&self) -> bool {
+        match self {
+            ModuleDecl::Let(_) => true,
+            ModuleDecl::Expr(Expr::Const(Const::Unit)) => false,
+            ModuleDecl::Expr(Expr::Do(e)) => !matches!(**e, Expr::Const(Const::Unit)),
+            ModuleDecl::Expr(_) => true,
+            _ => false,
+        }
+    }
 }
 
 /// A nested `module M =` and its declarations.
@@ -124,9 +161,83 @@ pub enum ModuleDecl<V: Version> {
 pub struct NestedModule<V: Version> {
     pub attributes: Vec<Attribute<V>>,
     pub access: Option<Access>,
-    pub is_rec: bool,
-    pub name: Ident,
-    pub decls: Vec<ModuleDecl<V>>,
+    pub name: EntityName,
+    pub body: ModuleBody<V>,
+}
+
+/// A module's or namespace's declarations, and whether they are one
+/// recursive group (`module rec`, `namespace rec`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModuleBody<V: Version> {
+    NonRec(Vec<ModuleDecl<V>>),
+    Rec(RecDecls<V>),
+}
+
+impl<V: Version> ModuleBody<V> {
+    pub fn is_rec(&self) -> bool {
+        matches!(self, ModuleBody::Rec(_))
+    }
+
+    pub fn decls(&self) -> &[ModuleDecl<V>] {
+        match self {
+            ModuleBody::NonRec(decls) => decls,
+            ModuleBody::Rec(group) => group.decls(),
+        }
+    }
+}
+
+/// The declarations of a recursive module or namespace. Every module of a
+/// recursive group, its nested modules' included, must open first (FS3200),
+/// then abbreviate modules (FS3201), then declare the rest; and each of its
+/// `let`s is recursive, so none may bind a mutable (FS0874) or a pattern
+/// other than `_` (FS3521). [`RecDecls::new`] refuses declarations that break
+/// a rule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecDecls<V: Version>(Vec<ModuleDecl<V>>);
+
+impl<V: Version> RecDecls<V> {
+    /// `decls` as a recursive group, or `decls` back if F# refuses them as
+    /// one.
+    pub fn new(decls: Vec<ModuleDecl<V>>) -> Result<Self, Vec<ModuleDecl<V>>> {
+        if rec_group_admits(&decls) {
+            Ok(RecDecls(decls))
+        } else {
+            Err(decls)
+        }
+    }
+
+    pub fn decls(&self) -> &[ModuleDecl<V>] {
+        &self.0
+    }
+
+    pub fn into_decls(self) -> Vec<ModuleDecl<V>> {
+        self.0
+    }
+}
+
+/// Whether one module's `decls`, and every module nested in it, keep a
+/// recursive group's rules.
+fn rec_group_admits<V: Version>(decls: &[ModuleDecl<V>]) -> bool {
+    // 0: opens, 1: module abbreviations, 2: the rest.
+    let rank = |d: &ModuleDecl<V>| match d {
+        ModuleDecl::Open(_) => 0,
+        ModuleDecl::ModuleAbbrev { .. } => 1,
+        _ => 2,
+    };
+    let ordered = decls.windows(2).all(|w| rank(&w[0]) <= rank(&w[1]));
+    ordered
+        && decls.iter().all(|d| match d {
+            ModuleDecl::Let(group) => group.bindings().as_slice().iter().all(|b| match &b.head {
+                BindingHead::Name { is_mutable, .. } => !is_mutable,
+                BindingHead::Function { .. } => true,
+                BindingHead::Pattern(p) => matches!(p, Pat::Wildcard),
+            }),
+            ModuleDecl::NestedModule(m) => match &m.body {
+                ModuleBody::NonRec(inner) => rec_group_admits(inner),
+                ModuleBody::Rec(_) => true,
+            },
+            _ => true,
+        })
 }
 
 /// One `let` group. A non-recursive group has one binding: F# rejects
@@ -139,11 +250,60 @@ pub enum LetBindings<V: Version> {
     Rec(Vec1<Binding<V>>),
 }
 
+impl<V: Version> LetBindings<V> {
+    pub fn as_slice(&self) -> &[Binding<V>] {
+        match self {
+            LetBindings::NonRec(b) => std::slice::from_ref(b),
+            LetBindings::Rec(bs) => bs.as_slice(),
+        }
+    }
+
+    /// Whether F# admits the group wherever a `let` group goes: an inline
+    /// binding must be a function (FS0832, and FS0829 for a mutable one),
+    /// and a recursive group must bind neither a mutable (FS0874) nor a
+    /// pattern other than `_`, which is printed parenthesised (FS3521).
+    fn admitted_anywhere(&self) -> bool {
+        let is_rec = matches!(self, LetBindings::Rec(_));
+        self.as_slice().iter().all(|b| match &b.head {
+            BindingHead::Name { is_mutable, .. } => !b.is_inline && !(*is_mutable && is_rec),
+            BindingHead::Function { .. } => true,
+            BindingHead::Pattern(p) => !b.is_inline && !(is_rec && !matches!(p, Pat::Wildcard)),
+        })
+    }
+}
+
+/// A `let` group in a module. F# refuses an inline binding that is not a
+/// function (FS0832, and FS0829 for a mutable one), and a recursive group
+/// binding a mutable (FS0874) or a pattern (FS3521), so
+/// [`ModuleBindings::new`] refuses a group with any of them. A recursive
+/// module refuses a mutable binding too, which [`RecDecls`] holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleBindings<V: Version>(LetBindings<V>);
+
+impl<V: Version> ModuleBindings<V> {
+    /// `bindings` as a module's group, or `bindings` back if F# refuses it
+    /// there.
+    pub fn new(bindings: LetBindings<V>) -> Result<Self, Box<LetBindings<V>>> {
+        if bindings.admitted_anywhere() {
+            Ok(ModuleBindings(bindings))
+        } else {
+            Err(Box::new(bindings))
+        }
+    }
+
+    pub fn bindings(&self) -> &LetBindings<V> {
+        &self.0
+    }
+
+    pub fn into_bindings(self) -> LetBindings<V> {
+        self.0
+    }
+}
+
 /// A `let` group in an expression or a computation expression's body. F#
-/// refuses an access modifier there (FS0646), attributes (FS0824), a mutable
-/// binding in a recursive group (FS0874) and an inline one (FS0829), an
-/// inline binding that is not a function (FS0832) and a recursive pattern
-/// (FS3521), so [`LocalBindings::new`] refuses a group with any of them.
+/// refuses there what it refuses in a module ([`ModuleBindings`]), and also
+/// an access modifier (FS0646) and attributes (FS0824), so
+/// [`LocalBindings::new`] refuses a group with any of them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalBindings<V: Version>(LetBindings<V>);
 
@@ -151,22 +311,14 @@ impl<V: Version> LocalBindings<V> {
     /// `bindings` as a local group, or `bindings` back if F# refuses it in an
     /// expression.
     pub fn new(bindings: LetBindings<V>) -> Result<Self, Box<LetBindings<V>>> {
-        let is_rec = matches!(bindings, LetBindings::Rec(_));
         let local = |b: &Binding<V>| {
-            let head_ok = match &b.head {
-                BindingHead::Name {
-                    access, is_mutable, ..
-                } => access.is_none() && !b.is_inline && !(*is_mutable && is_rec),
-                BindingHead::Function { access, .. } => access.is_none(),
-                BindingHead::Pattern(_) => !b.is_inline && !is_rec,
+            let access = match &b.head {
+                BindingHead::Name { access, .. } | BindingHead::Function { access, .. } => *access,
+                BindingHead::Pattern(_) => None,
             };
-            b.attributes.is_empty() && head_ok
+            b.attributes.is_empty() && access.is_none()
         };
-        let all = match &bindings {
-            LetBindings::NonRec(b) => local(b),
-            LetBindings::Rec(bs) => bs.as_slice().iter().all(local),
-        };
-        if all {
+        if bindings.admitted_anywhere() && bindings.as_slice().iter().all(local) {
             Ok(LocalBindings(bindings))
         } else {
             Err(Box::new(bindings))
@@ -187,13 +339,13 @@ impl<V: Version> LocalBindings<V> {
 pub struct Binding<V: Version> {
     pub attributes: Vec<Attribute<V>>,
     pub is_inline: bool,
-    pub head: BindingHead,
+    pub head: BindingHead<V>,
     pub body: Expr<V>,
 }
 
 /// What a binding binds.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BindingHead {
+pub enum BindingHead<V: Version> {
     /// `let [mutable] [access] x = …`
     Name {
         is_mutable: bool,
@@ -204,21 +356,155 @@ pub enum BindingHead {
     Function {
         access: Option<Access>,
         name: ValueName,
-        params: Vec1<Pat>,
+        params: Vec1<Pat<V>>,
     },
     /// `let (p) = …`: a pattern, printed parenthesised so that `Some x`
-    /// destructures rather than defining a function called `Some`.
-    Pattern(Pat),
+    /// destructures rather than defining a function called `Some`. `_` is
+    /// printed bare, as F# refuses a parenthesised head in a recursive group
+    /// (FS3521) but not `let rec _ = …`.
+    Pattern(Pat<V>),
 }
 
-/// A type definition, one of a `type … and …` group.
+/// A type definition, one of a `type … and …` group. F#'s checker refuses a
+/// type parameter declared twice (FS0037), an abbreviation that does not use
+/// every one it declares (FS0035), a record field or union case declared
+/// twice (FS0037), a `_` in a type (FS0715), a type parameter it does not
+/// declare (FS0039), and from F# 9 a union case named as a case's tester
+/// property (FS0023) or two cases with one tester (FS0438), so
+/// [`TypeDefn::new`] refuses them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeDefn<V: Version> {
-    pub attributes: Vec<Attribute<V>>,
-    pub access: Option<Access>,
-    pub name: Ident,
-    pub typars: Vec<TyparName>,
-    pub repr: TypeRepr,
+    attributes: Vec<Attribute<V>>,
+    access: Option<Access>,
+    name: EntityName,
+    typars: Vec<TyparName>,
+    repr: TypeRepr,
+}
+
+/// Why F#'s checker refuses a declaration a constructor was handed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeclRefusal {
+    /// A type parameter is declared twice.
+    DuplicateTypar(TyparName),
+    /// An abbreviation does not use this type parameter.
+    UnusedTypar(TyparName),
+    /// A record field, or a union case's or exception's field, is named
+    /// twice.
+    DuplicateField(Ident),
+    /// A union case is declared twice.
+    DuplicateCase(Ident),
+    /// A union case is named `Tags`, the name of the type F# generates for
+    /// the cases' tags (FS1219).
+    CaseNamedTags,
+    /// A declaration's type holds `_` (FS0715).
+    AnonymousType,
+    /// A namespace holds a `let` or an expression (FS0201).
+    ValueInNamespace,
+    /// A type uses a type parameter its definition does not declare (FS0039);
+    /// an exception declares none.
+    UndeclaredTypar(TyparName),
+    /// Two union cases have the same F# 9 tester property (FS0438), as `[]`
+    /// and `Empty` both have `IsEmpty`.
+    DuplicateTester(String),
+    /// A union case is named as F# 9 names another case's tester property,
+    /// `IsA` for `A` (FS0023).
+    CaseNamedAsTester(Ident),
+    /// A field is named what F# names one of the case's unnamed fields:
+    /// `Item`, `Item1`, … in a union case, `Data0`, … in an exception
+    /// (FS3176).
+    FieldNamedAsGenerated(Ident),
+}
+
+impl<V: Version> TypeDefn<V> {
+    /// The definition, or why F#'s checker refuses it.
+    pub fn new(
+        attributes: Vec<Attribute<V>>,
+        access: Option<Access>,
+        name: EntityName,
+        typars: Vec<TyparName>,
+        repr: TypeRepr,
+    ) -> Result<Self, DeclRefusal> {
+        if let Some(t) = first_duplicate(typars.iter()) {
+            return Err(DeclRefusal::DuplicateTypar(t.clone()));
+        }
+        if let Some(t) = repr.typars().into_iter().find(|t| !typars.contains(t)) {
+            return Err(DeclRefusal::UndeclaredTypar(t));
+        }
+        match &repr {
+            TypeRepr::Abbrev(ty) => {
+                if ty.has_anon() {
+                    return Err(DeclRefusal::AnonymousType);
+                }
+                let mut used = Vec::new();
+                ty.typars(&mut used);
+                if let Some(t) = typars.iter().find(|t| !used.contains(t)) {
+                    return Err(DeclRefusal::UnusedTypar(t.clone()));
+                }
+            }
+            TypeRepr::Record(fields) => {
+                if fields.as_slice().iter().any(|f| f.ty.has_anon()) {
+                    return Err(DeclRefusal::AnonymousType);
+                }
+                if let Some(f) = first_duplicate(fields.as_slice().iter().map(|f| &f.name)) {
+                    return Err(DeclRefusal::DuplicateField(f.clone()));
+                }
+            }
+            TypeRepr::Union(cases) => {
+                let cases = cases.as_slice();
+                if let Some(c) = first_duplicate(cases.iter().map(|c| c.name.ident())) {
+                    return Err(DeclRefusal::DuplicateCase(c.clone()));
+                }
+                // From F# 9 each case has a tester property, `IsA` for `A`.
+                // Testers must differ from each other (FS0438: `[]`'s and
+                // `Empty`'s are both `IsEmpty`) and from every case (FS0023).
+                if V::LANGUAGE.supports(LanguageFeature::UnionIsPropertiesVisible) {
+                    let mut testers: HashSet<String> = HashSet::new();
+                    for c in cases {
+                        let t = c.name.tester();
+                        if !testers.insert(t.clone()) {
+                            return Err(DeclRefusal::DuplicateTester(t));
+                        }
+                    }
+                    if let Some(c) = cases.iter().find(|c| testers.contains(c.name.as_str())) {
+                        return Err(DeclRefusal::CaseNamedAsTester(c.name.ident().clone()));
+                    }
+                }
+            }
+        }
+        Ok(TypeDefn {
+            attributes,
+            access,
+            name,
+            typars,
+            repr,
+        })
+    }
+
+    pub fn attributes(&self) -> &[Attribute<V>] {
+        &self.attributes
+    }
+
+    pub fn access(&self) -> Option<Access> {
+        self.access
+    }
+
+    pub fn name(&self) -> &EntityName {
+        &self.name
+    }
+
+    pub fn typars(&self) -> &[TyparName] {
+        &self.typars
+    }
+
+    pub fn repr(&self) -> &TypeRepr {
+        &self.repr
+    }
+}
+
+/// The first item of `items` equal to an earlier one.
+fn first_duplicate<'a, T: Eq + Hash + 'a>(items: impl Iterator<Item = &'a T>) -> Option<&'a T> {
+    let mut seen: HashSet<&T> = HashSet::new();
+    items.into_iter().find(|item| !seen.insert(item))
 }
 
 /// What a type definition defines.
@@ -232,6 +518,26 @@ pub enum TypeRepr {
     Union(Vec1<UnionCase>),
 }
 
+impl TypeRepr {
+    /// The type variables the representation's types use.
+    fn typars(&self) -> Vec<TyparName> {
+        let mut used = Vec::new();
+        match self {
+            TypeRepr::Abbrev(ty) => ty.typars(&mut used),
+            TypeRepr::Record(fields) => fields
+                .as_slice()
+                .iter()
+                .for_each(|f| f.ty.typars(&mut used)),
+            TypeRepr::Union(cases) => cases
+                .as_slice()
+                .iter()
+                .flat_map(|c| &c.fields)
+                .for_each(|f| f.ty.typars(&mut used)),
+        }
+        used
+    }
+}
+
 /// A record type's field.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordField {
@@ -240,11 +546,101 @@ pub struct RecordField {
     pub ty: Type,
 }
 
-/// A union case, or an exception's.
+/// A union case. F#'s checker refuses one named `Tags` (FS1219), a field
+/// named twice (FS3176), and a field named as F# names an unnamed one
+/// (FS3176), so [`UnionCase::new`] refuses them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnionCase {
-    pub name: Ident,
-    pub fields: Vec<UnionField>,
+    name: UnionCaseName,
+    fields: Vec<UnionField>,
+}
+
+impl UnionCase {
+    /// The case, or why F#'s checker refuses it.
+    pub fn new(name: UnionCaseName, fields: Vec<UnionField>) -> Result<Self, DeclRefusal> {
+        if name.as_str() == "Tags" {
+            return Err(DeclRefusal::CaseNamedTags);
+        }
+        // An unnamed field is `Item` in a case of one field, else `Item1`, ….
+        let n = fields.len();
+        check_fields(&fields, |i| {
+            if n == 1 {
+                "Item".to_owned()
+            } else {
+                format!("Item{}", i + 1)
+            }
+        })?;
+        Ok(UnionCase { name, fields })
+    }
+
+    pub fn name(&self) -> &UnionCaseName {
+        &self.name
+    }
+
+    pub fn fields(&self) -> &[UnionField] {
+        &self.fields
+    }
+}
+
+/// An exception's declaration, `exception E of …`. F#'s checker refuses a
+/// type parameter, which an exception cannot declare (FS0039), a field named
+/// twice (FS3176), and a field named as F# names an unnamed one (FS3176), so
+/// [`ExceptionDefn::new`] refuses them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExceptionDefn {
+    name: ExceptionName,
+    fields: Vec<UnionField>,
+}
+
+impl ExceptionDefn {
+    /// The exception, or why F#'s checker refuses it.
+    pub fn new(name: ExceptionName, fields: Vec<UnionField>) -> Result<Self, DeclRefusal> {
+        // An exception declares no type parameters.
+        let mut used = Vec::new();
+        fields.iter().for_each(|f| f.ty.typars(&mut used));
+        if let Some(t) = used.into_iter().next() {
+            return Err(DeclRefusal::UndeclaredTypar(t));
+        }
+        // An unnamed field is `Data0`, `Data1`, ….
+        check_fields(&fields, |i| format!("Data{i}"))?;
+        Ok(ExceptionDefn { name, fields })
+    }
+
+    pub fn name(&self) -> &ExceptionName {
+        &self.name
+    }
+
+    pub fn fields(&self) -> &[UnionField] {
+        &self.fields
+    }
+}
+
+/// Whether F# admits `fields`' names, where `generated(i)` names the `i`th
+/// field if it is unnamed: no name twice, and none an unnamed field's.
+fn check_fields(
+    fields: &[UnionField],
+    generated: impl Fn(usize) -> String,
+) -> Result<(), DeclRefusal> {
+    if fields.iter().any(|f| f.ty.has_anon()) {
+        return Err(DeclRefusal::AnonymousType);
+    }
+    if let Some(f) = first_duplicate(fields.iter().filter_map(|f| f.name.as_ref())) {
+        return Err(DeclRefusal::DuplicateField(f.clone()));
+    }
+    let unnamed: HashSet<String> = fields
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| f.name.is_none())
+        .map(|(i, _)| generated(i))
+        .collect();
+    match fields
+        .iter()
+        .filter_map(|f| f.name.as_ref())
+        .find(|n| unnamed.contains(n.as_str()))
+    {
+        Some(n) => Err(DeclRefusal::FieldNamedAsGenerated(n.clone())),
+        None => Ok(()),
+    }
 }
 
 /// One field of a union case, `int` or `x : int`.
@@ -330,7 +726,9 @@ pub enum Expr<V: Version> {
     /// An operator as a value, `( + )`.
     OpValue(Operator),
     /// `f x`: `func` applied to one argument, passed whole, so `f (a, b)`
-    /// with a tuple argument is printed `f ((a, b))`.
+    /// with a tuple argument is printed `f ((a, b))`. A [`Const::Unit`]
+    /// argument is printed `f ()`, which calls a method with no arguments
+    /// rather than with `()`.
     App {
         func: Box<Expr<V>>,
         arg: Box<Expr<V>>,
@@ -370,7 +768,7 @@ pub enum Expr<V: Version> {
     },
     /// `fun p1 p2 -> e`
     Lambda {
-        params: Vec1<Pat>,
+        params: Vec1<Pat<V>>,
         body: Box<Expr<V>>,
     },
     /// `function | p -> e …`
@@ -443,7 +841,7 @@ pub enum Expr<V: Version> {
     },
     /// `for p in e do e done`
     ForEach {
-        pat: Pat,
+        pat: Pat<V>,
         source: Box<ForSource<V>>,
         body: Box<Expr<V>>,
     },
@@ -688,7 +1086,7 @@ pub enum UseName<G: Gate> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LetBang<V: Version, K: Context> {
     pub gate: K::Bang,
-    pub pat: Pat,
+    pub pat: Pat<V>,
     pub value: Expr<V>,
     pub ands: Vec<AndBang<V>>,
 }
@@ -705,7 +1103,7 @@ pub struct UseBang<V: Version, K: Context> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AndBang<V: Version> {
     pub gate: V::AndBang,
-    pub pat: Pat,
+    pub pat: Pat<V>,
     pub value: Expr<V>,
 }
 
@@ -843,7 +1241,7 @@ pub enum Stmt<V: Version, K: Context> {
     },
     /// `for p in e do c done`
     ForEach {
-        pat: Pat,
+        pat: Pat<V>,
         source: ForSource<V>,
         body: Box<Comp<V, K>>,
     },
@@ -879,7 +1277,7 @@ pub struct Range<V: Version> {
 /// `| pat [when guard] -> body` in a computation expression.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompClause<V: Version, K: Context> {
-    pub pat: Pat,
+    pub pat: Pat<V>,
     pub guard: Option<Expr<V>>,
     pub body: Comp<V, K>,
 }
@@ -894,14 +1292,14 @@ pub enum ForDirection {
 /// `| pat [when guard] -> result`
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MatchClause<V: Version> {
-    pub pat: Pat,
+    pub pat: Pat<V>,
     pub guard: Option<Expr<V>>,
     pub result: Expr<V>,
 }
 
 /// A pattern.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Pat {
+pub enum Pat<V: Version> {
     /// `_`
     Wildcard,
     /// A name or dotted path, `x`, `None` or `A.B`. Whether it binds a variable
@@ -911,40 +1309,136 @@ pub enum Pat {
     /// `A.B p1 p2`
     Ctor {
         name: LongIdent,
-        args: Vec1<Pat>,
+        args: Vec1<Pat<V>>,
     },
     Const(Const),
     /// `null`
     Null,
     /// `a, b`
-    Tuple(Vec2<Pat>),
+    Tuple(Vec2<Pat<V>>),
     /// `[a; b]`
-    List(Vec<Pat>),
+    List(Vec<Pat<V>>),
     /// `[|a; b|]`
-    Array(Vec<Pat>),
+    Array(Vec<Pat<V>>),
     /// `h :: t`
     Cons {
-        head: Box<Pat>,
-        tail: Box<Pat>,
+        head: Box<Pat<V>>,
+        tail: Box<Pat<V>>,
     },
     /// `p : t`
     Typed {
-        pat: Box<Pat>,
+        pat: Box<Pat<V>>,
         ty: Type,
     },
-    /// `p as q`
+    /// `p as q`. With `p` a type test, `:? t as x`, F# binds `x` at `t`, so
+    /// the type test is printed bare.
     As {
-        pat: Box<Pat>,
-        alias: Box<Pat>,
+        pat: Box<Pat<V>>,
+        alias: AsAlias<V>,
     },
     /// `p | q`
-    Or(Box<Pat>, Box<Pat>),
+    Or(Box<Pat<V>>, Box<Pat<V>>),
     /// `p & q`
-    Ands(Vec2<Pat>),
+    Ands(Vec2<Pat<V>>),
     /// `{ A = p }`
-    Record(Vec1<(LongIdent, Pat)>),
+    Record(Vec1<(LongIdent, Pat<V>)>),
     /// `:? t`
     IsInst(Type),
+}
+
+impl<V: Version> Pat<V> {
+    /// Whether a single name in `self` is spelled as an active pattern's, or
+    /// starts with a letter whose case Unicode versions disagree on, which
+    /// FCS and our parser may read differently (#1053).
+    fn holds_unsure_name(&self) -> bool {
+        let one = |p: &Pat<V>| p.holds_unsure_name();
+        match self {
+            Pat::Name(path) => match path.segments() {
+                [only] => {
+                    let text = only.as_str();
+                    crate::names::is_active_pattern_spelling(text)
+                        || !(text.starts_with(|c: char| c.is_ascii())
+                            || VarName::new(only.clone()).is_ok()
+                            || crate::names::leads_stably_uppercase(text))
+                }
+                _ => false,
+            },
+            Pat::Wildcard | Pat::Const(_) | Pat::Null | Pat::IsInst(_) => false,
+            Pat::Ctor { args, .. } => args.as_slice().iter().any(one),
+            Pat::Tuple(ps) | Pat::Ands(ps) => ps.as_slice().iter().any(one),
+            Pat::List(ps) | Pat::Array(ps) => ps.iter().any(one),
+            Pat::Cons { head, tail } => one(head) || one(tail),
+            Pat::Typed { pat, .. } => one(pat),
+            Pat::As { pat, alias } => {
+                one(pat)
+                    || match alias {
+                        AsAlias::Var(_) => false,
+                        AsAlias::Pat(a) => one(a.pat()),
+                    }
+            }
+            Pat::Or(l, r) => one(l) || one(r),
+            Pat::Record(fs) => fs.as_slice().iter().any(|(_, p)| one(p)),
+        }
+    }
+}
+
+/// What follows `as` in a pattern.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AsAlias<V: Version> {
+    /// `p as x`: a variable, the only alias before F# 6.
+    Var(VarName),
+    /// `p as (q)`: any other pattern (F# 6).
+    Pat(AliasPat<V>),
+}
+
+/// A pattern after `as` other than a variable. F# reads `p as (x)` as
+/// `p as x`, so [`AliasPat::new`] refuses a single name unless it starts
+/// with a capital every Unicode version agrees on: a variable is
+/// [`AsAlias::Var`]'s, and on an uncertain initial FCS and our parser may
+/// read the name differently. It refuses a name spelled as an active
+/// pattern's too (FS1209).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AliasPat<V: Version> {
+    gate: V::NonVariablePatternsToRightOfAsPatterns,
+    pat: Box<Pat<V>>,
+}
+
+impl<V: Version> AliasPat<V> {
+    /// `pat` as an alias, or `pat` back if it is a variable.
+    pub fn new(
+        gate: V::NonVariablePatternsToRightOfAsPatterns,
+        pat: Pat<V>,
+    ) -> Result<Self, Box<Pat<V>>> {
+        // A single name is a variable, `AsAlias::Var`'s, unless it starts with
+        // a capital F# and our parser both read as one; anywhere in the
+        // alias, a name spelled as an active pattern's would define one,
+        // which FCS refuses of a value that is no function (FS1209), and one
+        // on an uncertain initial FCS and our parser may read differently.
+        let bare_var = match &pat {
+            Pat::Name(path) => match path.segments() {
+                [only] => !crate::names::leads_stably_uppercase(only.as_str()),
+                _ => false,
+            },
+            _ => false,
+        };
+        let refused = bare_var || pat.holds_unsure_name();
+        if refused {
+            Err(Box::new(pat))
+        } else {
+            Ok(AliasPat {
+                gate,
+                pat: Box::new(pat),
+            })
+        }
+    }
+
+    pub fn gate(&self) -> V::NonVariablePatternsToRightOfAsPatterns {
+        self.gate
+    }
+
+    pub fn pat(&self) -> &Pat<V> {
+        &self.pat
+    }
 }
 
 /// A type.
@@ -964,6 +1458,35 @@ pub enum Type {
     Array { rank: ArrayRank, elem: Box<Type> },
     /// `_`
     Anon,
+}
+
+impl Type {
+    /// Whether `self` holds `_` anywhere.
+    fn has_anon(&self) -> bool {
+        match self {
+            Type::Anon => true,
+            Type::Name(_) | Type::Var(_) => false,
+            Type::App { args, .. } => args.as_slice().iter().any(Type::has_anon),
+            Type::Fun { arg, ret } => arg.has_anon() || ret.has_anon(),
+            Type::Tuple(ts) => ts.as_slice().iter().any(Type::has_anon),
+            Type::Array { elem, .. } => elem.has_anon(),
+        }
+    }
+
+    /// Push the type variables `self` uses onto `out`.
+    fn typars(&self, out: &mut Vec<TyparName>) {
+        match self {
+            Type::Name(_) | Type::Anon => {}
+            Type::Var(t) => out.push(t.clone()),
+            Type::App { args, .. } => args.as_slice().iter().for_each(|a| a.typars(out)),
+            Type::Fun { arg, ret } => {
+                arg.typars(out);
+                ret.typars(out);
+            }
+            Type::Tuple(ts) => ts.as_slice().iter().for_each(|t| t.typars(out)),
+            Type::Array { elem, .. } => elem.typars(out),
+        }
+    }
 }
 
 /// An array type's rank: 1 for `t[]`, 2 for `t[,]`, up to 32, .NET's limit.

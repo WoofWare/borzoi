@@ -20,9 +20,14 @@ construct must type-check at its version and be rejected one version below
 it, by FCS's parser's FS3350 or, for a gate only the checker enforces, by
 its checker (`print_roundtrip::gates`). The checker cannot grade a tree with
 unbound names, so it grades the trees written over `print_roundtrip::check`'s
-typed prelude: the gates, and the exhaustive table of computation-expression
-statements nested in each other, at every version, where it must report no
-error. A computation expression's body takes the context it sits in (a
+typed prelude: the gates, the exhaustive table of computation-expression
+statements nested in each other, and random trees drawn for a type out of
+the prelude's names (`print_roundtrip::typed`), at every version, where it
+must report no error. That generator keeps out only what the checker refuses
+for name resolution's or inference's reasons, so an error it finds is a hole
+in the types or a printer bug, and each draw is capped in filter
+rejections, so a filter that cannot pass fails naming itself rather than
+spinning. A computation expression's body takes the context it sits in (a
 builder's braces or a list's brackets, `tree::Context`), as a tree takes its
 version, because the checker reads the two differently. The trees come from a generator over the
 whole tree at every version, from exhaustive tables of keywords, short

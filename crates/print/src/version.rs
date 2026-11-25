@@ -85,6 +85,10 @@ pub trait Version:
 
     /// `use! _ = e` (F# 10). Only FCS's checker refuses it below F# 10.
     type UseBangBindingValueDiscard: Gate;
+
+    /// `p as q` with `q` a pattern other than a variable (F# 6). Only FCS's
+    /// checker refuses it below F# 6.
+    type NonVariablePatternsToRightOfAsPatterns: Gate;
 }
 
 macro_rules! versions {
@@ -114,43 +118,43 @@ versions! {
     /// F# 4.6, the oldest version `borzoi-cst` parses.
     V4_6:
         available []
-        unavailable [AccessorFunctionShorthand, AndBang, WhileBang, ImplicitYield, TryWithInSeqExpression, UseBangBindingValueDiscard];
+        unavailable [AccessorFunctionShorthand, AndBang, WhileBang, ImplicitYield, TryWithInSeqExpression, UseBangBindingValueDiscard, NonVariablePatternsToRightOfAsPatterns];
     /// F# 4.7.
     V4_7:
         available [ImplicitYield]
-        unavailable [AccessorFunctionShorthand, AndBang, WhileBang, TryWithInSeqExpression, UseBangBindingValueDiscard];
+        unavailable [AccessorFunctionShorthand, AndBang, WhileBang, TryWithInSeqExpression, UseBangBindingValueDiscard, NonVariablePatternsToRightOfAsPatterns];
     /// F# 5.0.
     V5_0:
         available [AndBang, ImplicitYield]
-        unavailable [AccessorFunctionShorthand, WhileBang, TryWithInSeqExpression, UseBangBindingValueDiscard];
+        unavailable [AccessorFunctionShorthand, WhileBang, TryWithInSeqExpression, UseBangBindingValueDiscard, NonVariablePatternsToRightOfAsPatterns];
     /// F# 6.0.
     V6_0:
-        available [AndBang, ImplicitYield]
+        available [AndBang, ImplicitYield, NonVariablePatternsToRightOfAsPatterns]
         unavailable [AccessorFunctionShorthand, WhileBang, TryWithInSeqExpression, UseBangBindingValueDiscard];
     /// F# 7.0.
     V7_0:
-        available [AndBang, ImplicitYield]
+        available [AndBang, ImplicitYield, NonVariablePatternsToRightOfAsPatterns]
         unavailable [AccessorFunctionShorthand, WhileBang, TryWithInSeqExpression, UseBangBindingValueDiscard];
     /// F# 8.0.
     V8_0:
-        available [AccessorFunctionShorthand, AndBang, WhileBang, ImplicitYield, TryWithInSeqExpression]
+        available [AccessorFunctionShorthand, AndBang, WhileBang, ImplicitYield, TryWithInSeqExpression, NonVariablePatternsToRightOfAsPatterns]
         unavailable [UseBangBindingValueDiscard];
     /// F# 9.0.
     V9_0:
-        available [AccessorFunctionShorthand, AndBang, WhileBang, ImplicitYield, TryWithInSeqExpression]
+        available [AccessorFunctionShorthand, AndBang, WhileBang, ImplicitYield, TryWithInSeqExpression, NonVariablePatternsToRightOfAsPatterns]
         unavailable [UseBangBindingValueDiscard];
     /// F# 10.0.
     V10_0:
-        available [AccessorFunctionShorthand, AndBang, WhileBang, ImplicitYield, TryWithInSeqExpression, UseBangBindingValueDiscard]
+        available [AccessorFunctionShorthand, AndBang, WhileBang, ImplicitYield, TryWithInSeqExpression, UseBangBindingValueDiscard, NonVariablePatternsToRightOfAsPatterns]
         unavailable [];
     /// F# 11.0, what a project without `<LangVersion>` gets
     /// ([`LanguageVersion::DEFAULT`]).
     V11_0:
-        available [AccessorFunctionShorthand, AndBang, WhileBang, ImplicitYield, TryWithInSeqExpression, UseBangBindingValueDiscard]
+        available [AccessorFunctionShorthand, AndBang, WhileBang, ImplicitYield, TryWithInSeqExpression, UseBangBindingValueDiscard, NonVariablePatternsToRightOfAsPatterns]
         unavailable [];
     /// `<LangVersion>preview</LangVersion>`.
     Preview:
-        available [AccessorFunctionShorthand, AndBang, WhileBang, ImplicitYield, TryWithInSeqExpression, UseBangBindingValueDiscard]
+        available [AccessorFunctionShorthand, AndBang, WhileBang, ImplicitYield, TryWithInSeqExpression, UseBangBindingValueDiscard, NonVariablePatternsToRightOfAsPatterns]
         unavailable [];
 }
 
