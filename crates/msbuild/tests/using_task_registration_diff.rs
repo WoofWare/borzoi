@@ -222,9 +222,15 @@ fn attribute_text(value: &str) -> String {
 /// in the element the rejection spans), so MSBuild expands it as it did in
 /// the document, not the walk's expansion of it. `None` for a cause this
 /// differential does not isolate.
+///
+/// `has_children`: whether the claimed task has a child element. MSBuild
+/// refuses a `TaskFactory` of `AssemblyTaskFactory` or `TaskHostFactory`
+/// only under one, so the replay keeps one exactly where the task had one,
+/// and never supplies the precondition of the refusal it checks.
 fn alone(
     cause: &borzoi_msbuild::RejectionCause,
     raw: Option<&str>,
+    has_children: bool,
 ) -> Option<(String, &'static str)> {
     use borzoi_msbuild::RejectionCause;
     Some(match cause {
@@ -246,8 +252,9 @@ fn alone(
                 ),
                 "TaskFactory" => (
                     format!(
-                        "<UsingTask TaskName=\"X\" TaskFactory=\"{v}\" AssemblyFile=\"y.dll\">\
-                         <Task>x</Task></UsingTask>"
+                        "<UsingTask TaskName=\"X\" TaskFactory=\"{v}\" AssemblyFile=\"y.dll\">{}\
+                         </UsingTask>",
+                        if has_children { "<Task>x</Task>" } else { "" }
                     ),
                     "TaskFactory",
                 ),
@@ -342,7 +349,8 @@ fn assert_msbuild_refuses_alone(
             throw_site(xml, rejection.span.start, expression)
         }
         _ => {
-            let Some((body, attribute)) = alone(cause, raw.as_deref()) else {
+            let has_children = task_has_children(xml, rejection.span.start);
+            let Some((body, attribute)) = alone(cause, raw.as_deref(), has_children) else {
                 panic!("a certain refusal the differential does not isolate: {cause:?}: {xml}");
             };
             // An illegal condition's own template is the gate.
@@ -419,28 +427,42 @@ fn colliding_parameters(xml: &str, at: usize) -> String {
     format!("<{first_name} /><{second_name} />")
 }
 
-/// Whether the `<UsingTask>` holding the element starting at `at` in `xml`
-/// has a `<ParameterGroup>` as its first child, and a `<Task>` as its last:
-/// where MSBuild reads each. Both true for an element outside a task.
-fn child_places(xml: &str, at: usize) -> (bool, bool) {
+/// The element children of the `<UsingTask>` holding the element starting at
+/// `at` in `xml`, as their tag names; `None` for an element outside a task.
+fn task_children(xml: &str, at: usize) -> Option<Vec<String>> {
     let document = borzoi_msbuild::document::parse(xml).expect("well-formed");
     let root = document.root_element();
-    let Some(task) = document
+    let task = document
         .descendants()
         .find(|node| node.is_element() && node.range().start == at)
         .and_then(|element| {
             element
                 .ancestors()
                 .find(|node| node.parent_element() == Some(root))
-        })
-    else {
+        })?;
+    Some(
+        task.children()
+            .filter(|node| node.is_element())
+            .map(|node| node.tag_name().name().to_owned())
+            .collect(),
+    )
+}
+
+/// Whether the `<UsingTask>` holding the element starting at `at` in `xml`
+/// has a child element.
+fn task_has_children(xml: &str, at: usize) -> bool {
+    task_children(xml, at).is_some_and(|children| !children.is_empty())
+}
+
+/// Whether the `<UsingTask>` holding the element starting at `at` in `xml`
+/// has a `<ParameterGroup>` as its first child, and a `<Task>` as its last:
+/// where MSBuild reads each. Both true for an element outside a task.
+fn child_places(xml: &str, at: usize) -> (bool, bool) {
+    let Some(children) = task_children(xml, at) else {
         return (true, true);
     };
-    let children: Vec<_> = task.children().filter(|node| node.is_element()).collect();
-    let named = |node: Option<&roxmltree::Node<'_, '_>>, name: &str| {
-        node.is_some_and(|node| node.tag_name().name() == name)
-    };
-    let has = |name: &str| children.iter().any(|node| node.tag_name().name() == name);
+    let named = |child: Option<&String>, name: &str| child.is_some_and(|child| child == name);
+    let has = |name: &str| children.iter().any(|child| child == name);
     (
         !has("ParameterGroup") || named(children.first(), "ParameterGroup"),
         !has("Task") || named(children.last(), "Task"),
@@ -1218,6 +1240,16 @@ fn hand_picked_registrations() {
         // ([`a_child_a_parse_configuration_may_skip_needs_no_certain_factory`]).
         (
             "<UsingTask TaskName=\"X\" AssemblyFile=\"y.dll\"><Extension /></UsingTask>".to_owned(),
+            true,
+            Some(Certain),
+        ),
+        // A childless task's `TaskHostFactory` is no refusal, in a project
+        // another task rejects: every certain diagnostic is replayed alone
+        // with the task's children as they were (`alone`).
+        (
+            "<UsingTask TaskName=\"Y\" TaskFactory=\"TaskHostFactory\" AssemblyFile=\"y.dll\" />\
+             <UsingTask TaskName=\"$(Empty)\" AssemblyFile=\"y.dll\" />"
+                .to_owned(),
             true,
             Some(Certain),
         ),
