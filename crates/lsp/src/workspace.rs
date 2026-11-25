@@ -2111,6 +2111,7 @@ impl Workspace {
             Some(evaluated) => ProjectEvaluation::Evaluated {
                 parsed: &evaluated.parsed,
                 not_an_inner_build: evaluated.not_an_inner_build,
+                declared_tfms_undecided: evaluated.declared_tfms_undecided,
             },
             None => ProjectEvaluation::Failed,
         };
@@ -2600,20 +2601,13 @@ fn resolve_node_uncached(
         // so none validates a restore's seed, and the node's output declines
         // with its TFM. No inner build can be enumerated to show which of this
         // evaluation's edges survive into the one the compiler sees, so a
-        // compile closure takes none, and says so.
-        return match purpose {
-            GraphWalkPurpose::DeclaredStructure => NodeResult::Resolved {
-                edges: outer_edges,
-                tfm: NodeTfm::Unresolved,
-                output_name: None,
-                references_uncertain: outer_suppressed,
-            },
-            GraphWalkPurpose::CompileClosure => NodeResult::Resolved {
-                edges: Vec::new(),
-                tfm: NodeTfm::Unresolved,
-                output_name: None,
-                references_uncertain: true,
-            },
+        // compile closure takes none (`references_suppressed`, the predicate
+        // the deferral message explains).
+        return NodeResult::Resolved {
+            edges: outer_edges,
+            tfm: NodeTfm::Unresolved,
+            output_name: None,
+            references_uncertain: outer_suppressed,
         };
     }
     let declared = &outer.declared_tfms;
@@ -2808,6 +2802,7 @@ fn references_suppressed(evaluated: &EvaluatedProject, purpose: GraphWalkPurpose
         && ProjectEvaluation::Evaluated {
             parsed: &evaluated.parsed,
             not_an_inner_build: evaluated.not_an_inner_build,
+            declared_tfms_undecided: evaluated.declared_tfms_undecided,
         }
         .drops_reference_edges()
 }
@@ -3501,6 +3496,27 @@ mod tests {
             .find(|n| paths_equal(&n.path, &proj))
             .expect("entry node");
         assert!(node.references.is_empty(), "{:?}", node.references);
+        // The edges it drops are the ones it reports dropping: the
+        // explanation and the walk read one predicate.
+        let extra = HashMap::from([("TargetFramework".to_string(), String::new())]);
+        let mut ws =
+            Workspace::with_env_and_extra_build_properties(SdkDiscoveryEnv::default(), extra);
+        let evaluation = ws.project_evaluation(&proj);
+        assert!(evaluation.drops_reference_edges());
+        let deferrals = crate::project_deferral::deferrals(
+            evaluation,
+            crate::project_deferral::FoldOutcome::Unknown,
+        );
+        let edges = deferrals
+            .iter()
+            .find(|d| {
+                d.capability() == crate::project_deferral::DeferredCapability::ProjectReferenceEdges
+            })
+            .expect("the dropped edges are reported");
+        assert!(
+            edges.causes().recorded()[0].contains("target frameworks"),
+            "{edges:?}"
+        );
         // The entry's served framework says the same: no current framework
         // was established, so no restored target's assemblies are served.
         let extra = HashMap::from([("TargetFramework".to_string(), String::new())]);
