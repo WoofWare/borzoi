@@ -17,7 +17,9 @@
 
 use std::collections::HashMap;
 
-use borzoi_msbuild::{InexactUnset, ParsedProject, PropertyRead, target_frameworks};
+use borzoi_msbuild::{
+    InexactUnset, ParsedProject, PropertyRead, target_frameworks, target_frameworks_undecided,
+};
 
 /// The served-TFM decision for one project, as computed from its first
 /// (unseeded, or caller-seeded) evaluation.
@@ -122,7 +124,7 @@ impl TfmChoice {
 ///    '$(TargetFramework)' == ''`, so a non-empty singular is a single-target
 ///    build even when the plural is also set. Pass 1 already evaluated under
 ///    it — no second pass;
-/// 3. else the **first** [`target_frameworks`] entry, under which the project
+/// 3. else, the plural trusted, the **first** [`target_frameworks`] entry, under which the project
 ///    is re-evaluated with `TargetFramework` seeded as a read-only global —
 ///    exactly what an MSBuild inner build does — so `$(TargetFramework)`-gated
 ///    defines and Compile items become evaluable instead of flipping the
@@ -134,8 +136,10 @@ impl TfmChoice {
 ///    serve — pairing first-declared parses with whatever the env's no-TFM
 ///    fallback selects (the E5 incoherence). Pass 1 is kept with every
 ///    TFM-derived conclusion withheld instead ([`TfmChoice::pass1_is_the_build`]);
-/// 4. else [`TfmChoice::NoneDeclared`] (no TFM declared anywhere): keep pass 1;
-///    or, when the plural is untrusted, [`TfmChoice::PluralUnknown`].
+/// 4. else, when the plural is untrusted (it may declare other frameworks in
+///    the real build), [`TfmChoice::PluralUnknown`], declared entries or none:
+///    its first is no framework a build is known to declare;
+/// 5. else [`TfmChoice::NoneDeclared`] (no TFM declared anywhere): keep pass 1.
 ///
 /// The one extra parse in case 3 happens once per multi-targeted project.
 pub(crate) fn tfm_choice(pass1: &ParsedProject, extras: &HashMap<String, String>) -> TfmChoice {
@@ -153,16 +157,22 @@ pub(crate) fn tfm_choice(pass1: &ParsedProject, extras: &HashMap<String, String>
             may_dispatch: !pass1.target_frameworks.is_empty() || plural_untrusted(pass1),
         };
     }
+    // An untrusted plural may declare other frameworks in the real build, or
+    // none of these: its first is no framework to build an inner evaluation
+    // under.
+    if plural_untrusted(pass1) {
+        return TfmChoice::PluralUnknown;
+    }
     match target_frameworks(pass1).first() {
         Some(first) => TfmChoice::Reseed(first.clone()),
-        None if plural_untrusted(pass1) => TfmChoice::PluralUnknown,
+        None if target_frameworks_undecided(pass1) => TfmChoice::PluralUnknown,
         None => TfmChoice::NoneDeclared,
     }
 }
 
 /// Whether the plural `TargetFrameworks` is too weakly established to call
 /// unset, by the same classification [`tfm_untrusted`] gives the singular.
-fn plural_untrusted(parsed: &ParsedProject) -> bool {
+pub(crate) fn plural_untrusted(parsed: &ParsedProject) -> bool {
     read_untrusted(parsed.property("TargetFrameworks"))
 }
 
@@ -331,4 +341,36 @@ pub(crate) fn lookup_property_ci<'a>(
     map.iter()
         .find(|(k, _)| k.eq_ignore_ascii_case(name))
         .map(|(_, v)| v.as_str())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An untrusted plural names no framework to reseed with: the real build
+    /// may declare others, as a write under a gate the walk cannot decide
+    /// would here.
+    #[test]
+    fn an_untrusted_plural_reseeds_no_framework() {
+        let source = r#"<Project><PropertyGroup>
+    <TargetFrameworks>net8.0</TargetFrameworks>
+    <TargetFrameworks Condition="'É' == 'é'">net9.0</TargetFrameworks>
+  </PropertyGroup></Project>"#;
+        let pass1 = borzoi_msbuild::parse_fsproj(
+            &borzoi_msbuild::ProjectFile::buffer(std::path::Path::new("/repo/Demo.fsproj"), source)
+                .unwrap(),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert!(
+            plural_untrusted(&pass1),
+            "{:?}",
+            pass1.property("TargetFrameworks")
+        );
+        assert_eq!(
+            tfm_choice(&pass1, &HashMap::new()),
+            TfmChoice::PluralUnknown
+        );
+    }
 }
