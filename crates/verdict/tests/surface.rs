@@ -9,7 +9,10 @@
 //! cannot change the surface: doc comments, and the statements of function
 //! bodies. What a body holds that can reach the surface is listed: each item
 //! declared in it (an impl there adds methods callable from outside), listed
-//! as a top-level one is, and each macro it invokes, which may expand to one.
+//! as a top-level one is, and each macro it invokes, with its arguments, which
+//! may expand to one or hold one. The walk visits every expression, type and
+//! pattern of the body, so a block declaring items is found wherever it sits;
+//! only a macro's arguments are opaque to it, and those are listed whole.
 //! Nothing else is modelled or left out, so no dimension of the surface can be
 //! missed.
 //!
@@ -32,7 +35,7 @@ const SURFACE: &str = r#"
 enum Reading < C > { Values , Ended , Unknown (C) , }
 impl < T , C , I : Iterator < Item = Verdict < T , C > > > Iterator for UntilUnknown < I , C > { }
 impl < T , C , I : Iterator < Item = Verdict < T , C > > > Iterator for UntilUnknown < I , C > { } => fn next (& mut self) -> Option < T > { }
-impl < T , C , I : Iterator < Item = Verdict < T , C > > > Iterator for UntilUnknown < I , C > { } => fn next => macro matches !
+impl < T , C , I : Iterator < Item = Verdict < T , C > > > Iterator for UntilUnknown < I , C > { } => fn next => macro matches ! (self . state , Reading :: Values)
 impl < T , C , I : Iterator < Item = Verdict < T , C > > > Iterator for UntilUnknown < I , C > { } => fn size_hint (& self) -> (usize , Option < usize >) { }
 impl < T , C , I : Iterator < Item = Verdict < T , C > > > Iterator for UntilUnknown < I , C > { } => type Item = T ;
 impl < T , C , V : FromIterator < T > > FromIterator < Verdict < T , C > > for Verdict < V , C > { }
@@ -139,7 +142,8 @@ fn item_attributes(item: &mut syn::Item) -> Option<&mut Vec<syn::Attribute>> {
 
 /// What a function body holds that can reach the surface: the items declared
 /// in it (an impl there adds methods callable from outside), and the macros it
-/// invokes (a macro may expand to items), by path.
+/// invokes, whole (a macro may expand to items, and its arguments, which the
+/// walk cannot see into, may declare them).
 #[derive(Default)]
 struct BodyContents {
     items: Vec<syn::Item>,
@@ -153,7 +157,9 @@ impl<'ast> syn::visit::Visit<'ast> for BodyContents {
     }
 
     fn visit_macro(&mut self, mac: &'ast syn::Macro) {
-        self.macros.insert(mac.path.to_token_stream().to_string());
+        // The whole invocation: its arguments are opaque to the walk, and may
+        // hold a block declaring items.
+        self.macros.insert(mac.to_token_stream().to_string());
     }
 }
 
@@ -169,7 +175,7 @@ fn body_contents(block: &syn::Block) -> BodyContents {
 fn list_body(context: &str, block: &syn::Block, lines: &mut Vec<String>) {
     let contents = body_contents(block);
     for mac in &contents.macros {
-        lines.push(format!("{context} => macro {mac} !"));
+        lines.push(format!("{context} => macro {mac}"));
     }
     let mut nested = Vec::new();
     list_items(contents.items, &mut nested);
@@ -264,6 +270,7 @@ struct S<C> {
 impl<T> E<T> {
     /// Docs.
     pub fn m(&self, f: impl FnOnce() -> T) -> Option<T> {
+        debug_assert!(true);
         Some(f())
     }
 }
@@ -333,6 +340,14 @@ fn the_listing_moves_with_every_change_to_the_surface() {
         FIXTURE.replace("Some(f())", "{ let _ = { fn inner() {} }; Some(f()) }"),
         FIXTURE.replace("Some(f())", "include!(\"more.rs\"); Some(f())"),
         FIXTURE.replace("Some(f())", "Some(core::convert::identity(stamp!(f())))"),
+        // A macro's arguments, which the walk cannot see into: a block in them
+        // may declare an impl.
+        FIXTURE.replace(
+            "debug_assert!(true)",
+            "debug_assert!({ mod m { impl<T> super::super::E<T> { pub fn w(&self) -> bool { true } } } true })",
+        ),
+        FIXTURE.replace("debug_assert!(true)", "debug_assert!(false)"),
+
         // A crate attribute.
         FIXTURE.replace(
             "#![no_std]",

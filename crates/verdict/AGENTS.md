@@ -17,15 +17,16 @@ doctests spell the absences out. A reading can be added under any name, so
 `tests/surface.rs` holds all of `src/lib.rs` but its doc comments and
 function bodies (every item, attribute, variant, field and signature, `cfg`
 ones included, and of each body the items it declares and the macros it
-invokes) to an exact list. Do not add any such
+invokes, arguments and all) to an exact list. Do not add any such
 reading; a consumer that needs one writes the `match` that makes its choice
 visible.
 
 Every operation's laws are in its doc comment, and `tests/laws.rs` checks
 each one exhaustively over a finite domain (every value, cause and function
 on it). Collecting is also checked under every way a `FromIterator` target
-can read what it is offered (all of it, none, a prefix, then asking again
-after the end) and over a source that is not fused. A new operation comes
+can read what it is offered (all of it, none, a prefix, as many as the size
+hint promises, then asking again after the end) and over a source that is not
+fused. A new operation comes
 with its laws, their exhaustive check and its line in `tests/surface.rs`.
 Add an operation only with the consumer that needs it.
 

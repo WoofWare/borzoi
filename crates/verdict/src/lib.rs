@@ -258,10 +258,17 @@ impl<T, C> Verdict<Option<T>, C> {
 /// again. A source that ends and then yields more is read only to its first
 /// end.
 ///
+/// The collection is offered a size hint whose lower bound is zero, since
+/// the source may hold an `Unknown`, after which no value is offered, and
+/// whose upper bound is the source's.
+///
 /// Law: the result is `Unknown(c)` for the leftmost `Unknown(c)` of the
-/// source, else `Certain(values.collect())`. For a collection that reads
-/// every value it is offered (a `Vec`), that is the fold of [`Verdict::zip`]
-/// from `Certain` of the empty collection, appending each certain value.
+/// source, else `Certain` of what the collection makes of the source's values
+/// offered under that size hint. For a collection whose result depends only on
+/// the values it reads, that is `Certain(values.collect())`; for one that also
+/// reads every value it is offered (a `Vec`), it is the fold of
+/// [`Verdict::zip`] from `Certain` of the empty collection, appending each
+/// certain value.
 impl<T, C, V: FromIterator<T>> FromIterator<Verdict<T, C>> for Verdict<V, C> {
     fn from_iter<I: IntoIterator<Item = Verdict<T, C>>>(iter: I) -> Self {
         let mut source = UntilUnknown {

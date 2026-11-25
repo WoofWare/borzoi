@@ -236,7 +236,21 @@ const THROUGH_ZERO: u8 = 3;
 /// Reads to the end, then asks three more times; anything it is given after
 /// the end is recorded as `99`, which no model produces.
 const ASKS_AFTER_END: u8 = 4;
-const DISCIPLINES: [u8; 5] = [EVERY, NOTHING, FIRST, THROUGH_ZERO, ASKS_AFTER_END];
+/// Reads as many values as the lower bound of the size hint it is offered,
+/// as a collection that preallocates and fills may.
+const LOWER_BOUND: u8 = 5;
+/// Reads to the end, recording `99` if it read more values than the upper
+/// bound of the size hint it was offered allowed.
+const WITHIN_UPPER_BOUND: u8 = 6;
+const DISCIPLINES: [u8; 7] = [
+    EVERY,
+    NOTHING,
+    FIRST,
+    THROUGH_ZERO,
+    ASKS_AFTER_END,
+    LOWER_BOUND,
+    WITHIN_UPPER_BOUND,
+];
 
 /// A collection reading by discipline `D`, holding what it read.
 #[derive(Debug, PartialEq)]
@@ -266,6 +280,17 @@ impl<const D: u8> FromIterator<u8> for Collector<D> {
                     }
                 }
             }
+            LOWER_BOUND => {
+                let lower = iter.size_hint().0;
+                read.extend(iter.take(lower));
+            }
+            WITHIN_UPPER_BOUND => {
+                let upper = iter.size_hint().1;
+                read.extend(&mut iter);
+                if upper.is_some_and(|upper| read.len() > upper) {
+                    read.push(99);
+                }
+            }
             _ => unreachable!("a discipline of DISCIPLINES"),
         }
         Collector(read)
@@ -276,8 +301,10 @@ impl<const D: u8> FromIterator<u8> for Collector<D> {
 /// `values` and nothing after them.
 fn model(discipline: u8, values: &[u8]) -> Vec<u8> {
     match discipline {
-        EVERY | ASKS_AFTER_END => values.to_vec(),
-        NOTHING => vec![],
+        EVERY | ASKS_AFTER_END | WITHIN_UPPER_BOUND => values.to_vec(),
+        // The collection is offered a lower bound of zero: the source may hold
+        // an `Unknown`, after which no value is offered.
+        NOTHING | LOWER_BOUND => vec![],
         FIRST => values.iter().copied().take(1).collect(),
         THROUGH_ZERO => match values.iter().position(|&x| x == 0) {
             Some(at) => values[..=at].to_vec(),
@@ -327,6 +354,16 @@ impl Iterator for Source {
         self.handed_out += usize::from(item.is_some());
         item
     }
+
+    /// Exact before the end, which is what a collection would trust.
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        if self.next < self.items.len() || !self.ended {
+            let left = self.items.len().saturating_sub(self.next);
+            (left, Some(left))
+        } else {
+            (0, None)
+        }
+    }
 }
 
 /// The documented answer for collecting `seq`, by discipline `D`.
@@ -374,12 +411,18 @@ fn verdict_collect_gives_the_leftmost_unknown_however_the_collection_reads() {
     let probe = [1, 0, 1];
     let models: std::collections::BTreeSet<_> =
         DISCIPLINES.iter().map(|&d| model(d, &probe)).collect();
-    assert_eq!(models.len(), 4, "EVERY and ASKS_AFTER_END model alike");
+    assert_eq!(
+        models.len(),
+        4,
+        "EVERY, ASKS_AFTER_END and WITHIN_UPPER_BOUND model alike, as do NOTHING and LOWER_BOUND"
+    );
     check_discipline::<EVERY>();
     check_discipline::<NOTHING>();
     check_discipline::<FIRST>();
     check_discipline::<THROUGH_ZERO>();
     check_discipline::<ASKS_AFTER_END>();
+    check_discipline::<LOWER_BOUND>();
+    check_discipline::<WITHIN_UPPER_BOUND>();
 }
 
 #[test]
