@@ -57,11 +57,12 @@ filter_prefixes() {
     stats)     echo "tools/stats" ;;
     fcs)       echo "tools/fcs-dump tools/fcs-dump-legacy" ;;
     sidecar)   echo "tools/csharp-sidecar tools/csharp-sidecar.tests" ;;
-    # crates/spawn (every test harness shells out through it) and
-    # crates/oracle-harness (drives every resident oracle) underpin the whole
-    # suite, so — like the build-config entries — a change to either runs
+    # crates/spawn (every test harness shells out through it),
+    # crates/oracle-harness (drives every resident oracle) and crates/verdict
+    # (the answer types the evaluating crates publish) underpin the whole
+    # suite, so — like the build-config entries — a change to any of them runs
     # everything. Each still has its own test job, gated on `workspace`.
-    workspace) echo "Cargo.toml Cargo.lock flake.nix flake.lock nix rust-toolchain.toml .github/workflows tools/ci crates/spawn crates/oracle-harness" ;;
+    workspace) echo "Cargo.toml Cargo.lock flake.nix flake.lock nix rust-toolchain.toml .github/workflows tools/ci crates/spawn crates/oracle-harness crates/verdict" ;;
     *)         echo "filter_prefixes: unknown filter '$1'" >&2; exit 2 ;;
   esac
 }

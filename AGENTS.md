@@ -13,7 +13,7 @@ findings already known to be out of scope, none of which this file repeats.
 
 ## Workspace layout
 
-A Cargo workspace with ten crates under `crates/` and two tools:
+A Cargo workspace with eleven crates under `crates/` and two tools:
 
 - `crates/cst/` — `borzoi-cst`: lexer, lex-filter (offside rewriter),
   recursive-descent parser, the lossless tree, and the typed AST, both as the
@@ -28,6 +28,9 @@ A Cargo workspace with ten crates under `crates/` and two tools:
   warm-cache restore, each either identical to `dotnet restore` or declining.
 - `crates/spawn/` — `borzoi-spawn`: the one place a child process is spawned
   (`clippy.toml` bans `Command::{spawn,status,output}` everywhere else).
+- `crates/verdict/` — `borzoi-verdict`: `Verdict` and `Lookup`, answers
+  that can be incomplete as types with no reading as complete (no conversion
+  to or from `Option`/`bool`). No dependencies.
 - `crates/oracle-harness/` — `borzoi-oracle-harness`, test-only: resident
   oracle children, exact manifests, the XML nesting pump, the hostile-value
   library.
