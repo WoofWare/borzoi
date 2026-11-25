@@ -68,9 +68,9 @@
 
 use std::collections::BTreeSet;
 
-use borzoi_assembly::existence::{
-    ExistenceIndex, PickleLayer, PickledEntityKind, PickledEntityRow,
-};
+#[cfg(any(test, feature = "test-support"))]
+use borzoi_assembly::existence::{ExistenceIndex, PickleLayer};
+use borzoi_assembly::existence::{PickledEntityKind, PickledEntityRow};
 use borzoi_cst::syntax::{
     AstNode, Attribute, AttributeList, ExceptionDefnDecl, Expr, ImplicitCtor, LongIdent,
     MemberDefn, ModuleDecl, ModuleOrNamespace, ModuleOrNamespaceKind, SyntaxKind, SyntaxNode,
@@ -921,6 +921,10 @@ impl FileWalk<'_> {
                         pending.push((inside, inner));
                     }
                     ModuleDecl::Types(t) => {
+                        // A group is its definitions, nothing else.
+                        if !consumed(t.syntax(), |n| TypeDefn::can_cast(n.kind()), |_| false) {
+                            return Err(self.unreadable(Leaf::TypeDefinition));
+                        }
                         for defn in t.defns() {
                             self.type_defn(&scope, &defn)?;
                         }
