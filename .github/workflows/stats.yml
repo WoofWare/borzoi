@@ -474,7 +474,7 @@ jobs:
       id-token: write
     environment:
       name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+      url: ${{ steps.deployment-retry.outputs.page_url || steps.deployment.outputs.page_url }}
     steps:
       # The shared `pages` lock covers the fetch, render, and deployment. Every
       # contender therefore renders the then-current branch tip; an older
@@ -534,8 +534,32 @@ jobs:
           name: github-pages-${{ github.run_attempt }}
           path: ${{ runner.temp }}/stats-site
 
+      # deploy-pages makes one attempt, and two of its failures are transient
+      # on GitHub's side: the artifact listing can omit the artifact uploaded
+      # a second earlier ("No artifacts named ..."), and Pages can answer a 5xx
+      # or "Deployment failed, try again later". So a failed first attempt gets
+      # exactly one more after a pause, and the job fails only if that one does
+      # too. The retry is safe because the site is a pure render of the
+      # stats-data tip (taken under the `pages` lock above): a second deploy of
+      # it publishes the same site, even over a Pages deployment someone
+      # cancelled by hand (cancelling the workflow run skips the retry). If the
+      # first attempt's deployment is still live, for example because the
+      # create response was lost, the retry can fail while that deployment
+      # succeeds, so a failed job does not prove the dashboard is stale.
       - name: Deploy GitHub Pages
         id: deployment
+        continue-on-error: true
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0
+        with:
+          artifact_name: github-pages-${{ github.run_attempt }}
+
+      - name: Wait before retrying the Pages deployment
+        if: steps.deployment.outcome == 'failure'
+        run: sleep 30
+
+      - name: Retry the Pages deployment
+        id: deployment-retry
+        if: steps.deployment.outcome == 'failure'
         uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0
         with:
           artifact_name: github-pages-${{ github.run_attempt }}
