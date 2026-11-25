@@ -38,8 +38,10 @@
 //!   for a lookup, `ProvedAbsent`) passes through unchanged.
 //! - **and:** [`Verdict::zip`] commits to both values when both are certain,
 //!   and otherwise keeps the leftmost `Unknown`. Collecting an iterator of
-//!   verdicts into a verdict of a collection ([`FromIterator`]) is a fold of
-//!   [`Verdict::zip`]. It stops at the first `Unknown`.
+//!   verdicts into a verdict of a collection ([`FromIterator`]) gives the
+//!   leftmost `Unknown`, whatever the collection reads, and otherwise the
+//!   certain collection; for a `Vec` it is a fold of [`Verdict::zip`]. It
+//!   reads the source no further than its first `Unknown`.
 //! - **or:** [`Lookup::or_shadowed`] is a search of an inner scope, then an
 //!   outer one. An inner `Unknown` is never skipped: the inner scope may hold
 //!   the name, and if it does, it shadows whatever the outer scope finds.
@@ -100,6 +102,30 @@
 //! // `Unknown`:
 //! for _ in borzoi_verdict::Lookup::<u8, ()>::Found(1) {}
 //! ```
+//!
+//! ```compile_fail
+//! // No iteration of a verdict either:
+//! for _ in borzoi_verdict::Verdict::<u8, ()>::Certain(1) {}
+//! ```
+//!
+//! ```compile_fail
+//! // No projection to `bool` by method:
+//! let found = borzoi_verdict::Lookup::<u8, ()>::Found(1).is_found();
+//! ```
+//!
+//! ```compile_fail
+//! // No projection to `Option` by method:
+//! let found = borzoi_verdict::Lookup::<u8, ()>::Found(1).ok();
+//! ```
+//!
+//! ```compile_fail
+//! // No fallback value:
+//! let found = borzoi_verdict::Lookup::<u8, ()>::Found(1).unwrap_or(0);
+//! ```
+//!
+//! These name the readings the docs above rule out; `tests/surface.rs` holds
+//! the whole public surface to an exact list, so a reading under any other
+//! name fails there.
 //!
 //! ```compile_fail
 //! // No `or` on a verdict:
@@ -221,27 +247,82 @@ impl<T, C> Verdict<Option<T>, C> {
     }
 }
 
-/// Every verdict certain gives the certain collection; otherwise the first
-/// `Unknown`, and the iterator is not advanced past it.
+/// The first `Unknown` in the source, if it holds one before it ends;
+/// otherwise `Certain` of the collection `V` makes of the certain values.
 ///
-/// Law: collecting equals folding [`Verdict::zip`] from `Certain` of the
-/// empty collection, appending each certain value.
+/// The source is read up to and including its first `Unknown`, or up to its
+/// end, and never past either, whatever `V` does. A `V` that stops reading
+/// early (an `Option` or a `Result` collection, at its first `None` or `Err`)
+/// does not hide a later `Unknown`: the rest of the source is still checked.
+/// A `V` that asks again after being told the values are over is told so
+/// again. A source that ends and then yields more is read only to its first
+/// end.
+///
+/// Law: the result is `Unknown(c)` for the leftmost `Unknown(c)` of the
+/// source, else `Certain(values.collect())`. For a collection that reads
+/// every value it is offered (a `Vec`), that is the fold of [`Verdict::zip`]
+/// from `Certain` of the empty collection, appending each certain value.
 impl<T, C, V: FromIterator<T>> FromIterator<Verdict<T, C>> for Verdict<V, C> {
     fn from_iter<I: IntoIterator<Item = Verdict<T, C>>>(iter: I) -> Self {
-        let mut first_unknown = None;
-        let values: V = iter
-            .into_iter()
-            .map_while(|verdict| match verdict {
-                Verdict::Certain(value) => Some(value),
-                Verdict::Unknown(cause) => {
-                    first_unknown = Some(cause);
-                    None
-                }
-            })
-            .collect();
-        match first_unknown {
-            Some(cause) => Verdict::Unknown(cause),
-            None => Verdict::Certain(values),
+        let mut source = UntilUnknown {
+            source: iter.into_iter(),
+            state: Reading::Values,
+        };
+        let values: V = (&mut source).collect();
+        // `V` may have stopped before the source did; an `Unknown` it did not
+        // read still decides the answer.
+        while let Reading::Values = source.state {
+            source.next();
+        }
+        match source.state {
+            Reading::Unknown(cause) => Verdict::Unknown(cause),
+            Reading::Values | Reading::Ended => Verdict::Certain(values),
+        }
+    }
+}
+
+/// How far [`UntilUnknown`] has read its source.
+enum Reading<C> {
+    /// Every verdict so far was certain, and the source has not ended.
+    Values,
+    /// The source ended with every verdict certain.
+    Ended,
+    /// The source yielded this cause, and is read no further.
+    Unknown(C),
+}
+
+/// A source of verdicts read as the certain values before its first
+/// `Unknown` or its first end, whichever comes first. Once either is reached
+/// it yields nothing more, however often it is asked.
+struct UntilUnknown<I, C> {
+    source: I,
+    state: Reading<C>,
+}
+
+impl<T, C, I: Iterator<Item = Verdict<T, C>>> Iterator for UntilUnknown<I, C> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<T> {
+        if !matches!(self.state, Reading::Values) {
+            return None;
+        }
+        match self.source.next() {
+            Some(Verdict::Certain(value)) => Some(value),
+            Some(Verdict::Unknown(cause)) => {
+                self.state = Reading::Unknown(cause);
+                None
+            }
+            None => {
+                self.state = Reading::Ended;
+                None
+            }
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self.state {
+            Reading::Values => (0, self.source.size_hint().1),
+            Reading::Ended | Reading::Unknown(_) => (0, Some(0)),
         }
     }
 }

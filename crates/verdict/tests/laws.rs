@@ -205,7 +205,7 @@ fn sequences(max_len: usize) -> Vec<Vec<V>> {
 }
 
 #[test]
-fn verdict_collect_is_a_fold_of_zip() {
+fn verdict_collect_into_a_vec_is_a_fold_of_zip() {
     let all = sequences(4);
     assert_eq!(all.len(), 1 + 4 + 16 + 64 + 256);
     for seq in all {
@@ -223,20 +223,204 @@ fn verdict_collect_is_a_fold_of_zip() {
     }
 }
 
-#[test]
-fn verdict_collect_stops_at_the_first_unknown() {
+/// How a collection reads the values it is offered: the dimension along
+/// which a `FromIterator` target can differ from a `Vec`.
+const EVERY: u8 = 0;
+/// Reads nothing.
+const NOTHING: u8 = 1;
+/// Reads one value, then stops.
+const FIRST: u8 = 2;
+/// Reads up to and including the first `0`, then stops, as an `Option`
+/// collection stops at its first `None`.
+const THROUGH_ZERO: u8 = 3;
+/// Reads to the end, then asks three more times; anything it is given after
+/// the end is recorded as `99`, which no model produces.
+const ASKS_AFTER_END: u8 = 4;
+const DISCIPLINES: [u8; 5] = [EVERY, NOTHING, FIRST, THROUGH_ZERO, ASKS_AFTER_END];
+
+/// A collection reading by discipline `D`, holding what it read.
+#[derive(Debug, PartialEq)]
+struct Collector<const D: u8>(Vec<u8>);
+
+impl<const D: u8> FromIterator<u8> for Collector<D> {
+    fn from_iter<I: IntoIterator<Item = u8>>(iter: I) -> Self {
+        let mut iter = iter.into_iter();
+        let mut read = Vec::new();
+        match D {
+            EVERY => read.extend(&mut iter),
+            NOTHING => {}
+            FIRST => read.extend(iter.next()),
+            THROUGH_ZERO => {
+                for x in &mut iter {
+                    read.push(x);
+                    if x == 0 {
+                        break;
+                    }
+                }
+            }
+            ASKS_AFTER_END => {
+                read.extend(&mut iter);
+                for _ in 0..3 {
+                    if iter.next().is_some() {
+                        read.push(99);
+                    }
+                }
+            }
+            _ => unreachable!("a discipline of DISCIPLINES"),
+        }
+        Collector(read)
+    }
+}
+
+/// What a collection reading by `discipline` holds after being offered
+/// `values` and nothing after them.
+fn model(discipline: u8, values: &[u8]) -> Vec<u8> {
+    match discipline {
+        EVERY | ASKS_AFTER_END => values.to_vec(),
+        NOTHING => vec![],
+        FIRST => values.iter().copied().take(1).collect(),
+        THROUGH_ZERO => match values.iter().position(|&x| x == 0) {
+            Some(at) => values[..=at].to_vec(),
+            None => values.to_vec(),
+        },
+        _ => unreachable!("a discipline of DISCIPLINES"),
+    }
+}
+
+/// A source yielding `items`, then ending, then yielding `after_end`: an
+/// iterator that is not fused. Counts how many items it hands out.
+struct Source {
+    items: Vec<V>,
+    after_end: Vec<V>,
+    next: usize,
+    ended: bool,
+    handed_out: usize,
+}
+
+impl Source {
+    fn new(items: Vec<V>, after_end: Vec<V>) -> Self {
+        Source {
+            items,
+            after_end,
+            next: 0,
+            ended: false,
+            handed_out: 0,
+        }
+    }
+}
+
+impl Iterator for Source {
+    type Item = V;
+
+    fn next(&mut self) -> Option<V> {
+        let item = if self.next < self.items.len() {
+            self.next += 1;
+            Some(self.items[self.next - 1])
+        } else if !self.ended {
+            self.ended = true;
+            None
+        } else {
+            let at = self.next - self.items.len();
+            self.next += 1;
+            self.after_end.get(at).copied()
+        };
+        self.handed_out += usize::from(item.is_some());
+        item
+    }
+}
+
+/// The documented answer for collecting `seq`, by discipline `D`.
+fn expected_collect<const D: u8>(seq: &[V]) -> Verdict<Collector<D>, char> {
+    let mut values = Vec::new();
+    for v in seq {
+        match *v {
+            Verdict::Certain(x) => values.push(x),
+            Verdict::Unknown(c) => return Verdict::Unknown(c),
+        }
+    }
+    Verdict::Certain(Collector(model(D, &values)))
+}
+
+/// The items the source must hand out: up to and including the first
+/// `Unknown`, or all of them.
+fn expected_reads(seq: &[V]) -> usize {
+    seq.iter()
+        .position(|v| matches!(v, Verdict::Unknown(_)))
+        .map_or(seq.len(), |at| at + 1)
+}
+
+fn check_discipline<const D: u8>() {
+    // Hidden past the end of the source: never read, never decisive.
+    let after_end = vec![Verdict::Unknown('b'), Verdict::Certain(1)];
     for seq in sequences(4) {
-        let pulled = Cell::new(0usize);
-        let _: Verdict<Vec<u8>, char> = seq
+        let mut source = Source::new(seq.clone(), after_end.clone());
+        let collected: Verdict<Collector<D>, char> = (&mut source).collect();
+        assert_eq!(
+            collected,
+            expected_collect::<D>(&seq),
+            "discipline {D}: {seq:?}"
+        );
+        assert_eq!(
+            source.handed_out,
+            expected_reads(&seq),
+            "discipline {D}: {seq:?}"
+        );
+    }
+}
+
+#[test]
+fn verdict_collect_gives_the_leftmost_unknown_however_the_collection_reads() {
+    // Anti-vacuity: each discipline reads differently on some sequence.
+    let probe = [1, 0, 1];
+    let models: std::collections::BTreeSet<_> =
+        DISCIPLINES.iter().map(|&d| model(d, &probe)).collect();
+    assert_eq!(models.len(), 4, "EVERY and ASKS_AFTER_END model alike");
+    check_discipline::<EVERY>();
+    check_discipline::<NOTHING>();
+    check_discipline::<FIRST>();
+    check_discipline::<THROUGH_ZERO>();
+    check_discipline::<ASKS_AFTER_END>();
+}
+
+#[test]
+fn verdict_collect_into_a_short_circuiting_std_collection() {
+    // `Option<Vec<_>>` stops reading at its first `None`; an `Unknown` after
+    // it still decides the answer.
+    let items: Vec<Verdict<Option<u8>, char>> = optional_verdicts();
+    let mut all: Vec<Vec<Verdict<Option<u8>, char>>> = vec![vec![]];
+    let mut frontier = all.clone();
+    for _ in 0..4 {
+        frontier = frontier
             .iter()
-            .inspect(|_| pulled.set(pulled.get() + 1))
-            .copied()
+            .flat_map(|prefix| {
+                items.iter().map(move |&v| {
+                    let mut longer = prefix.clone();
+                    longer.push(v);
+                    longer
+                })
+            })
             .collect();
-        let expected = seq
-            .iter()
-            .position(|v| matches!(v, Verdict::Unknown(_)))
-            .map_or(seq.len(), |at| at + 1);
-        assert_eq!(pulled.get(), expected, "{seq:?}");
+        all.extend(frontier.iter().cloned());
+    }
+    assert_eq!(all.len(), 1 + 5 + 25 + 125 + 625);
+    for seq in all {
+        let first_unknown = seq.iter().find_map(|v| match *v {
+            Verdict::Unknown(c) => Some(c),
+            Verdict::Certain(_) => None,
+        });
+        let expected = match first_unknown {
+            Some(c) => Verdict::Unknown(c),
+            None => Verdict::Certain(
+                seq.iter()
+                    .map(|v| match *v {
+                        Verdict::Certain(o) => o,
+                        Verdict::Unknown(_) => unreachable!("no Unknown in this sequence"),
+                    })
+                    .collect::<Option<Vec<u8>>>(),
+            ),
+        };
+        let collected: Verdict<Option<Vec<u8>>, char> = seq.iter().copied().collect();
+        assert_eq!(collected, expected, "{seq:?}");
     }
 }
 
