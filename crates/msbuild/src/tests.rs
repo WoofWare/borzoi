@@ -668,7 +668,14 @@ fn an_update_that_may_strand_declines_however_it_is_gated() {
   <ItemGroup Condition="'$(MSBuildStartupDirectory)' != ''"><Compile Update="B.fs;B.fs" CompileOrder="CompileFirst" /></ItemGroup>
   <ItemGroup><Compile Include="A.fs;B.fs" /></ItemGroup></Project>"#,
     );
-    assert!(p.items_uncertain, "{:?}", file_names(&p.items));
+    assert!(
+        p.diagnostics.iter().any(|d| matches!(
+            &d.kind,
+            DiagnosticKind::UnmodelledUpdateBatch { update } if update == "B.fs;B.fs"
+        )),
+        "{:?}",
+        p.diagnostics
+    );
     // The same for packages: `Beta;Beta` strands `Beta` with its override,
     // which MSBuild then applies to the later `Beta`.
     let p = parse(
@@ -676,7 +683,14 @@ fn an_update_that_may_strand_declines_however_it_is_gated() {
   <ItemGroup Condition="'$(MSBuildStartupDirectory)' != ''"><PackageReference Update="Beta;Beta" VersionOverride="2.0" /></ItemGroup>
   <ItemGroup><PackageReference Include="Beta" Version="1.0" /></ItemGroup></Project>"#,
     );
-    assert!(p.package_references_uncertain, "{:?}", p.package_references);
+    assert!(
+        p.package_reference_uncertainties.iter().any(|c| matches!(
+            &c.kind,
+            PackageReferenceUncertaintyCauseKind::UnmodelledUpdateBatch { update } if update == "Beta;Beta"
+        )),
+        "{:?}",
+        p.package_reference_uncertainties
+    );
     for certainly_false in [
         r#"<ItemGroup><Compile Update="A.fs;A.fs" Link="a" Condition="false" /></ItemGroup>"#,
         r#"<ItemGroup Condition="false"><Compile Update="A.fs;A.fs" Link="a" /></ItemGroup>"#,

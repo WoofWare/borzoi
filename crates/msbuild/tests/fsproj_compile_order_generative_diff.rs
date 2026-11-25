@@ -1383,9 +1383,10 @@ const CORNERS: &[(&str, bool)] = &[
     <Compile Include="A.fs;B.fs" />"#,
         false,
     ),
-    // Main's keys kept a rooted `A.fs` its spelling removes, and missed the
-    // strand of `B.fs` the next `Update` leaves: MSBuild compiles `C.fs`
-    // first. Declined.
+    // MSBuild removes the rooted `A.fs` from the batch by its spelling, so
+    // `A.fs;B.fs;B.fs` joins afresh and strands `B.fs`, and `C.fs;B.fs`
+    // collides on it and strands `C.fs`: MSBuild compiles `C.fs` first.
+    // Declined.
     (
         r#"    <Compile Update="$(MSBuildProjectDirectory)/A.fs;$(MSBuildProjectDirectory)/A.fs" Visible="false" />
     <Compile Update="A.fs;B.fs;B.fs" Visible="false" />
