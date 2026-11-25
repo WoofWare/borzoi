@@ -2231,7 +2231,10 @@ mod tests {
             let environment: HashMap<String, String> =
                 names.into_iter().map(|name| (name, "v".to_string())).collect();
             match environment_decline(&environment) {
-                Some(NameDecline::Environment(name)) => prop_assert!(declined_before(&name)),
+                Some(NameDecline::Environment(name)) => {
+                    prop_assert!(environment.contains_key(&name), "{name} is not set");
+                    prop_assert!(declined_before(&name));
+                }
                 Some(other) => prop_assert!(false, "{other:?}"),
                 None => prop_assert!(!environment.keys().any(|name| declined_before(name))),
             }
