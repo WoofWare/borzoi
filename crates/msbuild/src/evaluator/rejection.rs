@@ -1731,15 +1731,8 @@ fn undecided_import_within(
         );
         return;
     };
-    let requires_own_file = requires_own_file(node, &project);
-    if let Some(why) = may_load_nothing(
-        node,
-        &project,
-        current_file_dir,
-        requires_own_file,
-        seen,
-        state,
-    ) {
+    let guard = own_file_guard(node, &project);
+    if let Some(why) = may_load_nothing(node, &project, current_file_dir, guard, seen, state) {
         state.note_possible_rejection(
             RejectionCause::Import {
                 project: project.into_owned(),
@@ -1787,47 +1780,59 @@ pub(super) fn taken_import_with_undecided_path(
     state: &mut State<'_>,
 ) {
     let project = attribute(node, "Project").unwrap_or_default();
-    let requires_own_file = requires_own_file(node, &project);
+    let guard = own_file_guard(node, &project);
     let mut seen = HashSet::new();
-    if let Some(why) = may_load_nothing(
-        node,
-        &project,
-        current_file_dir,
-        requires_own_file,
-        &mut seen,
-        state,
-    ) {
+    if let Some(why) = may_load_nothing(node, &project, current_file_dir, guard, &mut seen, state) {
         state.note_unloadable_import(node, why);
     }
 }
 
-/// Whether the gate of the import at `node` of `project` is false whenever
-/// MSBuild's `Exists` of `project` is: its own condition, or that of the
-/// `<ImportGroup>` around it, which gates it as much, has that `Exists` as a
-/// conjunct. An SDK import's path is not the `Exists` argument's, so none is.
-/// The argument and `project` are compared as written
-/// ([`condition::requires_exists`]).
-fn requires_own_file(node: Node<'_, '_>, project: &str) -> bool {
+/// Which gate of an import, if any, is false whenever MSBuild's `Exists` of
+/// its `Project` is ([`own_file_guard`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OwnFileGuard {
+    /// Neither gate has that `Exists` as a conjunct.
+    None,
+    /// The `<ImportGroup>` around it has, which gates it as much. MSBuild
+    /// evaluates that gate once, before the group's imports run, so what an
+    /// earlier one of them writes does not reach it: the walk, reading the
+    /// import's `Project` now, cannot ask that `Exists` again.
+    Group,
+    /// Its own condition has, evaluated when the import is reached.
+    Own,
+}
+
+/// [`OwnFileGuard`] of the import at `node` of `project`. An SDK import's path
+/// is not the `Exists` argument's, so none is. The argument and `project` are
+/// compared as written ([`condition::requires_exists`]).
+fn own_file_guard(node: Node<'_, '_>, project: &str) -> OwnFileGuard {
     let is_own_file = |arg: &str| arg == project;
     let requires = |gate: Node<'_, '_>| {
         attribute(gate, "Condition")
             .is_some_and(|condition| condition::requires_exists(&condition, &is_own_file))
     };
-    attribute(node, "Sdk").is_none()
-        && (requires(node)
-            || node
-                .parent_element()
-                .is_some_and(|parent| parent.has_tag_name("ImportGroup") && requires(parent)))
+    if attribute(node, "Sdk").is_some() {
+        OwnFileGuard::None
+    } else if requires(node) {
+        OwnFileGuard::Own
+    } else if node
+        .parent_element()
+        .is_some_and(|parent| parent.has_tag_name("ImportGroup") && requires(parent))
+    {
+        OwnFileGuard::Group
+    } else {
+        OwnFileGuard::None
+    }
 }
 
 /// Why an import of `project` at `node`, which MSBuild may make, may load no
-/// file, or `None` when every file it names loads. `requires_own_file`: its
-/// gate is false whenever MSBuild's `Exists` of `project` is.
+/// file, or `None` when every file it names loads. `guard`: which of its gates
+/// is false whenever MSBuild's `Exists` of `project` is.
 fn may_load_nothing(
     node: Node<'_, '_>,
     project: &str,
     current_file_dir: &Path,
-    requires_own_file: bool,
+    guard: OwnFileGuard,
     seen: &mut HashSet<String>,
     state: &State<'_>,
 ) -> Option<UnloadableImport> {
@@ -1836,7 +1841,7 @@ fn may_load_nothing(
     }
     let expansion = expand_silent(&super::import_project_as_expanded(project), state);
     if path_undecided(project, state, expansion.had_unsupported) {
-        return (!requires_own_file).then_some(UnloadableImport::PathUndecided);
+        return (guard == OwnFileGuard::None).then_some(UnloadableImport::PathUndecided);
     }
     // Its trust is judged just above, name by name.
     let value = expansion.value.ignoring_trust();
@@ -1854,7 +1859,7 @@ fn may_load_nothing(
     // ([`condition::exists_of_list`]): false rules the import out; true
     // leaves each entry to be judged below, as with no guard; undecided says
     // nothing of the import.
-    if requires_own_file {
+    if guard == OwnFileGuard::Own {
         let exists = |path: &str| super::condition_exists(state.observer, path, current_file_dir);
         match condition::exists_of_list(value, &exists) {
             Some(false) => return None,

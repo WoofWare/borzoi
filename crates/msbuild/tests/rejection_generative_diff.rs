@@ -1728,7 +1728,8 @@ impl GuardedEntry {
 /// Every guarded import over a list of one or two entries of each kind
 /// ([`GuardedEntry`]), its `Exists` guard spelled as the import or with each
 /// `\` respelled, behind a conjunct the walk cannot decide that MSBuild takes
-/// true or false, before the guard or after it: each held certain-implies-exact
+/// true or false, before the guard or after it, on the import or on an
+/// `<ImportGroup>` around it: each held certain-implies-exact
 /// against MSBuild. Where MSBuild rejects the project, the walk commits no
 /// value of the property written after the import; where it evaluates it,
 /// the walk claims no certain rejection and commits MSBuild's value. And it
@@ -1794,16 +1795,28 @@ fn guarded_import_lists_are_judged_as_msbuild_judges_them() {
             let escaped = kinds
                 .iter()
                 .any(|kind| matches!(kind, GuardedEntry::Escaped));
-            let must_commit = loads || (guard == list && !exists && !escaped);
-            for gate in [
+            let own_guard_false = guard == list && !exists && !escaped;
+            for (gate, grouped) in [
                 format!("'É' == 'é' And Exists('{guard}')"),
                 format!("Exists('{guard}') And 'É' == 'é'"),
                 format!("'É' == 'Ê' And Exists('{guard}')"),
-            ] {
+            ]
+            .into_iter()
+            .flat_map(|gate| [(gate.clone(), false), (gate, true)])
+            {
+                // On the import, or on an `<ImportGroup>` around it, which
+                // MSBuild evaluates before the group's imports run.
+                let import = if grouped {
+                    format!(
+                        "  <ImportGroup Condition=\"{gate}\">\n    <Import Project=\"{list}\" />\n  \
+                         </ImportGroup>\n"
+                    )
+                } else {
+                    format!("  <Import Project=\"{list}\" Condition=\"{gate}\" />\n")
+                };
                 let xml = format!(
-                    "<Project>\n  <Import Project=\"{list}\" Condition=\"{}\" />\n  \
-                     <PropertyGroup><After>ok</After></PropertyGroup>\n</Project>\n",
-                    gate
+                    "<Project>\n{import}  <PropertyGroup><After>ok</After></PropertyGroup>\n\
+                     </Project>\n"
                 );
                 let theirs = oracle.project(&xml, &names, Some(&project_path), &[]);
                 let parsed = parse_fsproj_with_imports(
@@ -1815,6 +1828,9 @@ fn guarded_import_lists_are_judged_as_msbuild_judges_them() {
                 )
                 .unwrap();
                 let ours = parsed.property("After");
+                // A group's guard the walk does not ask again: it judges the
+                // import as unguarded.
+                let must_commit = loads || (own_guard_false && !grouped);
                 let context = format!("{kinds:?}, guard {guard:?}\n{xml}");
                 graded += 1;
                 assert!(
@@ -1859,5 +1875,44 @@ fn guarded_import_lists_are_judged_as_msbuild_judges_them() {
     assert!(
         rejected > 0 && committed > 0,
         "{rejected} rejected, {committed} committed"
+    );
+}
+
+/// An `<ImportGroup>`'s guard is evaluated once, before its imports run: an
+/// earlier import that rewrites `P` (to a spelling naming a directory) does
+/// not reach it, so the later import of `$(P)` is made where `'É' == 'é'`
+/// holds, and fails. The walk may not ask the group's `Exists` of the
+/// rewritten `P`.
+#[test]
+fn an_import_group_guard_is_not_asked_again_after_its_imports_run() {
+    let mut oracle = Oracle::spawn();
+    let tmp = TempDir::new().unwrap();
+    let dir = borzoi_msbuild::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    std::fs::write(dir.join("ok.props"), "<Project />").unwrap();
+    std::fs::write(
+        dir.join("rewrite.props"),
+        "<Project><PropertyGroup><P>ok.props/</P></PropertyGroup></Project>",
+    )
+    .unwrap();
+    let project_path = dir.join("Demo.fsproj");
+    let xml = "<Project>\n  <PropertyGroup><P>ok.props</P></PropertyGroup>\n  \
+               <ImportGroup Condition=\"Exists('$(P)')\">\n    \
+               <Import Project=\"rewrite.props\" />\n    \
+               <Import Project=\"$(P)\" Condition=\"'É' == 'é'\" />\n  </ImportGroup>\n  \
+               <PropertyGroup><After>ok</After></PropertyGroup>\n</Project>\n";
+    let theirs = oracle.project(xml, &["After".to_owned()], Some(&project_path), &[]);
+    assert_eq!(theirs, None, "MSBuild rejects the project");
+    let parsed = parse_fsproj_with_imports(
+        &borzoi_msbuild::ProjectFile::buffer(&project_path, xml).unwrap(),
+        &HashMap::new(),
+        &HashMap::new(),
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(
+        !matches!(parsed.property("After"), PropertyRead::Value(_)),
+        "we commit {:?}",
+        parsed.property("After")
     );
 }
