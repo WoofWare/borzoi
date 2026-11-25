@@ -269,6 +269,23 @@ fn cases() -> Vec<Case> {
                 f("Directory.Build.targets", dbt.clone()),
             ],
         },
+        // A redirect the walk cannot compute (a function it does not model)
+        // to a directory: the point's `Exists` is true of it, and MSBuild
+        // fails to import a directory, rejecting the project. The point's
+        // guard says nothing of a path the walk does not hold.
+        Case {
+            name: "redirect-to-an-uncomputed-directory",
+            files: vec![
+                f(
+                    "Directory.Build.props",
+                    props(
+                        "    <DirectoryBuildTargetsPath>$(MSBuildThisFileDirectory)$([System.IO.Path]::GetFileName('x/Sub'))</DirectoryBuildTargetsPath>\n",
+                    ),
+                ),
+                f("Sub/keep.txt", String::new()),
+                f("Directory.Build.targets", dbt.clone()),
+            ],
+        },
         // No `Directory.Build.targets` on disk at all: the import is a clean
         // skip on both sides, and must not manufacture a diagnostic that
         // withdraws the neighbours' claims.
@@ -292,7 +309,9 @@ fn evaluate(
     }
     std::fs::create_dir_all(dir).expect("create case directory");
     for (name, body) in &case.files {
-        std::fs::write(dir.join(name), body)
+        let path = dir.join(name);
+        std::fs::create_dir_all(path.parent().expect("a directory")).expect("create its directory");
+        std::fs::write(path, body)
             .unwrap_or_else(|e| panic!("write {name} for {}: {e}", case.name));
     }
     let project_path = dir.join("Demo.fsproj");

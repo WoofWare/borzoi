@@ -1841,8 +1841,12 @@ fn may_load_nothing(
         return sdk_import_may_load_nothing(&sdk, project, seen, state);
     }
     let expansion = expand_silent(&super::import_project_as_expanded(project), state);
+    // A guard requiring the file says nothing of a path the walk cannot
+    // compute: `Exists` is true of a directory MSBuild cannot import, and of
+    // a path an earlier import in the group rewrote after the group's gate
+    // ran, and the walk cannot rule either out of text it does not hold.
     if path_undecided(project, state, expansion.had_unsupported) {
-        return (guard == OwnFileGuard::None).then_some(UnloadableImport::PathUndecided);
+        return Some(UnloadableImport::PathUndecided);
     }
     // Its trust is judged just above, name by name.
     let value = expansion.value.ignoring_trust();

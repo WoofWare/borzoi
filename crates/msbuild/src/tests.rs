@@ -11674,30 +11674,31 @@ fn a_backslash_written_in_a_has_trailing_slash_argument_is_a_slash_before_expans
 /// An `Exists` guard written with a `\` is the import's own guard when the
 /// import's `Project` is written alike: both are `/` before they are
 /// expanded, so the walk reads the one as requiring the other's file, as it
-/// does with no `\` written, though it cannot compute the path.
+/// does with no `\` written. Behind a conjunct the walk cannot decide, the
+/// guard of a missing file rules the import out either way.
 #[test]
 #[cfg(not(windows))]
 fn an_exists_guard_written_with_a_backslash_is_its_imports_own() {
     let tmp = tempfile::TempDir::new().unwrap();
     let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
-    let rejection = |separator: &str| {
+    std::fs::create_dir(root.join("sub")).unwrap();
+    for separator in ["\\", "/"] {
         let source = format!(
             r#"<Project>
-  <PropertyGroup><P>$([System.String]::Copy('sub'))</P></PropertyGroup>
-  <Import Project="$(P){separator}missing.props" Condition="Exists('$(P){separator}missing.props')" />
+  <PropertyGroup><P>sub</P></PropertyGroup>
+  <Import Project="$(P){separator}missing.props" Condition="'É' == 'é' And Exists('$(P){separator}missing.props')" />
 </Project>"#
         );
-        crate::parse_fsproj_with_imports(
+        let p = crate::parse_fsproj_with_imports(
             &crate::ProjectFile::buffer(&root.join("Demo.fsproj"), &source).unwrap(),
             &HashMap::new(),
             &HashMap::new(),
             None,
             None,
         )
-        .unwrap()
-        .rejection
-    };
-    assert_eq!(rejection("\\"), rejection("/"));
+        .unwrap();
+        assert!(p.rejection.is_none(), "{separator}: {:#?}", p.rejection);
+    }
 }
 
 /// An `Exists` guard written apart from its import's `Project` guards it as
