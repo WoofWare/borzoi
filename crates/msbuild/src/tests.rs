@@ -620,7 +620,7 @@ fn updates_that_cannot_leave_past_their_first_fragment_commit() {
 /// An `Update` may strand whether or not the walk takes it to run: one under
 /// a gate MSBuild takes and the walk does not, in a group the walk skips on
 /// an untrusted read, or whose spec the walk does not hold. Each may strand,
-/// and so may `B.fs;A.fs`; a certainly false `Update` is none of the
+/// and declines the list itself; a certainly false `Update` is none of the
 /// batch's.
 #[test]
 fn an_update_that_may_strand_declines_however_it_is_gated() {
@@ -637,16 +637,28 @@ fn an_update_that_may_strand_declines_however_it_is_gated() {
             "spec the walk does not hold",
             r#"<PropertyGroup><S Condition="'É' == 'é'">A.fs;A.fs</S></PropertyGroup><ItemGroup><Compile Update="$(S)" Link="a" /></ItemGroup>"#,
         ),
+        (
+            "spec the walk reads on an untrusted value",
+            r#"<PropertyGroup><S>A.fs;A.fs</S><S Condition="'É' != 'é'">A.fs</S></PropertyGroup><ItemGroup><Compile Update="$(S)" Link="a" /></ItemGroup>"#,
+        ),
     ] {
         let p = parse(&format!(
             r#"<Project>{UNTRUSTED_F}
   {body}
   <ItemGroup>
-    <Compile Update="B.fs;A.fs" CompileOrder="CompileFirst" />
+    <Compile Update="B.fs" CompileOrder="CompileFirst" />
     <Compile Include="A.fs;B.fs" />
   </ItemGroup></Project>"#
         ));
         assert!(p.items_uncertain, "{case}: {:?}", file_names(&p.items));
+        assert!(
+            p.diagnostics.iter().any(|d| matches!(
+                &d.kind,
+                DiagnosticKind::UnmodelledUpdateBatch { update } if update != "B.fs"
+            )),
+            "{case}: {:?}",
+            p.diagnostics
+        );
     }
     // A group the walk skips on an inexact read (MSBuild sets the toolset's
     // `MSBuildStartupDirectory`) runs `B.fs;B.fs`, which strands `B.fs` with
@@ -713,6 +725,39 @@ fn a_skipped_update_or_a_key_removed_by_its_spelling_declines() {
         removed_by_text.items_uncertain,
         "{:?}",
         file_names(&removed_by_text.items)
+    );
+}
+
+/// A `PackageReference` `Update` that may strand declines the
+/// `PackageReference` list only: the `PackageVersion` list beside it stays
+/// exact. (In a group the walk skips, the group's gate reads a name the walk
+/// doubts, and records that cause for every dependency list itself.)
+#[test]
+fn a_package_update_that_may_strand_declines_only_its_list() {
+    let source = r#"<Project>
+  <ItemGroup><PackageVersion Include="Beta" Version="1.0" /></ItemGroup>
+  <ItemGroup><PackageReference Update="Beta;Beta" VersionOverride="2.0" /></ItemGroup>
+</Project>"#;
+    let probe = crate::evaluator::reads::ReadProbe {
+        item_types: vec!["PackageVersion".to_owned()],
+        ..Default::default()
+    };
+    let walked = crate::parse_fsproj_probed(
+        &crate::ProjectFile::buffer(Path::new("/repo/proj/Demo.fsproj"), source).unwrap(),
+        &HashMap::new(),
+        &HashMap::new(),
+        None,
+        None,
+        None,
+        Some(&probe),
+    )
+    .unwrap();
+    assert!(walked.project.package_references_uncertain);
+    let reads = walked.reads.expect("a probed walk answers its probe");
+    assert!(
+        reads.items["PackageVersion"].exact,
+        "{:?}",
+        walked.project.package_reference_uncertainties
     );
 }
 

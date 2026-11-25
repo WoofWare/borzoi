@@ -2614,6 +2614,8 @@ fn note_update_may_strand(node: Node<'_, '_>, item_type: &str, state: &mut State
         );
         state.compile_context = previous;
     } else {
+        #[cfg(any(test, feature = "test-support"))]
+        let causes_before = state.package_reference_uncertainties.len();
         let previous = state.package_context;
         state.package_context = true;
         state.note_package_uncertain(
@@ -2621,6 +2623,10 @@ fn note_update_may_strand(node: Node<'_, '_>, item_type: &str, state: &mut State
             node.range(),
         );
         state.package_context = previous;
+        // The cause is the `PackageReference` list's alone, whether or not
+        // the walk walks `node` ([`walk_item_child`] attributes its own).
+        #[cfg(any(test, feature = "test-support"))]
+        state.attribute_package_causes(causes_before, PackageItemKind::PackageReference);
     }
 }
 
