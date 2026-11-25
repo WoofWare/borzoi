@@ -1,60 +1,38 @@
 //! Matching a condition atom against NuGet's restore guards allocates
 //! nothing of its own: it runs on every conjunct of every group condition
 //! outside the install. (Reading whether a guard's value expands is the
-//! evaluator's own scan, which these atoms never reach.) The count is the
-//! measuring thread's alone, so the test runner's own threads move nothing.
-
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
+//! evaluator's own scan; the values here are ones it reads without
+//! allocating.) The count is the measuring thread's alone
+//! (`alloc_limit::thread_allocations`), so the test runner's own threads
+//! move nothing.
 
 use borzoi_msbuild::test_support::nuget_group_atom;
-
-/// The system allocator, counting each thread's allocations.
-struct PerThread;
-
-thread_local! {
-    static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
-}
-
-// SAFETY: every call is passed straight to `System`; the count is a
-// const-initialised thread-local, which allocates nothing.
-unsafe impl GlobalAlloc for PerThread {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let _ = ALLOCATIONS.try_with(|n| n.set(n.get() + 1));
-        // SAFETY: the caller's contract is `System`'s.
-        unsafe { System.alloc(layout) }
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        // SAFETY: the caller's contract is `System`'s.
-        unsafe { System.dealloc(ptr, layout) }
-    }
-}
+use borzoi_oracle_harness::alloc_limit::{self, LimitedAlloc};
 
 #[global_allocator]
-static ALLOC: PerThread = PerThread;
-
-/// This thread's allocations so far.
-fn allocations() -> usize {
-    ALLOCATIONS.with(Cell::get)
-}
+static ALLOC: LimitedAlloc = LimitedAlloc;
 
 #[test]
 fn matching_a_guard_allocates_nothing() {
-    // Fixed-value guards, and atoms that are no guard: none reaches the
-    // scan of a value.
     let atoms = [
+        // The fixed-value rows.
         "'$(ExcludeRestorePackageImports)' != 'true'",
         "'$(TargetFramework)' == ''",
+        // Each row that takes any literal, on one the value scan reads
+        // without allocating.
+        "'$(TargetFramework)' == ' '",
+        "'$(Language)' == ' '",
+        "'$(Language)' != ' '",
+        // No guard.
         "'$(ExcludeRestorePackageImports)' != 'false'",
         "'$(Configuration)' == 'Debug'",
         "'$(Language)' <> 'F#'",
         "not an atom",
     ];
-    let before = allocations();
+    let before = alloc_limit::thread_allocations();
     let matched = atoms.iter().filter(|atom| nuget_group_atom(atom)).count();
-    let allocated = allocations() - before;
-    assert_eq!(matched, 2);
+    let allocated = alloc_limit::thread_allocations() - before;
+    assert_eq!(matched, 5);
     assert_eq!(
         allocated,
         0,
@@ -67,9 +45,9 @@ fn matching_a_guard_allocates_nothing() {
 /// matcher's.
 #[test]
 fn the_count_sees_this_thread() {
-    let before = allocations();
+    let before = alloc_limit::thread_allocations();
     let boxed = std::hint::black_box(Box::new(1u64));
-    assert!(allocations() > before);
+    assert!(alloc_limit::thread_allocations() > before);
     drop(boxed);
 }
 
@@ -77,7 +55,7 @@ fn the_count_sees_this_thread() {
 /// threads cannot move the count above.
 #[test]
 fn another_thread_is_not_counted() {
-    let before = allocations();
+    let before = alloc_limit::thread_allocations();
     std::thread::scope(|scope| {
         scope.spawn(|| {
             for i in 0..100u64 {
@@ -86,5 +64,5 @@ fn another_thread_is_not_counted() {
         });
     });
     // Spawning the thread allocates on this one; its hundred boxes do not.
-    assert!(allocations() - before < 100);
+    assert!(alloc_limit::thread_allocations() - before < 100);
 }
