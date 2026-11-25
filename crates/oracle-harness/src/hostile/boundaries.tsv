@@ -345,6 +345,7 @@ crates/sema/tests/all/resolve_target_fold.rs	pending	3
 crates/sema/tests/all/silent_region_sweep.rs	pending	3
 crates/sema/tests/all/source_existence_budget.rs	not-applicable	growth families of the walk's budget, sized by the strategy; the hostile source states reach the same walk through source_existence_gen's census
 crates/sema/tests/all/source_existence_diff.rs	not-applicable	the grading harness the grid, domain and generator share, which draws nothing itself; the hostile source states reach it through source_existence_gen's census
+crates/sema/tests/all/source_existence_domain.rs	not-applicable	one fixed witness per form of the walk's closed table; the hostile source states reach the same walk through source_existence_gen's census
 crates/sema/tests/all/source_existence_gen.rs	draws	source_existence_gen=source
 crates/sema/tests/all/source_existence_grid.rs	not-applicable	a hand-written table of producer cells, one per shape; the hostile source states reach the same walk through source_existence_gen's census
 crates/sema/tests/all/tier_order_diff.rs	pending	3

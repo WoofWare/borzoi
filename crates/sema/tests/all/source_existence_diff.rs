@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use borzoi_assembly::existence::{ExistenceIndex, PickleLayer};
 use borzoi_cst::syntax::{AstNode, ImplFile, SigFile};
 use borzoi_oracle_harness::project_graph::{FixtureFile, GraphCell, PlainName, RefusalCause};
-use borzoi_sema::test_support::{ExistenceFacts, existence_facts};
+use borzoi_sema::test_support::{ExistenceFacts, existence_facts, surface_facts};
 use borzoi_sema::{
     Budget, CompileItem, Producer, ProjectFile, ProviderReferences, SourceExistence, SourceFile,
     SyntaxRecovery, qualified_names, source_existence,
@@ -139,7 +139,7 @@ pub fn grade(cell: &Cell, fcs: &Reading, ours: &SourceExistence) -> Result<Strin
         SourceExistence::Unread(why) => return Ok(format!("unread {why:?}")),
         SourceExistence::Read(s) => s,
     };
-    let mine = existence_facts(&surface.index(), &[]);
+    let mine = surface_facts(surface);
     let theirs = existence_facts(
         &ExistenceIndex {
             il: Vec::new(),

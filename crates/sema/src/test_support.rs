@@ -35,6 +35,13 @@ pub fn source_existence_forms(
     crate::source_existence::read(producer, budget)
 }
 
+/// The entity facts the existence set holds of a source producer's rows:
+/// [`existence_facts`] of its entity index, with no assembly auto-open. Only
+/// the entity facts: the rows carry no extension rows.
+pub fn surface_facts(surface: &crate::SourceSurface) -> ExistenceFacts {
+    existence_facts(&surface.entity_index(), &[])
+}
+
 /// What the existence questions hold of one assembly whose index is `index`
 /// and whose assembly-level `[<AutoOpen("…")>]` arguments are `auto_opens`:
 /// the facts of the existence set built from them alone, by the code every

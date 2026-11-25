@@ -72,9 +72,9 @@ use borzoi_assembly::existence::{
     ExistenceIndex, PickleLayer, PickledEntityKind, PickledEntityRow,
 };
 use borzoi_cst::syntax::{
-    AstNode, AttributeList, ExceptionDefnDecl, ImplicitCtor, LongIdent, MemberDefn, ModuleDecl,
-    ModuleOrNamespaceKind, SyntaxKind, SyntaxNode, TupleTypeExtensionHead, TyparDecls, Type,
-    TypeDefn, TypeDefnRepr, UnionCase,
+    AstNode, Attribute, AttributeList, ExceptionDefnDecl, Expr, ImplicitCtor, LongIdent,
+    MemberDefn, ModuleDecl, ModuleOrNamespace, ModuleOrNamespaceKind, SyntaxKind, SyntaxNode,
+    TupleTypeExtensionHead, TyparDecls, Type, TypeDefn, TypeDefnRepr, UnionCase,
 };
 
 use crate::def::id_text;
@@ -341,9 +341,13 @@ pub struct SourceSurface {
 }
 
 impl SourceSurface {
-    /// The rows as an existence index: an empty IL layer, the entity rows,
-    /// and no extension rows.
-    pub fn index(&self) -> ExistenceIndex {
+    /// The rows as an existence index, for the entity questions alone: an
+    /// empty IL layer, the entity rows, and no extension rows, though the
+    /// producer may declare extensions. So an extension question asked of
+    /// it would answer "none" where the walk never looked, and it stays
+    /// private to the crate's test support (`test_support::surface_facts`).
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn entity_index(&self) -> ExistenceIndex {
         ExistenceIndex {
             il: Vec::new(),
             pickle: PickleLayer::Read(self.entities.clone()),
@@ -715,6 +719,10 @@ impl FileWalk<'_> {
                 self.attribute_list(&list)?;
             }
         }
+        // Every child of the file is a module or namespace.
+        if !consumed(root, |n| ModuleOrNamespace::can_cast(n.kind()), |_| false) {
+            return Err(self.unreadable(Leaf::File));
+        }
         for m in file.modules() {
             // The header: its keyword, access and `rec` tokens, its name and
             // its declarations. An attribute list on it is an entity's.
@@ -796,6 +804,35 @@ impl FileWalk<'_> {
         let Some(parent) = list.syntax().parent() else {
             return Err(self.unreadable(Leaf::Attribute));
         };
+        // The list's brackets, separators and attributes, and each
+        // attribute's target, name and argument: a child of either that no
+        // classifier names is unreadable, before any verdict is read off
+        // the attributes the accessors return.
+        let readable = consumed(
+            list.syntax(),
+            |n| Attribute::can_cast(n.kind()),
+            |k| {
+                matches!(
+                    k,
+                    SyntaxKind::LBRACK_LESS_TOK
+                        | SyntaxKind::GREATER_RBRACK_TOK
+                        | SyntaxKind::SEMI_TOK
+                )
+            },
+        ) && list.attributes().all(|a| {
+            consumed(
+                a.syntax(),
+                |n| {
+                    n.kind() == SyntaxKind::ATTRIBUTE_TARGET
+                        || LongIdent::can_cast(n.kind())
+                        || Expr::can_cast(n.kind())
+                },
+                |_| false,
+            )
+        });
+        if !readable {
+            return Err(self.unreadable(Leaf::Attribute));
+        }
         let exception_case = parent.kind() == SyntaxKind::UNION_CASE
             && parent
                 .parent()
@@ -1056,6 +1093,14 @@ fn target_form(ty: &Type, name: &str, generic: bool) -> Form {
     }
     let mut ty = ty.clone();
     while let Type::Paren(p) = &ty {
+        // The parentheses and the one type inside them, nothing else.
+        if !consumed(
+            p.syntax(),
+            |n| Type::can_cast(n.kind()),
+            |k| matches!(k, SyntaxKind::LPAREN_TOK | SyntaxKind::RPAREN_TOK),
+        ) {
+            return Form::NamedTarget;
+        }
         match p.inner() {
             Some(inner) => ty = inner,
             None => return Form::NamedTarget,
