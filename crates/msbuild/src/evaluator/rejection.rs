@@ -1850,12 +1850,17 @@ fn may_load_nothing(
     }) {
         return Some(UnloadableImport::PathUndecided);
     }
+    // The gate's `Exists` proves the one file its argument names; a list's
+    // entries are each judged below, as they are with no guard.
     if requires_own_file {
-        let whole = current_file_dir.join(value.unescape().replace('\\', "/"));
-        if value.trimmed_unescaped().is_empty()
-            || observed::link_kind(state.observer, &normalise(&whole)).is_err()
-        {
+        if value.trimmed_unescaped().is_empty() {
             return None;
+        }
+        if let [entry] = value.split_list().collect::<Vec<_>>().as_slice() {
+            let whole = current_file_dir.join(entry.trimmed_unescaped().replace('\\', "/"));
+            if observed::link_kind(state.observer, &normalise(&whole)).is_err() {
+                return None;
+            }
         }
     }
     if value.as_escaped().trim().is_empty() && !value.as_escaped().contains(';') {

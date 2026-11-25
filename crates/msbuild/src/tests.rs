@@ -11494,3 +11494,34 @@ fn an_exists_guard_spelled_apart_from_its_import_list_does_not_discharge_it() {
         assert!(p.rejection.is_some(), "{guard}: {:#?}", p.diagnostics);
     }
 }
+
+/// An `Exists` guard matched to its import as written proves one file only
+/// where the expansion names one: respelled, `S.Split('\')` splits `x/a`, and
+/// the import's list names `a.props` and `b.props`. With both present and
+/// `a.props` malformed, MSBuild's guard holds where `'É' == 'é'` does, and
+/// the import rejects the project.
+#[test]
+#[cfg(not(windows))]
+fn an_exists_guard_over_an_expanded_list_does_not_discharge_its_import() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    std::fs::write(root.join("a.props"), "<Project>").unwrap();
+    std::fs::write(root.join("b.props"), "<Project />").unwrap();
+    let path = "$(S.Split(`\\`)[1]).props;b.props";
+    let source = format!(
+        r#"<Project>
+  <PropertyGroup><S>x/a</S></PropertyGroup>
+  <Import Project="{path}" Condition="Exists('{path}') And 'É' == 'é'" />
+  <PropertyGroup><After>y</After></PropertyGroup>
+</Project>"#
+    );
+    let p = crate::parse_fsproj_with_imports(
+        &crate::ProjectFile::buffer(&root.join("Demo.fsproj"), &source).unwrap(),
+        &HashMap::new(),
+        &HashMap::new(),
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(p.rejection.is_some(), "{:#?}", p.property("After"));
+}
