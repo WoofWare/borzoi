@@ -69,6 +69,20 @@ reference list) are all built from it. `tests/all/referenced_oracle.rs`
 tests the oracle itself: an inventory of producers with each verdict
 pinned, a trigger and a near miss for each way a producer goes ungraded,
 and a probe that a cache planted across requests is caught.
+`source_existence` reads a referenced project's entity surface from its
+source, on a closed list of forms (`Form`, each with its verdict and a
+witness), and declines every producer holding anything else, with the
+form as the reason. Every child of a node it classifies is accounted for
+(`consumed`), so a shape the grammar grows declines until it is read. Its
+rows' paths grow quadratically with nesting, so it charges a `Budget` for
+each row before it builds it, and only its `rows` module builds a row.
+`source_existence_diff` holds containment of the existence set's entity
+facts against the `referenced` oracle over a grid, every form's witness
+(`source_existence_domain`) and a generator with a pinned production
+census (`source_existence_gen`); `source_existence_budget` holds the
+budget to growth families by counts; `source_existence_accessors` pins the
+typed accessors the walk leaves unread, each with its reason; and
+`source_existence_census` (ignored) measures its declines over the corpus.
 
 ## Working here
 
