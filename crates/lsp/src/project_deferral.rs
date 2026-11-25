@@ -1024,6 +1024,34 @@ fn render_rejection_cause(cause: &RejectionCause, certain: bool) -> String {
             "the property function `{expression}`, which MSBuild may be unable to evaluate, \
              so MSBuild {rejects} the whole project"
         ),
+        RejectionCause::UsingTaskRegistration {
+            task,
+            attribute,
+            value,
+        } => {
+            // A possible refusal is one Borzoi cannot rule out: on a value
+            // MSBuild may not read, or by a rule it does not know.
+            if certain {
+                format!(
+                    "a `<UsingTask>` of `{task}` whose `{attribute}` reads `{value}`, which \
+                     MSBuild refuses to register, so MSBuild {rejects} the whole project"
+                )
+            } else {
+                format!(
+                    "a `<UsingTask>` of `{task}` whose `{attribute}` (`{value}`, as Borzoi reads \
+                     it) Borzoi cannot confirm MSBuild registers, so MSBuild {rejects} the whole \
+                     project"
+                )
+            }
+        }
+        RejectionCause::UsingTaskParameterCollision {
+            task,
+            first,
+            second,
+        } => format!(
+            "a `<UsingTask>` of `{task}` declaring parameters `{first}` and `{second}`, one name \
+             to MSBuild, which ignores case, so MSBuild {rejects} the whole project"
+        ),
     }
 }
 

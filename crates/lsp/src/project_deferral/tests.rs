@@ -1149,3 +1149,25 @@ fn a_feature_switch_refusal_names_its_route() {
         }
     }
 }
+
+/// A registration the walk only doubts claims nothing: the cause says Borzoi
+/// cannot confirm MSBuild registers it, not that the attribute reads the
+/// value, nor that MSBuild refuses it.
+#[test]
+fn a_possible_registration_refusal_claims_nothing_of_the_value() {
+    let cause = borzoi_msbuild::RejectionCause::UsingTaskRegistration {
+        task: "X".into(),
+        attribute: "ParameterType".to_owned(),
+        value: "System.TimeSpan".into(),
+    };
+    let possible = render_rejection_cause(&cause, false);
+    assert!(
+        possible.contains("cannot confirm MSBuild registers"),
+        "{possible}"
+    );
+    assert!(!possible.contains("reads `"), "{possible}");
+    assert!(!possible.contains("refuse"), "{possible}");
+    let certain = render_rejection_cause(&cause, true);
+    assert!(certain.contains("reads `System.TimeSpan`"), "{certain}");
+    assert!(certain.contains("refuses to register"), "{certain}");
+}

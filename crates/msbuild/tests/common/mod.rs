@@ -813,6 +813,75 @@ impl Oracle {
         BothEvaluations { build, design_time }
     }
 
+    /// [`Self::project_design_time`]'s verdict alone, where MSBuild's
+    /// evaluation may also fail by an exception other than an invalid
+    /// project's (an internal error, MSB1025, which fails a build alike):
+    /// `Err` with the oracle's report of it, rather than a panic.
+    pub fn design_time_verdict(&mut self, xml: &str, path: &Path) -> Result<bool, String> {
+        let line = serde_json::to_string(&serde_json::json!({
+            "op": "project",
+            "xml": xml,
+            "names": Vec::<String>::new(),
+            "path": path.to_string_lossy().into_owned(),
+            "globals": serde_json::Value::Null,
+            "designTime": true,
+        }))
+        .expect("serialise request");
+        let response: serde_json::Value =
+            serde_json::from_str(&self.child.request(&line)).expect("oracle response is JSON");
+        match response.get("error") {
+            Some(error) => Err(error.to_string()),
+            None => Ok(response["ok"].as_bool() == Some(true)),
+        }
+    }
+
+    /// The error code (`MSB4184`, …) MSBuild's design-time evaluation rejects
+    /// `xml`, as the file at `path`, with: `Ok(None)` where it evaluates, and
+    /// `Err` (as [`Self::design_time_verdict`]) where another exception fails
+    /// it.
+    pub fn design_time_rejection_code(
+        &mut self,
+        xml: &str,
+        path: &Path,
+    ) -> Result<Option<String>, String> {
+        Ok(self
+            .design_time_rejection(xml, path)?
+            .map(|rejection| rejection.code))
+    }
+
+    /// [`Self::design_time_rejection_code`], with where in `xml` MSBuild's
+    /// exception points.
+    pub fn design_time_rejection(
+        &mut self,
+        xml: &str,
+        path: &Path,
+    ) -> Result<Option<DesignTimeRejection>, String> {
+        let line = serde_json::to_string(&serde_json::json!({
+            "op": "rejectionCode",
+            "xml": xml,
+            "path": path.to_string_lossy().into_owned(),
+        }))
+        .expect("serialise request");
+        let response: serde_json::Value =
+            serde_json::from_str(&self.child.request(&line)).expect("oracle response is JSON");
+        if let Some(error) = response.get("error") {
+            return Err(error.to_string());
+        }
+        Ok(match response["ok"].as_bool() {
+            Some(true) => None,
+            // MSBuild's own XML errors carry no code: the message stands for
+            // it.
+            _ => Some(DesignTimeRejection {
+                code: match response["code"].as_str() {
+                    Some(code) => code.to_owned(),
+                    None => format!("no code: {}", response["message"]),
+                },
+                line: response["line"].as_u64().unwrap_or(0) as usize,
+                column: response["column"].as_u64().unwrap_or(0) as usize,
+            }),
+        })
+    }
+
     fn project_as(
         &mut self,
         xml: &str,
@@ -1148,6 +1217,19 @@ pub struct OracleItem {
 /// Fixed seeds keep every differential run identical, so a failure reproduces
 /// exactly; the *random* exploration lives in the proptest file.
 pub struct SplitMix64(pub u64);
+
+/// How MSBuild's design-time evaluation rejected a project
+/// ([`Oracle::design_time_rejection`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DesignTimeRejection {
+    /// The exception's error code (`MSB4184`, …), or `no code: ` and its
+    /// message where it has none.
+    pub code: String,
+    /// The 1-based line it points at, 0 for none.
+    pub line: usize,
+    /// The 1-based column it points at, 0 for none.
+    pub column: usize,
+}
 
 impl SplitMix64 {
     pub fn next(&mut self) -> u64 {

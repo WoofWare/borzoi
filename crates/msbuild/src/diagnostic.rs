@@ -306,6 +306,28 @@ pub enum RejectionCause {
     /// indexer out of range, a malformed `[MSBuild]::Version*` operand.
     /// `expression` is the `$(…)` text.
     ThrowingExpression { expression: String },
+    /// A `<UsingTask>` MSBuild refuses as it registers the task, without an
+    /// expression throwing: `attribute` (`TaskName`, `TaskFactory`,
+    /// `AssemblyFile`, `AssemblyName`, a body's `Evaluate`, a parameter's
+    /// `ParameterType`, `Output` or `Required`) expanded to `value`, which
+    /// the registration does not take (an empty name, a flag that is no
+    /// boolean, a type it does not resolve, a body under no task factory).
+    /// `task` is the `TaskName` as written, shared by every refusal of the
+    /// task's parameters.
+    UsingTaskRegistration {
+        task: std::sync::Arc<str>,
+        attribute: String,
+        value: std::sync::Arc<str>,
+    },
+    /// Two parameters of a `<UsingTask>`'s `<ParameterGroup>` whose names
+    /// MSBuild's registry, keyed case-insensitively, takes for one: it fails
+    /// on the `second`, after the `first` (MSB1025). `task` is the
+    /// `TaskName` as written.
+    UsingTaskParameterCollision {
+        task: std::sync::Arc<str>,
+        first: std::sync::Arc<str>,
+        second: std::sync::Arc<str>,
+    },
 }
 
 /// A construct MSBuild's loader (`ProjectParser`) refuses when it loads a

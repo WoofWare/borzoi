@@ -683,3 +683,32 @@ fn wide_unheld_reads_are_struck_in_one_pass() {
         );
     }
 }
+
+/// An inline task of `width` parameters, no two named alike.
+fn wide_parameter_group(width: usize) -> String {
+    let parameters: String = (0..width)
+        .map(|i| format!("<P{i} ParameterType=\"System.String\" Required=\"false\" />"))
+        .collect();
+    format!(
+        "<UsingTask TaskName=\"X\" TaskFactory=\"RoslynCodeTaskFactory\" AssemblyFile=\"y.dll\">\
+         <ParameterGroup>{parameters}</ParameterGroup><Task>x</Task></UsingTask>"
+    )
+}
+
+/// A `<UsingTask>`'s parameter names are checked for a repeat, as the loader
+/// keys them and as the registration folds them, by sorting them
+/// (`loader::first_repeat`): `n` parameters cost `O(n log n)` comparisons,
+/// where checking each against every earlier one costs `n(n - 1) / 2`.
+/// Counted, so no load on the machine moves it.
+#[test]
+fn a_wide_parameter_group_is_registered_in_one_pass() {
+    for width in [500_u64, 2_000] {
+        let comparisons = walk_costs(wide_parameter_group(width as usize)).name_comparisons;
+        let log = u64::from(width.ilog2()) + 1;
+        assert!(comparisons > 0, "{width} parameters made no comparison");
+        assert!(
+            comparisons <= 4 * width * log,
+            "{width} parameters took {comparisons} comparisons"
+        );
+    }
+}

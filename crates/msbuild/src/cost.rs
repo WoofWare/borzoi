@@ -24,6 +24,12 @@ pub struct WalkCosts {
     pub strikes: u64,
     /// The bytes `condition::strike` copied, building them.
     pub struck_bytes: u64,
+    /// The `<UsingTask>` values `rejection::registration_value` expanded
+    /// for the registration's rules.
+    pub registration_expansions: u64,
+    /// The comparisons of two names `loader::first_repeat` made, finding a
+    /// repeated parameter name.
+    pub name_comparisons: u64,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -34,6 +40,8 @@ thread_local! {
             path_writes_examined: 0,
             strikes: 0,
             struck_bytes: 0,
+            name_comparisons: 0,
+            registration_expansions: 0,
         })
     };
 }

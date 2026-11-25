@@ -1047,6 +1047,38 @@ fn rejection_message(cause: &RejectionCause, certain: bool) -> String {
             "MSBuild may reject this project: it may be unable to evaluate the property \
              function `{expression}` — no evaluated value is trusted"
         ),
+        RejectionCause::UsingTaskRegistration {
+            task,
+            attribute,
+            value,
+        } => {
+            // A possible refusal is one Borzoi cannot rule out: on a value
+            // MSBuild may not read, or by a rule it does not know.
+            if certain {
+                format!(
+                    "MSBuild rejects this project: a `<UsingTask>` of `{task}` has `{attribute}` \
+                     `{value}`, which it refuses to register — no evaluated value is trusted"
+                )
+            } else {
+                format!(
+                    "MSBuild may reject this project: Borzoi cannot confirm it registers a \
+                     `<UsingTask>` of `{task}` with `{attribute}` `{value}` (as Borzoi reads it) \
+                     — no evaluated value is trusted"
+                )
+            }
+        }
+        RejectionCause::UsingTaskParameterCollision {
+            task,
+            first,
+            second,
+        } => {
+            let rejects = if certain { "rejects" } else { "may reject" };
+            format!(
+                "MSBuild {rejects} this project: a `<UsingTask>` of `{task}` declares parameters \
+                 `{first}` and `{second}`, one name to MSBuild, which ignores case — rename \
+                 one; no evaluated value is trusted"
+            )
+        }
     }
 }
 
@@ -1092,6 +1124,31 @@ mod tests {
     use proptest::prelude::*;
     use std::fs;
     use tempfile::TempDir;
+
+    /// A registration the walk only doubts claims nothing: the message says
+    /// Borzoi cannot confirm MSBuild registers it, not that the attribute has
+    /// the value, nor that MSBuild refuses it.
+    #[test]
+    fn a_possible_registration_refusal_claims_nothing_of_the_value() {
+        let cause = RejectionCause::UsingTaskRegistration {
+            task: "X".into(),
+            attribute: "ParameterType".to_owned(),
+            value: "System.TimeSpan".into(),
+        };
+        let possible = rejection_message(&cause, false);
+        assert!(
+            possible.contains("cannot confirm it registers"),
+            "{possible}"
+        );
+        assert!(!possible.contains("has `ParameterType`"), "{possible}");
+        assert!(!possible.contains("refuse"), "{possible}");
+        let certain = rejection_message(&cause, true);
+        assert!(
+            certain.contains("has `ParameterType` `System.TimeSpan`"),
+            "{certain}"
+        );
+        assert!(certain.contains("refuses to register"), "{certain}");
+    }
 
     /// A `get_env` closure supplying `%LOCALAPPDATA%` (used only on Windows;
     /// the Unix branches read the home directory, not the environment).
