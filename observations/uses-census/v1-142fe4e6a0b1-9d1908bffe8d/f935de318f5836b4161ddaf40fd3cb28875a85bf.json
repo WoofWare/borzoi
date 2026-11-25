@@ -1,0 +1,141 @@
+{
+  "observation_schema_version": 1,
+  "series": "v1-142fe4e6a0b1-9d1908bffe8d",
+  "repository": "WoofWare/borzoi",
+  "commit": "f935de318f5836b4161ddaf40fd3cb28875a85bf",
+  "measured_at": "2026-11-25T20:45:07Z",
+  "workflow": {
+    "run_id": 45696309020,
+    "run_number": 542,
+    "run_attempt": 1,
+    "url": "https://github.com/WoofWare/borzoi/actions/runs/45696309020"
+  },
+  "corpus": {
+    "source": "dotnet/fsharp",
+    "revision": "142fe4e6a0b1cbef6f8e18e473e03b9137644cc0"
+  },
+  "flake_lock_hash": "1d8fecb61977dd5f76129f28d2eaeb8d9adb5eaf6e494ffcb42283bd56035227",
+  "generator": {
+    "schema_version": 1,
+    "measurement": "uses-census",
+    "configuration": {
+      "corpus": "fsharp-src",
+      "file_extensions": [
+        ".fs"
+      ],
+      "limit": null,
+      "scope": "file-isolated",
+      "stride": 13
+    },
+    "statistics": {
+      "buckets": {
+        "b1": 46183,
+        "b2": 3123,
+        "b3": 527,
+        "other": 83
+      },
+      "by_area": {
+        "other": {
+          "buckets": {
+            "b1": 799,
+            "b2": 20,
+            "b3": 9,
+            "other": 0
+          },
+          "files": 3,
+          "needs_inference": {
+            "basis_points": 350,
+            "denominator": 828,
+            "numerator": 29
+          },
+          "non_definition": 828
+        },
+        "src": {
+          "buckets": {
+            "b1": 25177,
+            "b2": 2322,
+            "b3": 267,
+            "other": 42
+          },
+          "files": 34,
+          "needs_inference": {
+            "basis_points": 931,
+            "denominator": 27808,
+            "numerator": 2589
+          },
+          "non_definition": 27808
+        },
+        "tests": {
+          "buckets": {
+            "b1": 20207,
+            "b2": 781,
+            "b3": 251,
+            "other": 41
+          },
+          "files": 395,
+          "needs_inference": {
+            "basis_points": 484,
+            "denominator": 21280,
+            "numerator": 1032
+          },
+          "non_definition": 21280
+        },
+        "vsintegration": {
+          "buckets": {
+            "b1": 0,
+            "b2": 0,
+            "b3": 0,
+            "other": 0
+          },
+          "files": 0,
+          "needs_inference": {
+            "basis_points": 0,
+            "denominator": 0,
+            "numerator": 0
+          },
+          "non_definition": 0
+        }
+      },
+      "by_tag": {
+        "active-pattern-case": 51,
+        "active-pattern-fn": 0,
+        "constructor": 810,
+        "constructor:overloaded": 209,
+        "entity:module": 1378,
+        "entity:namespace": 2013,
+        "entity:type": 6496,
+        "instance-member:overloaded": 230,
+        "instance-member:simple": 1917,
+        "member:extension": 88,
+        "other": 83,
+        "parameter": 102,
+        "record/class-field": 1206,
+        "static-member": 399,
+        "static-member:overloaded(group)": 233,
+        "type-parameter": 1675,
+        "union-case": 2711,
+        "value:local-or-param": 14767,
+        "value:module-or-import": 15548
+      },
+      "files": {
+        "sampled": 432,
+        "type_checked_ok": 432
+      },
+      "hard_pile_share": {
+        "basis_points": 1443,
+        "denominator": 3650,
+        "numerator": 527
+      },
+      "needs_inference": {
+        "basis_points": 731,
+        "denominator": 49916,
+        "numerator": 3650
+      },
+      "uses": {
+        "definition_occurrences": 20441,
+        "non_definition": 49916,
+        "total": 70357
+      }
+    }
+  }
+}
