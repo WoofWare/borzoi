@@ -2241,6 +2241,73 @@ mod tests {
         }
     }
 
+    /// Every hostile environment (`hostile::env`), its variables at their own
+    /// values, and every hostile file-name template rendered as a variable's
+    /// name (`hostile::name`): the classifier and the environment's verdict
+    /// are the rule they replaced, each recorded in the census
+    /// `variable_class`.
+    #[test]
+    fn the_classifier_agrees_on_every_hostile_environment() {
+        use borzoi_oracle_harness::hostile::{Dimension, coverage, env, name};
+        use std::collections::BTreeSet;
+        let census = coverage::open(
+            file!(),
+            "variable_class",
+            &[(
+                Dimension::NonUtf8,
+                "the derivation takes the environment as UTF-8 text, as its caller reads it",
+            )],
+        );
+        let mut failures = Vec::new();
+        let mut check = |environment: HashMap<String, String>, dimension: Dimension| {
+            for name in environment.keys() {
+                if !classify_variable(name).admitted() != declined_before(name) {
+                    failures.push(format!("{name:?}: {:?}", classify_variable(name)));
+                }
+            }
+            let declined = environment_decline(&environment);
+            let declined_name = match &declined {
+                Some(NameDecline::Environment(name)) => Some(name.clone()),
+                _ => None,
+            };
+            let agrees = match &declined_name {
+                Some(name) => environment.contains_key(name) && declined_before(name),
+                None => declined.is_none() && !environment.keys().any(|n| declined_before(n)),
+            };
+            if !agrees {
+                failures.push(format!("{environment:?}: {declined:?}"));
+            }
+            census.reached(
+                &BTreeSet::from([dimension]),
+                if declined.is_some() {
+                    "decline"
+                } else {
+                    "admit"
+                },
+            );
+        };
+        for entry in env::alphabet().entries() {
+            let environment = entry
+                .value
+                .iter()
+                .map(|(name, value)| (name.to_string(), value.to_string()))
+                .collect();
+            check(environment, entry.dimension);
+        }
+        for entry in name::as_text("BorzoiVar", "") {
+            check(
+                HashMap::from([(entry.value.clone(), "v".to_string())]),
+                entry.dimension,
+            );
+        }
+        census.reached(&BTreeSet::new(), "plain");
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+        census.finish(
+            "BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-msbuild --lib \
+             fsc::tests::the_classifier_agrees_on_every_hostile_environment",
+        );
+    }
+
     /// Each class is reached, so the property above compares every arm.
     #[test]
     fn every_class_is_reached() {

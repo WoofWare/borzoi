@@ -1889,4 +1889,7 @@ fn validate_inputs(extra_properties: &HashMap<String, String>) -> Result<(), Par
 mod tests;
 
 #[cfg(test)]
+mod nuget_guard_tests;
+
+#[cfg(test)]
 mod with_imports_tests;
