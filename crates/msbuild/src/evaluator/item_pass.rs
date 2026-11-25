@@ -269,6 +269,7 @@ impl<'r> State<'r> {
 /// pass encountered it. Called once per walk, after the property pass has
 /// consumed the entry body and every import.
 pub(super) fn replay_deferred_item_groups(entry_doc: &Document<'_>, state: &mut State<'_>) {
+    state.write_all_projects();
     let groups = std::mem::take(&mut state.deferred_item_groups);
     let files = std::mem::take(&mut state.retained_imported_files);
     let definition_groups = groups

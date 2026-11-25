@@ -173,6 +173,7 @@ crates/msbuild/src/with_imports_tests/package_uncertain.rs	pending	2
 crates/msbuild/src/with_imports_tests/read_set.rs	pending	2
 crates/msbuild/src/with_imports_tests/sdk_resolution.rs	pending	2
 crates/msbuild/src/with_imports_tests/startup_directory.rs	pending	2
+crates/msbuild/tests/all_projects_property_diff.rs	not-applicable	a table of the writes and spellings of the one name MSBuild rewrites between its passes; what it reads is that rewrite, not a hostile value
 crates/msbuild/tests/common/case_axis.rs	pending	2
 crates/msbuild/tests/common/mod.rs	pending	2
 crates/msbuild/tests/common/odd_entry.rs	pending	2
