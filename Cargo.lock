@@ -327,8 +327,7 @@ dependencies = [
 name = "borzoi-verdict"
 version = "0.1.0"
 dependencies = [
- "quote",
- "syn 2.0.119",
+ "sha1",
 ]
 
 [[package]]

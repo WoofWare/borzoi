@@ -4,8 +4,7 @@ version = "0.1.0"
 edition = "2024"
 license.workspace = true
 
-# Test-only: `tests/surface.rs` reads `src/lib.rs` to hold the crate's surface
-# to an exact list. The crate itself has no dependencies.
+# Test-only: `tests/pin.rs` hashes each file under `src` to hold it to its pin.
+# The crate itself has no dependencies.
 [dev-dependencies]
-quote.workspace = true
-syn.workspace = true
+sha1.workspace = true

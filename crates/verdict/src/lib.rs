@@ -123,9 +123,10 @@
 //! let found = borzoi_verdict::Lookup::<u8, ()>::Found(1).unwrap_or(0);
 //! ```
 //!
-//! These name the readings the docs above rule out; `tests/surface.rs` holds
-//! the whole public surface to an exact list, so a reading under any other
-//! name fails there.
+//! These name the readings the docs above rule out. A reading can be added
+//! under any other name, so `tests/pin.rs` pins the exact text of every file
+//! under `src`: no change to the crate lands without a reviewed change to the
+//! pin.
 //!
 //! ```compile_fail
 //! // No `or` on a verdict:

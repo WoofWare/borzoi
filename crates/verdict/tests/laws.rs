@@ -239,9 +239,9 @@ const ASKS_AFTER_END: u8 = 4;
 /// Reads as many values as the lower bound of the size hint it is offered,
 /// as a collection that preallocates and fills may.
 const LOWER_BOUND: u8 = 5;
-/// Reads to the end, recording `99` if it read more values than the upper
-/// bound of the size hint it was offered allowed.
-const WITHIN_UPPER_BOUND: u8 = 6;
+/// Reads to the end, recording in [`HINTS`] the size hint it is offered
+/// before each read and once after the end.
+const RECORDS_HINTS: u8 = 6;
 const DISCIPLINES: [u8; 7] = [
     EVERY,
     NOTHING,
@@ -249,8 +249,16 @@ const DISCIPLINES: [u8; 7] = [
     THROUGH_ZERO,
     ASKS_AFTER_END,
     LOWER_BOUND,
-    WITHIN_UPPER_BOUND,
+    RECORDS_HINTS,
 ];
+
+thread_local! {
+    /// The size hints the last [`RECORDS_HINTS`] collection was offered. Read
+    /// apart from the collection, so that the hints are checked even when the
+    /// source's `Unknown` means the collection itself is discarded.
+    static HINTS: std::cell::RefCell<Vec<(usize, Option<usize>)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
 
 /// A collection reading by discipline `D`, holding what it read.
 #[derive(Debug, PartialEq)]
@@ -284,12 +292,19 @@ impl<const D: u8> FromIterator<u8> for Collector<D> {
                 let lower = iter.size_hint().0;
                 read.extend(iter.take(lower));
             }
-            WITHIN_UPPER_BOUND => {
-                let upper = iter.size_hint().1;
-                read.extend(&mut iter);
-                if upper.is_some_and(|upper| read.len() > upper) {
-                    read.push(99);
+            RECORDS_HINTS => {
+                let mut hints = Vec::new();
+                loop {
+                    hints.push(iter.size_hint());
+                    match iter.next() {
+                        Some(x) => read.push(x),
+                        None => {
+                            hints.push(iter.size_hint());
+                            break;
+                        }
+                    }
                 }
+                HINTS.with(|recorded| *recorded.borrow_mut() = hints);
             }
             _ => unreachable!("a discipline of DISCIPLINES"),
         }
@@ -301,7 +316,7 @@ impl<const D: u8> FromIterator<u8> for Collector<D> {
 /// `values` and nothing after them.
 fn model(discipline: u8, values: &[u8]) -> Vec<u8> {
     match discipline {
-        EVERY | ASKS_AFTER_END | WITHIN_UPPER_BOUND => values.to_vec(),
+        EVERY | ASKS_AFTER_END | RECORDS_HINTS => values.to_vec(),
         // The collection is offered a lower bound of zero: the source may hold
         // an `Unknown`, after which no value is offered.
         NOTHING | LOWER_BOUND => vec![],
@@ -402,6 +417,20 @@ fn check_discipline<const D: u8>() {
             expected_reads(&seq),
             "discipline {D}: {seq:?}"
         );
+        if D == RECORDS_HINTS {
+            // Before each read, a lower bound of zero and the source's upper
+            // bound (it holds `n - i` more after `i` reads); once the first
+            // `Unknown` or the end is reached, nothing more.
+            let n = seq.len();
+            let certain = expected_reads(&seq)
+                - usize::from(seq.iter().any(|v| matches!(v, Verdict::Unknown(_))));
+            let expected: Vec<(usize, Option<usize>)> = (0..=certain)
+                .map(|i| (0, Some(n - i)))
+                .chain([(0, Some(0))])
+                .collect();
+            let recorded = HINTS.with(|recorded| recorded.borrow().clone());
+            assert_eq!(recorded, expected, "size hints offered: {seq:?}");
+        }
     }
 }
 
@@ -414,7 +443,7 @@ fn verdict_collect_gives_the_leftmost_unknown_however_the_collection_reads() {
     assert_eq!(
         models.len(),
         4,
-        "EVERY, ASKS_AFTER_END and WITHIN_UPPER_BOUND model alike, as do NOTHING and LOWER_BOUND"
+        "EVERY, ASKS_AFTER_END and RECORDS_HINTS model alike, as do NOTHING and LOWER_BOUND"
     );
     check_discipline::<EVERY>();
     check_discipline::<NOTHING>();
@@ -422,7 +451,7 @@ fn verdict_collect_gives_the_leftmost_unknown_however_the_collection_reads() {
     check_discipline::<THROUGH_ZERO>();
     check_discipline::<ASKS_AFTER_END>();
     check_discipline::<LOWER_BOUND>();
-    check_discipline::<WITHIN_UPPER_BOUND>();
+    check_discipline::<RECORDS_HINTS>();
 }
 
 #[test]

@@ -1,0 +1,3 @@
+# Every file under crates/verdict/src: path, SHA-1 of its bytes, length.
+# Regenerate with BORZOI_UPDATE_MANIFESTS=1 (see tests/pin.rs).
+src/lib.rs	ebdacdf8ff5ceac29661082cae25a98529485856	16764

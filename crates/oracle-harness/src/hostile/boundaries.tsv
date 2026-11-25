@@ -359,4 +359,3 @@ crates/sema/tests/all/value_access_open_grid.rs	pending	3
 crates/sema/tests/all/walk_cost_scaling.rs	pending	3
 crates/sema/tests/all/walk_stack_bound.rs	pending	3
 crates/verdict/tests/laws.rs	not-applicable	the exhaustive laws of an in-memory type, over every value, cause and function of a finite domain and every way a collection reads; no input crosses a boundary, so no hostile kind applies
-crates/verdict/tests/surface.rs	not-applicable	perturbs a Rust syntax fixture to check its listing of an API surface moves with each change; the inputs are hand-chosen edits to source the crate owns, not values drawn from any hostile kind
