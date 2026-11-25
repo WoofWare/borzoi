@@ -11,7 +11,8 @@ use crate::hash::{HashMap, HashSet};
 
 use borzoi_cst::syntax::{
     AstNode, AttributeList, ExceptionDefnDecl, ExternDecl, ImplFile, JoinInExpr, ModuleDecl,
-    NestedModuleDecl, SyntaxKind, SyntaxNode, TextRange, TypeDefn, TypeDefnRepr, UnionCase,
+    NestedModuleDecl, SyntaxKind, SyntaxNode, SyntaxToken, TextRange, TypeDefn, TypeDefnRepr,
+    UnionCase,
 };
 
 use super::contributors;
@@ -422,14 +423,14 @@ pub(super) fn declares_core_attribute_alias(root: &SyntaxNode) -> bool {
 /// rooted at `root`, an implementation or a signature, keyed as
 /// [`ResolvedFile::attribute_resolutions`](super::model::ResolvedFile::attribute_resolutions)
 /// keys an attribute's verdict (first ident to last), with its last
-/// identifier unquoted, or `None` for an attribute whose name has no ident
-/// to key it by.
+/// identifier (whose `id_text` is the written name), or `None` for an
+/// attribute whose name has no ident to key it by.
 ///
 /// An abbreviation carrying `[<AutoOpen>]` or `[<Extension>]` brings the
 /// extension members of the type it abbreviates into scope (#831): FCS reads
 /// either attribute off the abbreviation's own type and then works on its
 /// target. [`super::extension_names::file_extension_names`] reads these.
-pub(super) fn abbreviation_attributes(root: &SyntaxNode) -> Vec<Option<(TextRange, String)>> {
+pub(super) fn abbreviation_attributes(root: &SyntaxNode) -> Vec<Option<(TextRange, SyntaxToken)>> {
     root.descendants_of::<TypeDefn>()
         .filter(|defn| matches!(defn.repr(), Some(TypeDefnRepr::Abbrev(_))))
         .flat_map(|defn| {
@@ -444,7 +445,7 @@ pub(super) fn abbreviation_attributes(root: &SyntaxNode) -> Vec<Option<(TextRang
                     match (toks.first(), toks.last()) {
                         (Some(first), Some(last)) => Some((
                             TextRange::new(first.fcs_range().start(), last.fcs_range().end()),
-                            crate::def::id_text(last).into_owned(),
+                            last.clone(),
                         )),
                         _ => None,
                     }

@@ -468,7 +468,9 @@ fn walk_file(
     #[cfg(feature = "otel")]
     let _phase = tracing::info_span!("resolve_finish").entered();
     let item_base = r.item_base;
-    let mut rf = r.finish().into_resolved_file(prescan, item_base, recovery);
+    let mut rf = r
+        .finish()
+        .into_resolved_file(prescan, item_base, recovery, walk);
     rf.surface.extension_names = rf.syntactic_extension_names(file.syntax(), assemblies);
     rf.surface.damage = extension_names::damage(file.syntax(), recovery);
     rf.debug_assert_no_range_splits_a_glued_star(file.syntax());
@@ -2901,6 +2903,32 @@ fn attrs_auto_open(attrs: impl Iterator<Item = AttributeList>) -> bool {
         .filter_map(|attr| attr.type_name())
         .filter_map(|li| li.idents().last())
         .any(|seg| matches!(&*id_text(&seg), "AutoOpen" | "AutoOpenAttribute"))
+}
+
+#[cfg(test)]
+mod placed_type_index_tests {
+    use super::*;
+    use borzoi_cst::parser::parse;
+
+    /// A full walk indexes its placed types by def; a surface walk, whose
+    /// file lends only its surface, builds no index.
+    #[test]
+    fn only_a_full_walk_indexes_its_placed_types() {
+        let parsed = parse("module M\ntype A = int\ntype B() = class end\n");
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+        let recovery = SyntaxRecovery::of(&parsed);
+        let file = ImplFile::cast(parsed.root).expect("impl file");
+        let env = AssemblyEnv::default();
+        let preceding = ProjectItems::default();
+        let full = walk_file(&file, &preceding, &env, &recovery, Walk::Full);
+        let defs: Vec<DefId> = full.placed_type_defs().collect();
+        assert_eq!(defs.len(), 2, "{defs:?}");
+        for (index, def) in defs.into_iter().enumerate() {
+            assert_eq!(full.placed_type_index(def), u32::try_from(index).ok());
+        }
+        let surface = walk_file(&file, &preceding, &env, &recovery, Walk::Surface);
+        assert_eq!(surface.placed_type_of_def, None);
+    }
 }
 
 #[cfg(test)]

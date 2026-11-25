@@ -206,8 +206,8 @@ pub(crate) fn file_extension_names(
     for name in super::prescan::abbreviation_attributes(root) {
         match name {
             None => names.fail(NamesUnknowable::AttributeShape),
-            Some((range, written))
-                if may_be(range, &written, MarkerQuestion::ExtensionOrAutoOpen) =>
+            Some((range, last))
+                if may_be(range, &id_text(&last), MarkerQuestion::ExtensionOrAutoOpen) =>
             {
                 names.fail(NamesUnknowable::AttributedAbbreviation);
             }

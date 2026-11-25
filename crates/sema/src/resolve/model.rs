@@ -4362,8 +4362,9 @@ pub struct ResolvedFile {
     pub(super) own_abbrev_type_simple_names: HashSet<String>,
     /// Each placed type's position in [`FileSurface::placed_types`], by its
     /// def: how [`Self::placed_type_index`] finds a type without a scan per
-    /// use.
-    pub(super) placed_type_of_def: HashMap<DefId, usize>,
+    /// use. `None` for the file of a surface walk
+    /// ([`surface_file`](super::surface_file)), which lends only its surface.
+    pub(super) placed_type_of_def: Option<HashMap<DefId, usize>>,
     /// The file-wide unknowables the walk raised ([`Unknowables`]), read
     /// through [`Self::opens_unenumerated`] and [`Self::opens_project`].
     pub(super) unknowables: Unknowables,
@@ -4583,7 +4584,7 @@ impl ResolvedFile {
             attribute_resolutions: HashMap::default(),
             field_labels: HashMap::default(),
             own_abbrev_type_simple_names: HashSet::default(),
-            placed_type_of_def: HashMap::default(),
+            placed_type_of_def: Some(HashMap::default()),
             unknowables: Unknowables::default(),
             preceding_extension_names: ExtensionNames::default(),
             namespace_paths: Vec::new(),
@@ -5093,7 +5094,11 @@ impl ResolvedFile {
     /// [`Resolution::EarlierFileType`] names it by — or `None` when `def` is
     /// not a type the walk placed.
     pub fn placed_type_index(&self, def: DefId) -> Option<u32> {
-        let index = *self.placed_type_of_def.get(&def)?;
+        let index = *self
+            .placed_type_of_def
+            .as_ref()
+            .expect("a surface walk's file indexes no placed type")
+            .get(&def)?;
         debug_assert_eq!(self.surface.placed_types[index].def, def);
         Some(u32::try_from(index).expect("more than u32::MAX types in a file"))
     }
