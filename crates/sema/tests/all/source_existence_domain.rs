@@ -8,10 +8,10 @@
 
 use borzoi_oracle_harness::manifest::Manifest;
 use borzoi_oracle_harness::project_graph::Target;
-use borzoi_sema::{Form, Verdict};
+use borzoi_sema::{ExistenceUnread, Form, SourceExistence, Verdict};
 
 use crate::common::corpus_manifest::{check_manifest, regenerate};
-use crate::source_existence_diff::{Cell, grade_cells, graded};
+use crate::source_existence_diff::{Cell, grade_cells, graded, ours};
 
 /// A form's witness as a cell: a signature and its implementation for
 /// `SignatureFile`, one implementation file otherwise, an executable for a
@@ -51,9 +51,11 @@ fn every_form_is_read_or_declined_as_its_verdict_says() {
         let kept = match form.verdict() {
             // Graded against FCS, not merely not declined.
             Verdict::Read => graded(verdict),
-            Verdict::Declined => {
-                verdict.starts_with("unread Declined(") && verdict.contains(&format!(", {form:?})"))
-            }
+            // The walk's own reason, whether or not FCS's reading is graded.
+            Verdict::Declined => matches!(
+                ours(cell),
+                SourceExistence::Unread(ExistenceUnread::Declined(_, f)) if f == *form
+            ),
         };
         if !kept {
             wrong.push(format!(

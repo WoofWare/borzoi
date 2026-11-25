@@ -264,6 +264,9 @@ forms! {
     AnonymousModule: FileHeader, Declined, "type T = int\nlet x = 1\n";
     /// A long identifier of plain identifiers.
     PlainName: Name, Read, "module A.B.C\nlet x = 1\n";
+    /// A name holding the `global` keyword unquoted, which FCS spells
+    /// `` `global` ``, backticks and all.
+    GlobalName: Name, Declined, "module D\ntype global = { X: int }\n";
     /// `module M = …`.
     NestedModule: NestedModule, Read, "module Outer\nmodule Inner =\n    let x = 1\n";
     /// `module M = begin end`, a module with no declarations.
@@ -312,6 +315,11 @@ forms! {
     OtherAttribute: Attribute, Read, "module D\n[<System.Obsolete>]\nlet x = 1\n";
     /// A `#` directive.
     HashDirective: HashDirective, Declined, "module D\n#time \"on\"\nlet x = 1\n";
+    /// A line directive (`# 3 "f.fs"`, `#line`), which the lexer keeps as
+    /// trivia: it moves no entity, but FCS's reading of a producer holding
+    /// one is not graded (the oracle refuses it), so the walk does not read
+    /// it.
+    LineDirective: HashDirective, Declined, "module D\n# 3 \"Other.fs\"\nlet x = 1\n";
 }
 
 /// What [`source_existence`] read.
@@ -693,6 +701,12 @@ impl FileWalk<'_> {
         let root = file.syntax();
         // The attributes and directives anywhere in the file, before any
         // row: each is read or declines A, wherever it sits.
+        if root
+            .descendants_with_tokens()
+            .any(|el| el.kind() == SyntaxKind::HASH_LINE)
+        {
+            self.form(Form::LineDirective)?;
+        }
         for node in root.descendants() {
             if node.kind() == SyntaxKind::HASH_DIRECTIVE_DECL {
                 self.form(Form::HashDirective)?;
@@ -757,6 +771,14 @@ impl FileWalk<'_> {
 
     /// A long identifier's names, its form recorded.
     fn name(&mut self, li: Option<LongIdent>) -> Result<Vec<String>, ExistenceUnread> {
+        // The `global` keyword stands as an identifier token, spelled as
+        // written; FCS's name for it is quoted.
+        if li
+            .as_ref()
+            .is_some_and(|li| li.idents().any(|t| t.text() == "global"))
+        {
+            self.form(Form::GlobalName)?;
+        }
         let names = li
             .as_ref()
             .and_then(long_ident)
@@ -1019,6 +1041,7 @@ impl FileWalk<'_> {
 /// An abbreviation target's form (`name` the abbreviation's own, `generic`
 /// whether it has type parameters).
 fn target_form(ty: &Type, name: &str, generic: bool) -> Form {
+    // One scan of the whole target, then its parentheses peeled.
     let static_argument = ty.syntax().descendants().any(|n| {
         matches!(
             n.kind(),
@@ -1031,11 +1054,15 @@ fn target_form(ty: &Type, name: &str, generic: bool) -> Form {
     if static_argument {
         return Form::StaticArgumentTarget;
     }
-    match ty {
-        Type::Paren(p) => match p.inner() {
-            Some(inner) => target_form(&inner, name, generic),
-            None => Form::NamedTarget,
-        },
+    let mut ty = ty.clone();
+    while let Type::Paren(p) = &ty {
+        match p.inner() {
+            Some(inner) => ty = inner,
+            None => return Form::NamedTarget,
+        }
+    }
+    match &ty {
+        Type::Paren(_) => unreachable!("every parenthesis is peeled"),
         Type::LongIdent(t) => match t.long_ident().as_ref().and_then(long_ident).as_deref() {
             Some([single]) if single == name && !generic => Form::SelfNamedTarget,
             Some([single]) if FSHARP_CORE_TYPE_NAMES.contains(&single.as_str()) => {

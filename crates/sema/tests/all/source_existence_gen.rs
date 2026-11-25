@@ -83,6 +83,8 @@ pub enum Production {
     AttributedLet,
     Open,
     ModuleAbbreviation,
+    /// A keyword as a quoted name (`` ``global`` ``, `` ``type`` ``).
+    QuotedKeywordName,
     // Outside the domain: each declines with its form.
     EntityAttribute,
     StandaloneAttribute,
@@ -93,6 +95,8 @@ pub enum Production {
     TupleAugmentation,
     ConstructorAugmentation,
     HashDirective,
+    GlobalName,
+    LineDirective,
 }
 
 impl Production {
@@ -132,6 +136,9 @@ impl Production {
         Production::TupleAugmentation,
         Production::ConstructorAugmentation,
         Production::HashDirective,
+        Production::GlobalName,
+        Production::LineDirective,
+        Production::QuotedKeywordName,
     ];
 
     /// The form an out-of-domain production declines with, `None` for one
@@ -147,6 +154,8 @@ impl Production {
             Production::TupleAugmentation => Form::TupleAugmentation,
             Production::ConstructorAugmentation => Form::ConstructorAugmentation,
             Production::HashDirective => Form::HashDirective,
+            Production::GlobalName => Form::GlobalName,
+            Production::LineDirective => Form::LineDirective,
             Production::Namespace
             | Production::DottedNamespace
             | Production::RecNamespace
@@ -172,7 +181,8 @@ impl Production {
             | Production::Let
             | Production::AttributedLet
             | Production::Open
-            | Production::ModuleAbbreviation => return None,
+            | Production::ModuleAbbreviation
+            | Production::QuotedKeywordName => return None,
         })
     }
 
@@ -186,6 +196,8 @@ impl Production {
         Production::TupleAugmentation,
         Production::ConstructorAugmentation,
         Production::HashDirective,
+        Production::GlobalName,
+        Production::LineDirective,
     ];
 }
 
@@ -348,6 +360,11 @@ impl Gen {
                     self.draw(Production::Open);
                     out.push_str(&format!("{pad}open System\n"));
                 }
+                8 => {
+                    self.draw(Production::QuotedKeywordName);
+                    let name = self.rng.pick(&["``global``", "``type``", "``module``"]);
+                    out.push_str(&format!("{pad}type {name} = {{ X: int }}\n"));
+                }
                 7 if budget > 0 => {
                     let real = self.fresh();
                     let alias = self.fresh();
@@ -428,9 +445,11 @@ impl Gen {
                 format!("{pad}[<System.Obsolete>]\n{pad}type {name} = {{ X: int }}\n")
             }
             Production::StandaloneAttribute => format!("{pad}[<System.Obsolete>]\n{pad}do ()\n"),
-            Production::SuffixedModule => {
-                format!("{pad}module {name}Module =\n{pad}    let x = 1\n")
-            }
+            // A plain stem: `Module` after a backticked name is no name.
+            Production::SuffixedModule => format!(
+                "{pad}module Stem{}Module =\n{pad}    let x = 1\n",
+                self.counter
+            ),
             Production::DottedType => {
                 format!("{pad}type System.String with\n{pad}    member s.M = 1\n")
             }
@@ -443,6 +462,8 @@ impl Gen {
                 format!("{pad}type {name}() with\n{pad}    member x.M = 1\n")
             }
             Production::HashDirective => format!("{pad}#time \"on\"\n"),
+            Production::GlobalName => format!("{pad}type global = {{ X: int }}\n"),
+            Production::LineDirective => format!("{pad}# 7 \"Elsewhere.fs\"\n"),
             other => unreachable!("{other:?} is in the domain"),
         }
     }
@@ -505,6 +526,37 @@ pub fn case(seed: u64) -> Case {
     }
 }
 
+/// Whether the walk keeps its domain on `c`, a case with no hostile state:
+/// a case of in-domain productions alone is read, and one holding an
+/// out-of-domain production declines with that production's form. Judged
+/// on the walk's own verdict, whatever FCS made of the case.
+fn domain_failures(c: &Case) -> Option<String> {
+    if !c.hostile.is_empty() {
+        return None;
+    }
+    let ours = crate::source_existence_diff::ours(&c.cell);
+    match (c.outside, &ours) {
+        (None, SourceExistence::Read(_)) => None,
+        (None, SourceExistence::Unread(why)) => Some(format!(
+            "{}: in the domain, and the walk declines: {why:?}",
+            c.cell.name
+        )),
+        (Some(p), ours) => {
+            let form = p.declines_with().expect("an out-of-domain production");
+            (!matches!(
+                ours,
+                SourceExistence::Unread(ExistenceUnread::Declined(_, f)) if *f == form
+            ))
+            .then(|| {
+                format!(
+                    "{}: holds {p:?}, which declines with {form:?}, and the walk gave {ours:?}",
+                    c.cell.name
+                )
+            })
+        }
+    }
+}
+
 /// The census of the source mutations the generator mixes in.
 fn open_census() -> Census {
     coverage::open(
@@ -548,30 +600,7 @@ fn source_rows_hold_fcs_facts_over_generated_projects() {
                 slot.1 += 1;
             }
         }
-        if !c.hostile.is_empty() {
-            continue;
-        }
-        // The walk's own verdict, whatever FCS made of the case.
-        let ours = crate::source_existence_diff::ours(&c.cell);
-        match (c.outside, &ours) {
-            (None, SourceExistence::Read(_)) => {}
-            (None, SourceExistence::Unread(why)) => failures.push(format!(
-                "{}: in the domain, and the walk declines: {why:?}",
-                c.cell.name
-            )),
-            (Some(p), ours) => {
-                let form = p.declines_with().expect("an out-of-domain production");
-                if !matches!(
-                    ours,
-                    SourceExistence::Unread(ExistenceUnread::Declined(_, f)) if *f == form
-                ) {
-                    failures.push(format!(
-                        "{}: holds {p:?}, which declines with {form:?}, and the walk gave {ours:?}",
-                        c.cell.name
-                    ));
-                }
-            }
-        }
+        failures.extend(domain_failures(c));
     }
     if !failures.is_empty() {
         for c in &cases {
@@ -634,12 +663,29 @@ fn deep_source_rows_hold_fcs_facts_over_generated_projects() {
     };
     let first = var("BORZOI_SOURCE_EXISTENCE_SEED", 1000);
     let count = var("BORZOI_SOURCE_EXISTENCE_CASES", 400);
-    let cells: Vec<Cell> = (first..first + count).map(|s| case(s).cell).collect();
-    let (_, failures) = grade_cells(&cells);
+    let cases: Vec<Case> = (first..first + count).map(case).collect();
+    let cells: Vec<Cell> = cases.iter().map(|c| c.cell.clone()).collect();
+    let (_, mut failures) = grade_cells(&cells);
+    failures.extend(cases.iter().filter_map(domain_failures));
+    show_failing(&cases, &failures);
     assert!(
         failures.is_empty(),
         "{} failures:\n{}",
         failures.len(),
         failures.join("\n\n")
     );
+}
+
+/// Print each failing case's files.
+fn show_failing(cases: &[Case], failures: &[String]) {
+    for c in cases {
+        if failures
+            .iter()
+            .any(|f| f.starts_with(&format!("{}:", c.cell.name)))
+        {
+            for f in &c.cell.graph.files {
+                eprintln!("--- {} {}\n{}", c.cell.name, f.name, f.text);
+            }
+        }
+    }
 }

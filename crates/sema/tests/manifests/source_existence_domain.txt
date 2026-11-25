@@ -20,6 +20,8 @@ domain_FileHeader_Namespace	exact
 domain_File_ImplementationFile	exact
 domain_File_SignatureFile	unread Declined(0, SignatureFile)
 domain_HashDirective_HashDirective	unread Declined(0, HashDirective) [FCS: FS76]
+domain_HashDirective_LineDirective	ungraded: the oracle refuses (LineDirective); ours unread Declined(0, LineDirective)
+domain_Name_GlobalName	unread Declined(0, GlobalName) [FCS: FS883,FS1126]
 domain_Name_PlainName	exact
 domain_NestedModule_EmptyNestedModule	exact
 domain_NestedModule_NestedModule	exact
