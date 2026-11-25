@@ -7,10 +7,11 @@
 //! a write no document makes, by file times the walk does not read. So every
 //! read of the name after the property pass must be exact against MSBuild or
 //! declined: the final table's, a `Compile` item's spec, and a
-//! `ProjectReference`'s and a `PackageReference`'s gate, both one the
-//! rewritten value closes (`== 'off'`) and one it opens (`!= ''`). A read
-//! during the property pass, before the write, stays exact; and a gate
-//! another operand decides stays decided.
+//! `ProjectReference`'s and a `PackageReference`'s gate, one of [`GATES`] in
+//! each project, so that a decline of one gate cannot hide a wrong decision
+//! of another behind the list it makes uncertain. A read during the property
+//! pass, before the write, stays exact; and a gate another operand decides
+//! stays decided.
 //!
 //! The reference list's contract tolerates a missing edge behind a gate the
 //! walk cannot decide (`ParsedProject::project_references_uncertain`), so a
@@ -39,6 +40,9 @@ const WRITES: &[&str] = &[
     "<{name}>$({name});b.props</{name}>",
 ];
 
+/// The reference gates: one the rewritten value closes, and one it opens.
+const GATES: &[&str] = &["'$({name})' == 'off'", "'$({name})' != ''"];
+
 /// The spellings of the name a document reads it by.
 const SPELLINGS: &[&str] = &["MSBuildAllProjects", "msbuildallprojects"];
 
@@ -58,20 +62,21 @@ fn all_projects_after_the_property_pass_is_exact_or_declined() {
     let mut oracle = common::Oracle::spawn();
     let mut violations = Vec::new();
     for write in WRITES {
-        for name in SPELLINGS {
+        for (name, gate) in SPELLINGS
+            .iter()
+            .flat_map(|name| GATES.iter().map(move |gate| (name, gate)))
+        {
             let write = write.replace("{name}", name);
+            let gate = gate.replace("{name}", name);
             let tmp = TempDir::new().unwrap();
             let dir = borzoi_msbuild::observed::host_fs::canonicalize(tmp.path()).unwrap();
             let path = dir.join("Demo.fsproj");
             let body = format!(
                 "<Project><PropertyGroup>{write}<During>[$({name})]</During></PropertyGroup>\
                  <ItemGroup><Compile Include=\"$({name})x.fs\" />\
-                 <ProjectReference Include=\"P.fsproj\" Condition=\"'$({name})' == 'off'\" />\
-                 <ProjectReference Include=\"Q.fsproj\" Condition=\"'$({name})' != ''\" />\
-                 <PackageReference Include=\"Pkg\" Version=\"1.0.0\" \
-                 Condition=\"'$({name})' == 'off'\" />\
-                 <PackageReference Include=\"Pkg2\" Version=\"1.0.0\" \
-                 Condition=\"'$({name})' != ''\" /></ItemGroup></Project>"
+                 <ProjectReference Include=\"P.fsproj\" Condition=\"{gate}\" />\
+                 <PackageReference Include=\"Pkg\" Version=\"1.0.0\" Condition=\"{gate}\" />\
+                 </ItemGroup></Project>"
             );
             std::fs::write(&path, &body).unwrap();
             let names = ["MSBuildAllProjects".to_owned(), "During".to_owned()];
@@ -98,7 +103,7 @@ fn all_projects_after_the_property_pass_is_exact_or_declined() {
                 None,
             )
             .expect("well-formed XML parses");
-            let label = format!("write {write:?}, read as {name}");
+            let label = format!("write {write:?}, read as {name}, gate {gate:?}");
             if let Err(error) = exact_or_declined(
                 &ours.property("MSBuildAllProjects"),
                 theirs.get("MSBuildAllProjects"),
