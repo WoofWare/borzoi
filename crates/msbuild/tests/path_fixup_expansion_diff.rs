@@ -78,8 +78,8 @@ use borzoi_oracle_harness::manifest::{self, Manifest};
 use common::{Oracle, SplitMix64};
 use tempfile::TempDir;
 
-/// Which of the relative names a generated expansion may probe
-/// ([`relative_names`]) a working directory holds as directories.
+/// Which of the relative names the points probe ([`probed_names`]) a working
+/// directory holds as directories.
 #[derive(Clone, Copy)]
 enum Holds {
     Nothing,
@@ -98,78 +98,90 @@ const STARTS: [(&str, Holds); 6] = [
     ("proj-empty", Holds::Nothing),
 ];
 
-/// The names a start holds as directories.
-fn held(holds: Holds) -> Vec<String> {
-    match holds {
-        Holds::Nothing => Vec::new(),
-        Holds::Only(name) => vec![name.to_owned()],
-        Holds::Every => relative_names().to_vec(),
+/// The literal runs of `text`: what lies between its `$(…)` references, each
+/// of which MSBuild's fixup adjusts as a piece of its own.
+fn literal_runs(text: &str) -> Vec<&str> {
+    let mut runs = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("$(") {
+        runs.push(&rest[..start]);
+        let mut depth = 0usize;
+        let mut end = rest.len();
+        for (i, c) in rest[start + 1..].char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = start + 1 + i + 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        rest = &rest[end..];
     }
+    runs.push(rest);
+    runs
 }
 
-/// Every relative first segment a generated expansion may ask MSBuild's
-/// fixup about, found by brute force over the generator's own vocabulary,
-/// as an over-approximation. A value's head is a relative [`PREFIXES`] entry
-/// or a [`PARTS`] entry (an indexer's field starts at a part), then up to
-/// three `%5c`-joined parts and perhaps a last `%5c` (an escaped backslash is
-/// no separator, so it stays in the name the fixup probes); the value is
-/// that head alone or before a `\`. Each sits inside each read
-/// [`TEMPLATES`] entry, inside each copy template or none; and each literal
-/// run of those templates and of the indexer's bodies ([`index_body`]) is
-/// probed piece by piece. A start that holds every one varies every probe a
-/// point can make, not only `seg` and `obj`.
-fn relative_names() -> &'static [String] {
-    static NAMES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
-    NAMES.get_or_init(compute_relative_names)
-}
-
-fn compute_relative_names() -> Vec<String> {
-    let mut names = std::collections::BTreeSet::new();
-    let mut note = |text: &str| {
-        let text = text.replace("$(Empty)", "");
-        if !text.contains('\\') {
-            return;
-        }
-        let first = text.split(['/', '\\']).next().unwrap_or_default();
-        if !matches!(first, "" | "." | "..") {
-            names.insert(first.to_owned());
-        }
-    };
-    let mut heads: Vec<String> = PREFIXES
-        .iter()
-        .filter(|prefix| !prefix.starts_with(['/', '\\']))
-        .chain(PARTS)
-        .map(|token| (*token).to_owned())
-        .collect();
-    let mut chain = heads.clone();
-    for _ in 0..3 {
-        chain = chain
-            .iter()
-            .flat_map(|head| PARTS.iter().map(move |part| format!("{head}%5c{part}")))
-            .collect();
-        heads.extend(chain.iter().cloned());
-    }
-    let values: Vec<String> = heads
-        .iter()
-        .flat_map(|head| [head.clone(), format!("{head}%5c")])
-        .flat_map(|head| [head.clone(), format!("{head}\\x")])
-        .collect();
-    for variant in 0..4 {
-        for run in index_body(variant, 0).split("$(") {
-            note(run);
-        }
-    }
-    for read in TEMPLATES {
-        for run in read.split("{v}") {
-            note(run);
-        }
-        for copy in std::iter::once("{v}").chain(TEMPLATES.iter().copied()) {
-            for value in &values {
-                note(&read.replace("{v}", &copy.replace("{v}", value)));
+/// The relative first segments MSBuild's fixup may ask about for `texts`,
+/// the texts points record it adjusts ([`Point::probes`]): the first segment
+/// of each, and of each literal run of one, where it holds a `\`. An escaped `%5c` is no separator, so it stays in the name.
+///
+/// A rooted text names the host's file system, not the fixture's, unless it
+/// is under the fixture's root: each such first segment must be absent from
+/// the host, or the answers the baseline records would be host facts. That
+/// is asserted here, so a host it fails on says so rather than answering
+/// apart from the host that recorded the baseline.
+fn probed_names<'t>(
+    texts: impl IntoIterator<Item = &'t str>,
+    root: &str,
+) -> std::collections::BTreeSet<String> {
+    let under_root = root.trim_start_matches('/');
+    // The host's `MSBuildUserExtensionsPath` is a host fact by design
+    // ([`Source::UserExtensions`]), which the fixed seed never reads.
+    let user_extensions = common::oracle_environment()
+        .get("MSBuildUserExtensionsPath")
+        .map(|path| path.replace('\\', "/").trim_start_matches('/').to_owned())
+        .filter(|path| !path.is_empty());
+    let mut relative = std::collections::BTreeSet::new();
+    let mut rooted = std::collections::BTreeMap::new();
+    for text in texts {
+        for piece in std::iter::once(text).chain(literal_runs(text)) {
+            let piece = piece.replace("$(Empty)", "");
+            let bare = piece.trim_start_matches(['/', '\\']);
+            if bare.len() < piece.len() {
+                let host_by_design = user_extensions
+                    .as_deref()
+                    .is_some_and(|path| bare.replace('\\', "/").starts_with(path));
+                if !bare.starts_with(under_root) && !host_by_design {
+                    let first = bare.split(['/', '\\']).next().unwrap_or_default();
+                    if !first.is_empty() {
+                        rooted
+                            .entry(first.to_owned())
+                            .or_insert_with(|| text.to_owned());
+                    }
+                }
+            } else if piece.contains('\\') {
+                let first = piece.split(['/', '\\']).next().unwrap_or_default();
+                if !matches!(first, "" | "." | "..") {
+                    relative.insert(first.to_owned());
+                }
             }
         }
     }
-    names.into_iter().collect()
+    for (name, text) in &rooted {
+        if name != ".." && name != "." {
+            assert!(
+                host_fs::metadata(std::path::Path::new("/").join(name)).is_err(),
+                "/{name}, which a generated point names ({text:?}), is on this host: its \
+                 answers would measure the host"
+            );
+        }
+    }
+    relative
 }
 
 /// Files under `proj-full`'s segments, for the `Compile` globs to find.
@@ -182,18 +194,21 @@ const ENVIRONMENT_VALUES: usize = 24;
 struct Start {
     label: &'static str,
     dir: PathBuf,
-    /// Whether the directory holds none of the generated segments: the start
+    /// Whether the directory holds none of the probed names: the start
     /// whose answer the walk assumes for every relative probe.
     all_absent: bool,
     oracle: Oracle,
 }
 
-/// The fixture on disk: a canonical root holding [`STARTS`]' directories and
-/// the projects' files, and the environment variables both sides read.
+/// The fixture on disk: a canonical root, the environment variables both
+/// sides read, and, once furnished ([`Fixture::furnish`]), [`STARTS`]'
+/// directories and the projects' files.
 struct Fixture {
     root: PathBuf,
     /// `BorzoiEnv{i}` and its value, which MSBuild reads as a property.
     environment: Vec<(String, String)>,
+    /// What [`Fixture::furnish`] laid out ([`layout_text`]).
+    layout: String,
     _tmp: TempDir,
 }
 
@@ -217,26 +232,27 @@ const PROJECTS: [(&str, [usize; 5]); 2] = [
 /// that no generated value climbs out (three `..` at most, from the root or
 /// from a directory in it, and a template's one part after), so that every
 /// path a point names is the fixture's or a host-rooted name
-/// [`host_rooted_names_are_the_facts_the_baseline_assumes`] pins, never a
-/// file of the host's temporary directory.
+/// [`probed_names`] holds absent, never a file of the host's temporary
+/// directory.
 const ROOT_IN_TMP: &str = "climb/climb/fixture";
 
-/// The fixture's layout as text: a `root` line, [`ROOT_IN_TMP`]; a `dir` line per start, its directory and
+/// The fixture's layout as text, holding `names` in the full starts: a
+/// `root` line, [`ROOT_IN_TMP`]; a `dir` line per start, its directory and
 /// each name it holds; a `file` line per file under `proj-full` and beside
 /// each project; and a `project` line per project, with its starts. The
 /// sweep lays the fixture out from it ([`lay_out`]), dumps it for
 /// `path_fixup_baseline.rs`, which lays its fixture out from that dump, and
 /// hashes it into every point's key ([`point_fingerprint`]).
-fn layout_text() -> &'static str {
-    static LAYOUT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    LAYOUT.get_or_init(compute_layout_text)
-}
-
-fn compute_layout_text() -> String {
+fn layout_text(names: &std::collections::BTreeSet<String>) -> String {
     let mut text = format!("root\t{ROOT_IN_TMP}\n");
     for (dir, holds) in STARTS {
         text.push_str(&format!("dir\t{dir}"));
-        for name in held(holds) {
+        let held: Vec<&str> = match holds {
+            Holds::Nothing => Vec::new(),
+            Holds::Only(name) => vec![name],
+            Holds::Every => names.iter().map(String::as_str).collect(),
+        };
+        for name in held {
             text.push_str(&format!("\t{name}"));
         }
         text.push('\n');
@@ -266,7 +282,9 @@ fn lay_out(root: &std::path::Path, layout: &str) {
                 }
             }
             Some("file") => {
-                std::fs::write(root.join(fields.next().expect("a file")), "").unwrap();
+                let file = root.join(fields.next().expect("a file"));
+                std::fs::create_dir_all(file.parent().expect("a directory")).unwrap();
+                std::fs::write(file, "").unwrap();
             }
             Some("root" | "project") => {}
             other => panic!("no layout line {other:?}"),
@@ -275,12 +293,12 @@ fn lay_out(root: &std::path::Path, layout: &str) {
 }
 
 impl Fixture {
-    /// The fixture for `seed`, in a new temporary directory under `parent`.
+    /// The fixture for `seed`, in a new temporary directory under `parent`,
+    /// not yet furnished.
     fn new(seed: u64, parent: &std::path::Path) -> Fixture {
         let tmp = tempfile::Builder::new().tempdir_in(parent).unwrap();
         let root = host_fs::canonicalize(tmp.path()).unwrap().join(ROOT_IN_TMP);
         std::fs::create_dir_all(&root).unwrap();
-        lay_out(&root, layout_text());
         let mut rng = SplitMix64(seed ^ 0x5eed_e1f1_0000_0001);
         let root_text = root.to_str().unwrap().to_owned();
         let environment: Vec<(String, String)> = (0..ENVIRONMENT_VALUES)
@@ -289,8 +307,17 @@ impl Fixture {
         Fixture {
             root,
             environment,
+            layout: String::new(),
             _tmp: tmp,
         }
+    }
+
+    /// Lay the fixture out with the full starts holding every name `texts`
+    /// probe ([`probed_names`]).
+    fn furnish<'t>(&mut self, texts: impl IntoIterator<Item = &'t str>) {
+        let names = probed_names(texts, self.root_text());
+        self.layout = layout_text(&names);
+        lay_out(&self.root, &self.layout);
     }
 
     fn root_text(&self) -> &str {
@@ -306,8 +333,9 @@ impl Fixture {
 }
 
 impl World {
-    fn new(seed: u64) -> World {
-        let fixture = Fixture::new(seed, &fixture_parent());
+    /// `fixture`, furnished, with an oracle child in each start.
+    fn new(fixture: Fixture) -> World {
+        assert!(!fixture.layout.is_empty(), "the fixture is furnished");
         let starts = STARTS
             .into_iter()
             .map(|(label, holds)| {
@@ -315,12 +343,19 @@ impl World {
                 Start {
                     label,
                     oracle: Oracle::spawn_in_dir_with_env(&dir, &fixture.environment),
-                    all_absent: held(holds).is_empty(),
+                    all_absent: matches!(holds, Holds::Nothing),
                     dir,
                 }
             })
             .collect();
         World { fixture, starts }
+    }
+
+    /// A world for hand-written points, which probe `seg` and `obj`.
+    fn for_hand_written(seed: u64) -> World {
+        let mut fixture = Fixture::new(seed, &fixture_parent());
+        fixture.furnish(["seg\\x", "obj\\x"]);
+        World::new(fixture)
     }
 }
 
@@ -456,7 +491,7 @@ fn index_body(variant: usize, index: usize) -> String {
 /// past their end: no read beside the indexer throws on its own.
 #[test]
 fn each_index_variant_throws_only_at_its_indexer() {
-    let mut world = World::new(3);
+    let mut world = World::for_hand_written(3);
     let project = world.fixture.root.join("proj-empty").join("Demo.fsproj");
     for variant in 0..4 {
         for (index, accepted) in [(0, true), (1, true), (2, false)] {
@@ -508,10 +543,7 @@ fn gen_site_value(rng: &mut SplitMix64, root: &str, site: Site) -> String {
 
 /// The first segments [`gen_value`] writes beside the fixture's root, which
 /// stands for an absolute path that exists. Those rooted at the host's `/`
-/// (a UNC `\\…`, or a part a template roots) are probed on the host, so the
-/// answers the baseline records are host facts:
-/// [`host_rooted_names_are_the_facts_the_baseline_assumes`] pins each
-/// absent.
+/// are probed on the host, which [`probed_names`] holds them absent from.
 const PREFIXES: &[&str] = &[
     "/borzoi-missing",
     "seg",
@@ -542,25 +574,6 @@ fn gen_value(rng: &mut SplitMix64, root: &str) -> String {
         value.push_str(rng.pick(SEPARATORS));
     }
     value
-}
-
-/// No name a generated value may root at the host's `/` is there, so that
-/// nothing under it is either. A host where this fails answers the fixed
-/// seed's points apart from the host that recorded the baseline.
-#[test]
-fn host_rooted_names_are_the_facts_the_baseline_assumes() {
-    let mut names: Vec<&str> = PREFIXES
-        .iter()
-        .chain(PARTS)
-        .map(|name| name.trim_start_matches(['/', '\\']))
-        .filter(|name| !name.is_empty() && *name != "." && *name != "..")
-        .collect();
-    names.sort_unstable();
-    names.dedup();
-    for name in names {
-        let present = host_fs::metadata(std::path::Path::new("/").join(name)).is_ok();
-        assert!(!present, "/{name} is on this host");
-    }
 }
 
 /// Templates a read site composes the value into: `{v}` stands for the
@@ -615,6 +628,10 @@ struct Point {
     read: Read,
     /// The value the source supplies, for failure messages.
     value: String,
+    /// The texts the point makes MSBuild adjust, with each reference
+    /// replaced by the text it reads as written: what [`probed_names`] reads
+    /// the probed names off.
+    probes: Vec<String>,
 }
 
 fn gen_point(
@@ -667,20 +684,30 @@ fn gen_point(
         let copy = copy_template.replace("{v}", "$(V)");
         writes.push_str(&format!("    <W>{}</W>\n", xml_body(&copy)));
     }
+    // What the read expands to as written: the value, through the copy
+    // template for a copied one, inside the read's template.
+    let spliced = copy_template.map_or_else(|| value.clone(), |copy| copy.replace("{v}", &value));
+    let composed = template.replace("{v}", &spliced);
+    let mut probes = vec![value.clone(), spliced.clone(), composed.clone()];
+    probes.extend(
+        [template, copy_template.unwrap_or("{v}")]
+            .iter()
+            .map(|t| t.replace("{v}", "$(V)")),
+    );
     let read = match site {
         Site::Body => {
             writes.push_str(&format!("    <P>{}</P>\n", xml_body(&expansion)));
             Read::Property("P")
         }
         Site::Condition => {
-            // Compare with one spelling MSBuild may produce: the template
-            // around the value as written, or the same with every `\` a `/`.
-            let literal = template.replace("{v}", &value);
+            // Compare with one spelling MSBuild may produce: the expansion as
+            // written, or the same with every `\` a `/`.
             let candidate = if rng.below(2) == 0 {
-                literal
+                composed.clone()
             } else {
-                literal.replace('\\', "/")
+                composed.replace('\\', "/")
             };
+            probes.push(candidate.clone());
             let condition = format!("'{expansion}' == '{candidate}'");
             writes.push_str(&format!(
                 "    <C Condition=\"{}\">hit</C>\n",
@@ -689,6 +716,8 @@ fn gen_point(
             Read::Property("C")
         }
         Site::Exists => {
+            // `Exists` asks the file system about the path itself.
+            probes.push(composed.clone());
             let condition = format!("Exists('{expansion}')");
             writes.push_str(&format!(
                 "    <E Condition=\"{}\">hit</E>\n",
@@ -706,8 +735,7 @@ fn gen_point(
             let index = if rng.below(2) == 0 {
                 rng.below(6)
             } else {
-                let fields = template
-                    .replace("{v}", &value)
+                let fields = composed
                     .replace(fixture.root_text(), "{ROOT}")
                     .split('/')
                     .count();
@@ -722,10 +750,14 @@ fn gen_point(
             if variant != 0 {
                 writes.push_str(&format!("    <U>{UNHELD}</U>\n"));
             }
-            writes.push_str(&format!(
-                "    <F>{}</F>\n",
-                xml_body(&index_body(variant, index))
-            ));
+            let body = index_body(variant, index);
+            // Each field the indexer may return is adjusted whole, whether or
+            // not a `\` before it was respelled.
+            for spelling in [composed.clone(), composed.replace('\\', "/")] {
+                probes.extend(spelling.split('/').map(str::to_owned));
+            }
+            probes.push(body.clone());
+            writes.push_str(&format!("    <F>{}</F>\n", xml_body(&body)));
             writes.push_str(AFTER);
             Read::Property("After")
         }
@@ -738,12 +770,12 @@ fn gen_point(
             Read::Property("After")
         }
         Site::Gate => {
-            let literal = template.replace("{v}", &value);
             let candidate = if rng.below(2) == 0 {
-                literal
+                composed.clone()
             } else {
-                literal.replace('\\', "/")
+                composed.replace('\\', "/")
             };
+            probes.push(candidate.clone());
             let condition = format!("'{expansion}' == '{candidate}'");
             writes.push_str("    <X>true</X>\n");
             writes.push_str(&format!(
@@ -792,6 +824,12 @@ fn gen_point(
                     Some(format!("{expansion}\\a.fs")),
                 ),
             };
+            probes.push(include.replace(&expansion, &composed));
+            probes.extend(
+                exclude
+                    .as_ref()
+                    .map(|exclude| exclude.replace(&expansion, &composed)),
+            );
             let exclude = exclude
                 .map(|exclude| format!(" Exclude=\"{}\"", xml_attribute(&exclude)))
                 .unwrap_or_default();
@@ -836,6 +874,7 @@ fn gen_point(
         starts,
         read,
         value,
+        probes,
     }
 }
 
@@ -1255,7 +1294,7 @@ fn grade(world: &mut World, point: &Point) -> Seen {
 /// `MSBuildUserExtensionsPath`, read into a body, commits MSBuild's value.
 #[test]
 fn the_user_extensions_path_read_into_a_body_commits_msbuilds_value() {
-    let mut world = World::new(0);
+    let mut world = World::for_hand_written(0);
     for template in ["{v}", "x{v}", "[{v}]", "{v}\\y", "{v}/y"] {
         let body = template.replace("{v}", "$(MSBuildUserExtensionsPath)");
         let point = Point {
@@ -1270,6 +1309,7 @@ fn the_user_extensions_path_read_into_a_body_commits_msbuilds_value() {
             starts: PROJECTS[0].1,
             read: Read::Property("P"),
             value: common::oracle_environment()["MSBuildUserExtensionsPath"].clone(),
+            probes: Vec::new(),
         };
         let seen = check(&mut world, &point);
         assert!(seen.served, "{body}: the walk must commit\n{}", point.xml);
@@ -1289,12 +1329,16 @@ fn wrong_claims(seen: &Seen) -> Vec<(String, Vec<&'static str>)> {
 /// What the walk claims wrongly where it takes a probe of `segment` to miss
 /// (#993): every served mode, from each of `starts` whose directory holds
 /// `segment`, and the supplied mode of each such start.
-fn wrong_where_present(starts: [usize; 5], segment: &str) -> Vec<(String, Vec<&'static str>)> {
+fn wrong_where_present(
+    world: &World,
+    starts: [usize; 5],
+    segment: &str,
+) -> Vec<(String, Vec<&'static str>)> {
     let present: Vec<&'static str> = starts
         .iter()
-        .map(|&start| STARTS[start])
-        .filter(|(_, holds)| held(*holds).iter().any(|name| name == segment))
-        .map(|(label, _)| label)
+        .map(|&start| &world.starts[start])
+        .filter(|start| host_fs::metadata(start.dir.join(segment)).is_ok_and(|m| m.is_dir()))
+        .map(|start| start.label)
         .collect();
     MODES
         .iter()
@@ -1316,7 +1360,7 @@ fn wrong_where_present(starts: [usize; 5], segment: &str) -> Vec<(String, Vec<&'
 /// way, it commits rightly. Pinned, so that a fix of #993 shows here.
 #[test]
 fn a_relative_backslash_in_project_text_is_committed_as_if_its_probe_missed() {
-    let mut world = World::new(1);
+    let mut world = World::for_hand_written(1);
     let xml = "<Project>\n  <PropertyGroup>\n    <P>obj\\</P>\n    <R>FALSE</R>\n    \
                <R Condition=\"'$(P)'=='obj/'\">TRUE</R>\n    <N>$([System.IO.Path]::Combine('$(P)', 'x.dll'))</N>\n    \
                <S Condition=\"HasTrailingSlash('$(P)')\">yes</S>\n  </PropertyGroup>\n</Project>\n";
@@ -1331,13 +1375,14 @@ fn a_relative_backslash_in_project_text_is_committed_as_if_its_probe_missed() {
             starts: PROJECTS[0].1,
             read: Read::Property(name),
             value: "obj\\".to_owned(),
+            probes: Vec::new(),
         };
         let seen = check_all_absent(&mut world, &point);
         assert!(seen.served, "{name}: the served walk commits");
         assert_eq!(seen.supplied, 5, "{name}: every supplied start commits");
         let expected = if seen.moved {
             moved.push(name);
-            wrong_where_present(point.starts, "obj")
+            wrong_where_present(&world, point.starts, "obj")
         } else {
             Vec::new()
         };
@@ -1356,7 +1401,7 @@ fn a_relative_backslash_in_project_text_is_committed_as_if_its_probe_missed() {
 /// which MSBuild contradicts from that start alone, served or supplied.
 #[test]
 fn a_condition_reading_two_segments_is_wrong_only_where_one_is_present() {
-    let mut world = World::new(2);
+    let mut world = World::for_hand_written(2);
     let xml = "<Project>\n  <PropertyGroup>\n    <P>obj\\x</P>\n    <Q>seg\\y</Q>\n    \
                <R>FALSE</R>\n    <R Condition=\"'$(P)'=='obj/x' And '$(Q)'!='seg/y'\">TRUE</R>\n  \
                </PropertyGroup>\n</Project>\n";
@@ -1369,6 +1414,7 @@ fn a_condition_reading_two_segments_is_wrong_only_where_one_is_present() {
         starts: PROJECTS[1].1,
         read: Read::Property("R"),
         value: "obj\\x".to_owned(),
+        probes: Vec::new(),
     };
     let answers: Vec<(&str, Option<Vec<String>>)> = point
         .starts
@@ -1400,12 +1446,59 @@ fn a_condition_reading_two_segments_is_wrong_only_where_one_is_present() {
     );
 }
 
+/// The indexer's splices are each a piece MSBuild adjusts, so each is a name
+/// the full starts hold.
+#[test]
+fn every_indexer_splice_is_a_probed_name() {
+    assert_eq!(
+        literal_runs("s0\\x$(Empty)s1\\x$(U.Substring(5))$(X.Split('/')[0])q"),
+        ["s0\\x", "s1\\x", "", "q"]
+    );
+    let names = probed_names([index_body(3, 0).as_str()], "/nowhere");
+    let splices: Vec<String> = (0..UNENUMERATED_SPLICES).map(|i| format!("s{i}")).collect();
+    assert_eq!(names.into_iter().collect::<Vec<_>>(), splices);
+}
+
+/// A copied value's condition compares the copy as the copy template writes
+/// it, so its outcome turns on whether MSBuild respelled the value it copied.
+#[test]
+fn a_copied_value_is_compared_through_its_copy_template() {
+    let mut world = World::for_hand_written(5);
+    let xml = "<Project>\n  <PropertyGroup>\n    <V>seg\\a</V>\n    <W>[$(V)]</W>\n    \
+               <C Condition=\"'$(W)' == '[seg/a]'\">hit</C>\n  </PropertyGroup>\n</Project>\n";
+    let point = Point {
+        source: Source::Copied,
+        site: Site::Condition,
+        xml: xml.to_owned(),
+        globals: Vec::new(),
+        project: world.fixture.root.join("proj-empty").join("Demo.fsproj"),
+        starts: PROJECTS[1].1,
+        read: Read::Property("C"),
+        value: "seg\\a".to_owned(),
+        probes: Vec::new(),
+    };
+    let seen = check_all_absent(&mut world, &point);
+    let hit: Vec<&str> = point
+        .starts
+        .iter()
+        .zip(&seen.theirs)
+        .filter(|(_, answer)| answer.as_deref() == Some(&["hit".to_owned()][..]))
+        .map(|(&start, _)| world.starts[start].label)
+        .collect();
+    assert_eq!(
+        hit,
+        ["cwd-full", "cwd-seg"],
+        "MSBuild's answers: {:?}",
+        seen.theirs
+    );
+}
+
 /// A glob that finds files, alone and beside an `Exclude` that removes one,
 /// is graded whatever the soak's seed draws: MSBuild lists the files, and
 /// the served walk commits them.
 #[test]
 fn a_glob_that_finds_files_is_graded() {
-    let mut world = World::new(4);
+    let mut world = World::for_hand_written(4);
     for (include, exclude) in [
         ("seg\\*.fs", None),
         ("seg\\*.fs", Some("seg\\a.fs")),
@@ -1426,6 +1519,7 @@ fn a_glob_that_finds_files_is_graded() {
             starts: PROJECTS[0].1,
             read: Read::Items,
             value: include.to_owned(),
+            probes: Vec::new(),
         };
         let seen = check_all_absent(&mut world, &point);
         let mut globs = GlobCoverage::default();
@@ -1444,17 +1538,28 @@ fn a_glob_that_finds_files_is_graded() {
 fn expansions_hold_msbuilds_path_fixup() {
     let (seed, cases) = common::soak_parameters("BORZOI_PATH_FIXUP_EXPANSION", 600);
     let mut rng = SplitMix64(seed);
-    let mut world = World::new(seed);
+    let mut fixture = Fixture::new(seed, &fixture_parent());
+    let points: Vec<Point> = (0..cases)
+        .map(|case| {
+            let source = Source::ALL[case % Source::ALL.len()];
+            let site = match *rng.pick(&Site::SOAKED) {
+                // MSBuild's identities are read without globals.
+                Site::Identity if source == Source::Global => Site::Item,
+                site => site,
+            };
+            gen_point(&mut rng, &fixture, source, site, (case / 7) % 2)
+        })
+        .collect();
+    fixture.furnish(
+        points
+            .iter()
+            .flat_map(|point| point.probes.iter().map(String::as_str)),
+    );
+    let mut world = World::new(fixture);
     let mut census: BTreeMap<(Source, Site), Census> = BTreeMap::new();
-    for case in 0..cases {
-        let source = Source::ALL[case % Source::ALL.len()];
-        let site = match *rng.pick(&Site::SOAKED) {
-            // MSBuild's identities are read without globals.
-            Site::Identity if source == Source::Global => Site::Item,
-            site => site,
-        };
-        let point = gen_point(&mut rng, &world.fixture, source, site, (case / 7) % 2);
-        let seen = check_all_absent(&mut world, &point);
+    for point in &points {
+        let (source, site) = (point.source, point.site);
+        let seen = check_all_absent(&mut world, point);
         let entry = census.entry((source, site)).or_default();
         entry.points += 1;
         entry.served += usize::from(seen.served);
@@ -1676,12 +1781,11 @@ fn point_meta(point: &Point, root: &str) -> String {
 /// that the sweep generates (the document, [`point_meta`], the environment as
 /// `env.txt` spells it, and the fixture's [`layout_text`]), hashed as
 /// `path_fixup_baseline.rs` hashes them.
-fn point_fingerprint(point: &Point, root: &str, environment: &str) -> String {
+fn point_fingerprint(point: &Point, root: &str, environment: &str, layout: &str) -> String {
     fnv1a(&format!(
-        "{}\n--\n{}\n--\n{environment}\n--\n{}",
+        "{}\n--\n{}\n--\n{environment}\n--\n{layout}",
         placeholder(&point.xml, root),
-        point_meta(point, root),
-        layout_text()
+        point_meta(point, root)
     ))
 }
 
@@ -1742,13 +1846,21 @@ fn fixed_seed_points_do_not_depend_on_where_the_fixture_is() {
         .unwrap();
     let deeper = outer.path().join("a-deeper-host-temporary-directory");
     std::fs::create_dir(&deeper).unwrap();
+    // The points and their layout, never laid out: the keys are of inputs.
     let keys = |parent: &std::path::Path| -> Vec<(String, String)> {
         let fixture = Fixture::new(FIXED_SEED, parent);
         let env = environment_text(&fixture);
-        fixed_seed_points(&fixture)
+        let points = fixed_seed_points(&fixture);
+        let layout = layout_text(&probed_names(
+            points
+                .iter()
+                .flat_map(|(_, point)| point.probes.iter().map(String::as_str)),
+            fixture.root_text(),
+        ));
+        points
             .into_iter()
             .map(|(key, point)| {
-                let hash = point_fingerprint(&point, fixture.root_text(), &env);
+                let hash = point_fingerprint(&point, fixture.root_text(), &env, &layout);
                 (key, hash)
             })
             .collect()
@@ -1765,14 +1877,20 @@ fn fixed_seed_points_do_not_depend_on_where_the_fixture_is() {
 /// in `tests/manifests/path_fixup_pins.txt`, so that any movement shows.
 #[test]
 fn fixed_seed_sweep_regresses_nothing_main_answers() {
-    let mut world = World::new(FIXED_SEED);
+    let mut fixture = Fixture::new(FIXED_SEED, &fixture_parent());
+    let points = fixed_seed_points(&fixture);
+    fixture.furnish(
+        points
+            .iter()
+            .flat_map(|(_, point)| point.probes.iter().map(String::as_str)),
+    );
+    let mut world = World::new(fixture);
     let root = world.fixture.root_text().to_owned();
     let env = environment_text(&world.fixture);
-    let points = fixed_seed_points(&world.fixture);
     if let Some(dump) = std::env::var_os("BORZOI_PATH_FIXUP_DUMP").map(PathBuf::from) {
         std::fs::create_dir_all(&dump).unwrap();
         std::fs::write(dump.join("env.txt"), &env).unwrap();
-        std::fs::write(dump.join("layout.txt"), layout_text()).unwrap();
+        std::fs::write(dump.join("layout.txt"), &world.fixture.layout).unwrap();
         for (key, point) in &points {
             dump_point(&dump, key, point, &root);
         }
@@ -1793,7 +1911,7 @@ fn fixed_seed_sweep_regresses_nothing_main_answers() {
         let seen = grade(&mut world, point);
         globs.count(point, &seen);
         violations += seen.violations.len();
-        let hash = point_fingerprint(point, &root, &env);
+        let hash = point_fingerprint(point, &root, &env, &world.fixture.layout);
         let Some(row) = baseline.get(key).filter(|row| row.hash == hash) else {
             stale.push(key.clone());
             continue;
@@ -1852,7 +1970,12 @@ fn fixed_seed_sweep_regresses_nothing_main_answers() {
          relative names the full starts hold: {}",
         globs.found,
         globs.found_beside_exclude,
-        relative_names().len()
+        world
+            .fixture
+            .layout
+            .lines()
+            .find_map(|line| line.strip_prefix("dir\tcwd-full"))
+            .map_or(0, |names| names.matches('\t').count())
     );
     assert!(
         globs.found > 0 && globs.found_beside_exclude > 0,
