@@ -1796,7 +1796,8 @@ enum OwnFileGuard {
     /// The `<ImportGroup>` around it has, which gates it as much. MSBuild
     /// evaluates that gate once, before the group's imports run, so what an
     /// earlier one of them writes does not reach it: the walk, reading the
-    /// import's `Project` now, cannot ask that `Exists` again.
+    /// import's `Project` now, asks that `Exists` again only of a path that
+    /// reads no property.
     Group,
     /// Its own condition has, evaluated when the import is reached.
     Own,
@@ -1859,7 +1860,14 @@ fn may_load_nothing(
     // ([`condition::exists_of_list`]): false rules the import out; true
     // leaves each entry to be judged below, as with no guard; undecided says
     // nothing of the import.
-    if guard == OwnFileGuard::Own {
+    // A group's guard is asked again only of a path no write can have
+    // changed since the group's gate ran: one that reads no property.
+    let asked_again = match guard {
+        OwnFileGuard::Own => true,
+        OwnFileGuard::Group => properties::property_references(project).next().is_none(),
+        OwnFileGuard::None => false,
+    };
+    if asked_again {
         let exists = |path: &str| super::condition_exists(state.observer, path, current_file_dir);
         match condition::exists_of_list(value, &exists) {
             Some(false) => return None,

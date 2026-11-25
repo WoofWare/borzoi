@@ -1828,9 +1828,9 @@ fn guarded_import_lists_are_judged_as_msbuild_judges_them() {
                 )
                 .unwrap();
                 let ours = parsed.property("After");
-                // A group's guard the walk does not ask again: it judges the
-                // import as unguarded.
-                let must_commit = loads || (own_guard_false && !grouped);
+                // The lists are literal, so a group's guard asks of the
+                // import's path what its own would.
+                let must_commit = loads || own_guard_false;
                 let context = format!("{kinds:?}, guard {guard:?}\n{xml}");
                 graded += 1;
                 assert!(
