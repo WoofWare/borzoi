@@ -1128,10 +1128,46 @@ fn stored_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
     out
 }
 
+/// Whether every variable of `case` reaches the evaluation alone
+/// ([`split_variables`]): the build's inputs are empty, so its restore is
+/// the plain variables fixture's, which [`shared_variables_fixture`] makes
+/// once. Such a case is never built, as a commit under a variable the oracle
+/// does not take returns before the build.
+fn evaluator_only(case: &Case) -> bool {
+    case.place == Place::Variables
+        && split_variables(case)
+            .is_some_and(|(inputs, rest)| inputs == BuildInputs::new() && !rest.is_empty())
+}
+
+/// The project of a [`Place::Variables`] case with no variables, restored
+/// once per run under no inputs: what every [`evaluator_only`] case's own
+/// restore would make. It is read, never built.
+fn shared_variables_fixture() -> &'static Path {
+    static FIXTURE: std::sync::OnceLock<(tempfile::TempDir, std::path::PathBuf)> =
+        std::sync::OnceLock::new();
+    let (_, project) = FIXTURE.get_or_init(|| {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = host_fs::canonicalize(tmp.path()).unwrap().join("project");
+        std::fs::create_dir(&dir).unwrap();
+        let (project, inputs) =
+            lay_out(&Case::variables(&[]), &dir).expect("the variables fixture lays out");
+        restore(&project, &inputs);
+        (tmp, project)
+    });
+    project
+}
+
+thread_local! {
+    /// How many restores this thread has run, which
+    /// [`evaluator_only_cases_share_one_restore`] counts.
+    static RESTORES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Restore the project at `project` in place, under `inputs`, as the build
 /// would; a failed restore leaves the evaluation unrestored, which the
 /// derivation declines.
 fn restore(project: &Path, inputs: &BuildInputs) {
+    RESTORES.with(|n| n.set(n.get() + 1));
     let mut cmd = msbuild_command(project.parent().unwrap(), inputs);
     cmd.args(["-nodeReuse:false", "-t:Restore"]);
     for (name, value) in inputs.globals() {
@@ -1235,14 +1271,22 @@ fn grade(case: &Case) -> Result<Outcome, String> {
 /// [`grade`], without taking a permit.
 fn grade_unbudgeted(case: &Case) -> Result<Outcome, String> {
     let tmp = tempfile::TempDir::new().unwrap();
-    let dir = host_fs::canonicalize(tmp.path()).unwrap().join("project");
-    std::fs::create_dir(&dir).unwrap();
-    let Some((project, inputs)) = lay_out(case, &dir) else {
-        return Ok(Outcome::Inexpressible);
+    let (project, inputs) = if evaluator_only(case) {
+        // Restored under no inputs, it is the shared fixture, read and never
+        // built: a commit under a variable the oracle does not take returns
+        // below before any build.
+        (shared_variables_fixture().to_path_buf(), BuildInputs::new())
+    } else {
+        let dir = host_fs::canonicalize(tmp.path()).unwrap().join("project");
+        std::fs::create_dir(&dir).unwrap();
+        let Some((project, inputs)) = lay_out(case, &dir) else {
+            return Ok(Outcome::Inexpressible);
+        };
+        // The derivation reads a restored evaluation, as the build makes one.
+        restore(&project, &inputs);
+        after_restore(case, &project);
+        (project, inputs)
     };
-    // The derivation reads a restored evaluation, as the build makes one.
-    restore(&project, &inputs);
-    after_restore(case, &project);
     let extra = unsettable(case);
     let name = match ours(&project, &inputs, &extra) {
         CompiledAssemblyName::Known(name) => name,
@@ -1274,6 +1318,8 @@ fn grade_unbudgeted(case: &Case) -> Result<Outcome, String> {
         ));
     }
     if !extra.is_empty() {
+        // An evaluator-only case ends here, so the shared fixture is never
+        // built.
         return if extra.iter().all(|(name, _)| held_fixed(name)) {
             Ok(Outcome::HeldFixed)
         } else {
@@ -2012,16 +2058,75 @@ fn a_variable_is_selected_by_its_name() {
 /// Whether a census test is to stand aside: a focused run
 /// (`BORZOI_FSC_NAME_ONLY`) grades its selection through
 /// [`committed_names_survive_perturbation`], and a census is checked only
-/// whole.
+/// whole ([`census_stance`]).
 fn census_stands_aside() -> bool {
-    let focused = only_name().is_some();
-    if focused {
+    let updating = std::env::var_os("BORZOI_UPDATE_MANIFESTS").is_some();
+    let aside = census_stance(only_name().is_some(), updating).unwrap_or_else(|e| panic!("{e}"));
+    if aside {
         eprintln!(
             "BORZOI_FSC_NAME_ONLY is set: committed_names_survive_perturbation grades the \
              selected cases, and the census needs an unfiltered run"
         );
     }
-    focused
+    aside
+}
+
+/// Whether a census stands aside, given whether the run is `focused` and
+/// whether it is `updating` manifests: a focused run that is asked to
+/// regenerate a census is an error, since it would pass having written
+/// nothing.
+fn census_stance(focused: bool, updating: bool) -> Result<bool, String> {
+    match (focused, updating) {
+        (true, true) => Err(
+            "BORZOI_FSC_NAME_ONLY and BORZOI_UPDATE_MANIFESTS are both set: \
+                             a focused run checks no census, so it cannot regenerate one"
+                .to_string(),
+        ),
+        (focused, _) => Ok(focused),
+    }
+}
+
+/// A focused run asked to regenerate a census fails rather than writes
+/// nothing.
+#[test]
+fn a_focused_run_cannot_regenerate_a_census() {
+    assert_eq!(census_stance(false, false), Ok(false));
+    assert_eq!(census_stance(false, true), Ok(false));
+    assert_eq!(census_stance(true, false), Ok(true));
+    assert!(census_stance(true, true).is_err());
+}
+
+/// A case whose variables all reach the evaluation alone restores nothing
+/// of its own: two such grades run one restore between them at most (the
+/// shared fixture's, if no other test made it first), and the second runs
+/// none. A case with a variable the build takes restores its own.
+#[test]
+fn evaluator_only_cases_share_one_restore() {
+    let only_evaluated = [
+        Case::variables(&[("BorzoiVar.x", "Evil")]),
+        Case::variables(&[("BorzoiVar:y", "Evil")]),
+    ];
+    for case in &only_evaluated {
+        assert!(evaluator_only(case), "{}", case.label());
+    }
+    assert!(!evaluator_only(&Case::variables(&[("LANG", "Evil")])));
+    assert!(!evaluator_only(&Case::variables(&[
+        ("LANG", "Evil"),
+        ("BorzoiVar.x", "Evil")
+    ])));
+    let before = RESTORES.with(|n| n.get());
+    assert!(matches!(
+        grade(&only_evaluated[0]),
+        Ok(Outcome::Declined(_))
+    ));
+    let between = RESTORES.with(|n| n.get());
+    assert!(matches!(
+        grade(&only_evaluated[1]),
+        Ok(Outcome::Declined(_))
+    ));
+    let after = RESTORES.with(|n| n.get());
+    assert!(between - before <= 1, "{} restores", between - before);
+    assert_eq!(after, between, "the second evaluator-only grade restored");
 }
 
 fn run(cases: &[Case]) {

@@ -151,10 +151,13 @@ pub fn source_fingerprint(project: &Path) -> u64 {
 /// The variables of this process [`build_environment`] carries into a build,
 /// by exact name: the runtime essentials, the .NET install and NuGet's package
 /// folder, `RestoreSources` (the devshell's offline feed, so the restore is
-/// hermetic), and the CLI's switches the devshell sets. A closed list, so a
-/// machine's other `DOTNET_*` or `NUGET_*` variables (a CI runner's) never
-/// reach a build an evaluation is compared with.
+/// hermetic), the CLI's switches the devshell sets, and `DOTNET_CLI_HOME`,
+/// where a machine whose home is not writable keeps the CLI's state (the CLI
+/// writes its first-use sentinel there before MSBuild starts). A closed list,
+/// so a machine's other `DOTNET_*` or `NUGET_*` variables (a CI runner's)
+/// never reach a build an evaluation is compared with.
 pub const BUILD_ENVIRONMENT_NAMES: &[&str] = &[
+    "DOTNET_CLI_HOME",
     "DOTNET_CLI_TELEMETRY_OPTOUT",
     "DOTNET_NOLOGO",
     "DOTNET_NUGET_SIGNATURE_VERIFICATION",
@@ -186,8 +189,9 @@ pub fn build_environment() -> Vec<(String, String)> {
 ///
 /// # Panics
 ///
-/// When `DOTNET_ROOT` is not an absolute path, as it is in the devshell
-/// ([`host_in`]).
+/// When `DOTNET_ROOT` is not an absolute path, as it is in the devshell: an
+/// unset, empty or relative root would leave the program's name to a lookup
+/// on `PATH`.
 pub fn dotnet_host() -> PathBuf {
     let root = build_environment()
         .into_iter()
@@ -868,6 +872,16 @@ mod tests {
             json["Properties"][inherited], "",
             "{inherited} reached the build"
         );
+    }
+
+    /// The build carries the variables a build needs to start where the
+    /// machine is set up apart from the devshell: the CLI's home, which the
+    /// CLI writes before MSBuild starts.
+    #[test]
+    fn the_build_environment_keeps_what_a_build_needs_to_start() {
+        for name in ["DOTNET_ROOT", "DOTNET_CLI_HOME", "HOME", "PATH", "TMPDIR"] {
+            assert!(BUILD_ENVIRONMENT_NAMES.contains(&name), "{name}");
+        }
     }
 
     /// The host is launched by an absolute path, never looked up: an unset,
