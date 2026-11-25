@@ -11527,7 +11527,7 @@ fn an_exists_guard_over_an_expanded_list_does_not_discharge_its_import() {
 }
 
 /// `Exists` of an import's list asks about each entry. With an entry
-/// missing it is false, and MSBuild skips the import wherever the rest of
+/// missing (a file spelled with a trailing slash among them) it is false, and MSBuild skips the import wherever the rest of
 /// the gate holds; with every entry present (`sub` a directory) it is true,
 /// and MSBuild then fails to import `sub` where the rest of the gate holds.
 /// Under a gate the walk cannot decide, the first is no rejection and the
@@ -11539,7 +11539,12 @@ fn an_exists_guard_over_an_import_list_asks_about_each_entry() {
     let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
     std::fs::write(root.join("one.props"), "<Project />").unwrap();
     std::fs::create_dir_all(root.join("sub")).unwrap();
-    for (list, rejects) in [("one.props;absent.props", false), ("one.props;sub", true)] {
+    for (list, rejects) in [
+        ("one.props;absent.props", false),
+        // A file is no directory: `Exists('one.props/')` is false.
+        ("one.props/;one.props", false),
+        ("one.props;sub", true),
+    ] {
         let source = format!(
             r#"<Project>
   <Import Project="{list}" Condition="'É' == 'é' And Exists('{list}')" />

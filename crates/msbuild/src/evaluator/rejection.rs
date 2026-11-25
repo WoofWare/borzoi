@@ -1852,8 +1852,9 @@ fn may_load_nothing(
     }
     // `Exists` asks about each entry of its argument's list, trimmed, and is
     // false of an empty one: the gate rules the import out where an entry is
-    // missing. Where every entry is present, each is judged below, as with no
-    // guard.
+    // missing, asked as the gate's own `Exists` asks it
+    // ([`super::condition_exists`]). Where every entry is present, each is
+    // judged below, as with no guard.
     if requires_own_file {
         let entries: Vec<String> = value
             .split_list()
@@ -1861,10 +1862,9 @@ fn may_load_nothing(
             .filter(|entry| !entry.is_empty())
             .collect();
         if entries.is_empty()
-            || entries.iter().any(|entry| {
-                let whole = current_file_dir.join(entry.replace('\\', "/"));
-                observed::link_kind(state.observer, &normalise(&whole)).is_err()
-            })
+            || entries
+                .iter()
+                .any(|entry| !super::condition_exists(state.observer, entry, current_file_dir))
         {
             return None;
         }
