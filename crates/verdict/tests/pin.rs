@@ -9,6 +9,10 @@
 //! new or removed file, fails here until the pin is regenerated, and the
 //! regenerated pin is in the diff the reviewer reads.
 //!
+//! The bytes hashed are the ones rustc compiles: it reads a CRLF line end as
+//! LF, so a checkout under `core.autocrlf` compiles the same crate, and pins
+//! the same. A lone CR is kept.
+//!
 //! Regenerate with
 //! `BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-verdict --test pin`.
 
@@ -50,14 +54,35 @@ fn current_pin(crate_dir: &Path) -> String {
     );
     for (relative, path) in found {
         let bytes = std::fs::read(&path).expect("a readable source file");
-        let digest = Sha1::digest(&bytes);
-        let mut hex = String::new();
-        for byte in digest {
-            write!(hex, "{byte:02x}").expect("writing to a String");
-        }
-        writeln!(pin, "{relative}\t{hex}\t{}", bytes.len()).expect("writing to a String");
+        pin.push_str(&pin_line(&relative, &bytes));
     }
     pin
+}
+
+/// The bytes as rustc reads them: each CRLF as LF, a lone CR kept.
+fn as_compiled(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\r' && bytes.get(i + 1) == Some(&b'\n') {
+            i += 1;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    out
+}
+
+/// One file's line of the pin: its path, and the SHA-1 and length of its
+/// bytes as compiled.
+fn pin_line(relative: &str, bytes: &[u8]) -> String {
+    let compiled = as_compiled(bytes);
+    let mut hex = String::new();
+    for byte in Sha1::digest(&compiled) {
+        write!(hex, "{byte:02x}").expect("writing to a String");
+    }
+    format!("{relative}\t{hex}\t{}\n", compiled.len())
 }
 
 #[test]
@@ -68,6 +93,8 @@ fn every_source_file_is_exactly_as_pinned() {
         std::fs::write(crate_dir.join("tests/src.pin"), &current).expect("writing the pin");
         return;
     }
+    // By line, so a pin checked out with CRLF line ends reads the same.
+    let pinned: Vec<&str> = PIN.lines().collect();
     let moved: Vec<String> = current
         .lines()
         .filter(|line| !PIN.lines().any(|pinned| pinned == *line))
@@ -79,13 +106,29 @@ fn every_source_file_is_exactly_as_pinned() {
         )
         .collect();
     assert!(
-        current == PIN,
+        current.lines().collect::<Vec<_>>() == pinned,
         "crates/verdict/src no longer matches tests/src.pin:\n{}\n\
          Every change to this primitive is reviewed: check that it adds no reading of an \
          incomplete answer as a complete one (crate docs), give any new operation its laws \
          in tests/laws.rs, then regenerate with\n  \
          BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-verdict --test pin",
         moved.join("\n")
+    );
+}
+
+#[test]
+fn line_ends_pin_as_rustc_compiles_them() {
+    let lf = b"//! a\nfn f() {}\n";
+    let crlf = b"//! a\r\nfn f() {}\r\n";
+    assert_eq!(pin_line("src/x.rs", lf), pin_line("src/x.rs", crlf));
+    // A lone CR is part of what rustc reads, and so is pinned.
+    let lone = b"//! a\rfn f() {}\n";
+    assert_ne!(pin_line("src/x.rs", lf), pin_line("src/x.rs", lone));
+    assert_eq!(as_compiled(b"\r\r\n\n\r"), b"\r\n\n\r");
+    // Any other edit moves the pin.
+    assert_ne!(
+        pin_line("src/x.rs", lf),
+        pin_line("src/x.rs", b"//! b\nfn f() {}\n")
     );
 }
 
