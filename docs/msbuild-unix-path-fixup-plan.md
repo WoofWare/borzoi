@@ -127,10 +127,26 @@ again), so a value whose worlds agree is *committed determinate*, not degraded.
   (the gap below). A condition operand is expanded, and adjusted, only when
   MSBuild's scanner saw something to expand in it. Targets run in the project's
   directory, so the executor declines every relative probe
-  (`substitute_in_target`). `path_fixup_expansion_diff` holds this to MSBuild
-  from an empty working directory and one holding every relative segment, over
+  (`substitute_in_target`). `path_fixup_expansion_diff` runs MSBuild from the
+  project's directory, with and without the relative segments, and from four
+  unrelated directories (holding none, every one, and each alone), over
   generated values × sources × read sites (body, condition, `Exists`, property
-  function).
+  function, a `Compile` include or glob, a generic item's identities beside a
+  `Remove`, and three rejection shapes: an indexer past the end, a coercion,
+  a gate over a coerced write). The fresh-seed soak holds every commit to
+  MSBuild from the directories holding no segment, which is what the walk
+  assumes. The fixed-seed sweep
+  (`fixed_seed_sweep_regresses_nothing_main_answers`) holds every commit to
+  MSBuild from every directory, served or with the directory supplied, and
+  pins each wrong claim the baseline walk shares
+  (`tests/manifests/path_fixup_pins.txt`) against that walk's claims over the
+  same points (`tests/manifests/path_fixup_baseline.txt`, recorded by
+  `tools/path-fixup-baseline.sh <merge base>`): a claim wrong where the
+  baseline was right or declined fails it. Each pin names the directories
+  MSBuild contradicts it from: one contradicted only from a directory holding
+  a segment is the gap below, and the SDK's trusted `obj\` is pinned the same
+  way (`sdk_output_paths_moved_by_the_startup_directory_are_pinned`). The rest
+  sit at the rejection-shaped sites, which meet #1097's wrong answers.
 
 The three superseded stages — the original P1 (conditions bracket the worlds),
 P2 (exact-value consumers degrade), and their "scan the evaluated property table"
