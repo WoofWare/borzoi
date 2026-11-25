@@ -11525,3 +11525,35 @@ fn an_exists_guard_over_an_expanded_list_does_not_discharge_its_import() {
     .unwrap();
     assert!(p.rejection.is_some(), "{:#?}", p.property("After"));
 }
+
+/// `Exists` of an import's list asks about each entry. With an entry
+/// missing it is false, and MSBuild skips the import wherever the rest of
+/// the gate holds; with every entry present (`sub` a directory) it is true,
+/// and MSBuild then fails to import `sub` where the rest of the gate holds.
+/// Under a gate the walk cannot decide, the first is no rejection and the
+/// second a possible one.
+#[test]
+#[cfg(not(windows))]
+fn an_exists_guard_over_an_import_list_asks_about_each_entry() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    std::fs::write(root.join("one.props"), "<Project />").unwrap();
+    std::fs::create_dir_all(root.join("sub")).unwrap();
+    for (list, rejects) in [("one.props;absent.props", false), ("one.props;sub", true)] {
+        let source = format!(
+            r#"<Project>
+  <Import Project="{list}" Condition="'É' == 'é' And Exists('{list}')" />
+  <PropertyGroup><After>ok</After></PropertyGroup>
+</Project>"#
+        );
+        let p = crate::parse_fsproj_with_imports(
+            &crate::ProjectFile::buffer(&root.join("Demo.fsproj"), &source).unwrap(),
+            &HashMap::new(),
+            &HashMap::new(),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(p.rejection.is_some(), rejects, "{list}: {:#?}", p.rejection);
+    }
+}

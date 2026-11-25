@@ -1850,17 +1850,23 @@ fn may_load_nothing(
     }) {
         return Some(UnloadableImport::PathUndecided);
     }
-    // The gate's `Exists` proves the one file its argument names; a list's
-    // entries are each judged below, as they are with no guard.
+    // `Exists` asks about each entry of its argument's list, trimmed, and is
+    // false of an empty one: the gate rules the import out where an entry is
+    // missing. Where every entry is present, each is judged below, as with no
+    // guard.
     if requires_own_file {
-        if value.trimmed_unescaped().is_empty() {
+        let entries: Vec<String> = value
+            .split_list()
+            .map(|entry| entry.trimmed_unescaped())
+            .filter(|entry| !entry.is_empty())
+            .collect();
+        if entries.is_empty()
+            || entries.iter().any(|entry| {
+                let whole = current_file_dir.join(entry.replace('\\', "/"));
+                observed::link_kind(state.observer, &normalise(&whole)).is_err()
+            })
+        {
             return None;
-        }
-        if let [entry] = value.split_list().collect::<Vec<_>>().as_slice() {
-            let whole = current_file_dir.join(entry.trimmed_unescaped().replace('\\', "/"));
-            if observed::link_kind(state.observer, &normalise(&whole)).is_err() {
-                return None;
-            }
         }
     }
     if value.as_escaped().trim().is_empty() && !value.as_escaped().contains(';') {
