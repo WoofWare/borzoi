@@ -73,8 +73,8 @@ use borzoi_assembly::existence::{ExistenceIndex, PickleLayer};
 use borzoi_assembly::existence::{PickledEntityKind, PickledEntityRow};
 use borzoi_cst::syntax::{
     AstNode, Attribute, AttributeList, ExceptionDefnDecl, Expr, ImplicitCtor, LongIdent,
-    MemberDefn, ModuleDecl, ModuleOrNamespace, ModuleOrNamespaceKind, SyntaxKind, SyntaxNode,
-    TupleTypeExtensionHead, TyparDecls, Type, TypeDefn, TypeDefnRepr, UnionCase,
+    MemberDefn, ModuleDecl, ModuleOrNamespace, ModuleOrNamespaceKind, NestedModuleDecl, SyntaxKind,
+    SyntaxNode, TupleTypeExtensionHead, TyparDecls, Type, TypeDefn, TypeDefnRepr, UnionCase,
 };
 
 use crate::def::id_text;
@@ -576,6 +576,18 @@ mod rows {
         /// each charged before it is built.
         pub(super) fn namespace(&mut self, ns: &[String]) -> Result<Scope, BudgetExceeded> {
             let mut bytes = 0usize;
+            // A namespace already held holds every prefix: only its cost is
+            // needed, one pass, with no prefix compared again.
+            if self.namespaces.contains(ns) {
+                for segment in ns {
+                    bytes = bytes.saturating_add(name_cost(segment));
+                }
+                return Ok(Scope {
+                    namespace: ns.into(),
+                    enclosing: None,
+                    bytes,
+                });
+            }
             for k in 1..=ns.len() {
                 let name = name_cost(&ns[k - 1]);
                 bytes = bytes.saturating_add(name);
@@ -673,6 +685,22 @@ mod rows {
 
 use rows::Scope;
 
+/// A node whose declarations the walk reads: a file's module or namespace,
+/// or a nested module.
+enum Container {
+    File(ModuleOrNamespace),
+    Nested(NestedModuleDecl),
+}
+
+impl Container {
+    fn decls(&self) -> Box<dyn Iterator<Item = ModuleDecl> + '_> {
+        match self {
+            Container::File(m) => Box::new(m.decls()),
+            Container::Nested(m) => Box::new(m.decls()),
+        }
+    }
+}
+
 struct FileWalk<'w> {
     index: usize,
     providers: ProviderReferences,
@@ -744,7 +772,7 @@ impl FileWalk<'_> {
             ) {
                 return Err(self.unreadable(Leaf::FileHeader));
             }
-            let decls: Vec<ModuleDecl> = m.decls().collect();
+            let decls = Container::File(m.clone());
             match m.kind() {
                 ModuleOrNamespaceKind::GlobalNamespace => {
                     self.form(Form::GlobalNamespace)?;
@@ -876,10 +904,14 @@ impl FileWalk<'_> {
     /// The declaration lists of `scope` and of every module in it, by a
     /// stack of the modules still to read rather than by recursion, so the
     /// walk's stack does not grow with the nesting.
-    fn decls(&mut self, scope: Scope, decls: Vec<ModuleDecl>) -> Result<(), ExistenceUnread> {
-        let mut pending = vec![(scope, decls)];
-        while let Some((scope, decls)) = pending.pop() {
-            for d in decls {
+    ///
+    /// Each container's declarations are read as the tree holds them, never
+    /// collected, and a module waiting on the stack has already been charged
+    /// its row: the walk's memory beyond its rows is bounded by them.
+    fn decls(&mut self, scope: Scope, container: Container) -> Result<(), ExistenceUnread> {
+        let mut pending = vec![(scope, container)];
+        while let Some((scope, container)) = pending.pop() {
+            for d in container.decls() {
                 match d {
                     ModuleDecl::NestedModule(m) => {
                         if !consumed(
@@ -908,8 +940,7 @@ impl FileWalk<'_> {
                         if suffixable(name) {
                             self.form(Form::SuffixedModule)?;
                         }
-                        let inner: Vec<ModuleDecl> = m.decls().collect();
-                        self.form(if inner.is_empty() {
+                        self.form(if m.decls().next().is_none() {
                             Form::EmptyNestedModule
                         } else {
                             Form::NestedModule
@@ -918,7 +949,7 @@ impl FileWalk<'_> {
                             .rows
                             .module(&scope, name)
                             .map_err(ExistenceUnread::Budget)?;
-                        pending.push((inside, inner));
+                        pending.push((inside, Container::Nested(m.clone())));
                     }
                     ModuleDecl::Types(t) => {
                         // A group is its definitions, nothing else.
@@ -1112,6 +1143,12 @@ fn target_form(ty: &Type, name: &str, generic: bool) -> Form {
     }
     match &ty {
         Type::Paren(_) => unreachable!("every parenthesis is peeled"),
+        // The path and nothing beside it.
+        Type::LongIdent(t)
+            if !consumed(t.syntax(), |n| LongIdent::can_cast(n.kind()), |_| false) =>
+        {
+            Form::NamedTarget
+        }
         Type::LongIdent(t) => match t.long_ident().as_ref().and_then(long_ident).as_deref() {
             Some([single]) if single == name && !generic => Form::SelfNamedTarget,
             Some([single]) if FSHARP_CORE_TYPE_NAMES.contains(&single.as_str()) => {

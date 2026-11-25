@@ -40,6 +40,9 @@ enum Family {
     Dotted,
     /// A module and a type whose names are `n` bytes long.
     Long,
+    /// A module of `n` values, which declare no entity: one row, however
+    /// wide.
+    Values,
 }
 
 /// The family's member of size `n`.
@@ -67,6 +70,13 @@ fn source(family: Family, n: usize) -> String {
         Family::Long => {
             let name = format!("L{}", "x".repeat(n));
             format!("module Top\nmodule {name} =\n    type {name} = int\n")
+        }
+        Family::Values => {
+            let mut src = "module Top\nmodule V =\n".to_owned();
+            for k in 0..n {
+                src.push_str(&format!("    let v{k} = {k}\n"));
+            }
+            src
         }
     }
 }
@@ -102,6 +112,7 @@ fn family() -> impl Strategy<Value = Family> {
         Just(Family::Deep),
         Just(Family::Dotted),
         Just(Family::Long),
+        Just(Family::Values),
     ]
 }
 
@@ -204,11 +215,11 @@ fn budget_child() {
     let Some(case) = stack_probe::requested_case(CASE_VAR) else {
         return;
     };
-    let family = match case.as_str() {
-        "Dotted" => Family::Dotted,
+    let (family, n) = match case.as_str() {
+        "Dotted" => (Family::Dotted, corner(Family::Dotted)),
+        "Values" => (Family::Values, VALUES),
         other => panic!("no budget case {other}"),
     };
-    let n = corner(family);
     let cell = Cell::new("corner", &[("Lib.fs", &source(family, n))]);
     let project = crate::source_existence_diff::project_files(&cell);
     let items: Vec<borzoi_sema::CompileItem<'_>> = project
@@ -230,6 +241,33 @@ fn budget_child() {
         other => panic!("the corner is read: {other:?}"),
     };
     stack_probe::report(&format!("{n} {charged} {peak}"));
+}
+
+/// The values in [`the_walk_allocates_nothing_for_what_declares_no_entity`]'s
+/// module.
+const VALUES: usize = 50_000;
+
+/// A module of many values is two rows, and the walk's memory beyond them
+/// does not grow with the values: it reads each declaration list as the tree
+/// holds it, never collected.
+#[test]
+fn the_walk_allocates_nothing_for_what_declares_no_entity() {
+    let verdict = match stack_probe::run_case_limited(CHILD, CASE_VAR, "Values", CASE_TIMEOUT) {
+        Limited::Survived(verdict) => verdict,
+        other => panic!("Values: {other:?}"),
+    };
+    let numbers: Vec<usize> = verdict
+        .split(' ')
+        .map(|n| n.parse().expect("a count"))
+        .collect();
+    let [_, charged, peak] = numbers[..] else {
+        panic!("Values: {verdict}");
+    };
+    // A small constant: two rows, and the walk's own bookkeeping.
+    assert!(
+        peak <= charged + 16 * 1024,
+        "{VALUES} values charge {charged} and allocate {peak}"
+    );
 }
 
 /// At the default budget's corner, the walk allocates at most a few times
