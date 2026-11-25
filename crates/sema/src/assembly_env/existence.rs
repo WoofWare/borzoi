@@ -109,7 +109,43 @@ fn canonical_path(path: &[String]) -> Vec<String> {
     path.iter().map(|s| canonical(s)).collect()
 }
 
+/// The path an assembly-level `[<AutoOpen("…")>]` argument names: FCS's
+/// `splitNamespace`, a plain dotted path (no quoted-identifier escaping at
+/// this level), or `None` with an empty segment.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn auto_open_segments(path: &str) -> Option<Vec<String>> {
+    let segments: Vec<String> = path.split('.').map(str::to_string).collect();
+    (!segments.iter().any(String::is_empty)).then_some(segments)
+}
+
 impl ExistenceSet {
+    /// Every entity fact the set holds, in a comparable form: what its
+    /// entity questions read, and nothing else.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn facts(&self) -> ExistenceFacts {
+        let mut facts = ExistenceFacts {
+            unknowable: self.unknowable,
+            prefixes: self.prefixes.iter().cloned().collect(),
+            entities: self.entities.iter().cloned().collect(),
+            abbreviation_lenders: self.abbreviation_lenders.iter().cloned().collect(),
+            auto_open_bases: self.auto_open_bases.iter().cloned().collect(),
+            ..ExistenceFacts::default()
+        };
+        for (parent, children) in &self.children {
+            for child in children {
+                let mut path = parent.clone();
+                path.push(child.name.clone());
+                if child.lends_children {
+                    facts.lends_children.insert(path.clone());
+                }
+                if child.lends_anything {
+                    facts.lends_anything.insert(path);
+                }
+            }
+        }
+        facts
+    }
+
     /// Add one assembly's contribution.
     pub(crate) fn add(&mut self, input: &ExistenceInput, roots: &[Entity]) {
         match input {
@@ -387,6 +423,30 @@ impl ExistenceSet {
                 .abbreviation_lenders
                 .contains(&canonical_path(namespace))
     }
+}
+
+/// The entity facts an `ExistenceSet` holds (`ExistenceSet::facts`), each a
+/// set whose every element only ever makes a question answer "something may
+/// be there": one set's facts holding another's means it answers every
+/// entity question at least as permissively.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ExistenceFacts {
+    pub unknowable: bool,
+    /// Every prefix of every namespace and entity path, canonical.
+    pub prefixes: std::collections::BTreeSet<Vec<String>>,
+    /// Every entity path, canonical.
+    pub entities: std::collections::BTreeSet<Vec<String>>,
+    /// The entities whose children answer to short names where their
+    /// container is opened (an `[<AutoOpen>]` module or type).
+    pub lends_children: std::collections::BTreeSet<Vec<String>>,
+    /// The entities that may lend any short name (an `[<AutoOpen>]`
+    /// abbreviation).
+    pub lends_anything: std::collections::BTreeSet<Vec<String>>,
+    /// The containers holding an abbreviation marked `[<Extension>]` or
+    /// `[<AutoOpen>]`.
+    pub abbreviation_lenders: std::collections::BTreeSet<Vec<String>>,
+    pub auto_open_bases: std::collections::BTreeSet<Vec<String>>,
 }
 
 #[cfg(test)]

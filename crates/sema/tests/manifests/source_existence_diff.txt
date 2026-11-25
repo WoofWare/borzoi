@@ -1,0 +1,37 @@
+# Generated; do not edit by hand. One line per graded item, sorted.
+# Regenerate with:
+#   BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-sema --test all source_existence_grid::source_rows_hold_fcs_facts_over_the_grid
+abbreviation_of_every_fsharp_core_name	exact
+abbreviations	exact
+access	exact
+attributes_off_entities	exact
+attributes_on_members	exact
+augmentation_of_a_type_nowhere	exact, FCS rejects [FCS: FS39]
+augmentations	exact
+exceptions	exact
+exe	exact
+fcs_rejects_a_value	exact, FCS rejects [FCS: FS1]
+module_abbreviation	exact
+module_beside_exception_of_its_name	exact, FCS rejects [FCS: FS37]
+module_beside_type_of_its_name	exact
+module_empty_begin_end	exact
+module_header	exact
+module_header_single	exact
+module_nested_deep	exact
+module_rec	exact
+names_backticked	exact
+names_colliding	exact
+names_ending_in_module_on_types	exact
+names_fsharp_core	exact
+names_unicode	exact
+namespace	exact
+namespace_dotted_and_fragments	exact
+namespace_empty	exact
+namespace_global	exact
+namespace_rec	exact
+namespace_two_files	exact
+provider_possible	unread TypeProvider(0)
+type_and_group	exact
+type_duplicate_name	exact, FCS rejects [FCS: FS37]
+type_generic	exact
+type_kinds	exact

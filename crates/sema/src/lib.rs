@@ -52,6 +52,7 @@ mod overload;
 mod qnof;
 mod recovery;
 mod resolve;
+mod source_existence;
 #[cfg(feature = "test-support")]
 pub mod test_support;
 mod ty;
@@ -97,6 +98,10 @@ pub use resolve::{
 };
 // `TyVid` is re-exported because it appears in the public `TyKind::Var` variant;
 // it is an inference-internal handle that never surfaces in `infer_file` output.
+pub use source_existence::{
+    Budget, BudgetExceeded, Charged, CompileItem, ExistenceUnread, Form, Leaf, Producer,
+    ProviderReferences, SourceExistence, SourceSurface, Verdict, source_existence,
+};
 pub use ty::{
     MAX_TYPE_DEPTH, MAX_TYPE_NODES, Ty, TyKind, TyPath, TySize, TyVid, TypeBudgetExceeded,
 };

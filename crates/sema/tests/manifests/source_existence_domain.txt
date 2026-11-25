@@ -1,0 +1,32 @@
+# Generated; do not edit by hand. One line per graded item, sorted.
+# Regenerate with:
+#   BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-sema --test all source_existence_domain::every_form_is_read_or_declined_as_its_verdict_says
+domain_AbbreviationTarget_FSharpCoreTarget	exact
+domain_AbbreviationTarget_NamedTarget	unread Declined(0, NamedTarget)
+domain_AbbreviationTarget_SelfNamedTarget	unread Declined(0, SelfNamedTarget)
+domain_AbbreviationTarget_SingleIdentTarget	unread Declined(0, SingleIdentTarget)
+domain_AbbreviationTarget_StaticArgumentTarget	unread Declined(0, StaticArgumentTarget) [FCS: FS39,FS39]
+domain_AbbreviationTarget_StructuralTarget	exact
+domain_Attribute_EntityAttribute	unread Declined(0, EntityAttribute)
+domain_Attribute_OtherAttribute	exact
+domain_Attribute_StandaloneAttribute	unread Declined(0, StandaloneAttribute)
+domain_Attribute_TargetedAttribute	unread Declined(0, TargetedAttribute)
+domain_Exception_Exception	exact
+domain_Exception_ExceptionAbbreviation	exact
+domain_FileHeader_AnonymousModule	unread Declined(0, AnonymousModule)
+domain_FileHeader_GlobalNamespace	exact
+domain_FileHeader_NamedModule	exact
+domain_FileHeader_Namespace	exact
+domain_File_ImplementationFile	exact
+domain_File_SignatureFile	unread Declined(0, SignatureFile)
+domain_HashDirective_HashDirective	unread Declined(0, HashDirective) [FCS: FS76]
+domain_Name_PlainName	exact
+domain_NestedModule_EmptyNestedModule	exact
+domain_NestedModule_NestedModule	exact
+domain_NestedModule_SuffixedModule	unread Declined(0, SuffixedModule)
+domain_TypeDefinition_Augmentation	exact
+domain_TypeDefinition_ConstructorAugmentation	unread Declined(0, ConstructorAugmentation) [FCS: FS10,FS10,FS929,FS912]
+domain_TypeDefinition_DottedType	unread Declined(0, DottedType)
+domain_TypeDefinition_GenericType	exact
+domain_TypeDefinition_TupleAugmentation	unread Declined(0, TupleAugmentation) [FCS: FS3350]
+domain_TypeDefinition_Type	exact

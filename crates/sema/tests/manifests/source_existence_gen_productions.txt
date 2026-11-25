@@ -1,0 +1,38 @@
+# Generated; do not edit by hand. One line per graded item, sorted.
+# Regenerate with:
+#   BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-sema --test all source_existence_gen::source_rows_hold_fcs_facts_over_generated_projects
+AndGroup	drawn 27, graded 17
+AttributedLet	drawn 45, graded 26
+Augmentation	drawn 27, graded 16
+Class	drawn 20, graded 11
+ConstructorAugmentation	drawn 3, graded 0
+CoreAbbreviation	drawn 24, graded 16
+Delegate	drawn 19, graded 11
+DottedNamespace	drawn 22, graded 14
+DottedType	drawn 3, graded 0
+EmptyModule	drawn 51, graded 31
+EntityAttribute	drawn 4, graded 0
+Enum	drawn 18, graded 10
+Exception	drawn 23, graded 12
+ExceptionAbbreviation	drawn 21, graded 13
+GenericType	drawn 22, graded 12
+GlobalNamespace	drawn 28, graded 20
+HashDirective	drawn 3, graded 0
+Interface	drawn 20, graded 13
+Let	drawn 50, graded 26
+ModuleAbbreviation	drawn 40, graded 26
+ModuleBesideType	drawn 42, graded 26
+ModuleHeader	drawn 20, graded 14
+NamedTarget	drawn 3, graded 0
+Namespace	drawn 32, graded 19
+NestedModule	drawn 87, graded 54
+Open	drawn 40, graded 26
+RecNamespace	drawn 24, graded 12
+Record	drawn 19, graded 10
+SingleIdentTarget	drawn 3, graded 0
+StandaloneAttribute	drawn 4, graded 0
+Struct	drawn 14, graded 7
+StructuralAbbreviation	drawn 22, graded 14
+SuffixedModule	drawn 4, graded 0
+TupleAugmentation	drawn 3, graded 0
+Union	drawn 17, graded 9

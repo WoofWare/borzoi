@@ -1,0 +1,93 @@
+# Generated; do not edit by hand. One line per graded item, sorted.
+# Regenerate with:
+#   BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-sema --test all source_existence_gen::source_rows_hold_fcs_facts_over_generated_projects
+gen_0	ungraded: the oracle refuses (LineDirective); ours read
+gen_1	exact
+gen_10	exact
+gen_11	ungraded: the oracle refuses (MayReadDll); ours unread Declined(0, DottedType)
+gen_12	exact, FCS rejects [FCS: FS3200]
+gen_13	exact, FCS rejects [FCS: FS3201,FS3201]
+gen_14	unread Declined(1, SingleIdentTarget)
+gen_15	exact
+gen_16	exact
+gen_17	unread Declined(1, NamedTarget)
+gen_18	exact
+gen_19	exact, FCS rejects [FCS: FS53]
+gen_2	unread Declined(0, EntityAttribute)
+gen_20	ungraded: the oracle refuses (MayReadDll); ours unread Declined(1, TupleAugmentation)
+gen_21	exact
+gen_22	exact
+gen_23	unread Declined(1, ConstructorAugmentation) [FCS: FS10,FS10,FS929,FS912]
+gen_24	exact
+gen_25	exact
+gen_26	unread Declined(0, HashDirective) [FCS: FS76,FS3200]
+gen_27	exact
+gen_28	ungraded: the oracle refuses (LineDirective); ours read
+gen_29	unread Declined(0, EntityAttribute)
+gen_3	exact
+gen_30	exact
+gen_31	exact
+gen_32	unread Declined(0, StandaloneAttribute)
+gen_33	exact
+gen_34	exact
+gen_35	unread Declined(0, SuffixedModule)
+gen_36	unread Declined(0, HashDirective) [FCS: FS76]
+gen_37	exact
+gen_38	ungraded: the oracle refuses (MayReadDll); ours unread Declined(0, DottedType)
+gen_39	exact
+gen_4	exact
+gen_40	exact
+gen_41	unread Declined(1, SingleIdentTarget)
+gen_42	exact
+gen_43	exact
+gen_44	unread Declined(1, NamedTarget) [FCS: FS53]
+gen_45	exact, FCS rejects [FCS: FS3200]
+gen_46	exact
+gen_47	ungraded: the oracle refuses (MayReadDll); ours unread Declined(1, TupleAugmentation)
+gen_48	exact
+gen_49	exact
+gen_5	unread Declined(0, StandaloneAttribute)
+gen_50	unread Declined(1, ConstructorAugmentation) [FCS: FS10,FS10,FS929,FS912]
+gen_51	exact, FCS rejects [FCS: FS3200,FS53]
+gen_52	unread Recovered(1) [FCS: FS10]
+gen_53	unread Declined(1, HashDirective) [FCS: FS76,FS53,FS53]
+gen_54	exact, FCS rejects [FCS: FS53]
+gen_55	exact
+gen_56	ungraded: the oracle refuses (LineDirective); ours unread Declined(1, EntityAttribute)
+gen_57	exact
+gen_58	exact
+gen_59	unread Declined(0, StandaloneAttribute)
+gen_6	exact, FCS rejects [FCS: FS3200]
+gen_60	exact
+gen_61	exact, FCS rejects [FCS: FS3200]
+gen_62	unread Declined(1, SuffixedModule)
+gen_63	exact
+gen_64	exact, FCS rejects [FCS: FS53]
+gen_65	ungraded: the oracle refuses (MayReadDll); ours unread Declined(0, DottedType)
+gen_66	exact
+gen_67	exact
+gen_68	unread Declined(1, SingleIdentTarget) [FCS: FS53]
+gen_69	exact
+gen_7	exact
+gen_70	exact
+gen_71	unread Declined(1, NamedTarget)
+gen_72	exact
+gen_73	exact, FCS rejects [FCS: FS3200]
+gen_74	ungraded: the oracle refuses (MayReadDll); ours unread Declined(1, TupleAugmentation)
+gen_75	exact
+gen_76	exact
+gen_77	unread Declined(1, ConstructorAugmentation) [FCS: FS10,FS10,FS929,FS912]
+gen_78	exact
+gen_79	exact
+gen_8	unread Declined(0, HashDirective) [FCS: FS76,FS3201,FS3200,FS3201,FS3201]
+gen_80	unread Declined(1, HashDirective) [FCS: FS3200,FS3200,FS3200,FS3200,FS76]
+gen_81	exact
+gen_82	exact
+gen_83	unread Declined(1, EntityAttribute)
+gen_84	ungraded: the oracle refuses (LineDirective); ours unread Recovered(0)
+gen_85	exact
+gen_86	unread Declined(0, StandaloneAttribute) [FCS: FS53]
+gen_87	exact
+gen_88	exact
+gen_89	unread Declined(0, SuffixedModule)
+gen_9	exact

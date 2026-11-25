@@ -14,6 +14,46 @@
 
 use crate::{AssemblyEnv, EntityHandle, GateInput, Resolution, ResolvedFile};
 
+pub use crate::assembly_env::existence::ExistenceFacts;
+
+/// The names `source_existence` reads as an abbreviation's target naming a
+/// type FSharp.Core declares in a namespace every file has open, so a test
+/// can hold them to FSharp.Core's own pickle.
+pub fn fsharp_core_type_names() -> &'static [&'static str] {
+    crate::source_existence::FSHARP_CORE_TYPE_NAMES
+}
+
+/// [`crate::source_existence()`], with every [`crate::Form`] the walk
+/// classified before it finished or declined.
+pub fn source_existence_forms(
+    producer: crate::Producer<'_>,
+    budget: crate::Budget,
+) -> (
+    crate::SourceExistence,
+    std::collections::BTreeSet<crate::Form>,
+) {
+    crate::source_existence::read(producer, budget)
+}
+
+/// What the existence questions hold of one assembly whose index is `index`
+/// and whose assembly-level `[<AutoOpen("…")>]` arguments are `auto_opens`:
+/// the facts of the existence set built from them alone, by the code every
+/// question reads.
+pub fn existence_facts(
+    index: &borzoi_assembly::ExistenceIndex,
+    auto_opens: &[String],
+) -> ExistenceFacts {
+    use crate::assembly_env::existence::{ExistenceInput, ExistenceSet, auto_open_segments};
+    let mut set = ExistenceSet::default();
+    set.add(&ExistenceInput::Read(index.clone()), &[]);
+    for path in auto_opens {
+        if let Some(segments) = auto_open_segments(path) {
+            set.add_auto_open_base(segments);
+        }
+    }
+    set.facts()
+}
+
 /// Which input of the extension-scope gate declines a call of a method named
 /// `name` in the file `resolved` (`is_static`: a type-qualified call), or
 /// `None` when the gate lets the
