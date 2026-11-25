@@ -238,26 +238,25 @@ fn budget_child() {
 /// first, and the wide one only at hundreds of thousands of declarations.
 #[test]
 fn the_default_budget_bounds_the_memory_at_its_corner() {
-    for family in ["Dotted"] {
-        let verdict = match stack_probe::run_case_limited(CHILD, CASE_VAR, family, CASE_TIMEOUT) {
-            Limited::Survived(verdict) => verdict,
-            other => panic!("{family}: {other:?}"),
-        };
-        let numbers: Vec<usize> = verdict
-            .split(' ')
-            .map(|n| n.parse().expect("a count"))
-            .collect();
-        let [n, charged, peak] = numbers[..] else {
-            panic!("{family}: {verdict}");
-        };
-        eprintln!("{family}: the corner is {n}, charging {charged} and allocating {peak}");
-        assert!(
-            charged > Budget::DEFAULT.bytes / 2,
-            "{family}: the corner ({n}) charges {charged}, far from the budget"
-        );
-        assert!(
-            peak <= 4 * charged,
-            "{family}: the corner ({n}) charges {charged} and allocates {peak}"
-        );
-    }
+    let family = "Dotted";
+    let verdict = match stack_probe::run_case_limited(CHILD, CASE_VAR, family, CASE_TIMEOUT) {
+        Limited::Survived(verdict) => verdict,
+        other => panic!("{family}: {other:?}"),
+    };
+    let numbers: Vec<usize> = verdict
+        .split(' ')
+        .map(|n| n.parse().expect("a count"))
+        .collect();
+    let [n, charged, peak] = numbers[..] else {
+        panic!("{family}: {verdict}");
+    };
+    eprintln!("{family}: the corner is {n}, charging {charged} and allocating {peak}");
+    assert!(
+        charged > Budget::DEFAULT.bytes / 2,
+        "{family}: the corner ({n}) charges {charged}, far from the budget"
+    );
+    assert!(
+        peak <= 4 * charged,
+        "{family}: the corner ({n}) charges {charged} and allocates {peak}"
+    );
 }

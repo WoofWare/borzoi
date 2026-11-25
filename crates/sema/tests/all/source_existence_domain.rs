@@ -52,8 +52,7 @@ fn every_form_is_read_or_declined_as_its_verdict_says() {
             // Graded against FCS, not merely not declined.
             Verdict::Read => graded(verdict),
             Verdict::Declined => {
-                verdict.starts_with(&format!("unread Declined("))
-                    && verdict.contains(&format!(", {form:?})"))
+                verdict.starts_with("unread Declined(") && verdict.contains(&format!(", {form:?})"))
             }
         };
         if !kept {
