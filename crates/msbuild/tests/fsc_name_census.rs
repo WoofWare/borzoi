@@ -32,10 +32,10 @@ use std::path::{Path, PathBuf};
 
 use borzoi_msbuild::AutoResponseFile;
 use borzoi_msbuild::fsc::{
-    ALLOWED_ENVIRONMENT, ALLOWED_ITEM_TYPES, ALLOWED_METADATA, ALLOWED_PROPERTIES,
-    BUILD_TIME_SITES, CompiledAssemblyName, Gate, RESTORE_ITEM_TYPES, RESTORE_METADATA,
-    RESTORE_PROPERTIES, RESTORE_PROPERTY_PREFIX, resolved_sdk_version, restore_props,
-    toolchain_variable, verified_manifests, verified_sdks,
+    ALLOWED_ITEM_TYPES, ALLOWED_METADATA, ALLOWED_PROPERTIES, BUILD_TIME_SITES,
+    CompiledAssemblyName, Gate, RESTORE_ITEM_TYPES, RESTORE_METADATA, RESTORE_PROPERTIES,
+    RESTORE_PROPERTY_PREFIX, classify_variable, resolved_sdk_version, restore_props,
+    verified_manifests, verified_sdks,
 };
 use borzoi_msbuild::observed::host_fs::{self, HostPath};
 use borzoi_msbuild::{ParsedProject, PropertyRead};
@@ -197,10 +197,7 @@ fn blocking_facts(
         }
     }
     for name in environment.keys() {
-        if !toolchain_variable(name)
-            && !on_list(ALLOWED_ENVIRONMENT.iter().copied(), name)
-            && !on_list(ALLOWED_PROPERTIES.iter().map(|(n, _)| *n), name)
-        {
+        if !classify_variable(name).admitted() {
             fact("environment variable off the list", name);
         }
     }

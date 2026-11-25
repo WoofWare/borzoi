@@ -1047,6 +1047,32 @@ fn joined_text(node: roxmltree::Node<'_, '_>) -> Option<String> {
     Some(text)
 }
 
+/// The atoms of the conditions on the groups NuGet's restore writes
+/// ([`nuget_shaped`]): `'$(name)' op 'value'`, with the value as given, or
+/// with any literal holding no quote where `None`.
+pub(crate) const NUGET_GUARDS: &[(&str, &str, Option<&str>)] = &[
+    ("ExcludeRestorePackageImports", "!=", Some("true")),
+    ("TargetFramework", "==", Some("")),
+    ("TargetFramework", "==", None),
+    ("Language", "==", None),
+    ("Language", "!=", None),
+];
+
+/// Whether `atom`, one conjunct of a group's condition, is one of
+/// [`NUGET_GUARDS`].
+fn nuget_group_atom(atom: &str) -> bool {
+    NUGET_GUARDS.iter().any(|(name, op, value)| {
+        let head = format!("'$({name})' {op} '");
+        match value {
+            Some(value) => atom == format!("{head}{value}'"),
+            None => atom
+                .strip_prefix(head.as_str())
+                .and_then(|rest| rest.strip_suffix('\''))
+                .is_some_and(|value| !expands(value) && !value.contains('\'')),
+        }
+    })
+}
+
 /// Whether `node`, an element holding a condition or an expansion, is one
 /// of the shapes NuGet's restore writes into `obj/*.nuget.g.props` and
 /// `.targets` (`BuildAssetsUtils`, NuGet.Client):
@@ -1085,18 +1111,7 @@ fn nuget_shaped(node: roxmltree::Node<'_, '_>) -> bool {
         node.attributes()
             .all(|a| allowed.iter().any(|n| a.name().eq_ignore_ascii_case(n)))
     };
-    let quoted = |atom: &str, prefix: &str, suffix: &str| {
-        atom.strip_prefix(prefix)
-            .and_then(|rest| rest.strip_suffix(suffix))
-            .is_some_and(|value| literal(value) && !value.contains('\''))
-    };
-    let group_atom = |atom: &str| {
-        atom == "'$(ExcludeRestorePackageImports)' != 'true'"
-            || atom == "'$(TargetFramework)' == ''"
-            || quoted(atom, "'$(TargetFramework)' == '", "'")
-            || quoted(atom, "'$(Language)' == '", "'")
-            || quoted(atom, "'$(Language)' != '", "'")
-    };
+    let group_atom = nuget_group_atom;
     let rooted_literal = |text: &str, root: &str| literal(text.strip_prefix(root).unwrap_or(text));
     // One `Exists` of one quoted literal: a path holding a quote could close
     // the literal and add another call (`a') Or Exists('b`).
