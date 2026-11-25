@@ -6943,10 +6943,14 @@ let private attributeTypeName
 /// FCS loads a provider's design-time assembly into the process through the
 /// CLR, which never unloads it, so a later request in the same child could be
 /// answered from it.
-let private refuseTypeProvider (path: string) =
+let rec private refuseTypeProvider (path: string) =
     use stream = File.OpenRead path
     use pe = new System.Reflection.PortableExecutable.PEReader(stream)
-    let md = System.Reflection.Metadata.PEReaderExtensions.GetMetadataReader pe
+    refuseTypeProviderIn path (System.Reflection.Metadata.PEReaderExtensions.GetMetadataReader pe)
+
+/// [`refuseTypeProvider`], over `md`, the metadata of the assembly at `path`
+/// a caller already holds open.
+and private refuseTypeProviderIn (path: string) (md: System.Reflection.Metadata.MetadataReader) =
     for h in md.GetAssemblyDefinition().GetCustomAttributes() do
         match attributeTypeName md (md.GetCustomAttribute h).Constructor with
         | Some(ns, name) when
@@ -7633,20 +7637,24 @@ let private dllAssembly (where: string) (path: string) : string =
     if not (File.Exists path) then
         failwithf "%s: %s does not exist" where path
     requireRegularFile path
-    let name =
+    let notAnAssembly () = failwithf "%s: %s is not an assembly" where path
+    // One open and one metadata reader for both the identity and the
+    // provider check.
+    use stream =
+        try File.OpenRead path with _ -> notAnAssembly ()
+    use pe = new System.Reflection.PortableExecutable.PEReader(stream)
+    let read =
         try
-            use stream = File.OpenRead path
-            use pe = new System.Reflection.PortableExecutable.PEReader(stream)
             let md = System.Reflection.Metadata.PEReaderExtensions.GetMetadataReader pe
-            if md.IsAssembly then Some(md.GetString(md.GetAssemblyDefinition().Name)) else None
+            if md.IsAssembly then Some(md, md.GetString(md.GetAssemblyDefinition().Name)) else None
         with _ ->
             None
-    match name with
-    | None -> failwithf "%s: %s is not an assembly" where path
-    | Some name when name <> (Path.GetFileNameWithoutExtension path |> Option.ofObj |> Option.defaultValue "") ->
+    match read with
+    | None -> notAnAssembly ()
+    | Some(_, name) when name <> (Path.GetFileNameWithoutExtension path |> Option.ofObj |> Option.defaultValue "") ->
         failwithf "%s: %s is assembly %s, not the one its file name says" where path name
-    | Some name ->
-        refuseTypeProvider path
+    | Some(md, name) ->
+        refuseTypeProviderIn path md
         name
 
 /// Parse one graph project.
@@ -8012,10 +8020,12 @@ let private respondGraphCompile (checker: FSharpChecker) (root: JsonElement) =
     match staged with
     | null -> ()
     | dll ->
+        // Each DLL reference's assembly name is its file's stem: the request's
+        // parse held its manifest to that ([`dllAssembly`]).
         let named =
             p.References
             |> List.choose (function
-                | Dll path -> Some(dllAssembly "reference" path)
+                | Dll path -> Path.GetFileNameWithoutExtension path |> Option.ofObj
                 | ProjectRef _ -> None)
             |> set
         use stream = File.OpenRead dll

@@ -35,7 +35,7 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use borzoi_cst::language_version::LanguageVersion;
@@ -380,6 +380,78 @@ impl ChildBudget {
     }
 }
 
+/// One child's count against a [`ChildBudget`], given back when dropped,
+/// unwinding from a panic included: a failed build, spawn or request never
+/// keeps a count it no longer uses.
+struct Permit<'a>(&'a ChildBudget);
+
+impl ChildBudget {
+    /// [`ChildBudget::acquire`], as a [`Permit`].
+    fn permit(&self, evict: impl FnMut() -> bool) -> Permit<'_> {
+        self.acquire(evict);
+        Permit(self)
+    }
+}
+
+impl Drop for Permit<'_> {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+
+/// A pooled child and its count. Dropping it kills the child and gives the
+/// count back.
+struct PooledChild {
+    child: BatchChild,
+    _permit: Permit<'static>,
+}
+
+/// `slot`'s guard if it is free, and whether taking it dropped what a
+/// panicking holder left there. A slot whose holder panicked mid-request is
+/// free: what it held is dropped (a pooled child killed, its count given back)
+/// and the slot emptied, so a failure costs its own request, never the rest
+/// of the suite.
+fn try_lock_slot<T>(slot: &Mutex<Option<T>>) -> Option<(MutexGuard<'_, Option<T>>, bool)> {
+    match slot.try_lock() {
+        Ok(guard) => Some((guard, false)),
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+            let mut guard = poisoned.into_inner();
+            let held = guard.take().is_some();
+            slot.clear_poison();
+            Some((guard, held))
+        }
+        Err(std::sync::TryLockError::WouldBlock) => None,
+    }
+}
+
+/// `slot`'s guard, waiting for it, emptied as [`try_lock_slot`] empties a
+/// slot a panicking holder left.
+fn lock_slot<T>(slot: &Mutex<Option<T>>) -> MutexGuard<'_, Option<T>> {
+    slot.lock().unwrap_or_else(|poisoned| {
+        let mut guard = poisoned.into_inner();
+        *guard = None;
+        slot.clear_poison();
+        guard
+    })
+}
+
+/// End one idle child held in `slots` with `end`, or drop what a panicking
+/// holder left in one; whether either happened.
+fn evict_from<T>(slots: &[Mutex<Option<T>>], end: impl FnOnce(T)) -> bool {
+    for slot in slots {
+        if let Some((mut guard, reclaimed)) = try_lock_slot(slot) {
+            if reclaimed {
+                return true;
+            }
+            if let Some(held) = guard.take() {
+                end(held);
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// The process's [`ChildBudget`], [`fcs_children_budget`] of them.
 static CHILDREN: std::sync::LazyLock<ChildBudget> =
     std::sync::LazyLock::new(|| ChildBudget::new(fcs_children_budget()));
@@ -388,21 +460,53 @@ static CHILDREN: std::sync::LazyLock<ChildBudget> =
 /// ending an idle child of another ([`evict_an_idle_child`]).
 static POOLS: Mutex<Vec<&'static BatchPool>> = Mutex::new(Vec::new());
 
-/// End one idle pooled child, if any is idle, and release its count.
+/// End one idle pooled child, if any is idle, giving back its count.
 fn evict_an_idle_child() -> bool {
     let pools: Vec<&'static BatchPool> = POOLS.lock().unwrap_or_else(|p| p.into_inner()).clone();
-    for pool in pools {
-        for slot in &pool.slots {
-            if let Ok(mut guard) = slot.try_lock()
-                && let Some(child) = guard.take()
-            {
-                child.finish(Duration::from_secs(10));
-                CHILDREN.release();
-                return true;
-            }
-        }
-    }
-    false
+    pools.iter().any(|pool| {
+        evict_from(&pool.slots, |pooled: PooledChild| {
+            let PooledChild { child, _permit } = pooled;
+            child.finish(Duration::from_secs(10));
+        })
+    })
+}
+
+/// A request that panics while it holds a slot, or a spawn that panics
+/// while it holds a count, gives the count back: under a cap of one, the next
+/// caller still gets a child rather than waiting for ever.
+#[test]
+fn a_panicking_holder_gives_its_count_back() {
+    let _silence = borzoi_oracle_harness::panic_silence::silence_panics_here();
+    let budget: &'static ChildBudget = Box::leak(Box::new(ChildBudget::new(1)));
+    // A spawn that panics with its count in hand.
+    let spawn = std::panic::catch_unwind(|| {
+        let _permit = budget.permit(|| false);
+        panic!("the spawn failed");
+    });
+    assert!(spawn.is_err());
+    assert_eq!(
+        *budget.live.lock().expect("live"),
+        0,
+        "the failed spawn kept its count"
+    );
+    // A request that panics holding the slot of the only child.
+    let slots: &'static [Mutex<Option<Permit<'static>>>; 1] =
+        Box::leak(Box::new([Mutex::new(Some(budget.permit(|| false)))]));
+    let request = std::thread::spawn(|| {
+        let _silence = borzoi_oracle_harness::panic_silence::silence_panics_here();
+        let _guard = slots[0].lock().expect("the slot");
+        panic!("the request failed");
+    });
+    assert!(request.join().is_err());
+    assert!(slots[0].is_poisoned());
+    let (done, answer) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _permit = budget.permit(|| evict_from(slots, drop));
+        done.send(()).expect("the test is waiting");
+    });
+    answer
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the next caller waits for ever behind the panicked request");
 }
 
 /// The cap holds however many callers want a child at once, a caller still
@@ -485,7 +589,7 @@ struct BatchPool {
     /// than the per-snippet default, and a bound tight enough to kill a healthy
     /// project would be worse than no bound at all.
     request_timeout: Duration,
-    slots: Vec<Mutex<Option<BatchChild>>>,
+    slots: Vec<Mutex<Option<PooledChild>>>,
 }
 
 impl BatchPool {
@@ -515,25 +619,30 @@ impl BatchPool {
     /// a saturated pool queues rather than spawning without bound.
     fn request(&self, request: &str) -> String {
         for slot in &self.slots {
-            if let Ok(mut guard) = slot.try_lock() {
+            if let Some((mut guard, _)) = try_lock_slot(slot) {
                 return self.round_trip(&mut guard, request);
             }
         }
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let i = NEXT.fetch_add(1, Ordering::Relaxed) % self.slots.len();
-        let mut guard = self.slots[i]
-            .lock()
-            .expect("fcs-dump batch mutex poisoned (a previous request failed)");
+        let mut guard = lock_slot(&self.slots[i]);
         self.round_trip(&mut guard, request)
     }
 
-    fn round_trip(&self, slot: &mut Option<BatchChild>, request: &str) -> String {
-        let answer = slot
-            .get_or_insert_with(|| {
-                CHILDREN.acquire(evict_an_idle_child);
-                spawn_fcs_batch_child(self.oracle, self.subcommand, self.request_timeout, 2)
-            })
-            .request(request);
+    fn round_trip(&self, slot: &mut Option<PooledChild>, request: &str) -> String {
+        let pooled = match slot {
+            Some(pooled) => pooled,
+            None => {
+                let permit = CHILDREN.permit(evict_an_idle_child);
+                let child =
+                    spawn_fcs_batch_child(self.oracle, self.subcommand, self.request_timeout, 2);
+                slot.insert(PooledChild {
+                    child,
+                    _permit: permit,
+                })
+            }
+        };
+        let answer = pooled.child.request(request);
         CHILDREN.idle();
         answer
     }
@@ -749,15 +858,7 @@ pub fn with_fcs_graph_child<T>(
     env: &[(&'static str, &'static str)],
     f: impl FnOnce(&mut BatchChild) -> T,
 ) -> T {
-    /// Gives the child's count back however `f` ends.
-    struct Counted;
-    impl Drop for Counted {
-        fn drop(&mut self) {
-            CHILDREN.release();
-        }
-    }
-    CHILDREN.acquire(evict_an_idle_child);
-    let _counted = Counted;
+    let _permit = CHILDREN.permit(evict_an_idle_child);
     let mut child = spawn_fcs_batch_child_with_env(
         Oracle::Current,
         "uses-project-graph-batch",
