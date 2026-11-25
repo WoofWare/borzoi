@@ -6652,9 +6652,10 @@ fn sdk_project_under_root<'a>(raw: &str, relative: &'a str) -> &'a str {
 
 /// Whether an SDK import's `Project`, written as `raw` and expanded to
 /// `value`, names a file under `resolution` the walk does not model: one
-/// rooted that keeps a `\` bypasses the SDK root, and MSBuild's `..` pops a
-/// segment the `\` joins to its neighbour, which the walk, reading every `\`
-/// as a separator, does not. A resolution of no root names no file at all.
+/// rooted that keeps a `\` bypasses the SDK root, and a `..` after the `\`
+/// pops a segment the `\` joins to its neighbour where MSBuild keeps it,
+/// which the walk, reading every `\` as a separator, does not. A resolution
+/// of no root names no file at all.
 pub(super) fn sdk_import_keeps_a_rooted_backslash(
     raw: &str,
     value: &Escaped,
@@ -6662,10 +6663,13 @@ pub(super) fn sdk_import_keeps_a_rooted_backslash(
 ) -> bool {
     let names_a_file = !matches!(resolution, SdkResolution::Roots(roots) if roots.is_empty());
     // On Windows a `\` is a separator MSBuild reads as the walk does.
+    // A `\` with no `.` or `..` after it names the same file in every
+    // spelling (`adjustment_is_immaterial`).
     cfg!(not(windows))
         && names_a_file
         && sdk_project_written_rooted(raw)
         && value.as_escaped().contains('\\')
+        && !adjustment_is_immaterial(&value.unescape())
 }
 
 /// An import's `Project` attribute, written as `raw`, as MSBuild expands it

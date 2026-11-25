@@ -993,10 +993,62 @@ fn a_rooted_sdk_import_through_a_backslash_and_a_parent_hop_declines() {
     let prelude = "  <PropertyGroup><G>seg\\child</G></PropertyGroup>\n";
     let import = format!("/missing/..{}/$(G)/../T.props", work.display());
     let (xml, parsed, _) = evaluate_both_after(&layout, Kind::Sdk, prelude, &[import]);
+    // MSBuild's answer moves with its startup directory.
+    let proj = layout.root.join("proj").join("p.proj");
+    let env = child_environment(&layout);
+    let with_seg = layout.root.join("cwd-seg");
+    std::fs::create_dir_all(with_seg.join("seg")).expect("mkdir cwd-seg/seg");
+    assert_eq!(
+        msbuild_seen_from(&proj, &env, &with_seg).as_deref(),
+        Ok(";seg"),
+        "from a directory holding seg/\n{xml}"
+    );
+    assert_eq!(
+        msbuild_seen_from(&proj, &env, &layout.empty_cwd()).as_deref(),
+        Ok(";top"),
+        "from one holding none\n{xml}"
+    );
     assert!(
-        !parsed.diagnostics.is_empty(),
+        !matches!(
+            parsed.property("Seen"),
+            borzoi_msbuild::PropertyRead::Value(_)
+        ),
         "we committed {:?}\n{xml}",
-        parsed.properties.get("Seen")
+        parsed.property("Seen")
+    );
+}
+
+/// A rooted SDK import that keeps a property's `\` with no `.` or `..` after
+/// it names one file from every startup directory: the `..` before it pops
+/// what it pops in every spelling. The walk follows it.
+#[test]
+#[cfg(not(windows))]
+fn a_rooted_sdk_import_keeping_a_backslash_after_its_parent_hop_is_followed() {
+    let layout = Layout::new();
+    let work = layout.root.join("work");
+    std::fs::create_dir_all(work.join("sub")).expect("mkdir work/sub");
+    std::fs::write(
+        work.join("sub/T.props"),
+        "<Project><PropertyGroup><Seen>$(Seen);sub</Seen></PropertyGroup></Project>",
+    )
+    .expect("write marker");
+    let prelude = "  <PropertyGroup><G>sub\\T.props</G></PropertyGroup>\n";
+    let import = format!("/missing/..{}/$(G)", work.display());
+    let (xml, parsed, theirs) = evaluate_both_after(&layout, Kind::Sdk, prelude, &[import]);
+    assert_eq!(theirs.as_deref(), Ok(";sub"), "MSBuild's import\n{xml}");
+    let proj = layout.root.join("proj").join("p.proj");
+    let env = child_environment(&layout);
+    let with_sub = layout.root.join("cwd-sub");
+    std::fs::create_dir_all(with_sub.join("sub")).expect("mkdir cwd-sub/sub");
+    assert_eq!(
+        msbuild_seen_from(&proj, &env, &with_sub).as_deref(),
+        Ok(";sub"),
+        "from a directory holding sub/\n{xml}"
+    );
+    assert_eq!(
+        parsed.property("Seen"),
+        borzoi_msbuild::PropertyRead::Value(";sub".to_owned()),
+        "{xml}"
     );
 }
 
