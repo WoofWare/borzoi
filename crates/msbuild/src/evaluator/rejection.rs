@@ -1861,10 +1861,18 @@ fn may_load_nothing(
     // leaves each entry to be judged below, as with no guard; undecided says
     // nothing of the import.
     // A group's guard is asked again only of a path no write can have
-    // changed since the group's gate ran: one that reads no property.
+    // changed since the group's gate ran: one that reads no property, or the
+    // group's first import, before which none of its imports ran.
+    // `prev_siblings` starts at `node` itself.
+    let first_in_group = !node
+        .prev_siblings()
+        .skip(1)
+        .any(|s| s.has_tag_name("Import"));
     let asked_again = match guard {
         OwnFileGuard::Own => true,
-        OwnFileGuard::Group => properties::property_references(project).next().is_none(),
+        OwnFileGuard::Group => {
+            first_in_group || properties::property_references(project).next().is_none()
+        }
         OwnFileGuard::None => false,
     };
     if asked_again {
