@@ -1850,23 +1850,16 @@ fn may_load_nothing(
     }) {
         return Some(UnloadableImport::PathUndecided);
     }
-    // `Exists` asks about each entry of its argument's list, trimmed, and is
-    // false of an empty one: the gate rules the import out where an entry is
-    // missing, asked as the gate's own `Exists` asks it
-    // ([`super::condition_exists`]). Where every entry is present, each is
-    // judged below, as with no guard.
+    // The gate's `Exists`, asked as the gate's own evaluation asks it
+    // ([`condition::exists_of_list`]): false rules the import out; true
+    // leaves each entry to be judged below, as with no guard; undecided says
+    // nothing of the import.
     if requires_own_file {
-        let entries: Vec<String> = value
-            .split_list()
-            .map(|entry| entry.trimmed_unescaped())
-            .filter(|entry| !entry.is_empty())
-            .collect();
-        if entries.is_empty()
-            || entries
-                .iter()
-                .any(|entry| !super::condition_exists(state.observer, entry, current_file_dir))
-        {
-            return None;
+        let exists = |path: &str| super::condition_exists(state.observer, path, current_file_dir);
+        match condition::exists_of_list(value, &exists) {
+            Some(false) => return None,
+            Some(true) => {}
+            None => return Some(UnloadableImport::PathUndecided),
         }
     }
     if value.as_escaped().trim().is_empty() && !value.as_escaped().contains(';') {

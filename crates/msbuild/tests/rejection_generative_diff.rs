@@ -1709,15 +1709,19 @@ enum GuardedEntry {
     /// A file that loads, spelled with a trailing slash, which names a
     /// directory to `Exists` and to the import.
     Slashed,
+    /// A file that loads, spelled after an escaped `\` (`%5c`), which decodes
+    /// after MSBuild has asked whether the path is rooted.
+    Escaped,
 }
 
 impl GuardedEntry {
-    const ALL: [GuardedEntry; 5] = [
+    const ALL: [GuardedEntry; 6] = [
         GuardedEntry::Loads,
         GuardedEntry::Malformed,
         GuardedEntry::Missing,
         GuardedEntry::Directory,
         GuardedEntry::Slashed,
+        GuardedEntry::Escaped,
     ];
 }
 
@@ -1743,7 +1747,7 @@ fn guarded_import_lists_are_judged_as_msbuild_judges_them() {
         let name = format!("d{list}/e{at}.props");
         let path = dir.join(&name);
         match kind {
-            GuardedEntry::Loads | GuardedEntry::Slashed => {
+            GuardedEntry::Loads | GuardedEntry::Slashed | GuardedEntry::Escaped => {
                 std::fs::write(&path, "<Project />").unwrap();
             }
             GuardedEntry::Malformed => std::fs::write(&path, "<Project>").unwrap(),
@@ -1752,6 +1756,7 @@ fn guarded_import_lists_are_judged_as_msbuild_judges_them() {
         }
         match kind {
             GuardedEntry::Slashed => format!("{name}/"),
+            GuardedEntry::Escaped => format!("%5c{name}"),
             _ => name,
         }
     };
@@ -1775,13 +1780,21 @@ fn guarded_import_lists_are_judged_as_msbuild_judges_them() {
         let exists = kinds.iter().all(|kind| {
             matches!(
                 kind,
-                GuardedEntry::Loads | GuardedEntry::Malformed | GuardedEntry::Directory
+                GuardedEntry::Loads
+                    | GuardedEntry::Malformed
+                    | GuardedEntry::Directory
+                    | GuardedEntry::Escaped
             )
         });
         for guard in [list.clone(), list.replace('/', "\\")] {
             // Where the walk must commit, whatever MSBuild makes of the
             // conjunct it cannot decide.
-            let must_commit = loads || (guard == list && !exists);
+            // An escaped `\` leaves the guard undecided, which the walk
+            // declines whatever the other entries say.
+            let escaped = kinds
+                .iter()
+                .any(|kind| matches!(kind, GuardedEntry::Escaped));
+            let must_commit = loads || (guard == list && !exists && !escaped);
             for gate in [
                 format!("'É' == 'é' And Exists('{guard}')"),
                 format!("Exists('{guard}') And 'É' == 'é'"),
