@@ -148,10 +148,22 @@ fn probed_names<'t>(
         .filter(|path| !path.is_empty());
     let mut relative = std::collections::BTreeSet::new();
     let mut rooted = std::collections::BTreeMap::new();
+    let depth = ROOT_IN_TMP.split('/').count();
     for text in texts {
         for piece in std::iter::once(text).chain(literal_runs(text)) {
             let piece = piece.replace("$(Empty)", "");
             let bare = piece.trim_start_matches(['/', '\\']);
+            // Read from the root, or from a directory in it (a start, a
+            // project), no path may leave the temporary directory.
+            let (from, allowed) = match bare.strip_prefix(under_root) {
+                Some(rest) if bare.len() < piece.len() => (rest, depth),
+                _ if bare.len() < piece.len() => ("", 0),
+                _ => (piece.as_str(), depth + 1),
+            };
+            assert!(
+                climb(from) <= allowed,
+                "{text:?} climbs out of the fixture's temporary directory: deepen ROOT_IN_TMP"
+            );
             if bare.len() < piece.len() {
                 let host_by_design = user_extensions
                     .as_deref()
@@ -182,6 +194,21 @@ fn probed_names<'t>(
         }
     }
     relative
+}
+
+/// How many levels above where it starts `path` reaches, read segment by
+/// segment (a `%5c` is no separator).
+fn climb(path: &str) -> usize {
+    let (mut depth, mut lowest) = (0i64, 0i64);
+    for segment in path.split(['/', '\\']) {
+        match segment {
+            ".." => depth -= 1,
+            "" | "." => {}
+            _ => depth += 1,
+        }
+        lowest = lowest.min(depth);
+    }
+    usize::try_from(-lowest).expect("a climb is never negative")
 }
 
 /// Files under `proj-full`'s segments, for the `Compile` globs to find.
@@ -229,12 +256,14 @@ const PROJECTS: [(&str, [usize; 5]); 2] = [
 ];
 
 /// Where the fixture's root sits inside its temporary directory: deep enough
-/// that no generated value climbs out (three `..` at most, from the root or
-/// from a directory in it, and a template's one part after), so that every
-/// path a point names is the fixture's or a host-rooted name
-/// [`probed_names`] holds absent, never a file of the host's temporary
-/// directory.
-const ROOT_IN_TMP: &str = "climb/climb/fixture";
+/// that no composed path climbs out, so that every path a point names is the
+/// fixture's or a host-rooted name [`probed_names`] holds absent, never a
+/// file of the host's temporary directory. A value climbs four levels at
+/// most (a `..` first segment, three `..` parts, a last separator), a read
+/// template and a copy template may each double it, and the climb starts in
+/// a directory of the root's: sixteen levels below the temporary directory.
+/// [`probed_names`] asserts the bound on every point.
+const ROOT_IN_TMP: &str = "c/c/c/c/c/c/c/c/c/c/c/c/c/c/fixture";
 
 /// The fixture's layout as text, holding `names` in the full starts: a
 /// `root` line, [`ROOT_IN_TMP`]; a `dir` line per start, its directory and
@@ -1444,6 +1473,22 @@ fn a_condition_reading_two_segments_is_wrong_only_where_one_is_present() {
         expected,
         "the claims MSBuild contradicts"
     );
+}
+
+/// The deepest climb the generator can compose, a value climbing four levels
+/// doubled by both a read and a copy template, then a part, stays inside the
+/// fixture's temporary directory from a directory of the root's.
+#[test]
+fn the_deepest_composed_climb_stays_in_the_temporary_directory() {
+    assert_eq!(climb("../../../../../../y"), 6);
+    assert_eq!(climb("../a/../..%5c../b"), 1);
+    let value = "..\\..\\..\\..\\";
+    let doubled = "{v}{v}".replace("{v}", &"{v}{v}".replace("{v}", value));
+    let text = format!("{doubled}y");
+    let depth = ROOT_IN_TMP.split('/').count();
+    assert!(climb(&text) <= depth + 1, "{text:?} climbs out");
+    // `probed_names` holds every point to the same bound.
+    probed_names([text.as_str()], "/nowhere");
 }
 
 /// The indexer's splices are each a piece MSBuild adjusts, so each is a name

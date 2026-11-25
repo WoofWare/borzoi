@@ -38,7 +38,9 @@ fn lay_out(root: &std::path::Path, layout: &str) -> HashMap<String, Vec<String>>
                 }
             }
             Some("file") => {
-                std::fs::write(root.join(fields.next().expect("a file")), "").unwrap();
+                let file = root.join(fields.next().expect("a file"));
+                std::fs::create_dir_all(file.parent().expect("a directory")).unwrap();
+                std::fs::write(file, "").unwrap();
             }
             Some("root") => {}
             Some("project") => {
