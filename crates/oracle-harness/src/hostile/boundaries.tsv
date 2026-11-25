@@ -151,6 +151,7 @@ crates/lsp/tests/all/xml_doc_source_diff/signature.rs	pending	3
 crates/lsp/tests/all/xml_doc_type_id_diff.rs	pending	3
 crates/msbuild/src/condition.rs	pending	2
 crates/msbuild/src/document.rs	pending	2
+crates/msbuild/src/fsc.rs	not-applicable	its properties hold refactored rules (the environment classifier) to verbatim copies of the rules they replace, a pure function of a name; fsproj_assembly_name_perturbation_diff draws the env and name kinds against the real build
 crates/msbuild/src/glob/file_matcher/tests.rs	pending	2
 crates/msbuild/src/glob_resolver.rs	pending	2
 crates/msbuild/src/glob_resolver/symlink_tests.rs	pending	2
