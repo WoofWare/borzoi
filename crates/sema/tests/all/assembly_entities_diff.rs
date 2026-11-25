@@ -167,8 +167,10 @@ pub(crate) fn pickle_extension_failures(
     members: &[crate::common::assembly_entities::FcsExtensionMember],
     every_row_read: bool,
 ) -> Vec<String> {
-    let place = |ns: &str, enclosing: &[String]| format!("{ns} | {}", enclosing.join("+"));
-    let mut ours: BTreeMap<String, Vec<RowNames<'_>>> = BTreeMap::new();
+    // A place is the dotted namespace (FCS spells it no other way) and the
+    // enclosing entities as segments, so a quoted `A+B` is not `A` then `B`.
+    let place = |ns: &str, enclosing: &[String]| (ns.to_owned(), enclosing.to_vec());
+    let mut ours: BTreeMap<(String, Vec<String>), Vec<RowNames<'_>>> = BTreeMap::new();
     for row in index
         .extensions
         .iter()
@@ -190,12 +192,12 @@ pub(crate) fn pickle_extension_failures(
         });
         if !found {
             failures.push(format!(
-                "  FCS reads {:?} extension {} ({}, instance {}) at {at}; the index has no such row",
+                "  FCS reads {:?} extension {} ({}, instance {}) at {at:?}; the index has no such row",
                 m.style, m.logical_name, m.compiled_name, m.is_instance
             ));
         }
     }
-    let mut theirs: BTreeMap<String, BTreeSet<&str>> = BTreeMap::new();
+    let mut theirs: BTreeMap<(String, Vec<String>), BTreeSet<&str>> = BTreeMap::new();
     for m in members {
         let names = theirs.entry(place(&m.namespace, &m.enclosing)).or_default();
         names.insert(&m.logical_name);
@@ -208,7 +210,7 @@ pub(crate) fn pickle_extension_failures(
                 .is_some_and(|fcs| names.iter().any(|n| fcs.contains(n.as_str())));
             if !read {
                 failures.push(format!(
-                    "  the index lists extension {names:?} at {at}; FCS reads none of them there"
+                    "  the index lists extension {names:?} at {at:?}; FCS reads none of them there"
                 ));
             }
         }

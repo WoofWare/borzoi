@@ -656,8 +656,11 @@ fn the_cell_parse_reads_the_branches_fcs_reads() {
 /// fresh child about the second text. Returns the three answers: the first
 /// child's two, and the fresh child's.
 fn same_path_probe(env: &[(&'static str, &'static str)]) -> (String, String, String) {
+    // One length, so a cache keyed by path, modification time and size
+    // would miss nothing.
     let first = "namespace Probe\ntype First = { X: int }\n";
-    let second = "namespace Probe\ntype Second = { Y: int }\n";
+    let second = "namespace Probe\ntype Other = { X: int }\n";
+    assert_eq!(first.len(), second.len());
     let cell = GraphCell::library(plain("Probe"), files(&[("Lib.fs", first)]));
     let prepared = prepare(&cell);
     let line = prepared.referenced_line();
@@ -725,13 +728,13 @@ fn a_planted_cross_request_cache_is_caught() {
     );
 }
 
-/// A project the producer reads from source that FCS would read from its
-/// DLL instead (here a type provider, two levels down) refuses the request,
-/// naming that project, rather than letting the producer's check meet a DLL
-/// the request does not name. Each graph shape the request type admits is
-/// refused or answered, never an oracle error.
+/// A project of the request that FCS would read from its DLL instead (here a
+/// type provider) refuses the request, naming that project, wherever it sits
+/// in the graph: below the producer, or beside it under the consumer. A
+/// dependant's check never meets a DLL the request does not name, so each
+/// shape is refused, never an oracle error.
 #[test]
-fn a_type_provider_project_below_the_producer_is_refused() {
+fn a_type_provider_project_anywhere_in_the_graph_is_refused() {
     let framework: Vec<Reference> = framework_references()
         .iter()
         .cloned()
@@ -751,65 +754,92 @@ fn a_type_provider_project_below_the_producer_is_refused() {
             .chain(refs.iter().map(|r| Reference::Project(plain(r))))
             .collect(),
     };
-    let request = GraphRequest::new(
-        vec![
-            project(
-                "Provider",
-                vec![source(
-                    "referenced_tp_below",
-                    "namespace Provider\n[<assembly: Microsoft.FSharp.Core.CompilerServices.TypeProviderAssembly>]\ndo ()\ntype T = int\n",
-                )],
-                &[],
-            ),
-            project(
-                "Producer",
-                vec![source(
-                    "referenced_tp_producer",
-                    "namespace Producer\ntype Ab = Provider.T\n",
-                )],
-                &["Provider"],
-            ),
-            project(
-                "Consumer",
-                vec![source(
-                    "referenced_tp_consumer",
-                    "module Consumer.Use\nlet x = 1\n",
-                )],
-                &["Provider", "Producer"],
-            ),
-        ],
-        plain("Consumer"),
-    )
-    .expect("a valid graph request");
-    let line = request
-        .referenced_line(&plain("Producer"))
-        .expect("the consumer references the producer");
-    let answer = parse_response::<ReferencedResponse>(&invoke_fcs_dump_graph(&line));
-    assert!(
-        matches!(
+    // (shape, the producer's text, the producer's project references)
+    let shapes: [(&str, &str, &[&str]); 2] = [
+        (
+            "below",
+            "namespace Producer\ntype Ab = Provider.T\n",
+            &["Provider"],
+        ),
+        ("beside", "namespace Producer\ntype T = int\n", &[]),
+    ];
+    let mut failures = Vec::new();
+    for (shape, producer_text, producer_refs) in shapes {
+        let request = GraphRequest::new(
+            vec![
+                project(
+                    "Provider",
+                    vec![source(
+                        "referenced_tp_provider",
+                        "namespace Provider\n[<assembly: Microsoft.FSharp.Core.CompilerServices.TypeProviderAssembly>]\ndo ()\ntype T = int\n",
+                    )],
+                    &[],
+                ),
+                project(
+                    "Producer",
+                    vec![source("referenced_tp_producer", producer_text)],
+                    producer_refs,
+                ),
+                project(
+                    "Consumer",
+                    vec![source(
+                        "referenced_tp_consumer",
+                        "module Consumer.Use\nlet x = 1\n",
+                    )],
+                    &["Provider", "Producer"],
+                ),
+            ],
+            plain("Consumer"),
+        )
+        .expect("a valid graph request");
+        let line = request
+            .referenced_line(&plain("Producer"))
+            .expect("the consumer references the producer");
+        let answer = parse_response::<ReferencedResponse>(&invoke_fcs_dump_graph(&line));
+        let refused = matches!(
             &answer,
             Ok(ReferencedResponse::Refused(r))
                 if r.cause == RefusalCause::ReadsDll && r.detail.contains("Provider")
-        ),
-        "{answer:?}"
-    );
+        );
+        if !refused {
+            failures.push(format!("{shape}: {answer:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// A language version the compiler does not know is refused as such, before
-/// FCS checks anything under it.
+/// A language version the compiler does not know, or one below the compiler's
+/// support floor (whose features it has deleted, so it no longer checks as
+/// that version did, `docs/ast-versioning-plan.md` D12), is refused as such
+/// before FCS checks anything under it. The floor itself is answered.
 #[test]
-fn an_unknown_language_version_is_refused() {
-    let cell = GraphCell {
-        lang_version: LangVersion::new(99, 0),
-        ..one("namespace N\ntype T = int\n")
+fn a_language_version_the_compiler_cannot_check_is_refused() {
+    let floor = borzoi_oracle_harness::FCS_SUPPORT_FLOOR;
+    let (major, minor) = floor
+        .split_once('.')
+        .and_then(|(a, b)| Some((a.parse::<u8>().ok()?, b.parse::<u8>().ok()?)))
+        .unwrap_or_else(|| panic!("the support floor {floor} is <major>.<minor>"));
+    let answer_at = |version: LangVersion| {
+        let cell = GraphCell {
+            lang_version: version,
+            ..one("namespace N\ntype T = int\n")
+        };
+        let prepared = prepare(&cell);
+        parse_response::<ReferencedResponse>(&invoke_fcs_dump_graph(&prepared.referenced_line()))
     };
-    let prepared = prepare(&cell);
-    let answer =
-        parse_response::<ReferencedResponse>(&invoke_fcs_dump_graph(&prepared.referenced_line()));
-    assert!(
-        matches!(&answer, Err(ResponseError::Refused(why)) if why.contains("language version")),
-        "{answer:?}"
-    );
+    let mut failures = Vec::new();
+    for version in [LangVersion::new(99, 0), LangVersion::new(major - 1, 0)] {
+        let answer = answer_at(version);
+        if !matches!(&answer, Err(ResponseError::Refused(why)) if why.contains("language version"))
+        {
+            failures.push(format!("{version}: {answer:?}"));
+        }
+    }
+    let at_floor = answer_at(LangVersion::new(major, minor));
+    if !matches!(at_floor, Ok(ReferencedResponse::Found(_))) {
+        failures.push(format!("the floor {floor}: {at_floor:?}"));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 /// A type provider as a reference is refused before FCS reads it: the CLR

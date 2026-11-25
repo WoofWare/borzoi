@@ -7594,6 +7594,20 @@ type private ValidGraph =
       Order: GraphProject list
       Check: GraphProject }
 
+/// The lowest language version this compiler checks as that version did:
+/// FCS's `IsVersionSupported` floor (`languageVersion80`,
+/// `LanguageFeatures.fs`), which cannot be asked of FCS itself once
+/// [`pinnedLangVersionArgs`] has set `SKIP_VERSION_SUPPORTED_CHECK`.
+/// `borzoi_oracle_harness::FCS_SUPPORT_FLOOR` is the same floor, and
+/// `referenced_oracle`'s version test holds the two together.
+let private graphSupportFloor = "8.0"
+
+/// `<major>.<minor>` as a pair of numbers, for ordering versions.
+let private versionKey (version: string) : int * int =
+    match version.Split '.' with
+    | [| major; minor |] -> int major, int minor
+    | _ -> failwithf "invariant: %s is not <major>.<minor>" version
+
 /// Whether `s` is a conditional-compilation symbol: an ASCII letter or `_`,
 /// then letters, digits and `_`.
 let private isSymbol (s: string) =
@@ -7666,6 +7680,15 @@ let private parseGraphProject (e: JsonElement) : GraphProject =
     // rewrites, and the answer misattributed to the request's other fields.
     if not (fcsRecognisesLanguageVersion langVersion) then
         failwithf "%s: language version %s is not one this compiler knows" where langVersion
+    // Below the support floor this compiler has deleted the version's
+    // features and no longer checks as that version did
+    // (`docs/ast-versioning-plan.md`, D12).
+    if versionKey langVersion < versionKey graphSupportFloor then
+        failwithf
+            "%s: language version %s is below %s, the lowest this compiler checks as that version did"
+            where
+            langVersion
+            graphSupportFloor
     let sources =
         strictArray (where + " sources") (required where "sources" fields)
         |> List.map (absolutePath (where + " source"))
@@ -9463,12 +9486,12 @@ let private assemblyEntitiesOf (checkResults: FSharpCheckFileResults) (file: str
 /// directive (`LineDirective`); FCS resolved an assembly the request does not
 /// name (`UnnamedReference`).
 ///
-/// `target` and the projects it reads from source are checked first, each
-/// alone and after those it reads, and each one's assembly data read: FCS
-/// reads a project whose data is `Unavailable` from its DLL, so a dependant's
-/// check would try to open a file the request does not name. The refusal
-/// names the project. Only a target FCS reads from source, through projects
-/// it reads from source, is then read through `check`.
+/// Every project `check` reads from source is checked first, each alone and
+/// after those it reads, and each one's assembly data read: FCS reads a
+/// project whose data is `Unavailable` from its DLL, so a dependant's check
+/// would try to open a file the request does not name. The refusal names the
+/// project. Only when FCS reads all of them from source is `target` read
+/// through `check`.
 let private respondGraphReferenced (checker: FSharpChecker) (root: JsonElement) =
     let graph = parseGraphCheckWith [ "target" ] root
     let target =
@@ -9486,24 +9509,15 @@ let private respondGraphReferenced (checker: FSharpChecker) (root: JsonElement) 
         failwithf "invariant: %s exists, so a project reference could be read from disk" unwrittenRoot
     let built, outputOf = graphOptions graph
     let producer = graph.ById.[target]
-    // The target and every project it reads from source, each once however
-    // many paths reach it, in dependency order (each after the projects it
-    // reads): `graph.Order` is that order for all of `check`'s.
-    let inClosure = System.Collections.Generic.HashSet<string>()
-    let rec visit (p: GraphProject) =
-        if inClosure.Add p.Id then
-            for r in p.References do
-                match r with
-                | ProjectRef q -> visit graph.ById.[q]
-                | Dll _ -> ()
-    visit producer
-    let reached = graph.Order |> List.filter (fun p -> inClosure.Contains p.Id)
-    // Each is checked alone, after those it reads, and its assembly data
-    // read: FCS reads a project whose data is `Unavailable` from its DLL, so
-    // a dependant's check would try to open a file the request does not
+    // Every project `check` reads from source, the target among them, in
+    // dependency order (`graph.Order`, each after the projects it reads), is
+    // checked alone and its assembly data read: FCS reads a project whose
+    // data is `Unavailable` from its DLL, so a dependant's check, the
+    // target's or `check`'s, would try to open a file the request does not
     // name. Each was checked against exactly the references the request
     // names, so the target's signature describes that environment and no
     // other.
+    let reached = graph.Order |> List.filter (fun p -> p.Id <> graph.Check.Id)
     let mutable answer = None
     for p in reached do
         let results, release = checkProjectNowWith false checker built.[p.Id] "fcs-dump-graph-referenced"
