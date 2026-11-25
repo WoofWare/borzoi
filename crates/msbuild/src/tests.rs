@@ -11459,22 +11459,28 @@ fn an_exists_guard_written_with_a_backslash_is_its_imports_own() {
     assert_eq!(rejection("\\"), rejection("/"));
 }
 
-/// An `Exists` guard over an import's list, whatever its separators, is no
-/// proof that each entry it names loads: with `a.props` malformed and both
-/// present, MSBuild's guard holds where `'É' == 'é'` does, and the import
-/// rejects the project.
+/// An `Exists` guard written apart from its import's `Project` guards it as
+/// no own-file guard, though MSBuild's respelling makes the two name the
+/// same text: the walk's judge of a guarded import reads the guard's path as
+/// one file, which a list, written or expanded, is not. With `a.props`
+/// malformed and both present, MSBuild's guard holds where `'É' == 'é'`
+/// does, and the import rejects the project.
 #[test]
 #[cfg(not(windows))]
-fn an_exists_guard_over_an_import_list_does_not_discharge_it() {
+fn an_exists_guard_spelled_apart_from_its_import_list_does_not_discharge_it() {
     let tmp = tempfile::TempDir::new().unwrap();
     let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
     std::fs::create_dir(root.join("sub")).unwrap();
     std::fs::write(root.join("sub/a.props"), "<Project>").unwrap();
     std::fs::write(root.join("sub/b.props"), "<Project />").unwrap();
-    for guard in ["sub\\a.props;sub\\b.props", "sub/a.props;sub/b.props"] {
+    for (project, guard) in [
+        ("sub/a.props;sub/b.props", "sub\\a.props;sub\\b.props"),
+        ("sub/$(Tail)", "sub\\$(Tail)"),
+    ] {
         let source = format!(
             r#"<Project>
-  <Import Project="sub/a.props;sub/b.props" Condition="Exists('{guard}') And 'É' == 'é'" />
+  <PropertyGroup><Tail>a.props;sub/b.props</Tail></PropertyGroup>
+  <Import Project="{project}" Condition="Exists('{guard}') And 'É' == 'é'" />
 </Project>"#
         );
         let p = crate::parse_fsproj_with_imports(

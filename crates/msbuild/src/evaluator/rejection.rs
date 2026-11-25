@@ -1804,16 +1804,10 @@ pub(super) fn taken_import_with_undecided_path(
 /// Whether the gate of the import at `node` of `project` is false whenever
 /// MSBuild's `Exists` of `project` is: its own condition, or that of the
 /// `<ImportGroup>` around it, which gates it as much, has that `Exists` as a
-/// conjunct. An SDK import's path is not the `Exists` argument's, so none is,
-/// and neither is a list's: `Exists` asks about each entry, which
-/// [`may_load_nothing`] would read as one file.
+/// conjunct. An SDK import's path is not the `Exists` argument's, so none is.
+/// The argument and `project` are compared as written
+/// ([`condition::requires_exists`]).
 fn requires_own_file(node: Node<'_, '_>, project: &str) -> bool {
-    // The `Exists` argument the condition holds is the text MSBuild expands
-    // (`condition::BoolExpr::Exists`), and so is the import's.
-    let project = super::import_project_as_expanded(project);
-    if project.contains(';') {
-        return false;
-    }
     let is_own_file = |arg: &str| arg == project;
     let requires = |gate: Node<'_, '_>| {
         attribute(gate, "Condition")

@@ -359,6 +359,21 @@ fn parse_condition(source: &str) -> Result<Option<BoolExpr>, Reject> {
 
 /// [`parse_condition`] within the grammar we model.
 fn parse_modelled(source: &str) -> Result<Option<BoolExpr>, ()> {
+    parse_modelled_with(source, PathArguments::Respelled)
+}
+
+/// How a parse holds the arguments of `Exists` and `HasTrailingSlash`.
+#[derive(Clone, Copy)]
+enum PathArguments {
+    /// As MSBuild expands them: each written `\` a `/` on Unix
+    /// (`path_fixup::fix_file_path`).
+    Respelled,
+    /// As written.
+    AsWritten,
+}
+
+/// [`parse_modelled`], holding path arguments as `paths` says.
+fn parse_modelled_with(source: &str, paths: PathArguments) -> Result<Option<BoolExpr>, ()> {
     if source.is_empty() {
         return Ok(None);
     }
@@ -402,6 +417,7 @@ fn parse_modelled(source: &str) -> Result<Option<BoolExpr>, ()> {
         tokens: &tokens,
         pos: 0,
         depth: 0,
+        paths,
     };
     let expr = parser.parse_or()?;
     if parser.pos != parser.tokens.len() {
@@ -1255,7 +1271,10 @@ pub fn decided_conjunctwise(
 /// whose conjuncts is an `Exists` whose raw argument `is_the_exists` accepts:
 /// the condition is false whenever that `Exists` is.
 pub fn requires_exists(source: &str, is_the_exists: &dyn Fn(&str) -> bool) -> bool {
-    let Ok(Some(expr)) = parse_condition(source) else {
+    // Compared as written: MSBuild compares the respelled arguments, which
+    // match more spellings, so a guard written apart from the text
+    // `is_the_exists` looks for only goes unrecognised.
+    let Ok(Some(expr)) = parse_modelled_with(source, PathArguments::AsWritten) else {
         return false;
     };
     let mut pending = vec![&expr];
@@ -1913,9 +1932,21 @@ struct Parser<'a> {
     pos: usize,
     /// Parentheses and `!`s enclosing the factor being parsed.
     depth: usize,
+    /// How the path arguments are held.
+    paths: PathArguments,
 }
 
 impl<'a> Parser<'a> {
+    /// The argument of `Exists` or `HasTrailingSlash`, held as
+    /// [`Parser::paths`] says.
+    fn path_argument(&mut self) -> Result<String, ()> {
+        let argument = self.parse_single_string_argument()?;
+        Ok(match self.paths {
+            PathArguments::Respelled => path_fixup::fix_file_path(&argument),
+            PathArguments::AsWritten => argument,
+        })
+    }
+
     fn peek(&self) -> Option<&'a Token> {
         self.tokens.get(self.pos)
     }
@@ -2021,15 +2052,11 @@ impl<'a> Parser<'a> {
             // and may throw on alike, reads the text MSBuild expands.
             Some(Token::Exists) => {
                 self.bump();
-                Ok(BoolExpr::Exists(path_fixup::fix_file_path(
-                    &self.parse_single_string_argument()?,
-                )))
+                Ok(BoolExpr::Exists(self.path_argument()?))
             }
             Some(Token::HasTrailingSlash) => {
                 self.bump();
-                Ok(BoolExpr::HasTrailingSlash(path_fixup::fix_file_path(
-                    &self.parse_single_string_argument()?,
-                )))
+                Ok(BoolExpr::HasTrailingSlash(self.path_argument()?))
             }
             Some(Token::MsbuildVersionFunction(inner)) => {
                 let inner = inner.clone();
@@ -3284,6 +3311,7 @@ mod tests {
                 tokens: &tokens,
                 pos: 0,
                 depth: 0,
+                paths: super::PathArguments::Respelled,
             };
             let expr = parser.parse_or().expect("parses");
             let mut out = Vec::new();
