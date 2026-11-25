@@ -83,11 +83,11 @@ pub enum ProjectEvaluation<'a> {
         /// `'$(TargetFramework)' == ''` perfectly cleanly. See
         /// `workspace::EvaluatedProject::not_an_inner_build`.
         not_an_inner_build: bool,
-        /// The project's framework declarations are no answer: the walk does
-        /// not hold them for certain, so no inner build can be enumerated and
-        /// a compile closure takes none of the evaluation's edges. See
-        /// `workspace::EvaluatedProject::declared_tfms_undecided`.
-        declared_tfms_undecided: bool,
+        /// The project may dispatch to inner builds the walk cannot
+        /// enumerate: its plural `TargetFrameworks` is no answer and nothing
+        /// pins the build, so a compile closure takes none of the evaluation's
+        /// edges. See `workspace::EvaluatedProject::dispatch_undecided`.
+        dispatch_undecided: bool,
     },
     /// The `.fsproj` did not evaluate at all — malformed XML, an unreadable
     /// file, a rejected project path. The buffer's own diagnostics say which;
@@ -112,12 +112,8 @@ impl ProjectEvaluation<'_> {
             ProjectEvaluation::Evaluated {
                 parsed,
                 not_an_inner_build,
-                declared_tfms_undecided,
-            } => {
-                parsed.project_references_uncertain
-                    || *not_an_inner_build
-                    || *declared_tfms_undecided
-            }
+                dispatch_undecided,
+            } => parsed.project_references_uncertain || *not_an_inner_build || *dispatch_undecided,
         }
     }
 }
@@ -780,12 +776,13 @@ fn outer_build_cause(eval: ProjectEvaluation<'_>) -> Option<String> {
     }
 }
 
-/// The reason a project whose framework declarations are no answer drops its
-/// reference edges ([`ProjectEvaluation::Evaluated::declared_tfms_undecided`]).
+/// The reason a project that may dispatch to inner builds the walk cannot
+/// enumerate drops its reference edges
+/// ([`ProjectEvaluation::Evaluated::dispatch_undecided`]).
 fn undecided_frameworks_cause(eval: ProjectEvaluation<'_>) -> Option<String> {
     match eval {
         ProjectEvaluation::Evaluated {
-            declared_tfms_undecided: true,
+            dispatch_undecided: true,
             ..
         } => Some(
             "I could not determine which target frameworks this project declares, so I \

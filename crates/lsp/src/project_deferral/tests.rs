@@ -43,7 +43,7 @@ fn evaluated(parsed: &ParsedProject) -> ProjectEvaluation<'_> {
     ProjectEvaluation::Evaluated {
         parsed,
         not_an_inner_build: false,
-        declared_tfms_undecided: false,
+        dispatch_undecided: false,
     }
 }
 
@@ -674,7 +674,7 @@ fn the_outer_dispatch_build_reports_its_dropped_edges() {
     let eval = ProjectEvaluation::Evaluated {
         parsed: &parsed,
         not_an_inner_build: true,
-        declared_tfms_undecided: false,
+        dispatch_undecided: false,
     };
     assert!(eval.drops_reference_edges());
     let ds = deferrals(eval, FoldOutcome::Unknown);
@@ -700,7 +700,7 @@ fn the_edge_verdict_and_the_reported_capability_are_one_fact() {
                 let eval = ProjectEvaluation::Evaluated {
                     parsed: &parsed,
                     not_an_inner_build: outer,
-                    declared_tfms_undecided: undecided,
+                    dispatch_undecided: undecided,
                 };
                 assert_eq!(
                     eval.drops_reference_edges(),
@@ -846,7 +846,7 @@ fn an_unknown_fold_still_publishes_a_known_reference_loss() {
     let eval = ProjectEvaluation::Evaluated {
         parsed: &parsed,
         not_an_inner_build: true,
-        declared_tfms_undecided: false,
+        dispatch_undecided: false,
     };
     let fresh = deferrals(eval, FoldOutcome::Unknown);
     assert_eq!(fresh.len(), 1);
@@ -948,7 +948,7 @@ fn the_outer_dispatch_build_states_its_reason() {
         ProjectEvaluation::Evaluated {
             parsed: &parsed,
             not_an_inner_build: true,
-            declared_tfms_undecided: false,
+            dispatch_undecided: false,
         },
         FoldOutcome::Unknown,
     );
@@ -1009,7 +1009,7 @@ fn a_discarded_inner_build_explains_its_fold_decline_too() {
         ProjectEvaluation::Evaluated {
             parsed: &parsed,
             not_an_inner_build: true,
-            declared_tfms_undecided: false,
+            dispatch_undecided: false,
         },
         FoldOutcome::Unknown,
     );
