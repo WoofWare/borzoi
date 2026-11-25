@@ -383,7 +383,7 @@ fn compile_update_compile_order_scales_with_items_and_targets() {
         (names[N / 2], names[N - 1]),
         ("F0.fs", &*format!("F{}.fs", N - 2))
     );
-    assert!(!p.items_uncertain, "{:?}", p.diagnostics);
+    assert_only_the_batch_declines(&p);
     assert!(
         elapsed < std::time::Duration::from_secs(20),
         "{N} items against {N} targets took {elapsed:?}"
@@ -488,7 +488,7 @@ fn compile_update_compile_order_scales_with_a_long_update_spec() {
     let p = parse(&src);
     let elapsed = start.elapsed();
     assert_eq!(file_names(&p.items), ["T7.fs", "A.fs"]);
-    assert!(!p.items_uncertain, "{:?}", p.diagnostics);
+    assert_only_the_batch_declines(&p);
     assert!(
         elapsed < std::time::Duration::from_secs(20),
         "a {N}-target Update took {elapsed:?}"
@@ -519,7 +519,9 @@ fn compile_update_compile_order_declines_a_stranded_prefix() {
                 DiagnosticKind::StrandedUpdatePrefix { fragment, .. } if !fragment.is_empty()
             )
         });
-        assert_eq!(flagged, p.items_uncertain, "{spec}: {:?}", p.diagnostics);
+        // Every spec here but the escaped-first one may also leave the batch
+        // of `Update`s past its first fragment, which declines on its own.
+        assert!(!flagged || p.items_uncertain, "{spec}: {:?}", p.diagnostics);
         flagged
     };
     // A repeat, under any spelling, after the first fragment.
@@ -560,6 +562,246 @@ fn compile_update_strand_without_a_pending_batch_declines() {
     let p = parse(src);
     assert!(p.items_uncertain, "{:?}", p.diagnostics);
 }
+
+/// An `Update` whose own walk names the fragment it strands at is declined
+/// once, by that name.
+#[test]
+fn a_strand_the_walk_names_is_declined_once() {
+    let p = parse(
+        r#"<Project><ItemGroup>
+    <Compile Include="A.fs" />
+    <Compile Update="Z.fs" Link="z" />
+    <Compile Update="A.fs;A.fs" CompileOrder="CompileLast" />
+  </ItemGroup></Project>"#,
+    );
+    assert!(p.items_uncertain);
+    let kinds: Vec<_> = p.diagnostics.iter().map(|d| &d.kind).collect();
+    assert!(
+        matches!(
+            kinds.as_slice(),
+            [DiagnosticKind::StrandedUpdatePrefix { fragment, .. }] if fragment == "A.fs"
+        ),
+        "{kinds:?}"
+    );
+}
+
+/// The walk computed `p`'s Compile order, and declines it only because an
+/// `Update` may leave MSBuild's batch of `Update`s past its first fragment.
+fn assert_only_the_batch_declines(p: &ParsedProject) {
+    assert!(p.items_uncertain);
+    assert!(
+        p.diagnostics
+            .iter()
+            .all(|d| matches!(d.kind, DiagnosticKind::UnmodelledUpdateBatch { .. })),
+        "{:?}",
+        p.diagnostics
+    );
+}
+
+/// An `Update` that may leave MSBuild's batch past its first fragment
+/// declines its list, whatever the keys and whether it runs: even two
+/// distinct names may collide with a key an earlier `Update` left.
+#[test]
+fn a_multi_fragment_update_declines_its_list() {
+    let p = parse(
+        r#"<Project><ItemGroup>
+    <Compile Update="A.fs;B.fs" Link="x" />
+    <PackageReference Update="Delta;Gamma" VersionOverride="1.0" />
+    <Compile Include="A.fs" />
+    <PackageReference Include="Gamma" Version="1.0" />
+  </ItemGroup></Project>"#,
+    );
+    assert_only_the_batch_declines(&p);
+    assert!(p.package_reference_uncertainties.iter().any(|c| matches!(
+        &c.kind,
+        PackageReferenceUncertaintyCauseKind::UnmodelledUpdateBatch { update } if update == "Delta;Gamma"
+    )));
+}
+
+/// No `Update` can strand where every `Update` leaves the batch at its first
+/// fragment: one fragment, or one first fragment holding an expansion
+/// character (the SDK's gated `Update="@(Compile)"`, an escape), however
+/// their gates go.
+/// The order is certain.
+#[test]
+fn updates_that_cannot_leave_past_their_first_fragment_commit() {
+    let p = parse(&format!(
+        r#"<Project>{UNTRUSTED_F}<ItemGroup>
+    <Compile Include="A.fs;B.fs" />
+    <Compile Update="A.fs" CompileOrder="CompileLast" />
+    <Compile Update="A.fs" Link="a" Condition="'$(F)' == 'on'" />
+    <Compile Update="@(Compile)" Link="%(Filename)" />
+    <Compile Update="%41.fs;B.fs" Link="e" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(F)' == 'off'"><Compile Update="B.fs" Link="b" /></ItemGroup></Project>"#
+    ));
+    assert!(!p.items_uncertain, "{:?}", p.diagnostics);
+    assert_eq!(file_names(&p.items), ["B.fs", "A.fs"]);
+}
+
+/// An `Update` may strand whether or not the walk takes it to run: one under
+/// a gate MSBuild takes and the walk does not, in a group the walk skips on
+/// an untrusted read, or whose spec the walk does not hold. Each may strand,
+/// and declines the list itself; a certainly false `Update` is none of the
+/// batch's.
+#[test]
+fn an_update_that_may_strand_declines_however_it_is_gated() {
+    for (case, body) in [
+        (
+            "group the walk skips",
+            r#"<ItemGroup Condition="'$(F)' == 'off'"><Compile Update="A.fs;A.fs" Link="a" /></ItemGroup>"#,
+        ),
+        (
+            "own gate the walk skips",
+            r#"<ItemGroup><Compile Update="A.fs;A.fs" Link="a" Condition="'$(F)' == 'off'" /></ItemGroup>"#,
+        ),
+        (
+            "spec the walk does not hold",
+            r#"<PropertyGroup><S Condition="'É' == 'é'">A.fs;A.fs</S></PropertyGroup><ItemGroup><Compile Update="$(S)" Link="a" /></ItemGroup>"#,
+        ),
+        (
+            "spec the walk reads on an untrusted value",
+            r#"<PropertyGroup><S>A.fs;A.fs</S><S Condition="'É' != 'é'">A.fs</S></PropertyGroup><ItemGroup><Compile Update="$(S)" Link="a" /></ItemGroup>"#,
+        ),
+    ] {
+        let p = parse(&format!(
+            r#"<Project>{UNTRUSTED_F}
+  {body}
+  <ItemGroup>
+    <Compile Update="B.fs" CompileOrder="CompileFirst" />
+    <Compile Include="A.fs;B.fs" />
+  </ItemGroup></Project>"#
+        ));
+        assert!(p.items_uncertain, "{case}: {:?}", file_names(&p.items));
+        assert!(
+            p.diagnostics.iter().any(|d| matches!(
+                &d.kind,
+                DiagnosticKind::UnmodelledUpdateBatch { update } if update != "B.fs"
+            )),
+            "{case}: {:?}",
+            p.diagnostics
+        );
+    }
+    // A group the walk skips on an inexact read (MSBuild sets the toolset's
+    // `MSBuildStartupDirectory`) runs `B.fs;B.fs`, which strands `B.fs` with
+    // its `CompileFirst`: MSBuild compiles `B.fs` first.
+    let p = parse(
+        r#"<Project>
+  <ItemGroup Condition="'$(MSBuildStartupDirectory)' != ''"><Compile Update="B.fs;B.fs" CompileOrder="CompileFirst" /></ItemGroup>
+  <ItemGroup><Compile Include="A.fs;B.fs" /></ItemGroup></Project>"#,
+    );
+    assert!(
+        p.diagnostics.iter().any(|d| matches!(
+            &d.kind,
+            DiagnosticKind::UnmodelledUpdateBatch { update } if update == "B.fs;B.fs"
+        )),
+        "{:?}",
+        p.diagnostics
+    );
+    // The same for packages: `Beta;Beta` strands `Beta` with its override,
+    // which MSBuild then applies to the later `Beta`.
+    let p = parse(
+        r#"<Project>
+  <ItemGroup Condition="'$(MSBuildStartupDirectory)' != ''"><PackageReference Update="Beta;Beta" VersionOverride="2.0" /></ItemGroup>
+  <ItemGroup><PackageReference Include="Beta" Version="1.0" /></ItemGroup></Project>"#,
+    );
+    assert!(
+        p.package_reference_uncertainties.iter().any(|c| matches!(
+            &c.kind,
+            PackageReferenceUncertaintyCauseKind::UnmodelledUpdateBatch { update } if update == "Beta;Beta"
+        )),
+        "{:?}",
+        p.package_reference_uncertainties
+    );
+    for certainly_false in [
+        r#"<ItemGroup><Compile Update="A.fs;A.fs" Link="a" Condition="false" /></ItemGroup>"#,
+        r#"<ItemGroup Condition="false"><Compile Update="A.fs;A.fs" Link="a" /></ItemGroup>"#,
+    ] {
+        let p = parse(&format!(
+            r#"<Project>{certainly_false}<ItemGroup>
+    <Compile Include="A.fs;B.fs" />
+  </ItemGroup></Project>"#
+        ));
+        assert!(!p.items_uncertain, "{certainly_false}: {:?}", p.diagnostics);
+    }
+}
+
+/// Two batches whose strands turn on what the walk does not follow. A
+/// condition-false `Update` is none of MSBuild's batch, so `A.fs;A.fs`
+/// leaves with no batch pending and strands `A.fs`, and `B.fs;A.fs` strands
+/// `B.fs` (MSBuild compiles `B.fs` first). A rooted `A.fs` is removed from
+/// the batch by its spelling, so `A.fs;B.fs;B.fs` joins afresh and strands
+/// `B.fs`, and `C.fs;B.fs` strands `C.fs` (MSBuild compiles `C.fs` first;
+/// both probed, SDK 10.0.401). Both decline.
+#[test]
+fn a_skipped_update_or_a_key_removed_by_its_spelling_declines() {
+    let false_first = parse(&format!(
+        r#"<Project>{UNTRUSTED_F}
+  <ItemGroup><Compile Update="Z.fs" Condition="'$(NeverSet)' == 'true'" Link="z" /></ItemGroup>
+  <ItemGroup>
+    <Compile Update="A.fs;A.fs" Link="a" />
+    <Compile Update="B.fs;A.fs" CompileOrder="CompileFirst" />
+    <Compile Include="A.fs;B.fs" />
+  </ItemGroup></Project>"#
+    ));
+    assert!(
+        false_first.items_uncertain,
+        "{:?}",
+        file_names(&false_first.items)
+    );
+    let removed_by_text = parse(
+        r#"<Project><ItemGroup>
+    <Compile Update="$(MSBuildProjectDirectory)/A.fs;$(MSBuildProjectDirectory)/A.fs" Link="r" />
+    <Compile Update="A.fs;B.fs;B.fs" Link="x" />
+    <Compile Update="C.fs;B.fs" CompileOrder="CompileFirst" />
+    <Compile Include="A.fs;C.fs" />
+  </ItemGroup></Project>"#,
+    );
+    assert!(
+        removed_by_text.items_uncertain,
+        "{:?}",
+        file_names(&removed_by_text.items)
+    );
+}
+
+/// A `PackageReference` `Update` that may strand declines the
+/// `PackageReference` list only: the `PackageVersion` list beside it stays
+/// exact. (In a group the walk skips, the group's gate reads a name the walk
+/// doubts, and records that cause for every dependency list itself.)
+#[test]
+fn a_package_update_that_may_strand_declines_only_its_list() {
+    let source = r#"<Project>
+  <ItemGroup><PackageVersion Include="Beta" Version="1.0" /></ItemGroup>
+  <ItemGroup><PackageReference Update="Beta;Beta" VersionOverride="2.0" /></ItemGroup>
+</Project>"#;
+    let probe = crate::evaluator::reads::ReadProbe {
+        item_types: vec!["PackageVersion".to_owned()],
+        ..Default::default()
+    };
+    let walked = crate::parse_fsproj_probed(
+        &crate::ProjectFile::buffer(Path::new("/repo/proj/Demo.fsproj"), source).unwrap(),
+        &HashMap::new(),
+        &HashMap::new(),
+        None,
+        None,
+        None,
+        Some(&probe),
+    )
+    .unwrap();
+    assert!(walked.project.package_references_uncertain);
+    let reads = walked.reads.expect("a probed walk answers its probe");
+    assert!(
+        reads.items["PackageVersion"].exact,
+        "{:?}",
+        walked.project.package_reference_uncertainties
+    );
+}
+
+/// `F` is `on` to the walk, which cannot decide `'É' == 'é'`, and `off` to
+/// MSBuild, which folds `É` to `é`: a gate on `F` is one the walk takes on an
+/// untrusted read.
+const UNTRUSTED_F: &str =
+    r#"<PropertyGroup><F>on</F><F Condition="'É' == 'é'">off</F></PropertyGroup>"#;
 
 #[test]
 fn compile_update_compile_order_keeps_original_order_within_bucket() {
@@ -5002,33 +5244,32 @@ fn duplicate_identity_package_update_marks_the_set_uncertain() {
         PackageReferenceUncertaintyCauseKind::DuplicateUpdateIdentity { id } if id == "Gamma"
     )));
 
-    // The unique-spec forms keep the ordered semantics and stay certain: an
-    // Update preceding the Include modifies nothing.
-    for update in ["Gamma", "Delta;Gamma"] {
-        let src = format!(
-            r#"<Project>
+    // The unique-spec form keeps the ordered semantics and stays certain: an
+    // Update preceding the Include modifies nothing. (`Delta;Gamma` may leave
+    // the batch of `Update`s past its first fragment, which the walk does
+    // not follow: see `a_multi_fragment_update_declines_its_list`.)
+    let p = parse(
+        r#"<Project>
   <ItemGroup>
-    <PackageReference Update="{update}" VersionOverride="1.0" />
+    <PackageReference Update="Gamma" VersionOverride="1.0" />
     <PackageReference Include="Alpha;Gamma" Version="1.0" />
   </ItemGroup>
-</Project>"#
-        );
-        let p = parse(&src);
-        assert!(
-            !p.package_references_uncertain,
-            "unique Update spec {update:?} must stay certain: {:?}",
-            p.package_reference_uncertainties
-        );
-        let gamma = p
-            .package_references
-            .iter()
-            .find(|r| r.id == "Gamma")
-            .expect("Gamma captured");
-        assert_eq!(
-            gamma.version_override, None,
-            "an Update before the Include is a no-op for spec {update:?}"
-        );
-    }
+</Project>"#,
+    );
+    assert!(
+        !p.package_references_uncertain,
+        "a unique Update spec must stay certain: {:?}",
+        p.package_reference_uncertainties
+    );
+    let gamma = p
+        .package_references
+        .iter()
+        .find(|r| r.id == "Gamma")
+        .expect("Gamma captured");
+    assert_eq!(
+        gamma.version_override, None,
+        "an Update before the Include is a no-op"
+    );
 }
 
 #[test]
