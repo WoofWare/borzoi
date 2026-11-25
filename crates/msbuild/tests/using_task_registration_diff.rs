@@ -1787,16 +1787,23 @@ fn composite_sweep(seed: u64, cases: usize) -> Census {
             Some(RejectionCertainty::Possible) => tally.possible += 1,
             None => {}
         }
-        census.reached(
-            &hostile,
-            match (graded.msbuild_rejects, graded.walk) {
-                (true, Some(RejectionCertainty::Certain)) => "rejects-claimed",
-                (true, Some(_)) => "rejects-perhaps",
-                (true, None) => "rejects-on-a-doubted-value",
-                (false, Some(_)) => "evaluates-withdrawn",
-                (false, None) => "evaluates-committed",
-            },
-        );
+        // A draw reaches the registration only where MSBuild gets to it, and
+        // a document it rejects may have stopped before: at a parameter name
+        // its loader refuses, or at an earlier task's refusal. One it
+        // evaluates has registered every task, so each draw [`DRAWN`] kept
+        // was read, and only those documents are credited. The draws of a
+        // rejected one reach the registration in isolation, in
+        // [`registration_sweep`].
+        if !graded.msbuild_rejects {
+            census.reached(
+                &hostile,
+                if graded.walk.is_some() {
+                    "evaluates-withdrawn"
+                } else {
+                    "evaluates-committed"
+                },
+            );
+        }
     }
     census.finish(
         "BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-msbuild --test \
@@ -1808,7 +1815,7 @@ fn composite_sweep(seed: u64, cases: usize) -> Census {
 /// [`composite_sweep`] at a fixed seed.
 #[test]
 fn composite_sweep_fixed_seed() {
-    let tally = composite_sweep(0x1099_c0de, 600);
+    let tally = composite_sweep(0x1099_c0de, 2000);
     eprintln!("composite sweep: {tally:?}");
     assert!(tally.msbuild_rejects >= 100, "{tally:?}");
     assert!(tally.certain >= 50, "{tally:?}");
