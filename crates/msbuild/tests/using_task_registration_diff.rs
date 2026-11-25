@@ -1237,6 +1237,47 @@ fn hand_picked_registrations() {
     }
 }
 
+/// A registration reading a name MSBuild defines where no document gives it
+/// its value claims no certain rejection, by the walk's reads of those names
+/// alone: the judgement has no code of its own for any of them.
+///
+/// - `MSBuildAllProjects`, which MSBuild rewrites between its property pass
+///   and the registration, by file times (#1131): whatever the documents
+///   wrote, it holds the project's path when the registration reads it.
+/// - `LocalAppData`, which MSBuild seeds from the profile when the
+///   environment lacks it (#1130), here through a write gated on it.
+#[test]
+fn registrations_reading_names_msbuild_defines_claim_no_certain_rejection() {
+    let rows: &[(&str, &str)] = &[
+        (
+            "",
+            "<UsingTask TaskName=\"$(MSBuildAllProjects)\" AssemblyFile=\"y.dll\" />",
+        ),
+        (
+            "<MSBuildAllProjects></MSBuildAllProjects>",
+            "<UsingTask TaskName=\"$(MSBuildAllProjects)\" AssemblyFile=\"y.dll\" />",
+        ),
+        (
+            "<MSBuildAllProjects></MSBuildAllProjects>",
+            "<UsingTask TaskName=\"X\" AssemblyFile=\"$(MSBuildAllProjects)\" />",
+        ),
+        (
+            "<TasksAssembly Condition=\"'$(LocalAppData)' != ''\">x.dll</TasksAssembly>",
+            "<UsingTask TaskName=\"X\" AssemblyFile=\"$(TasksAssembly)\" />",
+        ),
+    ];
+    let mut oracle = Oracle::spawn();
+    for (writes, body) in rows {
+        // `grade` holds the walk to no certain rejection where MSBuild
+        // evaluates the project.
+        let graded = grade(&mut oracle, writes, body, Doubt::None);
+        assert!(
+            !graded.msbuild_rejects,
+            "MSBuild rejects {writes} {body}, so the row tests nothing"
+        );
+    }
+}
+
 /// The registration expands each attribute it reads once, for its throws and
 /// its rules alike (`rejection::registration_expansion`): five attributes,
 /// five expansions.
