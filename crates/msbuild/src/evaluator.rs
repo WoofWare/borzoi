@@ -1521,25 +1521,19 @@ impl<'r> State<'r> {
     /// MSBuild's own write of `MSBuildAllProjects` between its property and
     /// item passes (`Evaluator.SetAllProjectsProperty`, MSBuild 18.9): it
     /// prepends the most recently written of the project and its imports, by
-    /// file times the walk does not read. So the write is one the walk
-    /// refuses to compute, as it refuses a document's write it cannot
-    /// evaluate: the binding goes, the name is marked refused, and every read
-    /// of it from here on (an item's gate, spec or metadata, a reference's,
-    /// the final table's) is of a value the walk does not hold, decided
-    /// without it where it can be.
+    /// file times the walk does not read. So the walk holds no value of the
+    /// name from here on, and drops the documents' one. What a read of an
+    /// unbound name then sees is the judgement every undefined read gets
+    /// ([`Self::undefined_read_is_exact`]): an `msbuild` name is one MSBuild
+    /// may define where no document does
+    /// ([`is_toolset_initial_property_name`]), so the read is not exact, and
+    /// each consumer (an item's gate, spec or metadata, a reference's, the
+    /// final table's) declines it, deciding without it where another operand
+    /// settles the decision.
     fn write_all_projects(&mut self) {
         const NAME: &str = "MSBuildAllProjects";
+        debug_assert!(is_toolset_initial_property_name(&NAME.to_ascii_lowercase()));
         self.lookup.unbind(NAME);
-        self.written.remove(&NAME.to_ascii_lowercase());
-        self.apply_property_provenance(
-            NAME,
-            PropertyProvenance {
-                taint: TaintOutcome::Keep,
-                unpinned: UnpinnedOutcome::Clear,
-                refused: RefusedOutcome::Set,
-                stale: StaleOutcome::Keep,
-            },
-        );
     }
 
     #[allow(clippy::too_many_arguments)]

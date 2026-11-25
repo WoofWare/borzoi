@@ -7,15 +7,25 @@
 //! a write no document makes, by file times the walk does not read. So every
 //! read of the name after the property pass must be exact against MSBuild or
 //! declined: the final table's, a `Compile` item's spec, and a
-//! `ProjectReference`'s and a `PackageReference`'s gate. A read during the
-//! property pass, before the write, stays exact; and a gate another operand
-//! decides stays decided.
+//! `ProjectReference`'s and a `PackageReference`'s gate, both one the
+//! rewritten value closes (`== 'off'`) and one it opens (`!= ''`). A read
+//! during the property pass, before the write, stays exact; and a gate
+//! another operand decides stays decided.
+//!
+//! The reference list's contract tolerates a missing edge behind a gate the
+//! walk cannot decide (`ParsedProject::project_references_uncertain`), so a
+//! certain list is held to no phantom edge only. What tells an empty list the
+//! walk mistook for exact from a decline is the walk's own read of the list,
+//! the one an `@(ProjectReference)` in it takes (`ItemRead::exact`): an exact
+//! one must hold MSBuild's references, so a walk that took the opened gate for
+//! a closed one reads an exact list without them.
 
 mod common;
 
 use std::collections::{BTreeSet, HashMap};
 
 use borzoi_msbuild::PropertyRead;
+use borzoi_msbuild::test_support::{ReadProbe, parse_fsproj_reads};
 use tempfile::TempDir;
 
 /// What the documents write to the name before the item pass: nothing, an
@@ -57,8 +67,11 @@ fn all_projects_after_the_property_pass_is_exact_or_declined() {
                 "<Project><PropertyGroup>{write}<During>[$({name})]</During></PropertyGroup>\
                  <ItemGroup><Compile Include=\"$({name})x.fs\" />\
                  <ProjectReference Include=\"P.fsproj\" Condition=\"'$({name})' == 'off'\" />\
+                 <ProjectReference Include=\"Q.fsproj\" Condition=\"'$({name})' != ''\" />\
                  <PackageReference Include=\"Pkg\" Version=\"1.0.0\" \
-                 Condition=\"'$({name})' == 'off'\" /></ItemGroup></Project>"
+                 Condition=\"'$({name})' == 'off'\" />\
+                 <PackageReference Include=\"Pkg2\" Version=\"1.0.0\" \
+                 Condition=\"'$({name})' != ''\" /></ItemGroup></Project>"
             );
             std::fs::write(&path, &body).unwrap();
             let names = ["MSBuildAllProjects".to_owned(), "During".to_owned()];
@@ -111,10 +124,43 @@ fn all_projects_after_the_property_pass_is_exact_or_declined() {
                     .iter()
                     .map(|item| item.include.to_string_lossy().into_owned())
                     .collect();
-                if our_references != their_references {
+                if our_references
+                    .iter()
+                    .any(|reference| !their_references.contains(reference))
+                {
                     violations.push(format!(
-                        "{label}: ProjectReference {our_references:?} committed, MSBuild holds \
+                        "{label}: ProjectReference {our_references:?} committed, a phantom edge: MSBuild holds \
                          {their_references:?}"
+                    ));
+                }
+            }
+            let probe = ReadProbe {
+                item_types: vec!["ProjectReference".to_owned()],
+                ..ReadProbe::default()
+            };
+            let (_, reads) = parse_fsproj_reads(
+                &borzoi_msbuild::ProjectFile::buffer(&path, &body)
+                    .expect("a project path spelt as its full path"),
+                &HashMap::new(),
+                &common::oracle_environment(),
+                None,
+                None,
+                None,
+                &probe,
+            )
+            .expect("well-formed XML parses");
+            let read = &reads.items["ProjectReference"];
+            if read.exact {
+                let our_list: Vec<String> = read
+                    .items
+                    .iter()
+                    .flatten()
+                    .map(|row| dir.join(&row.identity).to_string_lossy().into_owned())
+                    .collect();
+                if our_list != their_references {
+                    violations.push(format!(
+                        "{label}: @(ProjectReference) read exactly as {our_list:?}, MSBuild \
+                         holds {their_references:?}"
                     ));
                 }
             }
