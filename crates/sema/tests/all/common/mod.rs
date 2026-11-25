@@ -327,41 +327,71 @@ fn fcs_children_budget() -> usize {
 /// ([`ChildBudget::acquire`]).
 struct ChildBudget {
     cap: usize,
-    live: Mutex<usize>,
-    freed: std::sync::Condvar,
+    counts: Mutex<Counts>,
+    changed: std::sync::Condvar,
+    /// How long a caller waits for a change before looking again, a
+    /// backstop: every change wakes it ([`ChildBudget::idle`],
+    /// [`ChildBudget::release`]).
+    poll: Duration,
+}
+
+/// What [`ChildBudget`] counts.
+struct Counts {
+    live: usize,
+    /// Bumped whenever a child is ended or becomes idle, so a caller that
+    /// found nothing to evict knows whether anything changed since it looked.
+    changes: u64,
 }
 
 impl ChildBudget {
     fn new(cap: usize) -> Self {
+        Self::polling(cap, Duration::from_millis(200))
+    }
+
+    fn polling(cap: usize, poll: Duration) -> Self {
         assert!(cap > 0, "a child budget of zero admits no child");
         ChildBudget {
             cap,
-            live: Mutex::new(0),
-            freed: std::sync::Condvar::new(),
+            counts: Mutex::new(Counts {
+                live: 0,
+                changes: 0,
+            }),
+            changed: std::sync::Condvar::new(),
+            poll,
         }
+    }
+
+    fn counts(&self) -> MutexGuard<'_, Counts> {
+        self.counts.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// How many children are counted.
+    fn live(&self) -> usize {
+        self.counts().live
     }
 
     /// Count one more child, waiting until it fits under the cap. While none
     /// fits, `evict` is asked to end an idle child somewhere (it returns
-    /// whether it did, having [`ChildBudget::release`]d it); with none idle,
-    /// this waits for one to become idle or ended.
+    /// whether it did, having its count given back); with none idle, this
+    /// waits until a child is ended or becomes idle, unless one already has
+    /// since it looked.
     fn acquire(&self, mut evict: impl FnMut() -> bool) {
         loop {
-            let live = self.live.lock().unwrap_or_else(|p| p.into_inner());
-            if *live < self.cap {
-                let mut live = live;
-                *live += 1;
+            let mut counts = self.counts();
+            if counts.live < self.cap {
+                counts.live += 1;
                 return;
             }
-            drop(live);
+            let seen = counts.changes;
+            drop(counts);
             if evict() {
                 continue;
             }
-            let live = self.live.lock().unwrap_or_else(|p| p.into_inner());
-            if *live >= self.cap {
+            let counts = self.counts();
+            if counts.live >= self.cap && counts.changes == seen {
                 let _ = self
-                    .freed
-                    .wait_timeout(live, Duration::from_millis(200))
+                    .changed
+                    .wait_timeout(counts, self.poll)
                     .unwrap_or_else(|p| p.into_inner());
             }
         }
@@ -369,15 +399,30 @@ impl ChildBudget {
 
     /// Count one child fewer.
     fn release(&self) {
-        let mut live = self.live.lock().unwrap_or_else(|p| p.into_inner());
-        *live -= 1;
-        self.freed.notify_all();
+        let mut counts = self.counts();
+        counts.live -= 1;
+        counts.changes += 1;
+        self.changed.notify_all();
     }
 
-    /// Wake whoever waits for an idle child: one has just become idle.
+    /// A child has just become idle: wake whoever waits to evict one.
     fn idle(&self) {
-        self.freed.notify_all();
+        self.counts().changes += 1;
+        self.changed.notify_all();
     }
+}
+
+/// Run `f` on the slot `guard` holds, then free the slot and only then say a
+/// child is idle, so a woken caller finds it free to evict.
+fn serve<T, R>(
+    budget: &ChildBudget,
+    mut guard: MutexGuard<'_, Option<T>>,
+    f: impl FnOnce(&mut Option<T>) -> R,
+) -> R {
+    let answer = f(&mut guard);
+    drop(guard);
+    budget.idle();
+    answer
 }
 
 /// One child's count against a [`ChildBudget`], given back when dropped,
@@ -484,11 +529,7 @@ fn a_panicking_holder_gives_its_count_back() {
         panic!("the spawn failed");
     });
     assert!(spawn.is_err());
-    assert_eq!(
-        *budget.live.lock().expect("live"),
-        0,
-        "the failed spawn kept its count"
-    );
+    assert_eq!(budget.live(), 0, "the failed spawn kept its count");
     // A request that panics holding the slot of the only child.
     let slots: &'static [Mutex<Option<Permit<'static>>>; 1] =
         Box::leak(Box::new([Mutex::new(Some(budget.permit(|| false)))]));
@@ -509,6 +550,29 @@ fn a_panicking_holder_gives_its_count_back() {
         .expect("the next caller waits for ever behind the panicked request");
 }
 
+/// A caller waiting for room is woken by the slot it waits on coming free,
+/// and finds it free: under a cap of one and a poll far longer than the
+/// test, it gets its child at once.
+#[test]
+fn a_waiting_caller_is_woken_when_a_child_comes_free() {
+    let budget: &'static ChildBudget =
+        Box::leak(Box::new(ChildBudget::polling(1, Duration::from_secs(600))));
+    let slots: &'static [Mutex<Option<Permit<'static>>>; 1] =
+        Box::leak(Box::new([Mutex::new(Some(budget.permit(|| false)))]));
+    let busy = slots[0].lock().expect("the slot");
+    let (done, answer) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _permit = budget.permit(|| evict_from(slots, drop));
+        done.send(()).expect("the test is waiting");
+    });
+    // Let the caller find the only child busy and wait.
+    std::thread::sleep(Duration::from_millis(300));
+    serve(budget, busy, |_| ());
+    answer
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the waiting caller was not woken when the child came free");
+}
+
 /// The cap holds however many callers want a child at once, a caller still
 /// gets one under a cap of one while another's child sits idle, and every
 /// count is given back.
@@ -523,7 +587,7 @@ fn the_child_budget_holds_its_cap_and_evicts_idle_children() {
             let (budget, peak) = (Arc::clone(&budget), Arc::clone(&peak));
             std::thread::spawn(move || {
                 budget.acquire(|| false);
-                let live = *budget.live.lock().expect("live");
+                let live = budget.live();
                 peak.fetch_max(live, Ordering::SeqCst);
                 std::thread::sleep(Duration::from_millis(20));
                 budget.release();
@@ -534,7 +598,7 @@ fn the_child_budget_holds_its_cap_and_evicts_idle_children() {
         t.join().expect("a caller");
     }
     assert!(peak.load(Ordering::SeqCst) <= 2, "the cap was exceeded");
-    assert_eq!(*budget.live.lock().expect("live"), 0, "a count was kept");
+    assert_eq!(budget.live(), 0, "a count was kept");
     // A cap of one, its child idle in another pool: the eviction makes room.
     let one = ChildBudget::new(1);
     one.acquire(|| false);
@@ -546,7 +610,7 @@ fn the_child_budget_holds_its_cap_and_evicts_idle_children() {
         }
         was
     });
-    assert_eq!(*one.live.lock().expect("live"), 1);
+    assert_eq!(one.live(), 1);
 }
 
 /// The lowest language version the current oracle's compiler supports
@@ -619,14 +683,14 @@ impl BatchPool {
     /// a saturated pool queues rather than spawning without bound.
     fn request(&self, request: &str) -> String {
         for slot in &self.slots {
-            if let Some((mut guard, _)) = try_lock_slot(slot) {
-                return self.round_trip(&mut guard, request);
+            if let Some((guard, _)) = try_lock_slot(slot) {
+                return serve(&CHILDREN, guard, |slot| self.round_trip(slot, request));
             }
         }
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let i = NEXT.fetch_add(1, Ordering::Relaxed) % self.slots.len();
-        let mut guard = lock_slot(&self.slots[i]);
-        self.round_trip(&mut guard, request)
+        let guard = lock_slot(&self.slots[i]);
+        serve(&CHILDREN, guard, |slot| self.round_trip(slot, request))
     }
 
     fn round_trip(&self, slot: &mut Option<PooledChild>, request: &str) -> String {
@@ -642,9 +706,7 @@ impl BatchPool {
                 })
             }
         };
-        let answer = pooled.child.request(request);
-        CHILDREN.idle();
-        answer
+        pooled.child.request(request)
     }
 }
 

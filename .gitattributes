@@ -16,6 +16,7 @@ crates/msbuild/tests/manifests/rejection_projects_wrong.txt merge=borzoi-manifes
 crates/sema/tests/manifests/infer_corpus_diff.txt merge=borzoi-manifest
 crates/sema/tests/manifests/infer_corpus_dump.txt merge=borzoi-manifest
 crates/sema/tests/manifests/infer_check_order_pins.txt merge=borzoi-manifest
+crates/sema/tests/manifests/hostile/referenced_change.txt merge=borzoi-manifest
 crates/sema/tests/manifests/referenced_oracle.txt merge=borzoi-manifest
 crates/sema/tests/manifests/resolve_corpus_diff.txt merge=borzoi-manifest
 crates/sema/tests/manifests/walk_stack_bound.txt merge=borzoi-manifest

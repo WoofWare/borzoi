@@ -842,6 +842,145 @@ fn a_language_version_the_compiler_cannot_check_is_refused() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// The cell's language version is the one FCS checks the producer under: a
+/// union's generated case testers (`u.IsA`) are an F# 9 feature, so the same
+/// producer is rejected at F# 8 and accepted at F# 9 and 10.
+#[test]
+fn the_cells_language_version_reaches_fcs() {
+    let text = "module Testers\ntype U = A | B\nlet isA (u: U) = u.IsA\n";
+    let errors_at = |major: u8| {
+        read(&GraphCell {
+            lang_version: LangVersion::new(major, 0),
+            ..one(text)
+        })
+        .errors
+    };
+    let (eight, nine, ten) = (errors_at(8), errors_at(9), errors_at(10));
+    assert!(!eight.is_empty(), "F# 8 accepted a case tester");
+    assert!(nine.is_empty(), "F# 9 rejected a case tester: {nine:?}");
+    assert!(ten.is_empty(), "F# 10 rejected a case tester: {ten:?}");
+}
+
+/// What a `referenced` answer says, apart from the signature's bytes, which
+/// name the child's own output directory (`fcs-dump`'s `unwrittenRoot`): the
+/// decoded rows, FCS's view and the diagnostics of a reading, the cause of a
+/// refusal, or the oracle's message for a request it does not answer.
+fn essence(line: &str, producer: &str) -> String {
+    match parse_response::<ReferencedResponse>(line) {
+        Ok(ReferencedResponse::Found(found)) => format!(
+            "found {:?} {:?} {:?} {:?} {:?} {:?}",
+            crate::common::referenced::decode(producer, &found),
+            found.signature.auto_opens,
+            found.signature.internals_visible_to,
+            found.entities,
+            found.extension_members,
+            found.diagnostics,
+        ),
+        Ok(ReferencedResponse::Refused(refusal)) => format!("refused {:?}", refusal.cause),
+        Err(ResponseError::Refused(why)) => format!("batch error {why}"),
+        Err(e) => panic!("referenced: {e:?}"),
+    }
+}
+
+/// The regeneration command for `referenced_oracle`'s hostile census.
+const REGENERATE_CHANGES: &str = "BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-sema \
+     --test all referenced_oracle::every_source_change_is_answered_as_a_fresh_child_answers_it";
+
+/// Each way the producer's source can change between two requests to one
+/// child (`hostile::fs::Change`) is answered by that child as a fresh child
+/// answers it, and moves the answer, so a stale one could not pass.
+#[test]
+fn every_source_change_is_answered_as_a_fresh_child_answers_it() {
+    use borzoi_oracle_harness::hostile::coverage;
+    use borzoi_oracle_harness::hostile::fs::{Change, HostileFs};
+    let census = coverage::open(file!(), "referenced_change", &[]);
+    let before = b"namespace Probe\ntype First = { X: int }\n";
+    let rewritten = b"namespace Probe\ntype Other = { X: int }\n";
+    let resized = b"namespace Probe\ntype Resized = { X: int }\n";
+    assert_eq!(before.len(), rewritten.len());
+    assert_ne!(before.len(), resized.len());
+    let mut failures = Vec::new();
+    // `None` first: the plain case, no change, against which a mishandled
+    // change would show.
+    for change in std::iter::once(None).chain(Change::ALL.iter().copied().map(Some)) {
+        let fs = HostileFs::new();
+        let dir = fs.tree().join("src");
+        std::fs::create_dir(&dir).expect("the source directory");
+        let producer = dir.join("Lib.fs");
+        let consumer = dir.join("Use.fs");
+        std::fs::write(&consumer, "module Consumer.Use\nlet x = 1\n").expect("the consumer");
+        if change != Some(Change::Appears) {
+            std::fs::write(&producer, before).expect("the producer");
+        }
+        let after: &[u8] = match change {
+            Some(Change::SameStampRewrite | Change::SameStampReplace) => rewritten,
+            Some(Change::SameStampResize) => resized,
+            Some(Change::Appears) | None => before,
+            Some(Change::Disappears) => b"",
+        };
+        let framework: Vec<Reference> = framework_references()
+            .iter()
+            .cloned()
+            .map(Reference::Dll)
+            .collect();
+        let project = |id: &str, source: &PathBuf, refs: &[&str]| GraphProject {
+            id: plain(id),
+            assembly_name: plain(id),
+            target: Target::Library,
+            lang_version: LangVersion::F10,
+            sources: vec![source.clone()],
+            defines: Vec::new(),
+            references: framework
+                .iter()
+                .cloned()
+                .chain(refs.iter().map(|r| Reference::Project(plain(r))))
+                .collect(),
+        };
+        let line = GraphRequest::new(
+            vec![
+                project("Probe", &producer, &[]),
+                project("Consumer", &consumer, &["Probe"]),
+            ],
+            plain("Consumer"),
+        )
+        .expect("a valid graph request")
+        .referenced_line(&plain("Probe"))
+        .expect("the consumer references the producer");
+        let changed = with_fcs_graph_child(&[], |child: &mut BatchChild| {
+            let first = child.request(&line);
+            change
+                .map_or(Ok(()), |change| fs.change(&producer, change, after))
+                .map(|()| (first, child.request(&line)))
+        });
+        let Ok((first, second)) = changed else {
+            failures.push(format!(
+                "{change:?}: the change could not be made: {changed:?}"
+            ));
+            continue;
+        };
+        let fresh = with_fcs_graph_child(&[], |child: &mut BatchChild| child.request(&line));
+        let (first, second, fresh) = (
+            essence(&first, "Probe"),
+            essence(&second, "Probe"),
+            essence(&fresh, "Probe"),
+        );
+        if change.is_some() == (first == fresh) {
+            failures.push(format!(
+                "{change:?}: the first answer is {first}, the fresh one {fresh}"
+            ));
+        }
+        if second != fresh {
+            failures.push(format!(
+                "{change:?}: the child answered {second}, a fresh child {fresh}"
+            ));
+        }
+        let outcome = fresh.split(' ').next().unwrap_or_default().to_owned();
+        census.reached(&change.iter().map(|c| c.dimension()).collect(), &outcome);
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    census.finish(REGENERATE_CHANGES);
+}
+
 /// A type provider as a reference is refused before FCS reads it: the CLR
 /// never unloads a provider's design-time assembly, so a later request in
 /// the child could be answered from it.

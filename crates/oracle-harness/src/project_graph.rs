@@ -998,8 +998,12 @@ impl ProjectGraphFixture {
         framework: &[PathBuf],
         compiled: &BTreeMap<PlainName, PathBuf>,
     ) -> Result<CompileRequest, String> {
-        for q in self.closure(name) {
-            assert!(compiled.contains_key(&q), "{name} needs {q} compiled first");
+        if let Some(q) = self
+            .closure(name)
+            .into_iter()
+            .find(|q| !compiled.contains_key(q))
+        {
+            return Err(format!("{name} needs {q} compiled first"));
         }
         let project = self.graph_project(name, framework, compiled);
         compile_request_line(&project, &self.root.join("out").join(name.as_str()))
@@ -1391,6 +1395,13 @@ mod tests {
                 Reference::Dll(PathBuf::from("/out/Lib.dll")),
                 Reference::Dll(PathBuf::from("/out/Mid.dll"))
             ]
+        );
+        // A project whose dependency is not compiled yet has no compile
+        // request, and says which.
+        let unbuilt = fixture.try_compile_request(&name("Mid"), &core(), &BTreeMap::new());
+        assert!(
+            unbuilt.as_ref().is_err_and(|e| e.contains("Lib")),
+            "{unbuilt:?}"
         );
         let line = fixture.compile_request(&name("Mid"), &core(), &compiled);
         let v: Value = serde_json::from_str(line.as_line()).expect("json");

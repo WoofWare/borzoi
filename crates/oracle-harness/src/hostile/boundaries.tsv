@@ -328,7 +328,7 @@ crates/sema/tests/all/open_shortening_matrix.rs	pending	3
 crates/sema/tests/all/overload_corpus_diff.rs	pending	3
 crates/sema/tests/all/project_half_matrix.rs	pending	3
 crates/sema/tests/all/record_label_gen_diff.rs	pending	3
-crates/sema/tests/all/referenced_oracle.rs	not-applicable	self-tests of the referenced oracle over a hand-written inventory of producers and a fixed sweep of define sets; the oracle's wire and file-system boundary is held to the hostile kinds by corpus-diff's fcs_dump_boundary
+crates/sema/tests/all/referenced_oracle.rs	draws	referenced_change=change
 crates/sema/tests/all/reopened_namespace_grid.rs	pending	3
 crates/sema/tests/all/resolve_case_pattern_gen_diff.rs	pending	3
 crates/sema/tests/all/resolve_diff.rs	pending	3
