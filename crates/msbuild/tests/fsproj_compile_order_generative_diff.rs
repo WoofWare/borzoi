@@ -50,7 +50,13 @@
 //!   spec and strands the fragments before (`LazyItemEvaluator.ComputeItems`
 //!   removes them under their written text, not their key), so they apply
 //!   again to items `Include`d after the `Update`. The evaluator declines
-//!   them, and the oracle sees the bug wherever it changes the order.
+//!   them, and the oracle sees the bug wherever it changes the order;
+//! - in a sweep of its own (`update_batches_match_msbuild`), runs of
+//!   consecutive `Update`s whose fragments repeat across specs, each
+//!   `Update` and each group perhaps under a gate MSBuild skips, the walk
+//!   cannot decide, or the walk takes on an untrusted or inexact read: the
+//!   batch of `Update`s the walk follows across elements, and which
+//!   operations join it.
 //!
 //! Two of the files carry characters MSBuild escapes (a space and a `;`), so
 //! escapes meet every other dimension at once (stage F4). Escape spellings in
@@ -134,6 +140,16 @@ enum Cond {
     SwitchEq(bool),
     UndefEmpty,
     UndefEqTrue,
+    /// A gate the walk cannot decide and MSBuild can: `'É' == 'é'` is true
+    /// under MSBuild's ordinal case folding, and the walk models none.
+    Undecided(bool),
+    /// A gate the walk takes on an untrusted true: `Flip` is `on` unless an
+    /// undecided write (true in MSBuild) made it `off` ([`Group::Flip`]).
+    Flipped,
+    /// A gate on a toolset property MSBuild sets: `'$(MSBuildStartupDirectory)'
+    /// == ''` is false there, and a walk that reads the property inexactly
+    /// must not take the gate as decided.
+    ToolsetEmpty,
 }
 
 impl Cond {
@@ -143,6 +159,10 @@ impl Cond {
             Cond::SwitchEq(want) => format!(" Condition=\"'$(Switch)' == '{want}'\""),
             Cond::UndefEmpty => " Condition=\"'$(NeverSet)' == ''\"".to_string(),
             Cond::UndefEqTrue => " Condition=\"'$(NeverSet)' == 'true'\"".to_string(),
+            Cond::Undecided(true) => " Condition=\"'É' == 'é'\"".to_string(),
+            Cond::Undecided(false) => " Condition=\"'É' != 'é'\"".to_string(),
+            Cond::Flipped => " Condition=\"'$(Flip)' == 'on'\"".to_string(),
+            Cond::ToolsetEmpty => " Condition=\"'$(MSBuildStartupDirectory)' == ''\"".to_string(),
         }
     }
 }
@@ -315,6 +335,9 @@ enum Boundary {
     /// `<Compile Update="…" Visible="false">`: an `Update` that writes no
     /// `CompileOrder`, so it cannot move anything.
     OtherMetadataUpdate(UpdateSpec),
+    /// [`Boundary::OtherMetadataUpdate`] under a gate: it moves nothing
+    /// itself, but takes part in MSBuild's batch of `Update`s, or not.
+    GatedMetadataUpdate(UpdateSpec, Cond),
     /// `<Compile Include="a" Exclude="b">`.
     Exclude(IncludeSpec, usize),
     /// `<Compile Include="@(Compile)">`: duplicates every item so far.
@@ -330,6 +353,11 @@ impl ItemDecl {
                     Boundary::OtherMetadataUpdate(spec) => {
                         format!("<Compile Update=\"{}\" Visible=\"false\" />", spec.render())
                     }
+                    Boundary::GatedMetadataUpdate(spec, cond) => format!(
+                        "<Compile Update=\"{}\" Visible=\"false\"{} />",
+                        spec.render(),
+                        cond.render()
+                    ),
                     Boundary::Exclude(spec, file) => format!(
                         "<Compile Include=\"{}\" Exclude=\"{}\" />",
                         spec.render(),
@@ -387,6 +415,10 @@ enum Group {
     CompileOrderDefault(OrderValue),
     /// An `<ItemGroup>` body written out verbatim: the hand-picked corners.
     Raw(&'static str),
+    /// `Flip`, `on` unless an undecided write (true in MSBuild) makes it
+    /// `off`: what [`Cond::Flipped`] reads. And `Src`, written `A.fs;A.fs`
+    /// under the same gate: unset to the walk.
+    Flip,
 }
 
 impl Group {
@@ -394,6 +426,12 @@ impl Group {
         match self {
             Group::Raw(body) => {
                 let _ = writeln!(out, "  <ItemGroup>\n{body}\n  </ItemGroup>");
+            }
+            Group::Flip => {
+                let _ = writeln!(
+                    out,
+                    "  <PropertyGroup>\n    <Flip>on</Flip>\n    <Flip Condition=\"'É' == 'é'\">off</Flip>\n    <Src Condition=\"'É' == 'é'\">A.fs;A.fs</Src>\n  </PropertyGroup>"
+                );
             }
             Group::CompileOrderDefault(value) => {
                 let _ = writeln!(
@@ -834,6 +872,184 @@ fn certain_compile_order_matches_msbuild() {
     );
 }
 
+/// An `Update` spec over three files only, so fragments repeat within a spec
+/// and across consecutive specs, in spellings that are and are not their own
+/// key (`Rooted` is the full path; the rest are not), with an escaped
+/// fragment where the batch is left for certain.
+fn batch_update_spec_strategy() -> impl Strategy<Value = UpdateSpec> {
+    let spelling = prop_oneof![
+        4 => Just(Spelling::Bare),
+        3 => Just(Spelling::Rooted),
+        1 => Just(Spelling::DotSlash),
+        1 => Just(Spelling::Lower),
+        1 => Just(Spelling::Escaped),
+    ];
+    prop_oneof![
+        // One fragment, which cannot leave the batch past its first.
+        5 => (0..3usize, spelling.clone()).prop_map(|file| UpdateSpec::Files(vec![file])),
+        4 => proptest::collection::vec((0..3usize, spelling), 2..5).prop_map(UpdateSpec::Files),
+        // `$(Src)`: `A.fs;A.fs` to MSBuild, and unset to the walk
+        // ([`Group::Flip`]).
+        1 => Just(UpdateSpec::Prop(0)),
+    ]
+}
+
+/// A gate in the batch sweep: mostly none, else one MSBuild certainly skips,
+/// one the walk cannot decide either way, or one it takes on an untrusted or
+/// inexact read that MSBuild skips.
+fn batch_cond_strategy() -> impl Strategy<Value = Cond> {
+    prop_oneof![
+        12 => Just(Cond::None),
+        1 => Just(Cond::SwitchEq(false)),
+        1 => Just(Cond::Undecided(true)),
+        1 => Just(Cond::Undecided(false)),
+        1 => Just(Cond::Flipped),
+        1 => Just(Cond::ToolsetEmpty),
+    ]
+}
+
+/// A run's group gate in the batch sweep: more often gated than an
+/// operation, since a skipped or doubted group's `Update`s are what move the
+/// batch apart from the walk's.
+fn batch_group_cond_strategy() -> impl Strategy<Value = Cond> {
+    prop_oneof![
+        6 => Just(Cond::None),
+        1 => Just(Cond::SwitchEq(false)),
+        1 => Just(Cond::Undecided(true)),
+        1 => Just(Cond::Flipped),
+        1 => Just(Cond::ToolsetEmpty),
+    ]
+}
+
+/// A run of consecutive `Update`s (each writing `CompileOrder` or only other
+/// metadata) between `Include`s: MSBuild's batch of `Update`s, its strands
+/// and what removing a fragment by its text leaves, are what this sweeps,
+/// with each `Update`, and each run's group, perhaps under a gate
+/// ([`batch_cond_strategy`]): an operation that does not run, or may not,
+/// takes part in the batch otherwise.
+fn batch_fixture_strategy() -> impl Strategy<Value = Fixture> {
+    let update = prop_oneof![
+        1 => (batch_update_spec_strategy(), (0..5usize), batch_cond_strategy())
+            .prop_map(|(spec, order, cond)| ItemDecl::OrderUpdate {
+                spec,
+                order: OrderMeta {
+                    attr: Some(OrderValue::Lit(order)),
+                    children: Vec::new(),
+                },
+                cond,
+            }),
+        1 => (batch_update_spec_strategy(), batch_cond_strategy())
+            .prop_map(|(spec, cond)| ItemDecl::Boundary(Boundary::GatedMetadataUpdate(spec, cond))),
+    ];
+    let include = (0..3usize).prop_map(|file| ItemDecl::Include {
+        item_type: ItemType::Compile,
+        spec: IncludeSpec::File(file, Spelling::Bare),
+        order: OrderMeta::default(),
+        cond: Cond::None,
+    });
+    // Two distinct files after the `Update`s, so every committed case has an
+    // order to get wrong.
+    let after = (0..3usize, 1..3usize).prop_map(|(first, step)| {
+        [first, (first + step) % 3].map(|file| ItemDecl::Include {
+            item_type: ItemType::Compile,
+            spec: IncludeSpec::File(file, Spelling::Bare),
+            order: OrderMeta::default(),
+            cond: Cond::None,
+        })
+    });
+    let run = (
+        proptest::collection::vec(include, 0..2),
+        proptest::collection::vec(update, 2..6),
+        after,
+    )
+        .prop_map(|(before, updates, after)| {
+            before
+                .into_iter()
+                .chain(updates)
+                .chain(after)
+                .collect::<Vec<_>>()
+        });
+    proptest::collection::vec((run, batch_group_cond_strategy()), 1..4).prop_map(|runs| Fixture {
+        sdk_props: Vec::new(),
+        project: std::iter::once(Group::Flip)
+            .chain(
+                runs.into_iter()
+                    .map(|(items, cond)| Group::Items { cond, items }),
+            )
+            .collect(),
+        sdk_targets: Vec::new(),
+    })
+}
+
+/// [`certain_compile_order_matches_msbuild`] over runs of consecutive
+/// `Update`s ([`batch_fixture_strategy`]), where the walk models MSBuild's
+/// batch of them. How many cases commit is
+/// [`batch_cases_often_commit`]'s, on a fixed sample.
+#[test]
+fn update_batches_match_msbuild() {
+    let cases: u32 = std::env::var("BORZOI_COMPILE_ORDER_CASES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1000);
+    let mut runner = TestRunner::new(ProptestConfig {
+        cases,
+        source_file: Some(file!()),
+        ..ProptestConfig::default()
+    });
+    let oracle_hits = std::cell::Cell::new(0u32);
+    runner
+        .run(&batch_fixture_strategy(), |fixture| {
+            if check_certain_implies_exact(&fixture)? {
+                oracle_hits.set(oracle_hits.get() + 1);
+            }
+            Ok(())
+        })
+        .unwrap_or_else(|e| panic!("{e}"));
+    eprintln!(
+        "{} of {cases} batch cases reached the oracle",
+        oracle_hits.get()
+    );
+    assert!(
+        oracle_hits.get() > 0,
+        "no batch case reached the MSBuild oracle"
+    );
+}
+
+/// [`update_batches_match_msbuild`] skips the cases the walk declines, so on
+/// its own it could rot into grading (almost) nothing. Sample the strategy
+/// deterministically, our walk only, and require that a fortieth commit to
+/// an order of two or more distinct files, one a wrong batch could get
+/// wrong (18 of the 400 do: an `Update` of two or more fragments, or the
+/// unset `$(Src)`, declines the rest). The sample is fixed, so the count moves only with the
+/// walk or the generator.
+#[test]
+fn batch_cases_often_commit() {
+    let mut runner = TestRunner::deterministic();
+    let strategy = batch_fixture_strategy();
+    let total = 400;
+    let mut observable = 0;
+    for _ in 0..total {
+        let fixture = strategy
+            .new_tree(&mut runner)
+            .expect("generate fixture")
+            .current();
+        let (_laid, parsed) = write_and_parse(&fixture);
+        let distinct: std::collections::HashSet<String> = parsed
+            .items
+            .iter()
+            .map(|item| full_path(&item.include))
+            .collect();
+        if !parsed.items_uncertain && distinct.len() >= 2 {
+            observable += 1;
+        }
+    }
+    eprintln!("{observable}/{total} batch cases committed to an order of distinct files");
+    assert!(
+        observable * 40 >= total,
+        "only {observable}/{total} batch cases committed to an order of distinct files"
+    );
+}
+
 /// The property above skips uncertain cases, so on its own it could rot into
 /// testing (almost) nothing if the generator, or a regression, made
 /// uncertainty the norm. Sample the strategy deterministically — our parser
@@ -855,8 +1071,11 @@ fn most_generated_cases_are_certain() {
         }
     }
     eprintln!("{certain}/{total} generated cases were certain");
+    // Every `Update` of two or more fragments declines (`update_may_strand`
+    // in the evaluator), which costs this sample 23 cases: 97 of the 200 are
+    // certain.
     assert!(
-        certain * 20 >= total * 11,
+        certain * 20 >= total * 9,
         "only {certain}/{total} generated cases were certain; the differential \
          property is barely exercising the oracle — rebalance the generator \
          weights or investigate an over-degrading evaluator"
@@ -981,7 +1200,8 @@ fn full_path(include: &Path) -> String {
 /// Spellings the generator does not reach, held to the same property: each
 /// corner either declines or matches MSBuild exactly. `certain` records which
 /// way it goes today, so a corner that starts declining is seen rather than
-/// skipped. The project directory is `case<n>/proj`.
+/// skipped. The project directory is `case<n>/proj`, and the body follows
+/// [`Group::Flip`]'s property group.
 const CORNERS: &[(&str, bool)] = &[
     // Every case variant of the folded name moves.
     (
@@ -1058,13 +1278,14 @@ const CORNERS: &[(&str, bool)] = &[
         true,
     ),
     // A fragment written as its own full path is removed by that text, so
-    // repeating it strands nothing.
+    // repeating it strands nothing; but only its key says so, and the walk
+    // follows no batch keys: declined.
     (
         r#"    <Compile Include="A.fs" />
     <Compile Update="$(MSBuildProjectDirectory)/A.fs;$(MSBuildProjectDirectory)/A.fs" CompileOrder="CompileLast" />
     <Compile Include="A.fs" />
     <Compile Include="B.fs" />"#,
-        true,
+        false,
     ),
     // `..` at the root stays at the root.
     (
@@ -1110,6 +1331,80 @@ const CORNERS: &[(&str, bool)] = &[
     <Compile Update="./a:b.fs" CompileOrder="CompileFirst" />"#,
         false,
     ),
+    // MSBuild's batch of `Update`s takes only operations that run. Each of
+    // these four skips `Z.fs` (or runs `A.fs;A.fs`), so `A.fs;A.fs` strands
+    // `A.fs` with no batch pending and `B.fs;A.fs` strands `B.fs` with its
+    // `CompileFirst`: MSBuild compiles `B.fs` first. A condition-false
+    // `Update`:
+    (
+        r#"    <Compile Update="Z.fs" Visible="false" Condition="'$(Switch)' == 'false'" />
+    <Compile Update="A.fs;A.fs" Visible="false" />
+    <Compile Update="B.fs;A.fs" CompileOrder="CompileFirst" />
+    <Compile Include="A.fs;B.fs" />"#,
+        false,
+    ),
+    // a group the walk takes on an untrusted read ([`Group::Flip`]):
+    (
+        r#"  </ItemGroup>
+  <ItemGroup Condition="'$(Flip)' == 'on'"><Compile Update="Z.fs" Visible="false" /></ItemGroup>
+  <ItemGroup>
+    <Compile Update="A.fs;A.fs" Visible="false" />
+    <Compile Update="B.fs;A.fs" CompileOrder="CompileFirst" />
+    <Compile Include="A.fs;B.fs" />"#,
+        false,
+    ),
+    // a group the walk takes on an inexact read of a toolset property:
+    (
+        r#"  </ItemGroup>
+  <ItemGroup Condition="'$(MSBuildStartupDirectory)' == ''"><Compile Update="Z.fs" Visible="false" /></ItemGroup>
+  <ItemGroup>
+    <Compile Update="A.fs;A.fs" Visible="false" />
+    <Compile Update="B.fs;A.fs" CompileOrder="CompileFirst" />
+    <Compile Include="A.fs;B.fs" />"#,
+        false,
+    ),
+    // a group the walk skips on an untrusted read, which MSBuild runs:
+    (
+        r#"  </ItemGroup>
+  <ItemGroup Condition="'$(Flip)' == 'off'"><Compile Update="A.fs;A.fs" Visible="false" /></ItemGroup>
+  <ItemGroup>
+    <Compile Update="B.fs;A.fs" CompileOrder="CompileFirst" />
+    <Compile Include="A.fs;B.fs" />"#,
+        false,
+    ),
+    // An undecided group whose only `Update` is certainly skipped changes
+    // nothing, whichever way MSBuild takes it; but `B.fs;A.fs` may leave the
+    // batch past its first fragment, which the walk does not follow.
+    (
+        r#"  </ItemGroup>
+  <ItemGroup Condition="'$(Flip)' == 'off'"><Compile Update="Z.fs" Visible="false" Condition="'$(Switch)' == 'false'" /></ItemGroup>
+  <ItemGroup>
+    <Compile Update="B.fs;A.fs" CompileOrder="CompileFirst" />
+    <Compile Include="A.fs;B.fs" />"#,
+        false,
+    ),
+    // Main's keys kept a rooted `A.fs` its spelling removes, and missed the
+    // strand of `B.fs` the next `Update` leaves: MSBuild compiles `C.fs`
+    // first. Declined.
+    (
+        r#"    <Compile Update="$(MSBuildProjectDirectory)/A.fs;$(MSBuildProjectDirectory)/A.fs" Visible="false" />
+    <Compile Update="A.fs;B.fs;B.fs" Visible="false" />
+    <Compile Update="C.fs;B.fs" CompileOrder="CompileFirst" />
+    <Compile Include="A.fs;C.fs" />"#,
+        false,
+    ),
+    // No `Update` here can leave the batch past its first fragment, however
+    // its gate goes: one fragment each, or an item reference first. Certain.
+    (
+        r#"    <Compile Include="A.fs;B.fs" />
+    <Compile Update="A.fs" CompileOrder="CompileLast" />
+    <Compile Update="A.fs" Visible="false" Condition="'$(Flip)' == 'on'" />
+    <Compile Update="@(Compile)" Visible="false" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(Flip)' == 'off'">
+    <Compile Update="B.fs" Visible="false" />"#,
+        true,
+    ),
 ];
 
 #[test]
@@ -1117,7 +1412,7 @@ fn corners_decline_or_match_msbuild() {
     for (index, &(body, certain)) in CORNERS.iter().enumerate() {
         let fixture = Fixture {
             sdk_props: Vec::new(),
-            project: vec![Group::Raw(body)],
+            project: vec![Group::Flip, Group::Raw(body)],
             sdk_targets: Vec::new(),
         };
         let reached =

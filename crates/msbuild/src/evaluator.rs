@@ -947,10 +947,6 @@ struct State<'r> {
     /// set from a root's `DefaultTargets`, or left unset because a root's
     /// could not be decided.
     default_targets_decided: bool,
-    /// MSBuild's batch of `Update`s for each item type whose `Update`s the walk
-    /// models (`Compile`, `PackageReference`), as far as the walk can follow it
-    /// ([`item_pass`]'s `update_strands_late`), keyed by lowercased item type.
-    update_batches: HashMap<String, item_pass::UpdateBatchRun>,
     package_versions: Vec<PackageVersion>,
     package_versions_untracked: bool,
     global_package_references: Vec<GlobalPackageReference>,
@@ -1770,7 +1766,6 @@ impl<'r> State<'r> {
             package_versions: Vec::new(),
             package_versions_untracked: false,
             default_targets_decided: false,
-            update_batches: HashMap::new(),
             global_package_references: Vec::new(),
             framework_references: Vec::new(),
             evaluated_items: HashMap::new(),
@@ -2257,7 +2252,6 @@ impl<'r> State<'r> {
             #[cfg(any(test, feature = "test-support"))]
                 package_cause_owners: _,
             default_targets_decided: _,
-            update_batches: _,
             package_versions,
             package_versions_untracked,
             global_package_references,

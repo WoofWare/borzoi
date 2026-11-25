@@ -694,6 +694,7 @@ fn evaluate_item_group(node: Node<'_, '_>, state: &mut State<'_>) {
             // reads a name the walk doubts.
             taint_group_references_on_doubted_reads(node, state);
             restore(state);
+            judge_update_batches_of(node, state);
         }
         CondGate::Unsupported => {
             // Record the carve-outs while both contexts are still set.
@@ -711,6 +712,7 @@ fn evaluate_item_group(node: Node<'_, '_>, state: &mut State<'_>) {
             }
             taint_group_references_on_doubted_reads(node, state);
             restore(state);
+            judge_update_batches_of(node, state);
         }
     }
 }
@@ -998,39 +1000,13 @@ fn walk_item_child(node: Node<'_, '_>, state: &mut State<'_>) {
 }
 
 fn walk_item_child_unattributed(node: Node<'_, '_>, state: &mut State<'_>) {
-    // MSBuild's batch of `Update`s, followed for the types whose `Update`s the
-    // walk models, before any condition: see [`update_strands_late`].
-    let batched = match package_item_kind_for_element(node) {
-        Some(PackageItemKind::PackageReference) => Some("PackageReference"),
-        Some(_) => None,
-        None => {
-            (modelled_item_kind_for_element(node) == Some(ItemKind::Compile)).then_some("Compile")
-        }
-    };
-    if let Some(item_type) = batched
-        && update_strands_late(node, item_type, state)
+    // MSBuild's batch of `Update`s, judged for the types whose `Update`s the
+    // walk models, whatever the element's condition: see
+    // [`update_may_strand`].
+    if let Some(item_type) = batched_item_type(node)
+        && update_may_strand(node, state)
     {
-        let update = attribute(node, "Update").unwrap_or_default().to_string();
-        if item_type == "Compile" {
-            let previous = state.compile_context;
-            state.compile_context = true;
-            state.push(
-                DiagnosticKind::StrandedUpdatePrefix {
-                    update,
-                    fragment: String::new(),
-                },
-                node.range(),
-            );
-            state.compile_context = previous;
-        } else {
-            let previous = state.package_context;
-            state.package_context = true;
-            state.note_package_uncertain(
-                PackageReferenceUncertaintyCauseKind::DuplicateUpdateIdentity { id: update },
-                node.range(),
-            );
-            state.package_context = previous;
-        }
+        note_update_may_strand(node, item_type, state);
     }
     // PackageReference/FrameworkReference are the NuGet dependency set — a
     // separate concern from Compile order / project edges, with their own
@@ -2059,8 +2035,9 @@ fn resolve_compile_update_targets(
 /// Wildcards and item references never get here (they decline earlier), and
 /// a `$(` cannot survive expansion unescaped. This model sees one spec alone;
 /// keys from *earlier* `Update`s, which a strand needs no pending batch to
-/// survive, are [`update_strands_late`]'s, which every `Compile` element
-/// feeds. A strand within the spec is harmless when the operation before it
+/// survive, are [`update_may_strand`]'s, which declines every `Update` that
+/// could leave the batch past its first fragment. A strand within the spec
+/// is harmless when the operation before it
 /// was a batched `Update` (the flush applies it at once); this declines all
 /// the same, which is only conservative.
 #[derive(Default)]
@@ -2579,121 +2556,106 @@ fn walk_package_reference(node: Node<'_, '_>, state: &mut State<'_>) {
     }
 }
 
-/// MSBuild's batch of `Update`s for one item type, as far as the walk follows
-/// it ([`update_strands_late`]).
-#[derive(Debug, Default)]
-pub(super) struct UpdateBatchRun {
-    /// The comparison keys the batch holds.
-    keys: HashSet<String>,
-    /// Some fragment the batch may hold has no key the walk can compute, so
-    /// any later fragment may collide with it.
-    unknown: bool,
-    /// Whether the last `Update` joined the batch, so that the next operation
-    /// flushes it.
-    pending: bool,
-}
-
 /// Whether `node`, an element of an item type whose `Update`s the walk models
-/// (`Compile`, `PackageReference`), leaves entries in MSBuild's batch of
-/// updates that it applies late, out of document order; feeding the batch as
-/// it goes. Run for every such element, before its condition: MSBuild batches
-/// a condition-false `Update` too (probed).
+/// (`Compile`, `PackageReference`), may leave entries in MSBuild's batch of
+/// updates that it applies late, out of document order.
 ///
 /// The mechanism is `LazyItemList.ComputeItems`. Consecutive `Update`s of one
-/// type join a batch keyed by full path (`NormalizePathForComparisonNoThrow`,
-/// `OrdinalIgnoreCase`). An `Update` leaves the batch at the first fragment
-/// holding an expansion character (`*`, `?`, `$(`, `@(`, `%`, in the escaped
-/// text) or one whose key the batch already holds. Leaving removes its earlier
-/// fragments by their text rather than their key, so they stay *stranded*,
-/// and is followed by a flush only when an earlier `Update` had joined
-/// (`pending`). A flush then applies the strands at once, to the items the
-/// `Update` itself reaches, which is harmless. Without one they stay until a
+/// type join a batch keyed by `NormalizePathForComparisonNoThrow`. An
+/// `Update` leaves the batch at the first fragment holding an expansion
+/// character (`*`, `?`, `$(`, `@(`, `%`, in the escaped text) or one whose key
+/// the batch already holds. Leaving removes its earlier fragments by their
+/// text rather than their key, so some may stay *stranded*, and apply at a
 /// later flush, past `Include`s and `Update`s in between: probed (dotnet 10),
 /// `Update="Alpha;Alpha"` then `Update="Beta;Alpha" VersionOverride="1.0"`
-/// then `Include="Alpha;Beta"` gives `Beta` the override.
+/// then `Include="Alpha;Beta"` gives `Beta` the override. Short of a strand,
+/// a batch applies each `Update` where document order does.
 ///
-/// So this answers true when an `Update` leaves the batch at its second
-/// fragment or later, with one of those before it strandable (its written text
-/// not its key, ignoring case) and no batch pending. It over-approximates, as the
-/// conservative reading: a fragment without a computable key may collide with
-/// anything, and an operation whose condition the walk cannot
-/// decide does not flush.
-fn update_strands_late(node: Node<'_, '_>, item_type: &str, state: &mut State<'_>) -> bool {
-    let key = item_key(item_type);
-    let (include, update) = (attribute(node, "Include"), attribute(node, "Update"));
-    let update = match (include.as_deref(), update.as_deref()) {
-        (None, Some(update)) => update,
-        _ => {
-            // Another operation flushes a pending batch, if it runs.
-            let runs = matches!(
-                evaluate_item_condition_silent(node, state),
-                (CondGate::Run, false)
-            );
-            if runs
-                && let Some(run) = state.update_batches.get_mut(&key)
-                && run.pending
-            {
-                *run = UpdateBatchRun::default();
-            }
-            return false;
-        }
+/// A strand needs an `Update` to leave at its second fragment or later. So the
+/// walk commits only where no `Update` can, whichever keys collide and
+/// whichever operations MSBuild runs: one whose spec, read exactly, has at
+/// most one fragment, or whose first fragment holds an expansion character
+/// (the SDK's `Update="@(Compile)"`). Every other `Update` of the type is
+/// true here, run or not, and the caller declines the list.
+fn update_may_strand(node: Node<'_, '_>, state: &State<'_>) -> bool {
+    let Some(update) = attribute(node, "Update") else {
+        return false;
     };
-    let expansion = expand_silent(update, state);
-    let project_dir = state.entry_project_dir.clone();
-    let run = state.update_batches.entry(key).or_default();
-    let fragments: Vec<&str> = spec_fragments(expansion.value.ignoring_trust()).collect();
-    // Whether the walk cannot tell if the fragment it stopped at joined.
-    let mut undecided = false;
-    let mut left_at = None;
-    // Whether a fragment that joined is one leaving would strand: its written
-    // text is not its key, so removing it by text misses. (A spelling MSBuild
-    // compares unnormalised is its own key.)
-    let mut strandable = false;
-    for (i, fragment) in fragments.iter().enumerate() {
-        let expands = ["*", "?", "$(", "@(", "%"]
-            .iter()
-            .any(|marker| fragment.contains(marker));
-        let fragment_key = (!expands && !expansion.had_issue())
-            .then(|| item_spec::comparison_key(&fragment_identity(fragment), &project_dir))
-            .flatten();
-        let joins = match &fragment_key {
-            Some(fragment_key) => !run.unknown && run.keys.insert(fragment_key.clone()),
-            None => {
-                // A fragment without a key may have joined, and may collide
-                // with any later one.
-                if !expands {
-                    run.unknown = true;
-                    undecided = true;
-                }
-                false
-            }
-        };
-        if !joins {
-            left_at = Some(i);
-            break;
-        }
-        let decoded = fragment_identity(fragment);
-        strandable |= !crate::glob::compares_unnormalised(&decoded)
-            && fragment_key.is_some_and(|key| key != fragment.to_ascii_lowercase());
+    if node.has_attribute("Include") || certainly_skipped(node, state) {
+        return false;
     }
-    match left_at {
+    if !rejection::operands_are_certain(state, &update) {
+        return true;
+    }
+    let expansion = expand_silent(&update, state);
+    if expansion.had_issue() {
+        return true;
+    }
+    let mut fragments = spec_fragments(expansion.value.ignoring_trust());
+    let Some(first) = fragments.next() else {
+        return false;
+    };
+    let expands = ["*", "?", "$(", "@(", "%"]
+        .iter()
+        .any(|marker| first.contains(marker));
+    !expands && fragments.next().is_some()
+}
+
+/// Decline `item_type`'s list at `node`, an `Update` that may leave a fragment
+/// stranded in MSBuild's batch of `Update`s ([`update_may_strand`]).
+fn note_update_may_strand(node: Node<'_, '_>, item_type: &str, state: &mut State<'_>) {
+    let update = attribute(node, "Update").unwrap_or_default().to_string();
+    if item_type == "Compile" {
+        let previous = state.compile_context;
+        state.compile_context = true;
+        state.push(
+            DiagnosticKind::UnmodelledUpdateBatch { update },
+            node.range(),
+        );
+        state.compile_context = previous;
+    } else {
+        let previous = state.package_context;
+        state.package_context = true;
+        state.note_package_uncertain(
+            PackageReferenceUncertaintyCauseKind::UnmodelledUpdateBatch { update },
+            node.range(),
+        );
+        state.package_context = previous;
+    }
+}
+
+/// The item type whose batch of `Update`s the walk judges that `node`
+/// belongs to ([`update_may_strand`]), if any.
+fn batched_item_type(node: Node<'_, '_>) -> Option<&'static str> {
+    match package_item_kind_for_element(node) {
+        Some(PackageItemKind::PackageReference) => Some("PackageReference"),
+        Some(_) => None,
         None => {
-            run.pending = true;
-            false
+            (modelled_item_kind_for_element(node) == Some(ItemKind::Compile)).then_some("Compile")
         }
-        Some(i) if undecided => {
-            // It may have joined (no flush) or left (a flush, if pending): keep
-            // every key, take no batch as pending, and count a strand whether
-            // or not one was.
-            run.pending = false;
-            i > 0 && strandable
-        }
-        Some(i) => {
-            let strands_late = i > 0 && strandable && !run.pending;
-            if run.pending {
-                *run = UpdateBatchRun::default();
-            }
-            strands_late
+    }
+}
+
+/// Whether `node`'s own gate is false whatever the names the walk is not
+/// certain of hold: MSBuild never runs it.
+fn certainly_skipped(node: Node<'_, '_>, state: &State<'_>) -> bool {
+    attribute(node, "Condition").is_some_and(|condition| {
+        directory_build::decision_from_certain_inputs(state, &condition, &state.entry_project_dir)
+            == Some(false)
+    })
+}
+
+/// [`update_may_strand`] for every child of an `<ItemGroup>` the walk does
+/// not walk, unless MSBuild never runs it either: its `Update`s may run.
+fn judge_update_batches_of(node: Node<'_, '_>, state: &mut State<'_>) {
+    if certainly_skipped(node, state) {
+        return;
+    }
+    for child in node.children().filter(Node::is_element) {
+        if let Some(item_type) = batched_item_type(child)
+            && update_may_strand(child, state)
+        {
+            note_update_may_strand(child, item_type, state);
         }
     }
 }

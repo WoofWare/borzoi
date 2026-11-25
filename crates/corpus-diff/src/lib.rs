@@ -667,6 +667,9 @@ fn msbuild_diagnostic_message(kind: &DiagnosticKind) -> String {
         DiagnosticKind::StrandedUpdatePrefix { update, fragment } => {
             format!("Update=\"{update}\" strands the fragments before `{fragment}`")
         }
+        DiagnosticKind::UnmodelledUpdateBatch { update } => {
+            format!("Update=\"{update}\" may strand fragments in MSBuild's batch of Updates")
+        }
         DiagnosticKind::SdkNotFound { name } => {
             format!("SDK '{name}' not found")
         }

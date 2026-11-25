@@ -145,6 +145,12 @@ pub enum DiagnosticKind {
     /// (an escape). That is an upstream bug the evaluator does not mirror, so
     /// the Compile order is not claimed.
     StrandedUpdatePrefix { update: String, fragment: String },
+    /// A `<Compile Update>` (`update` is its spec) that may leave
+    /// `LazyItemEvaluator.ComputeItems`'s batch of `Update`s past its first
+    /// fragment, stranding the fragments before it to apply late. The
+    /// evaluator does not follow the batch, so the Compile order is not
+    /// claimed.
+    UnmodelledUpdateBatch { update: String },
     /// `<Project Sdk="X">` or `<Import Sdk="X" .../>` was encountered,
     /// the with-imports walker was given an SDK resolver, and the
     /// resolver returned `None` for this SDK identifier — i.e. the
@@ -650,6 +656,10 @@ pub enum PackageReferenceUncertaintyCauseKind {
     /// (dotnet 10 probe). We model only the ordered semantics, so the
     /// captured set can't be trusted.
     DuplicateUpdateIdentity { id: String },
+    /// A `<PackageReference Update>` (`update` is its spec) that may leave
+    /// MSBuild's batch of `Update`s past its first fragment
+    /// ([`DiagnosticKind::UnmodelledUpdateBatch`]).
+    UnmodelledUpdateBatch { update: String },
     /// The package/framework identity could not be reduced to literal item
     /// identities.
     UnevaluableIdentity { value: String },
