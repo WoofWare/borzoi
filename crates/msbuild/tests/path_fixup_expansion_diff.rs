@@ -1622,10 +1622,28 @@ fn expansions_hold_msbuilds_path_fixup() {
             entry.points, entry.served, entry.moved, entry.supplied, entry.supplied_moved
         );
     }
-    // Anti-vacuity: each source commits somewhere, and the seeds whose probes
-    // are absolute commit at most sites. A walk that declined every backslash
-    // would pass the contract.
-    for source in Source::ALL {
+    // MSBuild reads the `\` of an `Exists` argument and of an item spec as a
+    // separator, so what they answer is the same from every working
+    // directory.
+    for site in [Site::Exists, Site::Item] {
+        let moved: usize = census
+            .iter()
+            .filter(|((_, s), _)| *s == site)
+            .map(|(_, e)| e.moved)
+            .sum();
+        assert_eq!(moved, 0, "{site:?}: MSBuild's answer moved");
+    }
+}
+
+/// The census's anti-vacuity floors, held on the fixed seed, whose sample
+/// does not move: each source commits somewhere, a source whose probes are
+/// absolute commits at most sites, some point moves with the working
+/// directory, and each read site commits a floor of its points. A walk that
+/// declined every backslash would pass the contract.
+fn assert_coverage(census: &BTreeMap<(Source, Site), Census>) {
+    let sources: std::collections::BTreeSet<Source> =
+        census.keys().map(|(source, _)| *source).collect();
+    for source in sources {
         let (points, served): (usize, usize) = census
             .iter()
             .filter(|((s, _), _)| *s == source)
@@ -1643,52 +1661,33 @@ fn expansions_hold_msbuilds_path_fixup() {
     let moved: usize = census.values().map(|e| e.moved).sum();
     assert!(moved > 0, "no point moved with the working directory");
     for site in Site::SOAKED {
-        let (points, served, site_moved, supplied_moved) = census
+        let (points, served) = census
             .iter()
             .filter(|((_, s), _)| *s == site)
-            .fold((0, 0, 0, 0), |(p, c, m, sm), (_, e)| {
-                (
-                    p + e.points,
-                    c + e.served,
-                    m + e.moved,
-                    sm + e.supplied_moved,
-                )
-            });
-        match site {
-            // MSBuild reads the `\` of an `Exists` argument and of an item
-            // spec as a separator, so what they answer is the same from every
-            // working directory. The served walk commits most item specs, and a
-            // little over half of the `Exists` arguments (57% to 74% over
-            // twelve seeds), so their floors differ.
-            Site::Exists | Site::Item => {
-                assert_eq!(site_moved, 0, "{site:?}: MSBuild's answer moved");
-                let share = if site == Site::Exists { 3 } else { 2 };
-                assert!(
-                    served * share >= points,
-                    "{site:?}: {served} of {points} points committed"
-                );
-            }
-            // What the walk claims where a body or a condition moves is pinned
-            // by `a_relative_backslash_in_project_text_is_committed_as_if_its_probe_missed`:
-            // the sweep's moving points depend on its seed. What moves at a
-            // property function is a result holding a `\`, which the expression
-            // evaluator declines whatever the startup directory
-            // (`expr::has_unix_backslash`).
+            .fold((0, 0), |(p, c), (_, e)| (p + e.points, c + e.served));
+        // The served walk commits most item specs, and a little over half of
+        // the `Exists` arguments; an identity's spelling moves with the
+        // working directory, and a quarter of those points commit at least.
+        // What the walk claims where a body or a condition moves is pinned by
+        // `a_relative_backslash_in_project_text_is_committed_as_if_its_probe_missed`.
+        // What moves at a property function is a result holding a `\`, which
+        // the expression evaluator declines whatever the startup directory
+        // (`expr::has_unix_backslash`).
+        let share = match site {
+            Site::Item => 2,
+            Site::Exists => 3,
+            Site::Identity => 4,
             Site::Body
             | Site::Condition
             | Site::Function
             | Site::Index
             | Site::Coerce
-            | Site::Gate => {
-                let _ = supplied_moved;
-            }
-            // An identity's spelling moves with the working directory; a
-            // quarter of the points commit at least.
-            Site::Identity => assert!(
-                served * 4 >= points,
-                "{site:?}: {served} of {points} points committed"
-            ),
-        }
+            | Site::Gate => continue,
+        };
+        assert!(
+            served * share >= points,
+            "{site:?}: {served} of {points} points committed"
+        );
     }
 }
 
@@ -1951,10 +1950,15 @@ fn fixed_seed_sweep_regresses_nothing_main_answers() {
     // The claims `main` made wrongly that the walk under test does not.
     let mut righted = 0usize;
     let mut globs = GlobCoverage::default();
+    let mut census: BTreeMap<(Source, Site), Census> = BTreeMap::new();
     for (key, point) in &points {
         let (source, site) = (point.source, point.site);
         let seen = grade(&mut world, point);
         globs.count(point, &seen);
+        let entry = census.entry((source, site)).or_default();
+        entry.points += 1;
+        entry.served += usize::from(seen.served);
+        entry.moved += usize::from(seen.moved);
         violations += seen.violations.len();
         let hash = point_fingerprint(point, &root, &env, &world.fixture.layout);
         let Some(row) = baseline.get(key).filter(|row| row.hash == hash) else {
@@ -2026,6 +2030,7 @@ fn fixed_seed_sweep_regresses_nothing_main_answers() {
         globs.found > 0 && globs.found_beside_exclude > 0,
         "the fixed seed grades no glob that finds a file, or none beside an Exclude"
     );
+    assert_coverage(&census);
     // A row no point visits is coverage the sweep lost without saying so.
     let generated: std::collections::HashSet<&str> =
         points.iter().map(|(key, _)| key.as_str()).collect();

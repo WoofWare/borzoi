@@ -55,11 +55,20 @@ cp "$root/crates/msbuild/tests/path_fixup_baseline.rs" "$base/crates/msbuild/tes
   exit 1
 }
 
+# A recorder that ran no test writes no rows: keep the checked-in baseline.
+points=$(find "$dump" -name '*.xml' | wc -l)
+rows=$(wc -l <"$dump/baseline.txt" 2>/dev/null || echo 0)
+if [ "$points" -eq 0 ] || [ "$rows" -ne "$points" ]; then
+  cat "$work/base.log" >&2
+  echo "the recorder wrote $rows rows for $points points" >&2
+  exit 1
+fi
 out="$root/crates/msbuild/tests/manifests/path_fixup_baseline.txt"
 {
   echo "# The walk at $rev over path_fixup_expansion_diff's fixed-seed points:"
   echo "# case, FNV-1a of its inputs (document, meta, environment, layout), each mode's claim."
   echo "# Regenerate: bash tools/path-fixup-baseline.sh $rev"
   cat "$dump/baseline.txt"
-} >"$out"
+} >"$work/baseline.txt"
+mv "$work/baseline.txt" "$out"
 echo "wrote $out" >&2
