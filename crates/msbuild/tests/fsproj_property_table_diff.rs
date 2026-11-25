@@ -789,11 +789,23 @@ fn an_exists_guard_does_not_rule_out_rejecting_an_uncomputed_import() {
         None,
     )
     .unwrap();
+    // The rejection names the path the walk does not compute, not a directory
+    // it found.
     assert!(
-        !parsed.property("P").is_exact(),
-        "the walk computes no path here"
+        matches!(
+            parsed.rejection,
+            Some(Rejection {
+                certainty: RejectionCertainty::Possible,
+                cause: RejectionCause::Import {
+                    why: UnloadableImport::PathUndecided,
+                    ..
+                },
+                ..
+            })
+        ),
+        "{:#?}",
+        parsed.rejection
     );
-    assert!(parsed.rejection.is_some(), "{:#?}", parsed.diagnostics);
     assert!(!parsed.property("After").is_exact());
 }
 
@@ -2166,7 +2178,10 @@ fn import_failures_commit_nothing_for_a_project_msbuild_rejects() {
             // for, but of a path the walk computes: `Exists` is true of a
             // directory too, so of a path it cannot compute the walk claims
             // only a possible rejection, naming that cause.
-            let computes_its_path = !before.contains(UNDECIDED_TRUE);
+            // A gate decided false rules the import out whatever its path;
+            // only an `Exists` gate's discharge turns on computing it.
+            let computes_its_path =
+                !before.contains(UNDECIDED_TRUE) || !gate_template.contains("Exists");
             if PROBES_ITS_OWN_FILE_OR_IS_FALSE.contains(&gate_template) && !computes_its_path {
                 assert!(
                     parsed.rejection.as_ref().is_none_or(|r| matches!(
