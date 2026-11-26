@@ -461,13 +461,24 @@ fn grade_read_document(oracle: &mut Oracle, document: &ReadDocument) -> (ReadOut
     if claim == common::ReferenceClaim::Nothing {
         return (ReadOutcome::Declined { owed }, evaluated);
     }
-    // An incomplete list may lack a reference reading a doubted name; a
-    // certain one may not, as it may hold another path in another world even
-    // where this one's agrees (#1098).
+    // A reference MSBuild made reading a name the walk doubts may hold
+    // another path in another world, even where this one's agrees (#1098). An
+    // incomplete list may lack such a reference, but may not keep one: the
+    // LSP follows every edge it keeps. A certain list may do neither.
+    let retained_doubted = document
+        .references
+        .iter()
+        .enumerate()
+        .find(|(i, reference)| {
+            reference.reads.iter().any(|name| doubted(name))
+                && !theirs_of(*i).is_empty()
+                && (claim == common::ReferenceClaim::Exact || !ours_of(*i).is_empty())
+        });
     assert!(
-        !owed || claim == common::ReferenceClaim::Within,
-        "#1098: the list is certain, and a reference MSBuild made reads a name the walk \
-         doubts:\n{xml}\nours: {:#?}",
+        retained_doubted.is_none(),
+        "#1098: the list ({claim:?}) holds reference E{}, which MSBuild made reading a name the \
+         walk doubts:\n{xml}\nours: {:#?}",
+        retained_doubted.map_or(0, |(i, _)| i),
         parsed.project_references
     );
     let all_ours: Vec<PathBuf> = parsed
