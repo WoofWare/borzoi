@@ -170,7 +170,7 @@ pub struct ProjectNode {
     pub output_name: Option<String>,
     /// Whether this node's `<ProjectReference>` list was **suppressed** rather
     /// than empty: the evaluator could not trust it
-    /// ([`borzoi_msbuild::ParsedProject::project_references_uncertain`] — an
+    /// ([`borzoi_msbuild::ParsedProject::project_references()`] withholds it — an
     /// unmodelled `Update`/`Remove`, an untrusted gate, an undecided
     /// `<Choose>`), so [`Self::references`] carries none of them.
     ///
