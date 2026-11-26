@@ -2593,7 +2593,7 @@ fn resolve_node_uncached(
     };
     let outer_edges = edges_of(outer, purpose, is_entry);
     let outer_suppressed = references_suppressed(outer, purpose);
-    let outer_incomplete = references_incomplete(outer, purpose);
+    let outer_incomplete = references_incomplete(outer, purpose, is_entry);
     if outer.not_an_inner_build {
         // Ahead of the caller-owned fast path below, for the reason
         // `Workspace::served_tfm_for_project` states: caller ownership excuses
@@ -2717,7 +2717,7 @@ fn resolve_node_uncached(
                     tfm: NodeTfm::Unresolved,
                     output_name: None,
                     references_uncertain: references_suppressed(&inner, purpose),
-                    references_incomplete: references_incomplete(&inner, purpose),
+                    references_incomplete: references_incomplete(&inner, purpose, is_entry),
                 },
                 Some(inner) => NodeResult::Resolved {
                     edges: edges_of(&inner, purpose, is_entry),
@@ -2728,7 +2728,7 @@ fn resolve_node_uncached(
                     // The inner evaluation is where these edges came from,
                     // so it is the one whose suppression applies.
                     references_uncertain: references_suppressed(&inner, purpose),
-                    references_incomplete: references_incomplete(&inner, purpose),
+                    references_incomplete: references_incomplete(&inner, purpose, is_entry),
                 },
                 None => NodeResult::resolved(Vec::new()),
             };
@@ -2787,7 +2787,7 @@ fn resolve_node_uncached(
                     };
                 };
                 any_suppressed |= references_suppressed(&branch, purpose);
-                any_incomplete |= references_incomplete(&branch, purpose);
+                any_incomplete |= references_incomplete(&branch, purpose, is_entry);
                 let mut branch_kinds: HashMap<PathBuf, EdgeKind> = HashMap::new();
                 for e in edges_of(&branch, purpose, is_entry) {
                     branch_kinds
@@ -2875,13 +2875,17 @@ fn references_suppressed(evaluated: &EvaluatedProject, purpose: GraphWalkPurpose
 /// The project-side half is [`ProjectEvaluation::may_lack_reference_edges`],
 /// shared with the code that explains the incompleteness to the user, for the
 /// reason [`references_suppressed`] shares its half.
-fn references_incomplete(evaluated: &EvaluatedProject, purpose: GraphWalkPurpose) -> bool {
+fn references_incomplete(
+    evaluated: &EvaluatedProject,
+    purpose: GraphWalkPurpose,
+    is_entry: bool,
+) -> bool {
     purpose == GraphWalkPurpose::CompileClosure
         && ProjectEvaluation::Evaluated {
             parsed: &evaluated.parsed,
             not_an_inner_build: evaluated.not_an_inner_build,
         }
-        .may_lack_reference_edges()
+        .may_lack_reference_edges(is_entry)
 }
 
 fn edges_of(evaluated: &EvaluatedProject, purpose: GraphWalkPurpose, is_entry: bool) -> Vec<Edge> {
@@ -2904,7 +2908,7 @@ fn edges_of(evaluated: &EvaluatedProject, purpose: GraphWalkPurpose, is_entry: b
         .filter_map(|item| {
             let kind = match purpose {
                 GraphWalkPurpose::DeclaredStructure => EdgeKind::Full,
-                GraphWalkPurpose::CompileClosure => compile_edge_kind(item, is_entry)?,
+                GraphWalkPurpose::CompileClosure => compile_edge_kind(item, is_entry).edge?,
             };
             Some(Edge {
                 target: lexically_normalize(&item.include),
@@ -2968,7 +2972,7 @@ fn edges_of(evaluated: &EvaluatedProject, purpose: GraphWalkPurpose, is_entry: b
 /// `ReferencePath`, identical to the unfiltered control — so collapsing
 /// unset/empty/cleared into [`ItemMetadataValue::Known`]`(None)` is exact
 /// (pinned live by `fsharp_empty_include_assets_matches_msbuild`).
-fn compile_edge_kind(item: &ResolvedItem, is_entry: bool) -> Option<EdgeKind> {
+pub(crate) fn compile_edge_kind(item: &ResolvedItem, is_entry: bool) -> CompileContribution {
     // Significant-but-unmodelled P2P metadata makes the edge's contribution
     // unknowable: probed (dotnet 10, 2026-07-10), `BuildReference="false"`
     // and `Targets="Clean"` remove the target from `ReferencePath` even on
@@ -2976,10 +2980,10 @@ fn compile_edge_kind(item: &ResolvedItem, is_entry: bool) -> Option<EdgeKind> {
     // property-list names change which build of the target the real
     // compiler sees. Nothing is safe to fold (D5: drop, under-resolve).
     if item.unmodelled_reference_metadata {
-        return None;
+        return CompileContribution::UNKNOWN;
     }
     let build_only = match &item.reference_output_assembly {
-        ItemMetadataValue::Unknown => return None,
+        ItemMetadataValue::Unknown => return CompileContribution::UNKNOWN,
         // Absent/empty: the common targets default it to `true` before the
         // comparison below.
         ItemMetadataValue::Known(None) => false,
@@ -2990,7 +2994,7 @@ fn compile_edge_kind(item: &ResolvedItem, is_entry: bool) -> Option<EdgeKind> {
         ItemMetadataValue::Known(Some(v)) => borzoi_msbuild::msbuild_boolean(v) != Some(true),
     };
     if build_only {
-        return None;
+        return CompileContribution::exact(None);
     }
     // Three-valued (`None` = unknowable): compile flows through the edge iff
     // it is included, not excluded, and (on non-entry edges) not private.
@@ -3013,18 +3017,49 @@ fn compile_edge_kind(item: &ResolvedItem, is_entry: bool) -> Option<EdgeKind> {
         (Some(true), Some(false), Some(false)) => Some(true),
         _ => None,
     };
+    // Blocked or unknowable flow: the entry's own edge still references the
+    // target's direct output (the build adds it outside the asset flow), so it
+    // degrades to OutputOnly rather than vanishing.
+    let blocked = || {
+        (is_entry && classify(Path::new(&item.include)) == ProjectKind::FSharp)
+            .then_some(EdgeKind::OutputOnly)
+    };
     match flows {
-        Some(true) => Some(EdgeKind::Full),
-        // Blocked or unknowable flow: the entry's own edge still references
-        // the target's direct output (the build adds it outside the asset
-        // flow), so it degrades to OutputOnly rather than vanishing.
-        Some(false) | None => {
-            if is_entry && classify(Path::new(&item.include)) == ProjectKind::FSharp {
-                Some(EdgeKind::OutputOnly)
-            } else {
-                None
-            }
-        }
+        Some(true) => CompileContribution::exact(Some(EdgeKind::Full)),
+        Some(false) => CompileContribution::exact(blocked()),
+        // What flows through the edge may be more than its output.
+        None => CompileContribution {
+            edge: blocked(),
+            exact: false,
+        },
+    }
+}
+
+/// What [`compile_edge_kind`] says a `<ProjectReference>` contributes to the
+/// compile closure: the edge the env follows, if any, and whether that is all
+/// the build references through it. An inexact contribution (one turning on
+/// metadata the walk could not resolve) may hold assemblies the env lacks, so
+/// the node reads as incomplete
+/// ([`ProjectEvaluation::may_lack_reference_edges`]) (#1181).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CompileContribution {
+    /// The edge to follow, or `None` when the env follows none.
+    pub(crate) edge: Option<EdgeKind>,
+    /// Whether the build references nothing through the reference beyond
+    /// [`Self::edge`].
+    pub(crate) exact: bool,
+}
+
+impl CompileContribution {
+    /// Nothing safe to follow, and the build may reference anything through
+    /// it.
+    const UNKNOWN: Self = Self {
+        edge: None,
+        exact: false,
+    };
+
+    fn exact(edge: Option<EdgeKind>) -> Self {
+        Self { edge, exact: true }
     }
 }
 
@@ -6825,7 +6860,8 @@ mod tests {
     /// every other non-true spelling.
     #[test]
     fn reference_output_assembly_uses_msbuild_boolean_comparison() {
-        let flows = |value: Option<&str>| compile_edge_kind(&project_reference_item(value), true);
+        let flows =
+            |value: Option<&str>| compile_edge_kind(&project_reference_item(value), true).edge;
         for v in [
             None,
             Some("true"),

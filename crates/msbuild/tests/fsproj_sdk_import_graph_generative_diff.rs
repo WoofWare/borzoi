@@ -1827,21 +1827,21 @@ fn evaluate(shared: &mut Shared, case: &Case) -> (Outcome, String) {
                 kind: FindingKind::Compile,
             });
         }
-        let no_edges: [&std::path::Path; 0] = [];
+        // A rejected project has no reference list: a certain one, even empty,
+        // is one no build holds, and an incomplete one holding an edge claims
+        // that edge.
+        let claim = common::reference_claim(&parsed);
         let held: Vec<&std::path::Path> = parsed
             .project_references
             .iter()
             .map(|item| item.include.as_path())
             .collect();
-        if common::check_reference_claim(common::reference_claim(&parsed), &held, &no_edges)
-            .is_err()
+        if claim == common::ReferenceClaim::Exact
+            || (claim == common::ReferenceClaim::Within && !held.is_empty())
         {
             outcome.findings.push(Finding {
                 what: "ProjectReference".to_owned(),
-                ours: format!(
-                    "{:?} reference list {held:?}",
-                    common::reference_claim(&parsed)
-                ),
+                ours: format!("{claim:?} reference list {held:?}"),
                 theirs: "a rejected project".to_owned(),
                 kind: FindingKind::References,
             });

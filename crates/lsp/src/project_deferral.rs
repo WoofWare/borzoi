@@ -112,20 +112,28 @@ impl ProjectEvaluation<'_> {
     }
 
     /// Whether the inter-project reference edges are kept for this project
-    /// but may lack references the build has
-    /// ([`ParsedProject::project_references_incomplete`]), so the assembly env
-    /// built from them is incomplete — the predicate
+    /// but may lack assemblies the build references, so the assembly env built
+    /// from them is incomplete: the list may lack references the build has
+    /// ([`ParsedProject::project_references_incomplete`]), or a reference's
+    /// compile contribution turns on metadata the walk could not resolve
+    /// ([`crate::workspace::CompileContribution::exact`]), read for an entry
+    /// edge or not as `is_entry` says. The predicate
     /// `workspace::references_incomplete` applies (modulo the same walk-purpose
     /// gate). Never together with [`Self::drops_reference_edges`]: a dropped
     /// list says more.
     ///
     /// Shared rather than restated, for the reason
     /// [`Self::drops_reference_edges`] is.
-    pub fn may_lack_reference_edges(&self) -> bool {
+    pub fn may_lack_reference_edges(&self, is_entry: bool) -> bool {
         match self {
             ProjectEvaluation::Failed => false,
             ProjectEvaluation::Evaluated { parsed, .. } => {
-                !self.drops_reference_edges() && parsed.project_references_incomplete
+                !self.drops_reference_edges()
+                    && (parsed.project_references_incomplete
+                        || parsed
+                            .project_references
+                            .iter()
+                            .any(|item| !crate::workspace::compile_edge_kind(item, is_entry).exact))
             }
         }
     }
@@ -182,7 +190,8 @@ pub enum DeferredCapability {
     ProjectReferenceEdges,
     /// A complete set of referenced assemblies. The project's
     /// `<ProjectReference>` edges are kept and followed, but the list may lack
-    /// references the build has, so the `AssemblyEnv` is marked incomplete: a
+    /// references the build has, or a reference may contribute more than the
+    /// edge followed for it, so the `AssemblyEnv` is marked incomplete: a
     /// name it does not find is not proof the build lacks it, and names that
     /// could come from a missing reference stay unresolved.
     ///
@@ -207,8 +216,9 @@ impl DeferredCapability {
                  projects won't resolve"
             }
             DeferredCapability::CompleteReferenceSet => {
-                "this project's <ProjectReference> list may lack references the build has, so \
-                 names that could come from a referenced project may not resolve"
+                "the assemblies this project references may lack some the build has (a \
+                 <ProjectReference>, or what one contributes, is not fully known), so names that \
+                 could come from a referenced project may not resolve"
             }
         }
     }
@@ -624,7 +634,8 @@ pub fn deferrals(eval: ProjectEvaluation<'_>, fold: FoldOutcome<'_>) -> Vec<Defe
         ));
     }
 
-    if eval.may_lack_reference_edges() {
+    // The report is the entry project's own.
+    if eval.may_lack_reference_edges(true) {
         // The evaluator records no cause for a dropped `Include`, and no
         // structural Compile cause explains one (an import it could not follow
         // withdraws the list instead), so the absence is stated.
