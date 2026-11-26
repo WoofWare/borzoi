@@ -18,10 +18,12 @@
 # `BORZOI_MUTANTS_JOBS` (default 2) is its `--jobs`.
 #
 # The run writes under `$RUNNER_TEMP/mutants-work/SET`, where mutant code can
-# leave anything. What leaves it is staged into `$RUNNER_TEMP/mutants/SET`,
-# which the job uploads and the manifest step reads: the run's three artifacts
-# and cargo-mutants' logs, each copied only if it is a regular file inside the
-# work directory, the artifacts whole up to 64 MiB and each log's first MiB.
+# leave anything. What the manifest step reads is staged out of it into
+# `$RUNNER_TEMP/mutants/SET`, made fresh after the run: the run's three
+# artifacts and cargo-mutants' logs, each copied only if it is a regular file
+# inside the work directory, the artifacts whole up to 64 MiB and each log's
+# first MiB. The job uploads nothing the run wrote; a failure is reproduced
+# with `tools/mutants/run.sh SET`.
 set -euo pipefail
 unset CDPATH
 # Git's repository-local variables would point `git rev-parse HEAD` below at

@@ -294,15 +294,21 @@ fn run(set: &str, out_dir: &Path, repo: &Path) -> Result<Result<(), String>, Str
     let update = update_requested();
     // A check pins the set to the manifest the graded commit holds. The
     // checkout is that commit with no tracked file changed (`checkout_is`), so
-    // a tracked manifest is the commit's; an untracked one, as a regeneration
-    // leaves a new set's, is in no commit, and a fresh checkout would not
-    // have it.
-    if !update && !tracked(&root, &rel)? {
+    // a manifest tracked as a regular file is the commit's. An untracked one,
+    // as a regeneration leaves a new set's, is in no commit; a tracked link
+    // holds no verdicts of its own; a fresh checkout would have neither.
+    if !update && !tracked_regular_file(&root, &rel)? {
         return Ok(Err(format!(
-            "{rel} is not tracked, so commit {} has no manifest for {set}; commit it, \
-             or regenerate with:\n  {regenerate}",
+            "{rel} is not a regular file tracked by commit {}, so the commit has no \
+             manifest for {set}; commit it, or regenerate with:\n  {regenerate}",
             info.commit
         )));
+    }
+    // A regeneration writes the file itself, never through a link to another.
+    if update && std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(format!(
+            "{rel} is a symbolic link; it must be the manifest itself"
+        ));
     }
     Ok(compare_described(
         &path,
@@ -313,14 +319,30 @@ fn run(set: &str, out_dir: &Path, repo: &Path) -> Result<Result<(), String>, Str
     ))
 }
 
-/// Whether Git tracks `rel` in the checkout at `root`.
-fn tracked(root: &Path, rel: &str) -> Result<bool, String> {
+/// Whether Git tracks `rel` in the checkout at `root` as a regular file (mode
+/// `100644` or `100755`), not a link or a submodule.
+fn tracked_regular_file(root: &Path, rel: &str) -> Result<bool, String> {
     let mut cmd = git_in(root)?;
-    cmd.args(["ls-files", "--error-unmatch", "--", rel]);
+    cmd.args(["ls-files", "--stage", "--", rel]);
     let out = borzoi_spawn::BoundedCommand::new(cmd)
         .run()
         .map_err(|e| format!("git ls-files: {e}"))?;
-    Ok(out.status.success())
+    if !out.status.success() {
+        return Err(format!(
+            "git ls-files: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    let listing = String::from_utf8_lossy(&out.stdout);
+    let mut entries = listing.lines();
+    // `<mode> <object> <stage>\t<path>`: exactly one entry, for exactly `rel`.
+    let regular = match (entries.next(), entries.next()) {
+        (Some(entry), None) => entry.split_once('\t').is_some_and(|(meta, path)| {
+            path == rel && (meta.starts_with("100644 ") || meta.starts_with("100755 "))
+        }),
+        _ => false,
+    };
+    Ok(regular)
 }
 
 fn main() -> ExitCode {
@@ -447,9 +469,15 @@ mod tests {
         let second = git(&["rev-parse", "HEAD"]);
         std::fs::write(repo.join("untracked"), "").unwrap();
         assert_eq!(checkout_is(repo, &second), Ok(()));
-        // And it is no manifest a check can pin to; a committed file is.
-        assert_eq!(tracked(repo, "untracked"), Ok(false));
-        assert_eq!(tracked(repo, "f"), Ok(true));
+        // And it is no manifest a check can pin to; a committed file is, and a
+        // committed link is not.
+        assert_eq!(tracked_regular_file(repo, "untracked"), Ok(false));
+        assert_eq!(tracked_regular_file(repo, "f"), Ok(true));
+        std::os::unix::fs::symlink("untracked", repo.join("link")).unwrap();
+        git(&["add", "link"]);
+        git(&["commit", "-q", "-m", "link"]);
+        assert_eq!(tracked_regular_file(repo, "link"), Ok(false));
+        assert_eq!(tracked_regular_file(repo, "absent"), Ok(false));
     }
 
     #[test]
