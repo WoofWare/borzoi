@@ -84,20 +84,20 @@ fn installed(sdk: &str) -> bool {
 /// of them), each directory entered once.
 fn files_under(dir: &Path, out: &mut Vec<PathBuf>) {
     fn walk(dir: &Path, seen: &mut BTreeSet<PathBuf>, out: &mut Vec<PathBuf>) {
-        let Ok(canonical) = host_fs::canonicalize(dir) else {
-            return;
-        };
+        // A directory or entry the scan cannot read could hold documents, so
+        // it fails the scan rather than count as holding none.
+        let canonical =
+            host_fs::canonicalize(dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display()));
         if !seen.insert(canonical) {
             return;
         }
-        let Ok(entries) = host_fs::read_dir(dir) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let Ok(meta) = host_fs::metadata(&path) else {
-                continue;
-            };
+        let entries = host_fs::read_dir(dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display()));
+        for entry in entries {
+            let path = entry
+                .unwrap_or_else(|e| panic!("an entry of {}: {e}", dir.display()))
+                .path();
+            let meta =
+                host_fs::metadata(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
             if meta.is_dir() {
                 walk(&path, seen, out);
             } else if meta.is_file() {
@@ -299,19 +299,45 @@ fn texts(node: roxmltree::Node<'_, '_>) -> Vec<String> {
 
 /// The variables `text` reads through `System.Environment`'s property
 /// functions, each a literal first argument of `GetEnvironmentVariable`; an
-/// error for a call whose name is not a literal, or for one that reads every
-/// variable at once (`GetEnvironmentVariables`).
+/// error for any other member of `System.Environment` (none of which the
+/// verified SDK calls), for a name that is not a literal, and for a call that
+/// reads by a pattern or every variable at once.
 fn environment_function_reads(text: &str) -> Result<Vec<String>, String> {
-    let mut names = Vec::new();
     let lower = text.to_ascii_lowercase();
-    if lower.contains("getenvironmentvariables") {
-        return Err("reads every environment variable at once".to_string());
+    // Calls that read variables by a name the text does not hold, or every
+    // variable at once: no list can hold what they read.
+    for call in ["expandenvironmentvariables", "getenvironmentvariables"] {
+        if lower.contains(call) {
+            return Err(format!("calls {call}, whose reads no list can hold"));
+        }
     }
-    for (at, _) in lower.match_indices("getenvironmentvariable(") {
-        let args = &text[at + "getenvironmentvariable(".len()..];
-        let arg = args.trim_start();
-        let literal = arg
-            .strip_prefix('\'')
+    let mut names = Vec::new();
+    // Every member of `System.Environment` a property function names
+    // (`[System.Environment]::Member`, spaces allowed around `::`): only
+    // `GetEnvironmentVariable` of a literal name is one this scan can list.
+    for (at, _) in lower.match_indices("environment]") {
+        let rest = lower[at + "environment]".len()..].trim_start();
+        let Some(rest) = rest.strip_prefix("::") else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        let member_len = rest
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .unwrap_or(rest.len());
+        let (member, after) = rest.split_at(member_len);
+        if member != "getenvironmentvariable" {
+            return Err(format!(
+                "calls System.Environment's {member:?}, which this scan cannot list"
+            ));
+        }
+        // The literal name, in the original spelling: the offset of `after`
+        // in the lowered text is its offset in `text`.
+        let offset = lower.len() - after.len();
+        let literal = text[offset..]
+            .trim_start()
+            .strip_prefix('(')
+            .map(str::trim_start)
+            .and_then(|arg| arg.strip_prefix('\''))
             .and_then(|rest| rest.split_once('\''))
             .map(|(name, _)| name)
             .filter(|name| !name.is_empty() && !name.contains(['$', '@', '%']));
@@ -323,28 +349,50 @@ fn environment_function_reads(text: &str) -> Result<Vec<String>, String> {
     Ok(names)
 }
 
-/// A variable a property function reads by a literal name is listed; one it
-/// reads by a computed name, or every one at once, fails the scan.
+/// A variable a property function reads by a literal name is listed, however
+/// the call is spaced; any other member of `System.Environment`, a computed
+/// name, or a call that reads by a pattern or every variable at once fails the
+/// scan.
 #[test]
 fn environment_functions_are_read_or_fail() {
-    assert_eq!(
-        environment_function_reads("$([System.Environment]::GetEnvironmentVariable('LANG'))"),
-        Ok(vec!["LANG".to_string()])
-    );
-    assert_eq!(
-        environment_function_reads(
-            "$([System.Environment]::getenvironmentvariable( 'X' , 'Process'))"
+    for (text, name) in [
+        (
+            "$([System.Environment]::GetEnvironmentVariable('LANG'))",
+            "LANG",
         ),
-        Ok(vec!["X".to_string()])
+        (
+            "$([System.Environment]::getenvironmentvariable( 'X' , 'Process'))",
+            "X",
+        ),
+        (
+            "$([System.Environment]::GetEnvironmentVariable ('EDITOR'))",
+            "EDITOR",
+        ),
+        (
+            "$([System.Environment] :: GetEnvironmentVariable('TZ'))",
+            "TZ",
+        ),
+        ("$([Environment]::GetEnvironmentVariable('PAGER'))", "PAGER"),
+    ] {
+        assert_eq!(
+            environment_function_reads(text),
+            Ok(vec![name.to_string()]),
+            "{text}"
+        );
+    }
+    for text in [
+        "$([System.Environment]::GetEnvironmentVariable($(Name)))",
+        "$([System.Environment]::GetEnvironmentVariables())",
+        "$([System.Environment]::ExpandEnvironmentVariables('%LANG%'))",
+        "$([System.Environment]::GetFolderPath(SpecialFolder.UserProfile))",
+        "$([System.Environment]::NewLine)",
+    ] {
+        assert!(environment_function_reads(text).is_err(), "{text}");
+    }
+    assert_eq!(
+        environment_function_reads("$(Plain) $(Environment)"),
+        Ok(vec![])
     );
-    assert!(
-        environment_function_reads("$([System.Environment]::GetEnvironmentVariable($(Name)))")
-            .is_err()
-    );
-    assert!(
-        environment_function_reads("$([System.Environment]::GetEnvironmentVariables())").is_err()
-    );
-    assert_eq!(environment_function_reads("$(Plain)"), Ok(vec![]));
 }
 
 /// The text from the start of `after` (just past a `$(`) to the parenthesis
@@ -737,27 +785,43 @@ fn the_scan_finds_the_known_reads() {
 }
 
 /// No name graded inert, and none the oracle can set, is a property a file of
-/// a verified SDK reads, unless it is an allowed property (held to its
-/// grammar) or a toolchain variable (held fixed). Grading a name by a few
-/// values says nothing of one some value of which moves the build.
+/// an SDK being pinned reads, unless it is an allowed property (held to its
+/// grammar); and no oracle input is a toolchain variable (held fixed). Grading
+/// a name by a few values says nothing of one some value of which moves the
+/// build.
 #[test]
 fn no_graded_name_is_read_by_an_sdk_file() {
-    let excepted = |name: &str| {
+    let allowed = |name: &str| {
         ALLOWED_PROPERTIES
             .iter()
             .any(|(allowed, _)| allowed.eq_ignore_ascii_case(name))
-            || TOOLCHAIN_VARIABLES
-                .iter()
-                .any(|(toolchain, _)| toolchain.eq_ignore_ascii_case(name))
     };
     let mut failures = Vec::new();
-    for sdk in verified_sdks() {
-        let reads =
-            environment_reads(sdk).expect("pinned, by every_verified_sdk_has_its_reads_pinned");
+    // Each SDK being pinned by its fresh scan where installed (a new SDK is
+    // checked before it is graded), else by its pin.
+    for sdk in sdks_to_pin() {
+        let reads = if installed(&sdk) {
+            scanned(&sdk)
+        } else {
+            environment_reads(&sdk)
+                .cloned()
+                .unwrap_or_else(|| panic!("{sdk} is neither installed nor pinned; {REGENERATE}"))
+        };
         for name in ALLOWED_ENVIRONMENT.iter().chain(INPUT_NAMES) {
-            if !excepted(name) && reads.reads(name) {
+            if !allowed(name) && reads.reads(name) {
                 failures.push(format!("{sdk}: {name} is graded, and an SDK file reads it"));
             }
+        }
+    }
+    // A toolchain variable is held fixed: none is an input the oracle can vary.
+    for name in INPUT_NAMES {
+        if TOOLCHAIN_VARIABLES
+            .iter()
+            .any(|(toolchain, _)| toolchain.eq_ignore_ascii_case(name))
+        {
+            failures.push(format!(
+                "{name} is a toolchain variable, and an oracle input"
+            ));
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));

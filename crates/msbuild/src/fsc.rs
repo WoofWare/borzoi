@@ -370,8 +370,8 @@ pub enum ToolchainValue {
     Path,
     /// A list of absolute paths, as the platform separates `PATH`'s.
     SearchPath,
-    /// A `;`-separated list of package sources, each an absolute path or an
-    /// `http(s)` URL (the scheme in any case) whose authority names a host.
+    /// A `;`-separated list of package sources, each an absolute path (a
+    /// feed's URL declines: the grading's sources are folders).
     Sources,
     /// One of the CLI's on-off switches: `1`, `0`, `true` or `false`, in any
     /// case.
@@ -386,7 +386,6 @@ impl ToolchainValue {
             return false;
         }
         let path = |p: &str| !p.is_empty() && std::path::Path::new(p).is_absolute();
-        let url = |e: &str| http_host(e).is_some();
         match self {
             ToolchainValue::Path => path(value),
             ToolchainValue::SearchPath => {
@@ -399,44 +398,13 @@ impl ToolchainValue {
                     .map(str::trim)
                     .filter(|e| !e.is_empty())
                     .collect();
-                !entries.is_empty() && entries.iter().all(|e| path(e) || url(e))
+                !entries.is_empty() && entries.iter().all(|e| path(e))
             }
             ToolchainValue::Switch => ["1", "0", "true", "false"]
                 .iter()
                 .any(|switch| switch.eq_ignore_ascii_case(value)),
         }
     }
-}
-
-/// The host an `http(s)` URL names (the scheme compared without case): its
-/// authority without the user information before an `@` or the port after
-/// the last `:` (an IPv6 literal in brackets kept whole), and `None` for a URL
-/// of another scheme or whose host is empty or holds a character no host
-/// name or address does.
-fn http_host(url: &str) -> Option<&str> {
-    let rest = ["https://", "http://"].iter().find_map(|scheme| {
-        url.get(..scheme.len())
-            .filter(|head| head.eq_ignore_ascii_case(scheme))
-            .map(|_| &url[scheme.len()..])
-    })?;
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
-    let host_port = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
-    let host = if let Some(bracketed) = host_port.strip_prefix('[') {
-        let (inside, after) = bracketed.split_once(']')?;
-        if !(after.is_empty() || after.starts_with(':')) {
-            return None;
-        }
-        (!inside.is_empty() && inside.chars().all(|c| c.is_ascii_hexdigit() || c == ':'))
-            .then_some(inside)?
-    } else {
-        let host = host_port.split(':').next().unwrap_or_default();
-        (!host.is_empty()
-            && host
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || "-.".contains(c)))
-        .then_some(host)?
-    };
-    Some(host)
 }
 
 /// The toolchain's own variables, each by its exact name and with the shape
@@ -665,10 +633,10 @@ pub fn environment_decline(
 /// case, which MSBuild reads as one property by an order the walk does not
 /// reproduce.
 pub fn environment_declines(sdk: &str, environment: &HashMap<String, String>) -> Vec<NameDecline> {
-    if environment_reads(sdk).is_none() {
-        return vec![NameDecline::UnscannedSdk(sdk.to_string())];
-    }
     let mut declines = Vec::new();
+    if environment_reads(sdk).is_none() {
+        declines.push(NameDecline::UnscannedSdk(sdk.to_string()));
+    }
     let mut names: Vec<&String> = environment.keys().collect();
     names.sort();
     let mut by_property: HashMap<String, &String> = HashMap::new();
@@ -2874,12 +2842,24 @@ mod tests {
     }
 
     /// An SDK whose reads are not pinned declines, whatever the environment,
-    /// an empty one included.
+    /// an empty one included, and the environment's other violations are
+    /// still enumerated.
     #[test]
     fn an_unscanned_sdk_declines_any_environment() {
         assert_eq!(
             environment_decline("0.0.0-unscanned", &HashMap::new()),
             Some(NameDecline::UnscannedSdk("0.0.0-unscanned".to_string()))
+        );
+        let environment = HashMap::from([
+            ("NUGET_PACKAGES".to_string(), "relative".to_string()),
+            ("LANG".to_string(), "C".to_string()),
+            ("lang".to_string(), "C".to_string()),
+        ]);
+        let declines = super::environment_declines("0.0.0-unscanned", &environment);
+        assert_eq!(declines.len(), 3, "{declines:?}");
+        assert_eq!(
+            declines[0],
+            NameDecline::UnscannedSdk("0.0.0-unscanned".to_string())
         );
     }
 
@@ -2894,22 +2874,13 @@ mod tests {
         for value in ["", "/usr/bin::/bin", "/usr/bin:bin"] {
             assert!(!ToolchainValue::SearchPath.admits(value), "{value:?}");
         }
-        for value in [
-            "/feed;https://api.nuget.org/v3/index.json",
-            "HTTPS://example.org/feed",
-            "http://user:pass@feeds.example.org:8080/v3/index.json",
-            "https://[::1]:5000/feed",
-            "https://example.org?x=1",
-        ] {
+        for value in ["/feed", "/feed;/other", " /feed ; /other ;"] {
             assert!(ToolchainValue::Sources.admits(value), "{value:?}");
         }
         for value in [
-            "https://:443/feed",
-            "https://user@/feed",
-            "https://exa mple.org/",
-            "https://[::1/feed",
-            "https://[]:1/",
-            "https://[::1]x/",
+            "https://api.nuget.org/v3/index.json",
+            "/feed;https://example.org/feed",
+            "HTTPS://example.org/feed",
         ] {
             assert!(!ToolchainValue::Sources.admits(value), "{value:?}");
         }
@@ -2937,7 +2908,7 @@ mod tests {
     /// shape, never its value, which may hold a feed's credentials.
     #[test]
     fn a_decline_names_no_value() {
-        let secret = "https://user:s3cret@private.example.org/v3/index.json;relative";
+        let secret = "/feeds/s3cret-token;relative";
         let environment = HashMap::from([("RestoreSources".to_string(), secret.to_string())]);
         let declines = super::environment_declines(sdk(), &environment);
         assert_eq!(declines.len(), 1, "{declines:?}");
