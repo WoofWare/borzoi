@@ -861,90 +861,145 @@ fn an_implicit_read_leaves_no_certain_list_short() {
 }
 
 /// A reference behind a gate false whatever any name holds reads nothing
-/// MSBuild uses, however doubted the names it reads, beside a live sibling
-/// in a group the walk cannot decide: the list keeps every edge it knows,
-/// certain, and MSBuild agrees with each.
+/// MSBuild uses, however doubted the names it reads: the list is never
+/// uncertain for it. Where the walk also decides every gate and computes
+/// every `Include` it keeps, the list is certain and MSBuild's exactly;
+/// where it cannot, the list is incomplete, and every edge it holds is
+/// MSBuild's. Each row pins which of the two it is, so a walk that learns to
+/// decide a row moves it.
 #[test]
 fn a_dead_reference_reading_a_refused_name_costs_no_certainty() {
+    use DeadRow::{Exact, Incomplete};
     let rows = [
-        // False gates, on a reference beside a live sibling in a group the
-        // walk cannot decide, and on a group.
-        format!(
-            "<ItemGroup{UNSUPPORTED_TRUE}><ProjectReference Include=\"B.fsproj\" />\
-             <ProjectReference Include=\"$(P).fsproj\" Condition=\"false\" /></ItemGroup>\
-             <ItemGroup Condition=\"false\"><ProjectReference Include=\"$(P).fsproj\" /></ItemGroup>"
+        // False gates, on a reference in a group the walk cannot decide, and
+        // on a group.
+        (
+            Exact,
+            format!(
+                "<ItemGroup{UNSUPPORTED_TRUE}>\
+                 <ProjectReference Include=\"$(P).fsproj\" Condition=\"false\" /></ItemGroup>\
+                 <ItemGroup Condition=\"false\"><ProjectReference Include=\"$(P).fsproj\" /></ItemGroup>"
+            ),
         ),
         // A gate on a name a refused write and then a clean one wrote: the
         // clean write decides it.
-        format!(
-            "<PropertyGroup><Gate>{REFUSED_BODY}</Gate></PropertyGroup>\
-             <PropertyGroup><Gate>false</Gate></PropertyGroup>\
-             <ItemGroup><ProjectReference Include=\"$(P).fsproj\" Condition=\"$(Gate)\" /></ItemGroup>"
+        (
+            Exact,
+            format!(
+                "<PropertyGroup><Gate>{REFUSED_BODY}</Gate></PropertyGroup>\
+                 <PropertyGroup><Gate>false</Gate></PropertyGroup>\
+                 <ItemGroup><ProjectReference Include=\"$(P).fsproj\" Condition=\"$(Gate)\" /></ItemGroup>"
+            ),
         ),
         // A `<When>` after one the walk cannot decide, false on the state
         // before the `<Choose>`, which is the state MSBuild evaluates it in
         // (the undecided branch's write to `Off` never precedes it).
-        format!(
-            "<PropertyGroup><Off>false</Off></PropertyGroup>\
-             <Choose><When{UNSUPPORTED_TRUE}><PropertyGroup><Off>true</Off></PropertyGroup></When>\
-             <When Condition=\"$(Off)\"><ItemGroup><ProjectReference Include=\"$(P).fsproj\" /></ItemGroup></When></Choose>"
+        (
+            Exact,
+            format!(
+                "<PropertyGroup><Off>false</Off></PropertyGroup>\
+                 <Choose><When{UNSUPPORTED_TRUE}><PropertyGroup><Off>true</Off></PropertyGroup></When>\
+                 <When Condition=\"$(Off)\"><ItemGroup><ProjectReference Include=\"$(P).fsproj\" /></ItemGroup></When></Choose>"
+            ),
         ),
         // A `<When>` false on a name a refused write and then a clean one
-        // wrote, after one the walk cannot decide.
-        format!(
-            "<PropertyGroup><Gate>{REFUSED_BODY}</Gate></PropertyGroup>\
-             <PropertyGroup><Gate>false</Gate></PropertyGroup>\
-             <Choose><When{UNSUPPORTED_TRUE}><PropertyGroup><X>1</X></PropertyGroup></When>\
-             <When Condition=\"$(Gate)\"><ItemGroup><ProjectReference Include=\"$(P).fsproj\" /></ItemGroup></When></Choose>"
+        // wrote, after one the walk cannot decide. The walk does not decide
+        // the arm (#1184).
+        (
+            Incomplete,
+            format!(
+                "<PropertyGroup><Gate>{REFUSED_BODY}</Gate></PropertyGroup>\
+                 <PropertyGroup><Gate>false</Gate></PropertyGroup>\
+                 <Choose><When{UNSUPPORTED_TRUE}><PropertyGroup><X>1</X></PropertyGroup></When>\
+                 <When Condition=\"$(Gate)\"><ItemGroup><ProjectReference Include=\"$(P).fsproj\" /></ItemGroup></When></Choose>"
+            ),
         ),
         // A padded bare read, which MSBuild expands to empty whatever `P`
-        // holds.
-        "<ItemGroup><ProjectReference Include=\"B$( P).fsproj\" /></ItemGroup>".to_owned(),
-        "<ItemGroup><ProjectReference Include=\"B$(P ).fsproj\" /></ItemGroup>".to_owned(),
+        // holds. The walk does not model the padded spelling, so it drops
+        // the `B.fsproj` MSBuild keeps (#1184).
+        (
+            Incomplete,
+            "<ItemGroup><ProjectReference Include=\"B$( P).fsproj\" /></ItemGroup>".to_owned(),
+        ),
+        (
+            Incomplete,
+            "<ItemGroup><ProjectReference Include=\"B$(P ).fsproj\" /></ItemGroup>".to_owned(),
+        ),
         // An `Exclude` reading it from an `Include` empty whatever any name
-        // holds: it excludes nothing.
-        "<ItemGroup><ProjectReference Include=\"$(OptionalProjects)\" Exclude=\"$(P)\" /></ItemGroup>"
-            .to_owned(),
+        // holds: it excludes nothing. The walk does not see that the
+        // `Exclude` is idle (#1184).
+        (
+            Incomplete,
+            "<ItemGroup><ProjectReference Include=\"$(OptionalProjects)\" Exclude=\"$(P)\" /></ItemGroup>"
+                .to_owned(),
+        ),
         // The same from an item list the walk knows to be empty.
-        "<ItemGroup><ProjectReference Include=\"@(OptionalProjects)\" Exclude=\"$(P)\" /></ItemGroup>"
-            .to_owned(),
+        (
+            Incomplete,
+            "<ItemGroup><ProjectReference Include=\"@(OptionalProjects)\" Exclude=\"$(P)\" /></ItemGroup>"
+                .to_owned(),
+        ),
         // A name only a branch MSBuild cannot take writes, beside an
         // undecided one: its write never happens, so a read of it is exact.
-        format!(
-            "<Choose><When{UNSUPPORTED_TRUE}><PropertyGroup><X>1</X></PropertyGroup></When>\
-             <When Condition=\"false\"><PropertyGroup><OptionalProjects>B.fsproj</OptionalProjects></PropertyGroup></When></Choose>\
-             <ItemGroup><ProjectReference Include=\"$(OptionalProjects)\" /></ItemGroup>"
+        (
+            Exact,
+            format!(
+                "<Choose><When{UNSUPPORTED_TRUE}><PropertyGroup><X>1</X></PropertyGroup></When>\
+                 <When Condition=\"false\"><PropertyGroup><OptionalProjects>B.fsproj</OptionalProjects></PropertyGroup></When></Choose>\
+                 <ItemGroup><ProjectReference Include=\"$(OptionalProjects)\" /></ItemGroup>"
+            ),
         ),
         // A gate false whatever a doubted name holds, which the walk cannot
         // evaluate on the value it holds (`É` against `é`).
-        format!(
-            "<PropertyGroup><Gate{UNSUPPORTED_TRUE}>É</Gate></PropertyGroup>\
-             <ItemGroup><ProjectReference Include=\"$(Gate).fsproj\" Condition=\"'$(Gate)' == 'é' And false\" /></ItemGroup>"
+        (
+            Exact,
+            format!(
+                "<PropertyGroup><Gate{UNSUPPORTED_TRUE}>É</Gate></PropertyGroup>\
+                 <ItemGroup><ProjectReference Include=\"$(Gate).fsproj\" Condition=\"'$(Gate)' == 'é' And false\" /></ItemGroup>"
+            ),
         ),
         // A nested `<When>` a clean value decides false whatever a name the
-        // enclosing undecided branch writes holds.
-        format!(
-            "<PropertyGroup><Gate>{REFUSED_BODY}</Gate></PropertyGroup>\
-             <PropertyGroup><Gate>false</Gate></PropertyGroup>\
-             <Choose><When{UNSUPPORTED_TRUE}><PropertyGroup><X>one</X></PropertyGroup>\
-             <Choose><When Condition=\"$(Gate) And '$(X)' == 'one'\">\
-             <ItemGroup><ProjectReference Include=\"$(P).fsproj\" /></ItemGroup></When></Choose></When></Choose>"
+        // enclosing undecided branch writes holds. The walk does not decide
+        // it (#1184).
+        (
+            Incomplete,
+            format!(
+                "<PropertyGroup><Gate>{REFUSED_BODY}</Gate></PropertyGroup>\
+                 <PropertyGroup><Gate>false</Gate></PropertyGroup>\
+                 <Choose><When{UNSUPPORTED_TRUE}><PropertyGroup><X>one</X></PropertyGroup>\
+                 <Choose><When Condition=\"$(Gate) And '$(X)' == 'one'\">\
+                 <ItemGroup><ProjectReference Include=\"$(P).fsproj\" /></ItemGroup></When></Choose></When></Choose>"
+            ),
         ),
-        // The same of a name written under a gate the walk cannot decide.
-        format!(
-            "<PropertyGroup><G{UNSUPPORTED_TRUE}>x</G></PropertyGroup>\
-             <ItemGroup><ProjectReference Include=\"B$( G).fsproj\" /></ItemGroup>"
+        // A padded read of a name written under a gate the walk cannot
+        // decide, as the padded rows above (#1184).
+        (
+            Incomplete,
+            format!(
+                "<PropertyGroup><G{UNSUPPORTED_TRUE}>x</G></PropertyGroup>\
+                 <ItemGroup><ProjectReference Include=\"B$( G).fsproj\" /></ItemGroup>"
+            ),
         ),
     ];
     let mut oracle = Oracle::spawn();
-    for row in rows {
-        dead_reference_row(&mut oracle, &row);
+    for (expected, row) in rows {
+        dead_reference_row(&mut oracle, expected, &row);
     }
+}
+
+/// What [`a_dead_reference_reading_a_refused_name_costs_no_certainty`] pins
+/// of one row's list. Neither is uncertain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DeadRow {
+    /// Certain, and MSBuild's list exactly.
+    Exact,
+    /// Incomplete, and every edge it holds MSBuild's.
+    Incomplete,
 }
 
 /// One row of [`a_dead_reference_reading_a_refused_name_costs_no_certainty`],
 /// beside a refused `P` and a live reference.
-fn dead_reference_row(oracle: &mut Oracle, row: &str) {
+fn dead_reference_row(oracle: &mut Oracle, expected: DeadRow, row: &str) {
     let xml = format!(
         "<Project><PropertyGroup><P>{REFUSED_BODY}</P></PropertyGroup>\
          <ItemGroup><ProjectReference Include=\"A.fsproj\" /></ItemGroup>{row}</Project>"
@@ -968,8 +1023,65 @@ fn dead_reference_row(oracle: &mut Oracle, row: &str) {
         None,
     )
     .expect("well-formed XML parses");
+    let ours: Vec<PathBuf> = parsed
+        .project_references
+        .iter()
+        .map(|item| lexical(&item.include.to_string_lossy()))
+        .collect();
+    assert!(!parsed.project_references_uncertain, "{xml}");
+    let got = if parsed.project_references_incomplete {
+        DeadRow::Incomplete
+    } else {
+        DeadRow::Exact
+    };
+    assert_eq!(got, expected, "{xml}\nours: {ours:?}\ntheirs: {theirs:?}");
+    match expected {
+        DeadRow::Exact => {
+            assert_eq!(
+                ours, theirs,
+                "a certain list is MSBuild's whole list: {xml}"
+            );
+        }
+        DeadRow::Incomplete => assert!(
+            !ours.is_empty() && ours.iter().all(|p| theirs.contains(p)),
+            "every edge an incomplete list holds is MSBuild's: {ours:?} {theirs:?}\n{xml}"
+        ),
+    }
+}
+
+/// #1181: a live reference beside the dead one, in a group the walk cannot
+/// decide, is one MSBuild keeps and the walk drops: the list is incomplete,
+/// not certain, while every edge it holds is MSBuild's.
+#[test]
+fn a_live_reference_in_an_undecided_group_leaves_the_list_incomplete() {
+    let xml = format!(
+        "<Project><PropertyGroup><P>{REFUSED_BODY}</P></PropertyGroup>\
+         <ItemGroup><ProjectReference Include=\"A.fsproj\" /></ItemGroup>\
+         <ItemGroup{UNSUPPORTED_TRUE}><ProjectReference Include=\"B.fsproj\" />\
+         <ProjectReference Include=\"$(P).fsproj\" Condition=\"false\" /></ItemGroup></Project>"
+    );
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let root = borzoi_msbuild::observed::host_fs::canonicalize(dir.path()).expect("canonicalize");
+    let proj = layout(&root);
+    std::fs::write(&proj, &xml).unwrap();
+    let theirs: Vec<PathBuf> = Oracle::spawn()
+        .items(&xml, &proj, "ProjectReference", &[])
+        .expect("MSBuild evaluates this document")
+        .iter()
+        .map(|p| lexical(p))
+        .collect();
+    assert_eq!(theirs.len(), 2, "MSBuild keeps B: {theirs:?}");
+    let parsed = parse_fsproj_with_imports(
+        &borzoi_msbuild::ProjectFile::buffer(&proj, &xml)
+            .expect("a project path spelt as its full path"),
+        &HashMap::new(),
+        &common::oracle_environment(),
+        None,
+        None,
+    )
+    .expect("well-formed XML parses");
     assert!(
-        !parsed.project_references_uncertain && !parsed.project_references_incomplete,
+        parsed.project_references_incomplete && !parsed.project_references_uncertain,
         "{xml}"
     );
     let ours: Vec<PathBuf> = parsed
@@ -979,6 +1091,6 @@ fn dead_reference_row(oracle: &mut Oracle, row: &str) {
         .collect();
     assert!(
         !ours.is_empty() && ours.iter().all(|p| theirs.contains(p)),
-        "{ours:?} {theirs:?}"
+        "every edge an incomplete list holds is MSBuild's: {ours:?} {theirs:?}"
     );
 }

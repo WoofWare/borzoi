@@ -3344,6 +3344,13 @@ impl<'r> State<'r> {
     /// differ too (#780). A refused name a later clean write bound holds a
     /// value computed exactly (the mark outlives the overwrite for the import
     /// points alone; [`Trust::refused`]).
+    ///
+    /// So does any other unbound name whose undefined read is not exact
+    /// ([`Self::undefined_read_is_exact`]): a toolset name the walk holds no
+    /// value of (`MSBuildStartupDirectory`, evaluating for no process), a name
+    /// the environment may supply, one content the walk did not enter may
+    /// write. The real build may hold a value there, and the gate may go the
+    /// other way (#1181).
     fn condition_reads_untrusted_value(&self, node: Node<'_, '_>) -> bool {
         attribute(node, "Condition").as_deref().is_some_and(|cond| {
             if self.condition_trust(cond, None).reference_is_untrusted() {
@@ -3351,8 +3358,10 @@ impl<'r> State<'r> {
             }
             !self.condition_is_decided_exactly(cond, None, &|name| {
                 self.undefined_read_is_exact(name)
-            }) && properties::property_references(cond)
-                .any(|name| !self.lookup.is_bound(name) && self.trust_of(name).refused())
+            }) && properties::property_references(cond).any(|name| {
+                !self.lookup.is_bound(name)
+                    && (self.trust_of(name).refused() || !self.undefined_read_is_exact(name))
+            })
         })
     }
 
