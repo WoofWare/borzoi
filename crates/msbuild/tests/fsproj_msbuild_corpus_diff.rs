@@ -699,6 +699,13 @@ fn compare_project_references(parsed: &ParsedProject, msbuild: &MsbuildOutput) -
         )
         .classed("decline(project_references_uncertain)".to_string());
     }
+    if parsed.project_references_incomplete {
+        return FacetReport::skipped(
+            "project_references",
+            "project_references_incomplete=true".to_string(),
+        )
+        .classed("decline(project_references_incomplete)".to_string());
+    }
     let ours: Vec<String> = parsed
         .project_references
         .iter()

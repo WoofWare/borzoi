@@ -2,13 +2,16 @@
 //! name the walk doubts, against the real MSBuild evaluator (the oracle's
 //! `itemsMeta` op).
 //!
-//! The reference list's contract (`ParsedProject::project_references_uncertain`)
-//! tolerates a missing edge where the walk cannot say MSBuild has one: an
-//! `Include` behind a gate it could not decide, or one whose value it cannot
-//! compute from names it holds exactly. An `Include` that reads a name the
-//! walk doubts (a write it refused to compute, one under a gate it could not
-//! decide, a copy of either) is an edge MSBuild has at a path the walk does
-//! not know, so a list missing it is no certain list (#1098).
+//! A reference list the walk publishes as certain (neither
+//! `ParsedProject::project_references_uncertain` nor
+//! `project_references_incomplete`) is MSBuild's exactly: no phantom edge, and
+//! no edge missing. An `Include` behind a gate the walk could not decide, or
+//! one whose value it cannot compute from names it holds exactly, is an edge
+//! MSBuild may have that the list lacks, so the list is incomplete (#1181);
+//! an `Include` that reads a name the walk doubts (a write it refused to
+//! compute, one under a gate it could not decide, a copy of either) is an
+//! edge MSBuild has at a path the walk does not know, so the list is
+//! uncertain (#1098).
 //!
 //! [`doubted_read_sweep`] generates writes of two names (hostile literals,
 //! functions the walk does not compute, copies, gates reading either name or
@@ -454,7 +457,7 @@ fn grade_read_document(oracle: &mut Oracle, document: &ReadDocument) -> (ReadOut
         .any(|(i, reference)| {
             reference.reads.iter().any(|name| doubted(name)) && !theirs_of(i).is_empty()
         });
-    if parsed.project_references_uncertain {
+    if parsed.project_references_uncertain || parsed.project_references_incomplete {
         return (ReadOutcome::Declined { owed }, evaluated);
     }
     // A reference MSBuild made reading a name the walk doubts may hold
@@ -485,10 +488,14 @@ fn grade_read_document(oracle: &mut Oracle, document: &ReadDocument) -> (ReadOut
             };
             unmatched.remove(at);
         }
+        // A certain list is MSBuild's whole list (#1181): an edge missing
+        // from it is a wrong answer whatever its `Include` reads, and one
+        // reading a doubted name is #1098 as well.
         assert!(
-            unmatched.is_empty() || !reads.iter().any(|name| doubted(name)),
-            "#1098: the list is certain without {unmatched:?} of reference E{i}, whose `Include` \
-             reads a name the walk doubts ({reads:?}):\n{xml}\nours: {ours:#?}"
+            unmatched.is_empty(),
+            "the list is certain without {unmatched:?} of reference E{i} (whose `Include` reads \
+             {reads:?}, doubted: {}):\n{xml}\nours: {ours:#?}",
+            reads.iter().any(|name| doubted(name))
         );
     }
     (ReadOutcome::Committed, evaluated)
@@ -841,7 +848,7 @@ fn an_implicit_read_leaves_no_certain_list_short() {
     )
     .expect("well-formed XML parses");
     assert_eq!(theirs.len(), 2, "{theirs:?}");
-    if !parsed.project_references_uncertain {
+    if !parsed.project_references_uncertain && !parsed.project_references_incomplete {
         let mut ours: Vec<PathBuf> = parsed
             .project_references
             .iter()
@@ -961,7 +968,10 @@ fn dead_reference_row(oracle: &mut Oracle, row: &str) {
         None,
     )
     .expect("well-formed XML parses");
-    assert!(!parsed.project_references_uncertain, "{xml}");
+    assert!(
+        !parsed.project_references_uncertain && !parsed.project_references_incomplete,
+        "{xml}"
+    );
     let ours: Vec<PathBuf> = parsed
         .project_references
         .iter()

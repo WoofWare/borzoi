@@ -340,13 +340,15 @@ fn facts(project: &ParsedProject, names: &[&'static str]) -> Facts {
     );
     out.insert(
         Fact::ProjectReferences,
-        (!project.project_references_uncertain).then(|| {
-            project
-                .project_references
-                .iter()
-                .map(|i| i.include.display().to_string())
-                .collect()
-        }),
+        (!project.project_references_uncertain && !project.project_references_incomplete).then(
+            || {
+                project
+                    .project_references
+                    .iter()
+                    .map(|i| i.include.display().to_string())
+                    .collect()
+            },
+        ),
     );
     out.insert(
         Fact::DefineConstants,
@@ -1127,21 +1129,38 @@ fn a_refused_write_is_not_published_as_never_written() {
     assert_eq!(project.target_name, ItemMetadataValue::Unknown);
 }
 
-/// #780: an item gate reads a refused name as never written, capturing a
-/// phantom `ProjectReference`.
+/// #780, #1181: a gate reading a name whose write the walk refused decides
+/// nothing about the reference behind it, whichever way the walk's reading
+/// of it went: kept, it may be a phantom edge; dropped, it may be one the
+/// build has. Either way the list is not the build's, on the element's gate as
+/// on its group's.
 #[test]
 fn a_project_reference_gated_on_a_refused_name_is_not_certain() {
-    let project = pure_evaluate(
-        r#"<Project>
-  <PropertyGroup><Bar>$(Configuration.Substring(0,1))</Bar></PropertyGroup>
-  <ItemGroup Condition="'$(Bar)' == ''"><ProjectReference Include="x.fsproj" /></ItemGroup>
-</Project>"#,
-    );
-    assert!(
-        project.project_references_uncertain || project.project_references.is_empty(),
-        "MSBuild computes `Bar` and skips the group; we captured {:?} as certain",
-        project.project_references
-    );
+    for refused in [
+        "$(Configuration.Substring(0,1))",
+        "$([System.String]::Copy('D'))",
+    ] {
+        for comparison in ["==", "!="] {
+            for site in ["group", "element"] {
+                let gate = format!("'$(Bar)' {comparison} ''");
+                let text = match site {
+                    "group" => format!(
+                        "<Project>\n  <PropertyGroup><Bar>{refused}</Bar></PropertyGroup>\n  <ItemGroup Condition=\"{gate}\"><ProjectReference Include=\"x.fsproj\" /></ItemGroup>\n</Project>"
+                    ),
+                    _ => format!(
+                        "<Project>\n  <PropertyGroup><Bar>{refused}</Bar></PropertyGroup>\n  <ItemGroup><ProjectReference Include=\"x.fsproj\" Condition=\"{gate}\" /></ItemGroup>\n</Project>"
+                    ),
+                };
+                let project = pure_evaluate(&text);
+                assert!(
+                    project.project_references_uncertain || project.project_references_incomplete,
+                    "the gate reads a refused name, and the walk published {:?} as the build's \
+                     whole list:\n{text}",
+                    project.project_references
+                );
+            }
+        }
+    }
 }
 
 /// #1098: a `ProjectReference` reading a name refused twice (a refused write,
@@ -1245,7 +1264,7 @@ fn a_project_reference_gated_on_a_rewritten_refused_name_is_certain() {
   <ItemGroup Condition="'$(Bar)' == 'x'"><ProjectReference Include="x.fsproj" /></ItemGroup>
 </Project>"#,
     );
-    assert!(!project.project_references_uncertain);
+    assert!(!project.project_references_uncertain && !project.project_references_incomplete);
     assert_eq!(project.project_references.len(), 1);
     assert_eq!(
         project.property("Bar"),

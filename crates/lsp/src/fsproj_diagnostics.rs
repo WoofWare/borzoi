@@ -2792,6 +2792,7 @@ mod tests {
             tfm: NodeTfm::NotEvaluated,
             output_name: None,
             references_uncertain: false,
+            references_incomplete: false,
             references: targets
                 .iter()
                 .map(|t| Edge {
@@ -2825,6 +2826,7 @@ mod tests {
                 tfm: NodeTfm::NotEvaluated,
                 output_name: None,
                 references_uncertain: false,
+                references_incomplete: false,
                 references: vec![Edge {
                     target: pb("/p/B.fsproj"),
                     span: span.clone(),
@@ -2861,6 +2863,7 @@ mod tests {
                 tfm: NodeTfm::NotEvaluated,
                 output_name: None,
                 references_uncertain: false,
+                references_incomplete: false,
                 references: vec![Edge {
                     target: pb("/p/B.fsproj"),
                     span: project_ref_span(text),
@@ -2885,6 +2888,7 @@ mod tests {
             tfm: NodeTfm::NotEvaluated,
             output_name: None,
             references_uncertain: false,
+            references_incomplete: false,
             references: vec![Edge {
                 target: pb("/p/A.fsproj"),
                 span: span.clone(),
@@ -2913,6 +2917,7 @@ mod tests {
                 tfm: NodeTfm::NotEvaluated,
                 output_name: None,
                 references_uncertain: false,
+                references_incomplete: false,
                 references: vec![
                     Edge {
                         target: pb("/p/X.fsproj"),
@@ -2952,6 +2957,7 @@ mod tests {
                 tfm: NodeTfm::NotEvaluated,
                 output_name: None,
                 references_uncertain: false,
+                references_incomplete: false,
                 references: vec![Edge {
                     target: pb("/p/B.fsproj"),
                     span: 2..9,
