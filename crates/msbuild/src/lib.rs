@@ -523,8 +523,8 @@ pub struct ParsedProject {
     ///
     /// - behind a gate, on the element or its `<ItemGroup>`, decided by a read
     ///   the walk doubts (a write it refused to compute, one under a gate it
-    ///   could not decide, an SDK-tainted value), whichever way the gate went
-    ///   for the walk;
+    ///   could not decide, an SDK-tainted value, a toolset or environment name
+    ///   it holds no exact value of), whichever way the gate went for the walk;
     /// - behind a condition the walk does not model;
     /// - in a still-possible branch of a `<Choose>` it could not decide;
     /// - whose value it could not expand (an unevaluable expression, a
