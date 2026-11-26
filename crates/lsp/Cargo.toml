@@ -12,6 +12,9 @@ borzoi-cst = { workspace = true, features = ["unstable-union"] }
 borzoi-msbuild.workspace = true
 borzoi-nuget.workspace = true
 borzoi-sema.workspace = true
+# The verdicts `borzoi-msbuild` publishes, and the served build's formed from them
+# (`workspace::EvaluatedProject`).
+borzoi-verdict.workspace = true
 lsp-server.workspace = true
 lsp-types.workspace = true
 # `server::buffer_input`'s bounded channel, the type `lsp-server`'s

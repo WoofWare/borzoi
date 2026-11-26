@@ -135,7 +135,7 @@ fn buffer_diagnostics_observed(
                 lang_version_refusal_diagnostic(&parsed, &env.build_environment, build_properties);
             let mut diags: Vec<Diagnostic> = parsed
                 .diagnostics
-                .into_iter()
+                .iter()
                 // Drop *content-level* diagnostics whose underlying cause
                 // lives inside an imported file (SDK targets, ancestor
                 // `Directory.Build.*`, a followed `<Import>` chain). Their
@@ -171,11 +171,13 @@ fn buffer_diagnostics_observed(
                 })
                 .map(|d| to_lsp_diagnostic(text, &d.kind, &d.span, discovery_failure))
                 .collect();
-            diags.extend(reference_diagnostics(
-                text,
-                &parsed.project_references,
-                observer,
-            ));
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "known defect #1176: a missing referenced project is reported from the \
+                          walk's reference list whether or not the build holds it"
+            )]
+            let references = parsed.best_guess().project_references;
+            diags.extend(reference_diagnostics(text, references, observer));
             // RestoreStale (consumer #3 stage 3.2): a real, SDK-resolved project
             // whose `obj/project.assets.json` is absent — the file the semantic
             // layer reads for cross-assembly resolution. `resolved_sdk_root` gates

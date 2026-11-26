@@ -60,6 +60,7 @@
 //! been accounted for.
 
 use borzoi_msbuild::observed::host_fs;
+use borzoi_verdict::Verdict;
 use host_fs::HostPath;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::OsString;
@@ -630,7 +631,7 @@ fn compare_compile(parsed: &ParsedProject, msbuild: &MsbuildOutput) -> FacetRepo
 }
 
 fn compare_project_references(parsed: &ParsedProject, msbuild: &MsbuildOutput) -> FacetReport {
-    if parsed.project_references_uncertain {
+    if matches!(parsed.project_references(), Verdict::Unknown(_)) {
         return FacetReport::skipped(
             "project_references",
             "project_references_uncertain=true".to_string(),
@@ -638,6 +639,7 @@ fn compare_project_references(parsed: &ParsedProject, msbuild: &MsbuildOutput) -
         .classed("decline(project_references_uncertain)".to_string());
     }
     let ours: Vec<String> = parsed
+        .best_guess()
         .project_references
         .iter()
         .map(|item| path_key(&item.include))
@@ -723,7 +725,7 @@ fn compare_target_frameworks(parsed: &ParsedProject, msbuild: &MsbuildOutput) ->
 }
 
 fn compare_define_constants(parsed: &ParsedProject, msbuild: &MsbuildOutput) -> FacetReport {
-    if parsed.define_constants_uncertain {
+    if matches!(parsed.define_constants(), Verdict::Unknown(_)) {
         return FacetReport::skipped(
             "define_constants",
             format!(
@@ -732,7 +734,7 @@ fn compare_define_constants(parsed: &ParsedProject, msbuild: &MsbuildOutput) -> 
             ),
         );
     }
-    let ours = parsed.define_constants.clone();
+    let ours = parsed.best_guess().define_constants.to_vec();
     let theirs = split_msbuild_list(&msbuild.properties.define_constants);
     if ours == theirs {
         return FacetReport::matched("define_constants", format!("{} symbol(s)", ours.len()));
@@ -1746,7 +1748,7 @@ mod tests {
             &HashMap::new(),
         )
         .expect("well-formed XML parses");
-        assert!(parsed.project_references_uncertain);
+        assert!(matches!(parsed.project_references(), Verdict::Unknown(_)));
 
         let report = compare_project_references(
             &parsed,

@@ -24,6 +24,7 @@ use borzoi_spawn::{BoundedCommand, ChildFailure};
 
 use borzoi::handlers::{served_resolution_with_range, smallest_resolution_with_range};
 use borzoi::project_assets::{resolve_assemblies_for_tfm, resolve_assemblies_root_only};
+use borzoi::project_deferral::ProjectEvaluation;
 use borzoi::sdk_discovery::SdkDiscoveryEnv;
 use borzoi::semantic::{ProjectParses, SemanticState};
 use borzoi::workspace::Workspace;
@@ -48,6 +49,7 @@ use borzoi_sema::{
     OpenOpacity, PrecedingTypes, Resolution, ResolvedFile, ResolvedProject, infer_named_file,
     infer_project,
 };
+use borzoi_verdict::Verdict;
 
 use crate::deferral_shape::{DeferralCause, DeferralShape};
 
@@ -316,11 +318,23 @@ pub fn load_lsp_project_with_options(
             details: items_uncertainty_details(&parsed),
         });
     }
-    if parsed.define_constants_uncertain {
-        return Err(LoadSkip::DefineConstantsUncertain {
-            details: define_constants_uncertainty_details(&parsed),
-        });
-    }
+    // The served build's defines, as the LSP takes them: the evaluator's
+    // verdict with the served-build facts folded in.
+    let define_constants = match workspace.project_evaluation(project) {
+        ProjectEvaluation::Evaluated {
+            defines: Verdict::Certain(defines),
+            ..
+        } => defines.to_vec(),
+        ProjectEvaluation::Evaluated {
+            defines: Verdict::Unknown(_),
+            ..
+        } => {
+            return Err(LoadSkip::DefineConstantsUncertain {
+                details: define_constants_uncertainty_details(&parsed),
+            });
+        }
+        ProjectEvaluation::Failed => return Err(LoadSkip::ProjectEvaluationFailed),
+    };
     if let Some(max_files) = options.limits.max_files
         && parsed.items.len() > max_files.get()
     {
@@ -330,7 +344,6 @@ pub fn load_lsp_project_with_options(
         });
     }
 
-    let define_constants = parsed.define_constants.clone();
     let lang_version = parsed.lang_version.clone();
     let (fcs_extra_refs, project_assets) = fcs_extra_refs(project, &mut workspace, &mut semantic)?;
     let parses = semantic

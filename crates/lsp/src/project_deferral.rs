@@ -39,9 +39,10 @@ use borzoi_msbuild::{
     CompileConditionReason, CompileConditionUncertainty, CompileItemUncertaintyCause,
     CompileItemUncertaintyCauseKind, DefineConstantsUncertaintyCause,
     DefineConstantsUncertaintyCauseKind, DiagnosticKind, DiagnosticOrigin, ImplicitImportKind,
-    ImportFailReason, ParsedProject, RejectionCause, RejectionCertainty,
+    ImportFailReason, ParsedProject, RejectionCause, RejectionCertainty, ResolvedItem,
     StructuralCompileItemUncertainty, UnloadableImport, UntrustedCause,
 };
+use borzoi_verdict::Verdict;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -74,8 +75,18 @@ const MAX_RENDERED_CAUSES: usize = 3;
 pub enum ProjectEvaluation<'a> {
     /// The `.fsproj` evaluated.
     Evaluated {
-        /// What the evaluator produced.
+        /// What the evaluator produced. Its defines and reference list are read
+        /// through [`Self::Evaluated::defines`] and
+        /// [`Self::Evaluated::references`], never off it: those fold in what
+        /// the evaluator cannot see.
         parsed: &'a ParsedProject,
+        /// The served build's `DefineConstants`, or why the LSP does not take
+        /// them for the build's (`workspace::EvaluatedProject::defines`).
+        defines: Verdict<&'a [String], DefinesUnknown<'a>>,
+        /// The served build's `<ProjectReference>` items, or why the LSP does
+        /// not take them for the build's
+        /// (`workspace::EvaluatedProject::references`).
+        references: Verdict<&'a [ResolvedItem], ReferencesUnknown>,
         /// We are serving the **outer dispatch** build of a multi-targeted
         /// project, whose `<ProjectReference>` list is not the real build's
         /// under any TFM. Nothing in `parsed` flags this: a multi-targeted
@@ -88,6 +99,34 @@ pub enum ProjectEvaluation<'a> {
     /// file, a rejected project path. The buffer's own diagnostics say which;
     /// here we only know that nothing downstream can run.
     Failed,
+}
+
+/// Why the LSP does not take the served evaluation's `DefineConstants` for the
+/// build's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DefinesUnknown<'a> {
+    /// The evaluator does not commit to them, for these causes (never none).
+    Evaluation(&'a [DefineConstantsUncertaintyCause]),
+    /// The served evaluation is an outer dispatch build standing in for an
+    /// inner build it could not serve (`workspace::discarded_inner_build`):
+    /// content gated on `'$(TargetFramework)' == ''` is reached here and in
+    /// no inner build.
+    OuterBuildServed,
+}
+
+/// Why the LSP does not take the served evaluation's `<ProjectReference>`
+/// items for the build's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReferencesUnknown {
+    /// The evaluator does not commit to them
+    /// ([`borzoi_msbuild::ProjectReferencesUnknown`]: it records no cause).
+    Evaluation,
+    /// The served evaluation is an outer dispatch build standing in for an
+    /// inner build it could not serve, as for [`DefinesUnknown::OuterBuildServed`].
+    OuterBuildServed,
+    /// No evaluation of the document is an inner build
+    /// (`workspace::EvaluatedProject::not_an_inner_build`).
+    NotAnInnerBuild,
 }
 
 impl ProjectEvaluation<'_> {
@@ -104,10 +143,9 @@ impl ProjectEvaluation<'_> {
             // A failed evaluation has no reference list to drop; its whole-project
             // deferral covers it.
             ProjectEvaluation::Failed => false,
-            ProjectEvaluation::Evaluated {
-                parsed,
-                not_an_inner_build,
-            } => parsed.project_references_uncertain || *not_an_inner_build,
+            ProjectEvaluation::Evaluated { references, .. } => {
+                matches!(references, Verdict::Unknown(_))
+            }
         }
     }
 }
@@ -496,7 +534,7 @@ pub fn deferrals(eval: ProjectEvaluation<'_>, fold: FoldOutcome<'_>) -> Vec<Defe
     let mut out = Vec::new();
 
     let fold_declined_on_evaluation = evaluation_declines_project_fold(eval);
-    let parsed = match eval {
+    let (parsed, defines) = match eval {
         ProjectEvaluation::Failed => {
             return vec![Deferral::new(
                 DeferredCapability::ProjectFold,
@@ -507,7 +545,15 @@ pub fn deferrals(eval: ProjectEvaluation<'_>, fold: FoldOutcome<'_>) -> Vec<Defe
                 ],
             )];
         }
-        ProjectEvaluation::Evaluated { parsed, .. } => parsed,
+        ProjectEvaluation::Evaluated {
+            parsed, defines, ..
+        } => (parsed, defines),
+    };
+    // The evaluator's own define causes; the outer-build cause, which it does
+    // not record, is `outer_build_cause`'s.
+    let define_causes: &[DefineConstantsUncertaintyCause] = match defines {
+        Verdict::Unknown(DefinesUnknown::Evaluation(causes)) => causes,
+        Verdict::Unknown(DefinesUnknown::OuterBuildServed) | Verdict::Certain(_) => &[],
     };
 
     if fold_declined_on_evaluation {
@@ -530,12 +576,7 @@ pub fn deferrals(eval: ProjectEvaluation<'_>, fold: FoldOutcome<'_>) -> Vec<Defe
                         .iter()
                         .map(render_compile_cause),
                 )
-                .chain(
-                    parsed
-                        .define_constants_uncertainties
-                        .iter()
-                        .map(render_define_cause),
-                ),
+                .chain(define_causes.iter().map(render_define_cause)),
         );
         out.push(Deferral::new(
             DeferredCapability::ProjectFold,
@@ -715,9 +756,9 @@ pub fn fold_verdict_known_for(record: &[Deferral], stated: &[Deferral]) -> bool 
 pub fn evaluation_declines_project_fold(eval: ProjectEvaluation<'_>) -> bool {
     match eval {
         ProjectEvaluation::Failed => true,
-        ProjectEvaluation::Evaluated { parsed, .. } => {
-            parsed.items_uncertain || parsed.define_constants_uncertain
-        }
+        ProjectEvaluation::Evaluated {
+            parsed, defines, ..
+        } => parsed.items_uncertain || matches!(defines, Verdict::Unknown(_)),
     }
 }
 

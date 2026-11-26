@@ -35,6 +35,7 @@ borzoi-print = { path = "crates/print" }
 borzoi-sema = { path = "crates/sema" }
 borzoi-spawn = { path = "crates/spawn" }
 borzoi-stats = { path = "tools/stats" }
+borzoi-verdict = { path = "crates/verdict" }
 
 # A bounded channel for the LSP's input buffer (`borzoi::server::buffer_input`);
 # already in the tree through `lsp-server`, whose `Connection` carries its

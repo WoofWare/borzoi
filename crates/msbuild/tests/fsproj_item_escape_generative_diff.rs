@@ -450,7 +450,7 @@ fn a_nul_bearing_item_path_names_no_real_file() {
         let items: Vec<&borzoi_msbuild::ResolvedItem> = parsed
             .items
             .iter()
-            .chain(&parsed.project_references)
+            .chain(parsed.best_guess().project_references)
             .collect();
         // Without a resolver the globs decline, and nothing names a real
         // file; with one, each glob's own match does, once.

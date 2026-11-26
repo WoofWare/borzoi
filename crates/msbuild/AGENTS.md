@@ -8,8 +8,11 @@ the condition subset, follows the SDK's `Directory.Build.props|targets`
 import points, and — when an SDK resolves to the canonical dotnet
 layout — walks the real `Microsoft.Common.props` → `NuGet.props` chain,
 including the `Directory.Packages.props` central-package import.
-Self-contained: depends only on `roxmltree` and `self_cell` (which holds a
-parsed document beside its text, so the crate forbids `unsafe`), and, behind
+Self-contained: depends only on `roxmltree`, `self_cell` (which holds a
+parsed document beside its text, so the crate forbids `unsafe`) and
+`borzoi-verdict` (the defines and the `<ProjectReference>` list are published
+as its `Verdict`s, the walk's raw values only through
+`ParsedProject::best_guess`, #1112), and, behind
 `test-support` only, `borzoi-spawn` (the soundness sweep's FIFO watch holds
 the FIFO open while no child is launched). Intended to be reusable outside
 this repo. Every file-system query an evaluation makes

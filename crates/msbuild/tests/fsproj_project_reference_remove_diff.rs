@@ -38,6 +38,7 @@ use crate::common::parse_fsproj_with_imports;
 use borzoi_msbuild::{
     GlobResolver, ParsedProject, SdkResolver, glob_resolver, resolve_sdk, workloads,
 };
+use borzoi_verdict::Verdict;
 use common::{Oracle, SplitMix64};
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
@@ -464,13 +465,14 @@ fn check(oracle: &mut Oracle, blocks: &[Block], with_resolver: bool) -> Outcome 
         .map(|p| lexical(p))
         .collect();
 
-    if parsed.project_references_uncertain {
+    if matches!(parsed.project_references(), Verdict::Unknown(_)) {
         return Outcome {
             committed: false,
             committed_through_a_remove: false,
         };
     }
     let ours: Vec<PathBuf> = parsed
+        .best_guess()
         .project_references
         .iter()
         .map(|item| lexical(&item.include.to_string_lossy()))
@@ -800,11 +802,12 @@ fn the_non_existent_idiom_commits_on_the_real_sdk() {
         "MSBuild drops the missing reference"
     );
     assert!(
-        !parsed.project_references_uncertain,
+        !matches!(parsed.project_references(), Verdict::Unknown(_)),
         "the idiom must commit on the real SDK; diagnostics: {:#?}",
         parsed.diagnostics
     );
     let ours: Vec<PathBuf> = parsed
+        .best_guess()
         .project_references
         .iter()
         .map(|item| lexical(&item.include.to_string_lossy()))

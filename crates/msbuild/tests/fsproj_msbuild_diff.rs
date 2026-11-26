@@ -463,14 +463,17 @@ fn multi_tfm_seeded_target_framework_matches_msbuild() {
     }
     compare_define_constants(
         "Multi.fsproj (TargetFramework=net8.0)",
-        &project.define_constants,
+        project.best_guess().define_constants,
         &msbuild.properties.define_constants,
         &project.diagnostics,
     );
 
     // Belt and braces: the *gated* branch really fired on both sides (the
     // comparisons above would also pass if both sides dropped it).
-    assert_eq!(project.define_constants, vec!["EIGHT".to_string()]);
+    assert_eq!(
+        project.best_guess().define_constants,
+        vec!["EIGHT".to_string()]
+    );
     assert_eq!(
         item_file_names(project.items.iter()),
         vec!["Shared.fs".to_string(), "Eight.fs".to_string()]
@@ -538,7 +541,7 @@ fn run_diff(rel_fsproj: &str, extras: &[(&str, &str)]) {
 
     compare_define_constants(
         rel_fsproj,
-        &project.define_constants,
+        project.best_guess().define_constants,
         &msbuild.properties.define_constants,
         &project.diagnostics,
     );

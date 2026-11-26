@@ -23,6 +23,7 @@
 
 mod common;
 
+use borzoi_verdict::Verdict;
 use std::collections::{BTreeSet, HashMap};
 
 use borzoi_msbuild::PropertyRead;
@@ -123,8 +124,9 @@ fn all_projects_after_the_property_pass_is_exact_or_declined() {
                     ));
                 }
             }
-            if !ours.project_references_uncertain {
+            if !matches!(ours.project_references(), Verdict::Unknown(_)) {
                 let our_references: Vec<String> = ours
+                    .best_guess()
                     .project_references
                     .iter()
                     .map(|item| item.include.to_string_lossy().into_owned())

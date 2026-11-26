@@ -20,6 +20,7 @@
 
 mod common;
 
+use borzoi_verdict::Verdict;
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Component, Path, PathBuf};
 
@@ -430,6 +431,7 @@ fn grade_read_document(oracle: &mut Oracle, document: &ReadDocument) -> (ReadOut
         .collect();
     let ours_of = |i: usize| -> Vec<PathBuf> {
         parsed
+            .best_guess()
             .project_references
             .iter()
             .filter(|item| starts.iter().position(|s| *s == item.span.start) == Some(i))
@@ -454,7 +456,7 @@ fn grade_read_document(oracle: &mut Oracle, document: &ReadDocument) -> (ReadOut
         .any(|(i, reference)| {
             reference.reads.iter().any(|name| doubted(name)) && !theirs_of(i).is_empty()
         });
-    if parsed.project_references_uncertain {
+    if matches!(parsed.project_references(), Verdict::Unknown(_)) {
         return (ReadOutcome::Declined { owed }, evaluated);
     }
     // A reference MSBuild made reading a name the walk doubts may hold
@@ -463,10 +465,10 @@ fn grade_read_document(oracle: &mut Oracle, document: &ReadDocument) -> (ReadOut
         !owed,
         "#1098: the list is certain, and a reference MSBuild made reads a name the walk \
          doubts:\n{xml}\nours: {:#?}",
-        parsed.project_references
+        parsed.best_guess().project_references
     );
     assert_eq!(
-        parsed.project_references.len(),
+        parsed.best_guess().project_references.len(),
         (0..document.references.len())
             .map(|i| ours_of(i).len())
             .sum::<usize>(),
@@ -680,13 +682,13 @@ fn a_reference_reading_a_refused_name_is_no_certain_omission() {
         )
         .expect("well-formed XML parses");
         assert!(
-            theirs.len() > parsed.project_references.len(),
+            theirs.len() > parsed.best_guess().project_references.len(),
             "MSBuild's list is not longer, so the row tests nothing: {xml}\n{theirs:?}"
         );
         assert!(
-            parsed.project_references_uncertain,
+            matches!(parsed.project_references(), Verdict::Unknown(_)),
             "MSBuild holds {theirs:?}, and the walk published {:?} as certain: {xml}",
-            parsed.project_references
+            parsed.best_guess().project_references
         );
     }
 }
@@ -721,7 +723,10 @@ fn a_doubted_reference_flags_the_list_where_it_stands() {
         None,
     )
     .expect("well-formed XML parses");
-    assert!(parsed.project_references_uncertain, "{xml}");
+    assert!(
+        matches!(parsed.project_references(), Verdict::Unknown(_)),
+        "{xml}"
+    );
     assert!(
         !parsed.package_references_uncertain,
         "{xml}\n{:#?}",
@@ -841,8 +846,9 @@ fn an_implicit_read_leaves_no_certain_list_short() {
     )
     .expect("well-formed XML parses");
     assert_eq!(theirs.len(), 2, "{theirs:?}");
-    if !parsed.project_references_uncertain {
+    if !matches!(parsed.project_references(), Verdict::Unknown(_)) {
         let mut ours: Vec<PathBuf> = parsed
+            .best_guess()
             .project_references
             .iter()
             .map(|item| lexical(&item.include.to_string_lossy()))
@@ -961,8 +967,12 @@ fn dead_reference_row(oracle: &mut Oracle, row: &str) {
         None,
     )
     .expect("well-formed XML parses");
-    assert!(!parsed.project_references_uncertain, "{xml}");
+    assert!(
+        !matches!(parsed.project_references(), Verdict::Unknown(_)),
+        "{xml}"
+    );
     let ours: Vec<PathBuf> = parsed
+        .best_guess()
         .project_references
         .iter()
         .map(|item| lexical(&item.include.to_string_lossy()))

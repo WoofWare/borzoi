@@ -627,6 +627,29 @@ mod tests {
         }
     }
 
+    /// The served build's defines and references are read from
+    /// `workspace::EvaluatedProject` (#1112): the ban on the evaluator's own
+    /// verdicts and its raw values is what makes any other read say why, so
+    /// it must not fall out of the crate's `clippy.toml`.
+    #[test]
+    fn clippy_config_bans_reading_the_evaluators_own_verdicts() {
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let crate_config = host_fs::read_to_string(manifest.join("clippy.toml")).unwrap();
+        for method in [
+            "borzoi_msbuild::ParsedProject::define_constants",
+            "borzoi_msbuild::ParsedProject::project_references",
+            "borzoi_msbuild::ParsedProject::best_guess",
+        ] {
+            assert!(
+                crate_config
+                    .lines()
+                    .filter(|line| !line.trim_start().starts_with('#'))
+                    .any(|line| line.contains(&format!("path = \"{method}\""))),
+                "crates/lsp/clippy.toml no longer bans {method}"
+            );
+        }
+    }
+
     #[test]
     fn a_host_read_stamps_what_it_read() {
         let tmp = tempfile::TempDir::new().unwrap();

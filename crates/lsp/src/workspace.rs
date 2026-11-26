@@ -62,7 +62,7 @@ use borzoi_msbuild::{
 };
 
 use crate::paths::{lexically_normalize, paths_equal};
-use crate::project_deferral::ProjectEvaluation;
+use crate::project_deferral::{DefinesUnknown, ProjectEvaluation, ReferencesUnknown};
 use crate::project_graph::{
     Edge, EdgeKind, NodeResult, NodeTfm, ProjectGraph, ProjectKind, build_graph, classify,
 };
@@ -71,6 +71,7 @@ use crate::sdk_language::LangVersionSelection;
 use crate::semantic::ProjectId;
 use crate::tfm_policy::{self, caller_owns_target_framework, seed_target_framework_global};
 use borzoi_msbuild::ItemMetadataValue;
+use borzoi_verdict::Verdict;
 
 const COMPILED: &str = "COMPILED";
 const INTERACTIVE: &str = "INTERACTIVE";
@@ -265,6 +266,66 @@ struct EvaluatedProject {
     /// `WasmNativeWorkload` and `RestoreAdditionalProjectSources`), so this
     /// declines nothing anyone has been observed to write.
     not_an_inner_build: bool,
+    /// `parsed` is an outer dispatch build served in place of an inner build
+    /// that could not be served ([`discarded_inner_build`]): its
+    /// `DefineConstants` and `<ProjectReference>`s are the outer build's, and
+    /// no inner build has them. Nothing in the evaluation says so, so
+    /// [`Self::defines`] and [`Self::references`] fold it in.
+    outer_build_served: bool,
+}
+
+impl EvaluatedProject {
+    /// The served build's `DefineConstants`, or why the LSP does not take the
+    /// evaluation's for the build's: the evaluator's verdict, then the outer
+    /// build standing in for an inner one. The one place the evaluator's
+    /// verdict on the defines is read.
+    fn defines(&self) -> Verdict<&[String], DefinesUnknown<'_>> {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "forms the served build's verdict from the evaluator's, here and nowhere else"
+        )]
+        let evaluated = self.parsed.define_constants();
+        match evaluated {
+            Verdict::Unknown(causes) => Verdict::Unknown(DefinesUnknown::Evaluation(causes)),
+            Verdict::Certain(_) if self.outer_build_served => {
+                Verdict::Unknown(DefinesUnknown::OuterBuildServed)
+            }
+            Verdict::Certain(defines) => Verdict::Certain(defines),
+        }
+    }
+
+    /// The served build's `<ProjectReference>` items, or why the LSP does not
+    /// take the evaluation's for the build's: the evaluator's verdict, then the
+    /// outer build standing in for an inner one, then a document no
+    /// evaluation of which is an inner build. The one place the evaluator's
+    /// verdict on the references is read.
+    fn references(&self) -> Verdict<&[ResolvedItem], ReferencesUnknown> {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "forms the served build's verdict from the evaluator's, here and nowhere else"
+        )]
+        let evaluated = self.parsed.project_references();
+        match evaluated {
+            Verdict::Unknown(_) => Verdict::Unknown(ReferencesUnknown::Evaluation),
+            Verdict::Certain(_) if self.outer_build_served => {
+                Verdict::Unknown(ReferencesUnknown::OuterBuildServed)
+            }
+            Verdict::Certain(_) if self.not_an_inner_build => {
+                Verdict::Unknown(ReferencesUnknown::NotAnInnerBuild)
+            }
+            Verdict::Certain(references) => Verdict::Certain(references),
+        }
+    }
+
+    /// Everything the decline decisions read ([`ProjectEvaluation`]).
+    fn evaluation(&self) -> ProjectEvaluation<'_> {
+        ProjectEvaluation::Evaluated {
+            parsed: &self.parsed,
+            defines: self.defines(),
+            references: self.references(),
+            not_an_inner_build: self.not_an_inner_build,
+        }
+    }
 }
 
 /// What one generation of a [`Workspace`] observed
@@ -1841,8 +1902,14 @@ impl Workspace {
     /// Add the project's evaluated `$(DefineConstants)` to `symbols`. A no-op if
     /// the project at `project_path` failed to evaluate (its failure is cached).
     fn extend_with_define_constants(&mut self, project_path: &Path, symbols: &mut HashSet<String>) {
-        if let Some(parsed) = self.project(project_path) {
-            for sym in &parsed.define_constants {
+        if let Some(evaluated) = self.evaluated(project_path) {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "known defect #1176: the single-file parse takes the walk's defines \
+                          whether or not the build holds them"
+            )]
+            let defines = evaluated.parsed.best_guess().define_constants;
+            for sym in defines {
                 symbols.insert(sym.clone());
             }
         }
@@ -2099,10 +2166,7 @@ impl Workspace {
             .get(project)
             .and_then(|c| c.evaluated.as_ref())
         {
-            Some(evaluated) => ProjectEvaluation::Evaluated {
-                parsed: &evaluated.parsed,
-                not_an_inner_build: evaluated.not_an_inner_build,
-            },
+            Some(evaluated) => evaluated.evaluation(),
             None => ProjectEvaluation::Failed,
         };
         (evaluation, id)
@@ -2773,12 +2837,7 @@ fn references_suppressed(evaluated: &EvaluatedProject, purpose: GraphWalkPurpose
     //
     // The purpose gate stays here: it is about why *this caller* is walking, not
     // about the project, so it has no place in a per-project verdict.
-    purpose == GraphWalkPurpose::CompileClosure
-        && ProjectEvaluation::Evaluated {
-            parsed: &evaluated.parsed,
-            not_an_inner_build: evaluated.not_an_inner_build,
-        }
-        .drops_reference_edges()
+    purpose == GraphWalkPurpose::CompileClosure && evaluated.evaluation().drops_reference_edges()
 }
 
 fn edges_of(evaluated: &EvaluatedProject, purpose: GraphWalkPurpose, is_entry: bool) -> Vec<Edge> {
@@ -2794,9 +2853,22 @@ fn edges_of(evaluated: &EvaluatedProject, purpose: GraphWalkPurpose, is_entry: b
     if references_suppressed(evaluated, purpose) {
         return Vec::new();
     }
-    evaluated
-        .parsed
-        .project_references
+    let items = match purpose {
+        GraphWalkPurpose::CompileClosure => match evaluated.references() {
+            Verdict::Certain(items) => items,
+            Verdict::Unknown(_) => return Vec::new(),
+        },
+        GraphWalkPurpose::DeclaredStructure => {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "known defect #1176: the declared-structure walk reads the walk's \
+                          reference list whether or not the build holds it"
+            )]
+            let items = evaluated.parsed.best_guess().project_references;
+            items
+        }
+    };
+    items
         .iter()
         .filter_map(|item| {
             let kind = match purpose {
@@ -3017,6 +3089,7 @@ fn evaluate_project(
     // so an override widens it — and the override additionally withholds every
     // other TFM-derived conclusion (see `EvaluatedProject::not_an_inner_build`).
     let not_an_inner_build = served.not_an_inner_build;
+    let outer_build_served = served.outer_build_served;
     let tfm_untrusted = pass1_untrusted || not_an_inner_build || served.tfm_unknown;
     // The evaluator reports the `SdkPaths::root` of the entry project's own SDK
     // (`ParsedProject::resolved_sdk_root`); recover the install root from it.
@@ -3043,6 +3116,7 @@ fn evaluate_project(
             body_target_framework,
             tfm_untrusted,
             not_an_inner_build,
+            outer_build_served,
         }),
         reads,
         immutable,
@@ -3059,17 +3133,15 @@ fn evaluate_project(
 /// singular, so that gate is decided cleanly under the evaluator's environment
 /// model, with no diagnostic and no `*_uncertain` flag.
 ///
-/// Setting the flags the consumers already read is deliberate, rather than
-/// giving each of them a second predicate to consult. `*_uncertain` already
+/// The defines and the references the evaluation publishes as verdicts, so the
+/// served build's verdicts fold this in instead
+/// ([`EvaluatedProject::outer_build_served`]). The Compile items are still a
+/// value beside a flag, so their flag is set here: `items_uncertain` already
 /// means "this list may not be what the real build sees, so do not fold from
-/// it", which is exactly the claim, and every consumer that must respect it has
-/// been audited for that meaning already — `parses_for_project` refuses the
-/// whole fold on the first two (`semantic.rs`), degrading to single-file
-/// analysis.
+/// it", and `parses_for_project` refuses the whole fold on it (`semantic.rs`),
+/// degrading to single-file analysis.
 fn discarded_inner_build(mut parsed: ParsedProject) -> ParsedProject {
-    parsed.define_constants_uncertain = true;
     parsed.items_uncertain = true;
-    parsed.project_references_uncertain = true;
     parsed
 }
 
@@ -3091,6 +3163,9 @@ struct ServedEvaluation {
     /// The read set of the seeded second pass, when one ran, whether or not
     /// it is the one served: a discarded pass decided `not_an_inner_build`.
     pass2_reads: Option<ReadSet>,
+    /// `parsed` is pass 1, an outer dispatch build, served in place of an inner
+    /// build: [`EvaluatedProject::outer_build_served`], which this becomes.
+    outer_build_served: bool,
 }
 
 /// Apply [`tfm_policy::tfm_choice`]'s decision: re-evaluate `pass1`'s project
@@ -3134,6 +3209,7 @@ fn select_target_framework(
                 not_an_inner_build: true,
                 tfm_unknown: false,
                 pass2_reads: None,
+                outer_build_served: true,
             };
         }
         // Pass 1 may be the outer dispatch build: exact for itself, and for no
@@ -3145,6 +3221,7 @@ fn select_target_framework(
                 not_an_inner_build: false,
                 tfm_unknown: true,
                 pass2_reads: None,
+                outer_build_served: true,
             };
         }
         let chosen_tfm = choice.served().map(str::to_string);
@@ -3154,6 +3231,7 @@ fn select_target_framework(
             not_an_inner_build: false,
             tfm_unknown: false,
             pass2_reads: None,
+            outer_build_served: false,
         };
     };
     let mut seeded = extras.clone();
@@ -3167,6 +3245,7 @@ fn select_target_framework(
                 chosen_tfm: Some(seed),
                 not_an_inner_build: false,
                 tfm_unknown: false,
+                outer_build_served: false,
             },
             // The document opts `TargetFramework` out of global protection,
             // so the seeded pass may be a chimera: values above an override
@@ -3187,6 +3266,7 @@ fn select_target_framework(
                 not_an_inner_build: true,
                 tfm_unknown: false,
                 pass2_reads: Some(pass2.read_set),
+                outer_build_served: true,
             },
         },
         // Same source, same resolver, and the seed key can't collide (a
@@ -3201,6 +3281,7 @@ fn select_target_framework(
             not_an_inner_build: false,
             tfm_unknown: false,
             pass2_reads: None,
+            outer_build_served: true,
         },
     }
 }
@@ -3584,12 +3665,12 @@ mod tests {
             SdkDiscoveryEnv::default(),
             HashMap::new(),
         );
-        let parsed = &ws.evaluated(&proj).expect("the project evaluates").parsed;
+        let evaluated = ws.evaluated(&proj).expect("the project evaluates");
         assert!(
-            parsed.items_uncertain && parsed.define_constants_uncertain,
+            evaluated.parsed.items_uncertain && matches!(evaluated.defines(), Verdict::Unknown(_)),
             "the outer build's Compile set {:?} and defines {:?} were served as the project's",
-            parsed.items,
-            parsed.define_constants
+            evaluated.parsed.items,
+            evaluated.defines()
         );
         assert_eq!(ws.served_tfm_for_project(&proj), ServedTfm::Untrusted);
     }
@@ -3621,12 +3702,12 @@ mod tests {
             SdkDiscoveryEnv::default(),
             HashMap::new(),
         );
-        let parsed = &ws.evaluated(&proj).expect("the project evaluates").parsed;
+        let evaluated = ws.evaluated(&proj).expect("the project evaluates");
         assert!(
-            parsed.items_uncertain && parsed.define_constants_uncertain,
+            evaluated.parsed.items_uncertain && matches!(evaluated.defines(), Verdict::Unknown(_)),
             "the outer build's Compile set {:?} and defines {:?} were served as the project's",
-            parsed.items,
-            parsed.define_constants
+            evaluated.parsed.items,
+            evaluated.defines()
         );
         assert_eq!(ws.served_tfm_for_project(&proj), ServedTfm::Untrusted);
     }
@@ -3667,11 +3748,11 @@ mod tests {
             &fsproj_multi_tfm("net8.0;net10.0", &[("net8.0", "EIGHT")]),
         );
         let mut ws = Workspace::default();
-        let parsed = ws.project(&proj).expect("evaluates");
+        let evaluated = ws.evaluated(&proj).expect("evaluates");
         assert!(
-            !parsed.define_constants_uncertain,
+            matches!(evaluated.defines(), Verdict::Certain(_)),
             "seeded TargetFramework must make the gate evaluable: {:?}",
-            parsed.diagnostics
+            evaluated.parsed.diagnostics
         );
     }
 
@@ -3907,17 +3988,18 @@ mod tests {
             </Project>"#,
         );
         let mut ws = Workspace::default();
-        let parsed = ws.project(&proj).expect("evaluates");
+        let evaluated = ws.evaluated(&proj).expect("evaluates");
         assert!(
-            parsed.define_constants_uncertain,
+            matches!(evaluated.defines(), Verdict::Unknown(_)),
             "a TFM-gated define must read the unpinned TargetFramework, not a \
              first-declared seed we declined to serve"
         );
-        assert!(
-            !parsed.define_constants.contains(&"EIGHT".to_string()),
-            "{:?}",
-            parsed.define_constants
-        );
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the test checks the walk's own list, which the verdict withholds"
+        )]
+        let walked = evaluated.parsed.best_guess().define_constants;
+        assert!(!walked.contains(&"EIGHT".to_string()), "{walked:?}");
     }
 
     /// A caller-supplied `TargetFramework` global is immune to body-write
@@ -4228,14 +4310,17 @@ mod tests {
         );
         let mut ws = Workspace::default();
 
-        let parsed = ws.project(&proj).expect("evaluates");
+        let evaluated = ws.evaluated(&proj).expect("evaluates");
         assert!(
-            parsed.define_constants_uncertain,
+            matches!(evaluated.defines(), Verdict::Unknown(_)),
             "outer-only defines must not be served as fact"
         );
-        assert!(parsed.items_uncertain, "nor the outer build's Compile set");
         assert!(
-            parsed.project_references_uncertain,
+            evaluated.parsed.items_uncertain,
+            "nor the outer build's Compile set"
+        );
+        assert!(
+            matches!(evaluated.references(), Verdict::Unknown(_)),
             "nor its reference list"
         );
     }
@@ -4262,9 +4347,9 @@ mod tests {
             Workspace::with_env_and_extra_build_properties(SdkDiscoveryEnv::default(), extra);
 
         assert_eq!(ws.served_tfm_for_project(&proj), ServedTfm::Untrusted);
-        let parsed = ws.project(&proj).expect("evaluates");
-        assert!(parsed.define_constants_uncertain);
-        assert!(parsed.items_uncertain);
+        let evaluated = ws.evaluated(&proj).expect("evaluates");
+        assert!(matches!(evaluated.defines(), Verdict::Unknown(_)));
+        assert!(evaluated.parsed.items_uncertain);
     }
 
     /// `TreatAsLocalProperty` may itself be computed: MSBuild expands `$(…)` in
@@ -6711,10 +6796,10 @@ mod tests {
 
         // The first cache lookup of B must evaluate fresh — proving the walk
         // left B uncached. (A cached graph walk would pin the stale FOO.)
-        let defines = ws
-            .project(&b)
-            .map(|p| p.define_constants.clone())
-            .unwrap_or_default();
+        let defines = match ws.evaluated(&b).map(EvaluatedProject::defines) {
+            Some(Verdict::Certain(defines)) => defines.to_vec(),
+            other => panic!("B's defines are certain: {other:?}"),
+        };
         assert!(
             defines.iter().any(|d| d == "BAR") && !defines.iter().any(|d| d == "FOO"),
             "project_graph pinned B's evaluation: {defines:?}"
@@ -7661,7 +7746,7 @@ mod tests {
                 &Cell::new(0),
                 &RefCell::default(),
             );
-            let parsed = match evaluation.evaluated {
+            let mut parsed = match evaluation.evaluated {
                 Some(evaluated) => evaluated.parsed,
                 None => borzoi_msbuild::parse_fsproj(
                     &borzoi_msbuild::ProjectFile::buffer(project, "<Project />")
@@ -7671,10 +7756,8 @@ mod tests {
                 )
                 .unwrap(),
             };
-            ParsedProject {
-                read_set: evaluation.reads,
-                ..parsed
-            }
+            parsed.read_set = evaluation.reads;
+            parsed
         }
 
         /// The read-set soundness property of `docs/incremental-lsp-plan.md`
@@ -7795,7 +7878,11 @@ mod tests {
             let tmp = TempDir::new().unwrap();
             let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
             let (project, env) = workload_world(&root);
-            let defines = |parsed: &ParsedProject| parsed.define_constants.clone();
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "the read set's soundness is over the walk's own values"
+            )]
+            let defines = |parsed: &ParsedProject| parsed.best_guess().define_constants.to_vec();
             let base = evaluation(&project, &env);
             assert!(
                 defines(&base).iter().any(|d| d == "W_ONE")
@@ -7867,10 +7954,9 @@ mod tests {
                         .into_iter()
                         .map(|check| check.read().clone())
                         .collect();
-                    ParsedProject {
-                        read_set,
-                        ..evaluation_of(&project, evaluation.evaluated)
-                    }
+                    let mut parsed = evaluation_of(&project, evaluation.evaluated);
+                    parsed.read_set = read_set;
+                    parsed
                 };
                 let fifo = crate::observed::host_fs::Fifo::new();
                 let tally = soundness::sweep(

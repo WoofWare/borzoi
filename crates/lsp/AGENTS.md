@@ -18,6 +18,13 @@ its ordered Compile `items` (the semantic layer's fold order), and its
 `project_references` (the inter-project graph: `.fsproj` diagnostics and
 the assembly env's reference edges) are all consumed
 (`docs/fsproj-consumption-plan.md` tracks the remaining consumers).
+The defines and the reference list are `borzoi-verdict` verdicts, and the
+LSP forms the served build's once, in `workspace::EvaluatedProject`, folding in
+what the evaluator cannot see (an outer dispatch build standing in for an inner
+one, a document no evaluation of which is an inner build); every reader takes
+them from there or from `ProjectEvaluation`. `crates/lsp/clippy.toml` bans the
+evaluator's own verdicts and `ParsedProject::best_guess` elsewhere, so a reader
+of the walk's raw values carries an `#[expect]` saying why (#1112, #1176).
 `borzoi-assembly` is runtime-live too: referenced assemblies are
 read into each project's `AssemblyEnv` (`crates/lsp/src/semantic.rs`).
 The crate observes the file system only through `crates/lsp/src/observed.rs`

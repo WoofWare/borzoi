@@ -19,6 +19,8 @@ borzoi.workspace = true
 borzoi-cst = { workspace = true, features = ["unstable-union"] }
 borzoi-msbuild.workspace = true
 borzoi-sema = { workspace = true, features = ["test-support"] }
+# The served build's verdicts the workspace publishes (`ProjectEvaluation`).
+borzoi-verdict.workspace = true
 # The bounded driver for the `fcs-dump` children this harness shells out to. A
 # regular dependency, not a dev-dependency: this crate is itself an unpublished
 # integration-test shell (see the module docs), and the drivers live in its

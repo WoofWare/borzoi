@@ -73,13 +73,20 @@ fn fsproj_to_csharp_metadata_e2e() {
     // *canonical* file as `fixture.csproj_path()` but a different
     // PathBuf. Compare via canonicalise() so the test asserts identity
     // of file, not byte-equality of paths.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the evaluator's own verdict is what this end-to-end test checks"
+    )]
+    let references = match parsed.project_references() {
+        borzoi_verdict::Verdict::Certain(references) => references,
+        borzoi_verdict::Verdict::Unknown(why) => panic!("the reference list is certain: {why:?}"),
+    };
     assert_eq!(
-        parsed.project_references.len(),
+        references.len(),
         1,
-        "fsproj should declare exactly one ProjectReference, got {:?}",
-        parsed.project_references,
+        "fsproj should declare exactly one ProjectReference, got {references:?}",
     );
-    let pr_canon = crate::common::host_fs::canonicalize(&parsed.project_references[0].include)
+    let pr_canon = crate::common::host_fs::canonicalize(&references[0].include)
         .expect("canonicalise resolved ProjectReference");
     let csproj_canon = crate::common::host_fs::canonicalize(fixture.csproj_path())
         .expect("canonicalise fixture csproj");

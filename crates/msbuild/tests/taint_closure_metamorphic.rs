@@ -33,6 +33,7 @@
 
 mod common;
 
+use borzoi_verdict::Verdict;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
@@ -340,8 +341,9 @@ fn facts(project: &ParsedProject, names: &[&'static str]) -> Facts {
     );
     out.insert(
         Fact::ProjectReferences,
-        (!project.project_references_uncertain).then(|| {
+        (!matches!(project.project_references(), Verdict::Unknown(_))).then(|| {
             project
+                .best_guess()
                 .project_references
                 .iter()
                 .map(|i| i.include.display().to_string())
@@ -350,8 +352,8 @@ fn facts(project: &ParsedProject, names: &[&'static str]) -> Facts {
     );
     out.insert(
         Fact::DefineConstants,
-        (!project.define_constants_uncertain)
-            .then(|| vec![format!("{:?}", project.define_constants)]),
+        (!matches!(project.define_constants(), Verdict::Unknown(_)))
+            .then(|| vec![format!("{:?}", project.best_guess().define_constants)]),
     );
     out.insert(
         Fact::TargetName,
@@ -1138,9 +1140,10 @@ fn a_project_reference_gated_on_a_refused_name_is_not_certain() {
 </Project>"#,
     );
     assert!(
-        project.project_references_uncertain || project.project_references.is_empty(),
+        matches!(project.project_references(), Verdict::Unknown(_))
+            || project.best_guess().project_references.is_empty(),
         "MSBuild computes `Bar` and skips the group; we captured {:?} as certain",
-        project.project_references
+        project.best_guess().project_references
     );
 }
 
@@ -1172,9 +1175,9 @@ fn a_project_reference_reading_a_twice_refused_name_is_not_dropped() {
 </Project>"#,
     );
     assert!(
-        project.project_references_uncertain,
+        matches!(project.project_references(), Verdict::Unknown(_)),
         "MSBuild references `$(TargetFramework.Length).fsproj`; we captured {:?} as certain",
-        project.project_references
+        project.best_guess().project_references
     );
     // The same read of a name the walk holds no value of, or holds one it
     // doubts, by each route: dropped or kept, the list is not certain.
@@ -1227,9 +1230,9 @@ fn a_project_reference_reading_a_twice_refused_name_is_not_dropped() {
     ] {
         let project = pure_evaluate(text);
         assert!(
-            project.project_references_uncertain,
+            matches!(project.project_references(), Verdict::Unknown(_)),
             "{label}: MSBuild references `$(TF.Length).fsproj`; we captured {:?} as certain",
-            project.project_references
+            project.best_guess().project_references
         );
     }
 }
@@ -1245,8 +1248,8 @@ fn a_project_reference_gated_on_a_rewritten_refused_name_is_certain() {
   <ItemGroup Condition="'$(Bar)' == 'x'"><ProjectReference Include="x.fsproj" /></ItemGroup>
 </Project>"#,
     );
-    assert!(!project.project_references_uncertain);
-    assert_eq!(project.project_references.len(), 1);
+    assert!(!matches!(project.project_references(), Verdict::Unknown(_)));
+    assert_eq!(project.best_guess().project_references.len(), 1);
     assert_eq!(
         project.property("Bar"),
         PropertyRead::Value("x".to_string())
@@ -1338,9 +1341,9 @@ fn a_copied_define_constants_root_does_not_hide_a_gate() {
 </Project>"#,
     );
     assert!(
-        project.define_constants_uncertain,
+        matches!(project.define_constants(), Verdict::Unknown(_)),
         "MSBuild skips `P1`'s write, so `DefineConstants` is `xFalse`; we published {:?}",
-        project.define_constants
+        project.best_guess().define_constants
     );
 }
 
@@ -1359,8 +1362,8 @@ fn the_self_append_read_does_not_stand_for_a_copied_root() {
 </Project>"#,
     );
     assert!(
-        project.define_constants_uncertain,
+        matches!(project.define_constants(), Verdict::Unknown(_)),
         "MSBuild skips `P1`'s write, so `DefineConstants` is `;xFalse`; we published {:?}",
-        project.define_constants
+        project.best_guess().define_constants
     );
 }

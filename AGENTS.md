@@ -21,7 +21,8 @@ A Cargo workspace with eleven crates under `crates/` and two tools:
   per-version facades. Self-contained; meant to be reusable outside this repo.
 - `crates/msbuild/` — `borzoi-msbuild`: `.fsproj` evaluation (Compile order,
   properties, conditions, the SDK import chain), held to real MSBuild.
-  Self-contained; reusable.
+  Self-contained but for `borzoi-verdict`, whose verdicts it publishes;
+  reusable.
 - `crates/assembly/` — `borzoi-assembly`: an ECMA-335 reader with an
   F#-flavoured projection of referenced assemblies. Self-contained; reusable.
 - `crates/nuget/` — `borzoi-nuget`: NuGet primitives for the in-house

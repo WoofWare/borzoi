@@ -170,7 +170,11 @@ fn run_snapshot(rel_fsproj: &str, extras: &[(&str, &str)], snap_name: &str) {
 
     assert_compile_items_only(&project.items, rel_fsproj);
     assert_no_duplicate_includes(&project.items, &project_dir, rel_fsproj);
-    assert_no_duplicate_includes(&project.project_references, &project_dir, rel_fsproj);
+    assert_no_duplicate_includes(
+        project.best_guess().project_references,
+        &project_dir,
+        rel_fsproj,
+    );
 
     let actual = render_snapshot(&project, &project_dir);
     let snap_path = root.join(snap_name);
@@ -234,10 +238,10 @@ fn render_snapshot(project: &ParsedProject, project_dir: &Path) -> String {
     writeln!(
         out,
         "project_references ({}):",
-        project.project_references.len()
+        project.best_guess().project_references.len()
     )
     .unwrap();
-    for item in &project.project_references {
+    for item in project.best_guess().project_references {
         let rel = relative_to(&item.include, project_dir);
         let path = to_forward_slashes(&rel);
         writeln!(out, "  {path}").unwrap();

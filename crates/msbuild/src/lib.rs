@@ -87,6 +87,7 @@ pub fn msbuild_boolean(value: &str) -> Option<bool> {
     condition::parse_msbuild_bool(value)
 }
 
+use borzoi_verdict::Verdict;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::error::Error;
 use std::fmt;
@@ -456,7 +457,7 @@ pub struct ParsedProject {
     /// Each `include` is the path to a referenced project file (csproj,
     /// fsproj, etc.), resolved against the entry project's directory
     /// the same way `<Compile>` includes are.
-    pub project_references: Vec<ResolvedItem>,
+    pub(crate) project_references: Vec<ResolvedItem>,
     /// `true` if [`Self::project_references`] may diverge from MSBuild's
     /// evaluated item list. Consumers deriving *reference semantics* from
     /// the list — the LSP's compile-closure walk — must not trust it when
@@ -509,7 +510,7 @@ pub struct ParsedProject {
     /// A corresponding diagnostic ([`DiagnosticKind::UnsupportedItemOperation`],
     /// [`DiagnosticKind::UnsupportedCondition`],
     /// [`DiagnosticKind::UnresolvedImport`], …) is emitted alongside.
-    pub project_references_uncertain: bool,
+    pub(crate) project_references_uncertain: bool,
     /// The effective `<PackageReference>` dependency set in document order,
     /// after collapsing `Update` items onto the `Include` they modify: each
     /// `<PackageReference Update="X" …>` overwrites the matching (case-
@@ -553,7 +554,7 @@ pub struct ParsedProject {
     /// only what the project file itself wrote. Property-name lookup is
     /// case-insensitive (MSBuild semantics); individual segment casings
     /// are preserved (F# preprocessor symbols are case-sensitive).
-    pub define_constants: Vec<String>,
+    pub(crate) define_constants: Vec<String>,
     /// The declared target frameworks, in document order: `<TargetFrameworks>`
     /// split into entries, else `<TargetFramework>` as a single entry, else
     /// empty. Read it through [`target_frameworks()`](fn@target_frameworks), which is the supported
@@ -659,9 +660,9 @@ pub struct ParsedProject {
     /// not follow, or one whose gate it could not decide), or `None` when it
     /// entered everything the build imports. Content it did not see may define
     /// anything, so [`Self::foreign_definitions`] is complete only when this is
-    /// `None`, and [`Self::items_uncertain`],
-    /// [`Self::project_references_uncertain`] and
-    /// [`Self::define_constants_uncertain`] are `true` whenever it is `Some`.
+    /// `None`: [`Self::items_uncertain`] is `true` whenever it is `Some`, and
+    /// [`Self::project_references()`] and [`Self::define_constants()`] are
+    /// unknown.
     pub hidden_content: Option<UntrustedCause>,
     /// Why MSBuild rejects the whole project, or may, or `None` when nothing
     /// the walk passed could make it: the first construct the walk claims
@@ -671,9 +672,10 @@ pub struct ParsedProject {
     /// as the build's once this is `Some`, whatever it bound before or after
     /// the construct: every [`Self::property`] read is inexact
     /// ([`UntrustedCause::Rejected`], [`InexactUnset::Rejected`]),
-    /// [`Self::items_uncertain`], [`Self::define_constants_uncertain`],
-    /// [`Self::project_references_uncertain`] and
-    /// [`Self::package_references_uncertain`] are set (each naming a
+    /// [`Self::items_uncertain`] and
+    /// [`Self::package_references_uncertain`] are set,
+    /// [`Self::define_constants()`] and [`Self::project_references()`] are
+    /// unknown (each axis naming a
     /// [`DiagnosticKind::Rejected`] or [`DiagnosticKind::MayBeRejected`] cause
     /// where the axis records causes),
     /// [`Self::target_name`] is unknown and [`Self::hidden_content`] is
@@ -872,7 +874,7 @@ pub struct ParsedProject {
     /// across single-file and cross-file resolution. Only *user-authored*
     /// define uncertainty (an unevaluable condition, an unsupported/`@()`/`%()`
     /// value reference) and hidden content are flagged.
-    pub define_constants_uncertain: bool,
+    pub(crate) define_constants_uncertain: bool,
     /// Concrete events that made [`Self::define_constants_uncertain`] true —
     /// the define-axis twin of [`Self::compile_item_uncertainties`], and the
     /// only channel that can say *why* the `#if` symbol set is untrusted.
@@ -882,7 +884,7 @@ pub struct ParsedProject {
     /// which pushes here at the same moment, so
     /// `define_constants_uncertain == !define_constants_uncertainties.is_empty()`
     /// holds by construction; `define_uncertainty_and_its_causes_agree` pins it.
-    pub define_constants_uncertainties: Vec<DefineConstantsUncertaintyCause>,
+    pub(crate) define_constants_uncertainties: Vec<DefineConstantsUncertaintyCause>,
     /// The [`SdkPaths::root`] of the entry project's **own** SDK — its
     /// `<Project Sdk="X">` shorthand or the equivalent promoted explicit form
     /// (`<Import Sdk="X" Project="Sdk.props"/>` as the first body element).
@@ -1388,7 +1390,61 @@ impl ForeignDefinitions {
     }
 }
 
+/// Why the walk does not commit to its `<ProjectReference>` list
+/// ([`ParsedProject::project_references`]): the conditions
+/// `ParsedProject::project_references_uncertain` documents. The walk records
+/// no cause on this axis; its diagnostics say what it met.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProjectReferencesUnknown;
+
+/// The walk's own values for what [`ParsedProject`] publishes as verdicts,
+/// whether or not the build holds them: its best guess, for a consumer that
+/// serves one and says so.
+///
+/// A consumer deciding anything on these reads the verdicts instead
+/// ([`ParsedProject::define_constants`], [`ParsedProject::project_references`]).
+#[derive(Debug, Clone, Copy)]
+pub struct BestGuess<'a> {
+    /// The `DefineConstants` list the walk holds.
+    pub define_constants: &'a [String],
+    /// The `<ProjectReference>` items the walk holds.
+    pub project_references: &'a [ResolvedItem],
+}
+
 impl ParsedProject {
+    /// The F# preprocessor symbols of the evaluated `$(DefineConstants)`,
+    /// when the walk commits to them; otherwise why it does not (every
+    /// recorded cause, never none). See the `define_constants` and
+    /// `define_constants_uncertain` fields for what each means.
+    pub fn define_constants(&self) -> Verdict<&[String], &[DefineConstantsUncertaintyCause]> {
+        if self.define_constants_uncertain {
+            Verdict::Unknown(&self.define_constants_uncertainties)
+        } else {
+            Verdict::Certain(&self.define_constants)
+        }
+    }
+
+    /// The `<ProjectReference>` items in document order, when the walk
+    /// commits to them; otherwise [`ProjectReferencesUnknown`]. See the
+    /// `project_references` and `project_references_uncertain` fields for what
+    /// each means.
+    pub fn project_references(&self) -> Verdict<&[ResolvedItem], ProjectReferencesUnknown> {
+        if self.project_references_uncertain {
+            Verdict::Unknown(ProjectReferencesUnknown)
+        } else {
+            Verdict::Certain(&self.project_references)
+        }
+    }
+
+    /// The walk's own values for what this type publishes as verdicts,
+    /// whether or not the build holds them ([`BestGuess`]).
+    pub fn best_guess(&self) -> BestGuess<'_> {
+        BestGuess {
+            define_constants: &self.define_constants,
+            project_references: &self.project_references,
+        }
+    }
+
     /// What a read of `name` sees at the end of the evaluation
     /// ([`Self::property_reads`]). Case-insensitive (MSBuild property names
     /// compare OrdinalIgnoreCase).

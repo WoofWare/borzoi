@@ -99,6 +99,7 @@
 
 mod common;
 
+use borzoi_verdict::Verdict;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1827,7 +1828,7 @@ fn evaluate(shared: &mut Shared, case: &Case) -> (Outcome, String) {
                 kind: FindingKind::Compile,
             });
         }
-        if !parsed.project_references_uncertain {
+        if !matches!(parsed.project_references(), Verdict::Unknown(_)) {
             outcome.findings.push(Finding {
                 what: "ProjectReference".to_owned(),
                 ours: "a certain reference list".to_owned(),
@@ -1835,7 +1836,7 @@ fn evaluate(shared: &mut Shared, case: &Case) -> (Outcome, String) {
                 kind: FindingKind::References,
             });
         }
-        if !parsed.define_constants_uncertain {
+        if !matches!(parsed.define_constants(), Verdict::Unknown(_)) {
             outcome.findings.push(Finding {
                 what: "define_constants".to_owned(),
                 ours: "a certain define set".to_owned(),
@@ -1940,10 +1941,11 @@ fn evaluate(shared: &mut Shared, case: &Case) -> (Outcome, String) {
     // So must a reference list the walk calls certain: the LSP's project graph
     // reads it as the edges MSBuild builds. Identities are relative to the
     // project's directory, as the Compile items' are.
-    if !parsed.project_references_uncertain {
+    if !matches!(parsed.project_references(), Verdict::Unknown(_)) {
         outcome.certain_references = true;
         let project_dir = project_path.parent().expect("a project has a directory");
         let ours: Vec<PathBuf> = parsed
+            .best_guess()
             .project_references
             .iter()
             .map(|item| item.include.clone())
@@ -1967,7 +1969,7 @@ fn evaluate(shared: &mut Shared, case: &Case) -> (Outcome, String) {
     // So must a define set the walk calls certain: the LSP parses every file
     // under it. MSBuild's list is its `DefineConstants` split on semicolons,
     // empty entries dropped; no marker needs escaping.
-    if !parsed.define_constants_uncertain {
+    if !matches!(parsed.define_constants(), Verdict::Unknown(_)) {
         outcome.certain_defines = true;
         let theirs: Vec<String> = theirs["properties"]["DefineConstants"]
             .as_str()
@@ -1982,10 +1984,10 @@ fn evaluate(shared: &mut Shared, case: &Case) -> (Outcome, String) {
                 .strip_prefix("D_")
                 .is_some_and(|marker| marker != "body" && !SDK_MARKERS.contains(&marker))
         });
-        if parsed.define_constants != theirs {
+        if parsed.best_guess().define_constants != theirs {
             outcome.findings.push(Finding {
                 what: "define_constants".to_owned(),
-                ours: format!("{:?}", parsed.define_constants),
+                ours: format!("{:?}", parsed.best_guess().define_constants),
                 theirs: format!("{theirs:?}"),
                 kind: FindingKind::Defines,
             });

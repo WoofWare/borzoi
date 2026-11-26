@@ -5,6 +5,7 @@ edition = "2024"
 license.workspace = true
 
 [dependencies]
+borzoi-verdict.workspace = true
 roxmltree.workspace = true
 self_cell.workspace = true
 # Only for `test-support`'s soundness sweep, whose FIFO watch holds the FIFO

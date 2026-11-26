@@ -396,8 +396,8 @@ impl DiagnosticKind {
     /// This is the class, not a judgement about any one axis. Several
     /// consequences hang off it and must agree on membership: the evaluator
     /// goes opaque for later undefined-property reads, raises
-    /// [`crate::ParsedProject::items_uncertain`] and
-    /// [`crate::ParsedProject::project_references_uncertain`] wherever the
+    /// [`crate::ParsedProject::items_uncertain`] and withholds
+    /// [`crate::ParsedProject::project_references()`] wherever the
     /// file was named, and the LSP borrows exactly these causes to explain a dropped
     /// `<ProjectReference>` edge set (whose own axis records none). Hence one
     /// public definition rather than a `matches!` per consumer — a new variant
@@ -594,7 +594,7 @@ impl StructuralCompileItemUncertainty {
 }
 
 /// One concrete reason the evaluated `DefineConstants` set is not trustworthy —
-/// the explaining channel for [`crate::ParsedProject::define_constants_uncertain`],
+/// the causes [`crate::ParsedProject::define_constants()`] gives when it withholds them,
 /// in the mould of [`CompileItemUncertaintyCause`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DefineConstantsUncertaintyCause {

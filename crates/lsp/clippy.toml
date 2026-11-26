@@ -51,6 +51,17 @@ disallowed-methods = [
     # `borzoi_sema::FcsRange`). A site that needs the raw range carries
     # `#[allow(clippy::disallowed_methods)]` saying why.
     { path = "borzoi_cst::syntax::SyntaxToken::text_range", reason = "read a token's range as FCS reports it, through borzoi_sema::FcsRange::fcs_range — see crates/sema/src/fcs_range.rs" },
+    # A project's defines and `<ProjectReference>` items are the served
+    # build's: `workspace::EvaluatedProject::{defines, references}` fold the
+    # served-build facts the evaluator cannot see (an outer dispatch build
+    # standing in for an inner one) into the evaluator's verdict, and every
+    # other reader takes them from there, or from `ProjectEvaluation`. The
+    # evaluator's own verdict, and the walk's raw values (`best_guess`), are
+    # read only under `#[expect(clippy::disallowed_methods, reason = "…")]`
+    # saying why (#1112).
+    { path = "borzoi_msbuild::ParsedProject::define_constants", reason = "read the served build's defines from workspace::EvaluatedProject::defines — see crates/lsp/clippy.toml" },
+    { path = "borzoi_msbuild::ParsedProject::project_references", reason = "read the served build's references from workspace::EvaluatedProject::references — see crates/lsp/clippy.toml" },
+    { path = "borzoi_msbuild::ParsedProject::best_guess", reason = "the walk's values whether or not the build holds them; say why with #[expect] — see crates/lsp/clippy.toml" },
 ]
 
 # `lsp_types::Uri` wraps a `fluent_uri::Uri`, which caches its parsed
