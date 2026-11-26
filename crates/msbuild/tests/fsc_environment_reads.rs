@@ -209,7 +209,23 @@ fn an_undecodable_xml_document_fails_the_scan() {
     assert!(!starts_like_xml(assembly));
 }
 
-/// `bytes` as text: UTF-16 behind its byte-order mark, else UTF-8 (its mark
+/// A document marked UTF-32, in either byte order, reads as its text.
+#[test]
+fn utf32_documents_decode() {
+    let text = "<Project>$(Read)</Project>";
+    let le: Vec<u8> = [0xff, 0xfe, 0x00, 0x00]
+        .into_iter()
+        .chain(text.chars().flat_map(|c| (c as u32).to_le_bytes()))
+        .collect();
+    let be: Vec<u8> = [0x00, 0x00, 0xfe, 0xff]
+        .into_iter()
+        .chain(text.chars().flat_map(|c| (c as u32).to_be_bytes()))
+        .collect();
+    assert_eq!(decoded(&le).as_deref(), Some(text));
+    assert_eq!(decoded(&be).as_deref(), Some(text));
+}
+
+/// `bytes` as text: UTF-32 or UTF-16 behind its byte-order mark, else UTF-8 (its mark
 /// dropped), else `None`.
 fn decoded(bytes: &[u8]) -> Option<String> {
     let utf16 = |rest: &[u8], unit: fn([u8; 2]) -> u16| {
@@ -219,7 +235,19 @@ fn decoded(bytes: &[u8]) -> Option<String> {
             .collect();
         String::from_utf16(&units).ok()
     };
+    let utf32 = |rest: &[u8], unit: fn([u8; 4]) -> u32| {
+        rest.chunks(4)
+            .map(|q| {
+                let mut quad = [0u8; 4];
+                quad[..q.len()].copy_from_slice(q);
+                char::from_u32(unit(quad))
+            })
+            .collect::<Option<String>>()
+    };
     match bytes {
+        // UTF-32 first: its little-endian mark starts like UTF-16's.
+        [0xff, 0xfe, 0x00, 0x00, rest @ ..] => utf32(rest, u32::from_le_bytes),
+        [0x00, 0x00, 0xfe, 0xff, rest @ ..] => utf32(rest, u32::from_be_bytes),
         [0xff, 0xfe, rest @ ..] => utf16(rest, u16::from_le_bytes),
         [0xfe, 0xff, rest @ ..] => utf16(rest, u16::from_be_bytes),
         _ => std::str::from_utf8(bytes)
@@ -267,6 +295,56 @@ fn texts(node: roxmltree::Node<'_, '_>) -> Vec<String> {
         );
     }
     out
+}
+
+/// The variables `text` reads through `System.Environment`'s property
+/// functions, each a literal first argument of `GetEnvironmentVariable`; an
+/// error for a call whose name is not a literal, or for one that reads every
+/// variable at once (`GetEnvironmentVariables`).
+fn environment_function_reads(text: &str) -> Result<Vec<String>, String> {
+    let mut names = Vec::new();
+    let lower = text.to_ascii_lowercase();
+    if lower.contains("getenvironmentvariables") {
+        return Err("reads every environment variable at once".to_string());
+    }
+    for (at, _) in lower.match_indices("getenvironmentvariable(") {
+        let args = &text[at + "getenvironmentvariable(".len()..];
+        let arg = args.trim_start();
+        let literal = arg
+            .strip_prefix('\'')
+            .and_then(|rest| rest.split_once('\''))
+            .map(|(name, _)| name)
+            .filter(|name| !name.is_empty() && !name.contains(['$', '@', '%']));
+        match literal {
+            Some(name) => names.push(name.to_string()),
+            None => return Err("reads an environment variable whose name is not a literal".into()),
+        }
+    }
+    Ok(names)
+}
+
+/// A variable a property function reads by a literal name is listed; one it
+/// reads by a computed name, or every one at once, fails the scan.
+#[test]
+fn environment_functions_are_read_or_fail() {
+    assert_eq!(
+        environment_function_reads("$([System.Environment]::GetEnvironmentVariable('LANG'))"),
+        Ok(vec!["LANG".to_string()])
+    );
+    assert_eq!(
+        environment_function_reads(
+            "$([System.Environment]::getenvironmentvariable( 'X' , 'Process'))"
+        ),
+        Ok(vec!["X".to_string()])
+    );
+    assert!(
+        environment_function_reads("$([System.Environment]::GetEnvironmentVariable($(Name)))")
+            .is_err()
+    );
+    assert!(
+        environment_function_reads("$([System.Environment]::GetEnvironmentVariables())").is_err()
+    );
+    assert_eq!(environment_function_reads("$(Plain)"), Ok(vec![]));
 }
 
 /// The text from the start of `after` (just past a `$(`) to the parenthesis
@@ -372,6 +450,13 @@ fn sdk_properties(dotnet_root: &Path, sdk: &str) -> (BTreeSet<String>, BTreeSet<
                 for name in property_references(&text) {
                     names.insert(name.to_ascii_lowercase());
                 }
+                // A variable read by a property function rather than as a
+                // property: its name, when literal; any other spelling fails.
+                for name in environment_function_reads(&text)
+                    .unwrap_or_else(|e| panic!("{}: {e}: {text:?}", file.display()))
+                {
+                    names.insert(name.to_ascii_lowercase());
+                }
                 // A name the reference scan cannot see: one computed from
                 // an expansion anywhere in the name (before its first `.` or
                 // `:` outside parentheses). The one shape listed is a name
@@ -408,6 +493,13 @@ fn sdk_properties(dotnet_root: &Path, sdk: &str) -> (BTreeSet<String>, BTreeSet<
             }
         }
     }
+    // A prefix stands for every name an identity of the item type takes. An
+    // expansion in a declaration could put a `;` in it and so declare a second
+    // identity of any name; the one such read in the verified SDK
+    // (`$(%(PropertyNames.Identity))`, F#'s design-time tools) runs only for a
+    // `PackageReference` with `IsFSharpDesignTimeProvider` metadata, which is
+    // on no list of the derivation's (its build-time site is
+    // `Gate::Unreachable`), so it never runs in the domain.
     let mut prefixes = BTreeSet::new();
     for item in &computed_from {
         let specs = includes.get(item).unwrap_or_else(|| {

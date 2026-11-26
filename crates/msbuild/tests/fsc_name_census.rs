@@ -33,9 +33,9 @@ use std::path::{Path, PathBuf};
 use borzoi_msbuild::AutoResponseFile;
 use borzoi_msbuild::fsc::{
     ALLOWED_ITEM_TYPES, ALLOWED_METADATA, ALLOWED_PROPERTIES, BUILD_TIME_SITES,
-    CompiledAssemblyName, Gate, RESTORE_ITEM_TYPES, RESTORE_METADATA, RESTORE_PROPERTIES,
-    RESTORE_PROPERTY_PREFIX, classify_variable, resolved_sdk_version, restore_props,
-    verified_manifests, verified_sdks,
+    CompiledAssemblyName, Gate, NameDecline, RESTORE_ITEM_TYPES, RESTORE_METADATA,
+    RESTORE_PROPERTIES, RESTORE_PROPERTY_PREFIX, classify_variable, environment_declines,
+    resolved_sdk_version, restore_props, verified_manifests, verified_sdks,
 };
 use borzoi_msbuild::observed::host_fs::{self, HostPath};
 use borzoi_msbuild::{ParsedProject, PropertyRead};
@@ -199,6 +199,24 @@ fn blocking_facts(
     for name in environment.keys() {
         if !classify_variable(name).admitted() {
             fact("environment variable off the list", name);
+        }
+    }
+    // The environment's other rules, under the SDK the evaluation resolved:
+    // a toolchain value off its shape, two names of one property.
+    if let Some(sdk) = resolved_sdk_version(parsed) {
+        for decline in environment_declines(&sdk, environment) {
+            match decline {
+                NameDecline::Environment(why) if why.contains(": a value not of the shape") => {
+                    fact("environment variable value off its shape", &why);
+                }
+                NameDecline::Environment(why) if why.ends_with("name one property") => {
+                    fact("environment variables naming one property", &why);
+                }
+                NameDecline::UnscannedSdk(sdk) => {
+                    fact("environment reads not pinned for the SDK", &sdk);
+                }
+                _ => {}
+            }
         }
     }
     // A package's own build files: documents outside the install under the

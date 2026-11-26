@@ -371,7 +371,7 @@ pub enum ToolchainValue {
     /// A list of absolute paths, as the platform separates `PATH`'s.
     SearchPath,
     /// A `;`-separated list of package sources, each an absolute path or an
-    /// `http(s)` URL with a host.
+    /// `http(s)` URL (the scheme in any case) whose authority names a host.
     Sources,
     /// One of the CLI's on-off switches: `1`, `0`, `true` or `false`, in any
     /// case.
@@ -386,14 +386,7 @@ impl ToolchainValue {
             return false;
         }
         let path = |p: &str| !p.is_empty() && std::path::Path::new(p).is_absolute();
-        let url = |e: &str| {
-            ["https://", "http://"].iter().any(|scheme| {
-                e.strip_prefix(scheme).is_some_and(|rest| {
-                    let host = rest.split(['/', '?', '#']).next().unwrap_or_default();
-                    !host.is_empty() && !host.contains(char::is_whitespace)
-                })
-            })
-        };
+        let url = |e: &str| http_host(e).is_some();
         match self {
             ToolchainValue::Path => path(value),
             ToolchainValue::SearchPath => {
@@ -413,6 +406,37 @@ impl ToolchainValue {
                 .any(|switch| switch.eq_ignore_ascii_case(value)),
         }
     }
+}
+
+/// The host an `http(s)` URL names (the scheme compared without case): its
+/// authority without the user information before an `@` or the port after
+/// the last `:` (an IPv6 literal in brackets kept whole), and `None` for a URL
+/// of another scheme or whose host is empty or holds a character no host
+/// name or address does.
+fn http_host(url: &str) -> Option<&str> {
+    let rest = ["https://", "http://"].iter().find_map(|scheme| {
+        url.get(..scheme.len())
+            .filter(|head| head.eq_ignore_ascii_case(scheme))
+            .map(|_| &url[scheme.len()..])
+    })?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host_port = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    let host = if let Some(bracketed) = host_port.strip_prefix('[') {
+        let (inside, after) = bracketed.split_once(']')?;
+        if !(after.is_empty() || after.starts_with(':')) {
+            return None;
+        }
+        (!inside.is_empty() && inside.chars().all(|c| c.is_ascii_hexdigit() || c == ':'))
+            .then_some(inside)?
+    } else {
+        let host = host_port.split(':').next().unwrap_or_default();
+        (!host.is_empty()
+            && host
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "-.".contains(c)))
+        .then_some(host)?
+    };
+    Some(host)
 }
 
 /// The toolchain's own variables, each by its exact name and with the shape
@@ -623,40 +647,48 @@ pub fn classify_variable(name: &str) -> VariableClass {
 
 /// Why the environment `environment` takes an evaluation under the SDK `sdk`
 /// out of the domain, or `None` when it does not (an allowed property's value
-/// aside, which the derivation checks with the rest): the SDK's reads are not
-/// pinned ([`environment_reads`]); a variable [`classify_variable`] does not
-/// admit; a toolchain variable whose value is not of its shape; or two
-/// variables whose names differ only by case, which MSBuild reads as one
-/// property by an order the walk does not reproduce. Variables are taken in
-/// name order, so the reason given is the same however the map is ordered.
+/// aside, which the derivation checks with the rest): the first of
+/// [`environment_declines`].
 pub fn environment_decline(
     sdk: &str,
     environment: &HashMap<String, String>,
 ) -> Option<NameDecline> {
+    environment_declines(sdk, environment).into_iter().next()
+}
+
+/// Every reason the environment `environment` takes an evaluation under the
+/// SDK `sdk` out of the domain, in variable name order (so the same however
+/// the map is ordered): the SDK's reads are not pinned ([`environment_reads`]);
+/// a variable [`classify_variable`] does not admit; a toolchain variable whose
+/// value is not of its shape (named by its shape, never its value, which may
+/// hold a feed's credentials); and two variables whose names differ only by
+/// case, which MSBuild reads as one property by an order the walk does not
+/// reproduce.
+pub fn environment_declines(sdk: &str, environment: &HashMap<String, String>) -> Vec<NameDecline> {
     if environment_reads(sdk).is_none() {
-        return Some(NameDecline::UnscannedSdk(sdk.to_string()));
+        return vec![NameDecline::UnscannedSdk(sdk.to_string())];
     }
+    let mut declines = Vec::new();
     let mut names: Vec<&String> = environment.keys().collect();
     names.sort();
     let mut by_property: HashMap<String, &String> = HashMap::new();
     for name in names {
         match classify_variable(name) {
-            class if !class.admitted() => return Some(NameDecline::Environment(name.clone())),
+            class if !class.admitted() => declines.push(NameDecline::Environment(name.clone())),
             VariableClass::Toolchain(shape) if !shape.admits(&environment[name]) => {
-                return Some(NameDecline::Value(
-                    name.clone(),
-                    format!("{:?}", environment[name]),
-                ));
+                declines.push(NameDecline::Environment(format!(
+                    "{name}: a value not of the shape {shape:?}"
+                )));
             }
             _ => {}
         }
         if let Some(other) = by_property.insert(name.to_ascii_lowercase(), name) {
-            return Some(NameDecline::Environment(format!(
+            declines.push(NameDecline::Environment(format!(
                 "{other} and {name} name one property"
             )));
         }
     }
-    None
+    declines
 }
 
 /// The name of the assembly a project compiles to, as FCS names it.
@@ -2468,56 +2500,32 @@ mod tests {
         !toolchain && !graded && !property
     }
 
-    /// The toolchain's own names, as the allow-list states them: spelled here
-    /// apart from `TOOLCHAIN_VARIABLES`, with the shape each value must have.
-    const TOOLCHAIN: &[(&str, &str)] = &[
-        ("DOTNET_CLI_HOME", "path"),
-        ("DOTNET_CLI_TELEMETRY_OPTOUT", "switch"),
-        ("DOTNET_NOLOGO", "switch"),
-        ("DOTNET_NUGET_SIGNATURE_VERIFICATION", "switch"),
-        ("DOTNET_SKIP_FIRST_TIME_EXPERIENCE", "switch"),
-        ("DOTNET_SKIP_WORKLOAD_INTEGRITY_CHECK", "switch"),
-        ("DOTNET_ROOT", "path"),
-        ("HOME", "path"),
-        ("MSBuildUserExtensionsPath", "path"),
-        ("NUGET_PACKAGES", "path"),
-        ("PATH", "search path"),
-        ("RestoreSources", "sources"),
-        ("TMPDIR", "path"),
+    /// The toolchain's own names, as the allow-list states them, with the
+    /// shape each value must have: spelled here apart from
+    /// `TOOLCHAIN_VARIABLES`. What each shape admits is `ToolchainValue`'s,
+    /// graded by its own example table
+    /// ([`toolchain_values_are_held_to_their_shape`]).
+    const TOOLCHAIN: &[(&str, ToolchainValue)] = &[
+        ("DOTNET_CLI_HOME", ToolchainValue::Path),
+        ("DOTNET_CLI_TELEMETRY_OPTOUT", ToolchainValue::Switch),
+        ("DOTNET_NOLOGO", ToolchainValue::Switch),
+        (
+            "DOTNET_NUGET_SIGNATURE_VERIFICATION",
+            ToolchainValue::Switch,
+        ),
+        ("DOTNET_SKIP_FIRST_TIME_EXPERIENCE", ToolchainValue::Switch),
+        (
+            "DOTNET_SKIP_WORKLOAD_INTEGRITY_CHECK",
+            ToolchainValue::Switch,
+        ),
+        ("DOTNET_ROOT", ToolchainValue::Path),
+        ("HOME", ToolchainValue::Path),
+        ("MSBuildUserExtensionsPath", ToolchainValue::Path),
+        ("NUGET_PACKAGES", ToolchainValue::Path),
+        ("PATH", ToolchainValue::SearchPath),
+        ("RestoreSources", ToolchainValue::Sources),
+        ("TMPDIR", ToolchainValue::Path),
     ];
-
-    /// Whether `value` has the shape `shape` names, as the allow-list states
-    /// it: no control character; absolute paths; a source an absolute path or
-    /// an `http(s)` URL with a host; a switch `1`, `0`, `true` or `false`.
-    fn shaped(shape: &str, value: &str) -> bool {
-        if value.chars().any(char::is_control) {
-            return false;
-        }
-        let path = |p: &str| p.starts_with('/');
-        let url = |e: &str| {
-            ["https://", "http://"].iter().any(|scheme| {
-                e.strip_prefix(scheme).is_some_and(|rest| {
-                    let host = rest.split(['/', '?', '#']).next().unwrap_or_default();
-                    !host.is_empty() && !host.contains(char::is_whitespace)
-                })
-            })
-        };
-        match shape {
-            "path" => path(value),
-            "search path" => !value.is_empty() && value.split(':').all(path),
-            "switch" => ["1", "0", "true", "false"]
-                .iter()
-                .any(|s| s.eq_ignore_ascii_case(value)),
-            _ => {
-                let entries: Vec<&str> = value
-                    .split(';')
-                    .map(str::trim)
-                    .filter(|e| !e.is_empty())
-                    .collect();
-                !entries.is_empty() && entries.iter().all(|e| path(e) || url(e))
-            }
-        }
-    }
 
     /// Whether the allow-list moves the variable `name` at `value` from
     /// admitted to declined, as #1064 PR 2 claims: a `DOTNET_`/`NUGET_` name
@@ -2529,7 +2537,7 @@ mod tests {
             return false;
         }
         if let Some((_, shape)) = TOOLCHAIN.iter().find(|(t, _)| *t == name) {
-            return !shaped(shape, value);
+            return !shape.admits(value);
         }
         let by_prefix = name.starts_with("DOTNET_") || name.starts_with("NUGET_");
         let graded = OLD_GRADED
@@ -2571,17 +2579,23 @@ mod tests {
             ));
         }
         match &declined {
-            Some(NameDecline::Environment(why)) if !why.ends_with("name one property") => {
+            Some(NameDecline::Environment(why))
+                if !why.ends_with("name one property")
+                    && !why.contains(": a value not of the shape") =>
+            {
                 if !environment.contains_key(why) {
                     return Err(format!(
                         "{environment:?}: declined for {why}, which is not set"
                     ));
                 }
             }
-            Some(NameDecline::Value(name, _)) if !environment.contains_key(name) => {
-                return Err(format!(
-                    "{environment:?}: declined for {name}'s value, which is not set"
-                ));
+            Some(NameDecline::Environment(why)) if why.contains(": a value not of the shape") => {
+                let name = why.split(':').next().unwrap_or_default();
+                if !environment.contains_key(name) {
+                    return Err(format!(
+                        "{environment:?}: declined for {name}'s value, which is not set"
+                    ));
+                }
             }
             _ => {}
         }
@@ -2880,7 +2894,25 @@ mod tests {
         for value in ["", "/usr/bin::/bin", "/usr/bin:bin"] {
             assert!(!ToolchainValue::SearchPath.admits(value), "{value:?}");
         }
-        assert!(ToolchainValue::Sources.admits("/feed;https://api.nuget.org/v3/index.json"));
+        for value in [
+            "/feed;https://api.nuget.org/v3/index.json",
+            "HTTPS://example.org/feed",
+            "http://user:pass@feeds.example.org:8080/v3/index.json",
+            "https://[::1]:5000/feed",
+            "https://example.org?x=1",
+        ] {
+            assert!(ToolchainValue::Sources.admits(value), "{value:?}");
+        }
+        for value in [
+            "https://:443/feed",
+            "https://user@/feed",
+            "https://exa mple.org/",
+            "https://[::1/feed",
+            "https://[]:1/",
+            "https://[::1]x/",
+        ] {
+            assert!(!ToolchainValue::Sources.admits(value), "{value:?}");
+        }
         for value in [
             "",
             ";",
@@ -2899,6 +2931,35 @@ mod tests {
         for value in ["", "yes", "2", "1\n"] {
             assert!(!ToolchainValue::Switch.admits(value), "{value:?}");
         }
+    }
+
+    /// A toolchain value off its shape declines by the variable's name and the
+    /// shape, never its value, which may hold a feed's credentials.
+    #[test]
+    fn a_decline_names_no_value() {
+        let secret = "https://user:s3cret@private.example.org/v3/index.json;relative";
+        let environment = HashMap::from([("RestoreSources".to_string(), secret.to_string())]);
+        let declines = super::environment_declines(sdk(), &environment);
+        assert_eq!(declines.len(), 1, "{declines:?}");
+        let shown = format!("{declines:?}");
+        assert!(
+            shown.contains("RestoreSources") && !shown.contains("s3cret"),
+            "{shown}"
+        );
+    }
+
+    /// Every violation is enumerated, not only the first: an unlisted name, a
+    /// toolchain value off its shape and two spellings of one property.
+    #[test]
+    fn every_violation_is_enumerated() {
+        let environment = HashMap::from([
+            ("BORZOI_X".to_string(), "v".to_string()),
+            ("NUGET_PACKAGES".to_string(), "relative".to_string()),
+            ("LANG".to_string(), "C".to_string()),
+            ("lang".to_string(), "C".to_string()),
+        ]);
+        let declines = super::environment_declines(sdk(), &environment);
+        assert_eq!(declines.len(), 3, "{declines:?}");
     }
 
     /// Two names differing only by case decline, admitted or not, and the
