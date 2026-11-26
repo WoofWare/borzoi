@@ -379,10 +379,12 @@ pub enum ToolchainValue {
 }
 
 impl ToolchainValue {
-    /// Whether `value` has this shape: no control character anywhere, and
-    /// every path absolute, so it names one place whatever directory reads it.
+    /// Whether `value` has this shape: no control character anywhere, no `%`
+    /// (MSBuild reads the value as escaped text, so `%3B` would separate two
+    /// entries the shape never saw), and every path absolute, so it names one
+    /// place whatever directory reads it.
     pub fn admits(self, value: &str) -> bool {
-        if value.chars().any(char::is_control) {
+        if value.chars().any(|c| c.is_control() || c == '%') {
             return false;
         }
         let path = |p: &str| !p.is_empty() && std::path::Path::new(p).is_absolute();
@@ -2876,6 +2878,10 @@ mod tests {
         }
         for value in ["/feed", "/feed;/other", " /feed ; /other ;"] {
             assert!(ToolchainValue::Sources.admits(value), "{value:?}");
+        }
+        for value in ["/local%3Bhttps://example.org", "/a%20b"] {
+            assert!(!ToolchainValue::Sources.admits(value), "{value:?}");
+            assert!(!ToolchainValue::Path.admits(value), "{value:?}");
         }
         for value in [
             "https://api.nuget.org/v3/index.json",

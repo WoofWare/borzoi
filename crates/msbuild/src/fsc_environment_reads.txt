@@ -970,6 +970,7 @@ containerarchiveoutputpath
 containerauthors
 containerbasedigest
 containerbaseimage
+containerbaseimagedigest
 containerbasename
 containerbaseregistry
 containerbasetag
@@ -1103,6 +1104,7 @@ cswinrtrcwfactoryfallbackgeneratorforceoptout
 cswinrttoolsarchitecture
 cswinrttoolsdirectory
 cswinrtusewindowsuixamlprojections
+culture
 currentemsdktarget
 currentsolutionconfigurationcontents
 customafterblazorwebassemblysdktargets
@@ -1130,6 +1132,7 @@ customrazorextension
 customresourcetypessupport
 customtransformdirectory
 customtransformfilename
+customtransformfilepath
 debuggersupport
 debugsecurityzoneurl
 debugsymbols
@@ -1602,6 +1605,7 @@ includeversionininteropname
 includewindowssdkrefframeworkreferences
 incrementalcleandependson
 informationalversion
+innertarget
 innertargets
 innervstesttargets
 install
@@ -1612,6 +1616,7 @@ interceptorsnamespaces
 interceptorspreviewnamespaces
 intermediatedepsfilepath
 intermediateoutputpath
+intermediaterefassembly
 interopoutputpath
 invariantglobalization
 invarianttimezone
@@ -1927,6 +1932,7 @@ producereferenceassemblyinoutdir
 product
 productname
 profilingsymbolsdir
+project
 projectassetscachefile
 projectassetsfile
 projectassetsfileabsolutepath
@@ -1957,6 +1963,7 @@ projectruntimeconfigfilename
 projectruntimeconfigfilepath
 projecttooverrideprojectextensionspath
 projecttypeguids
+propertiesthattriggerrelinking
 provideapplicationpartfactoryattributetypename
 providecommandlineargs
 prunepackagedataroot
@@ -2098,6 +2105,7 @@ resolvecomreferencetoolpath
 resolvecorepublishstaticwebassetsdependson
 resolvecorestaticwebassetsdependson
 resolvecurrentprojectstaticwebassetsinputsdependson
+resolvedassemblykeyfile
 resolvedcodeanalysisruleset
 resolvedrazorcompiletoolset
 resolveembeddedstaticwebassets
@@ -2370,6 +2378,7 @@ suppresstrimanalysiswarnings
 symbolpackageformat
 synthesizelinkmetadata
 tailcalls
+target
 targetcompactframework
 targetculture
 targetdeploymanifestfilename

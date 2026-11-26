@@ -203,8 +203,11 @@ fn blocking_facts(
     }
     // The environment's other rules, under the SDK the evaluation resolved:
     // a toolchain value off its shape, two names of one property.
-    if let Some(sdk) = resolved_sdk_version(parsed) {
-        for decline in environment_declines(&sdk, environment) {
+    // With no SDK resolved, the rules that need none are still counted (the
+    // unpinned-reads decline is no fact then: another fact says no SDK).
+    let sdk = resolved_sdk_version(parsed);
+    {
+        for decline in environment_declines(sdk.as_deref().unwrap_or(""), environment) {
             match decline {
                 NameDecline::Environment(why) if why.contains(": a value not of the shape") => {
                     fact("environment variable value off its shape", &why);
@@ -212,8 +215,8 @@ fn blocking_facts(
                 NameDecline::Environment(why) if why.ends_with("name one property") => {
                     fact("environment variables naming one property", &why);
                 }
-                NameDecline::UnscannedSdk(sdk) => {
-                    fact("environment reads not pinned for the SDK", &sdk);
+                NameDecline::UnscannedSdk(version) if sdk.is_some() => {
+                    fact("environment reads not pinned for the SDK", &version);
                 }
                 _ => {}
             }

@@ -163,15 +163,28 @@ fn sdk_documents(dotnet_root: &Path, sdk: &str) -> Vec<(PathBuf, String)> {
                 return None;
             };
             // Any XML document whose root is `Project` is one MSBuild may
-            // import, so one the walk's reader refuses fails the scan.
+            // import, so one the walk's reader refuses fails the scan, and
+            // so does a candidate (a file holding `<Project`) that is not
+            // well-formed XML at all: MSBuild may read what `roxmltree`
+            // refuses (a character reference XML forbids).
             let candidate = roxmltree::Document::parse_with_options(
                 &body,
                 roxmltree::ParsingOptions {
                     allow_dtd: true,
                     ..Default::default()
                 },
-            )
-            .ok()?;
+            );
+            let candidate = match candidate {
+                Ok(candidate) => candidate,
+                Err(e) => {
+                    assert!(
+                        !project_candidate(&body),
+                        "{} holds `<Project` and is not XML this scan can read: {e}",
+                        file.display()
+                    );
+                    return None;
+                }
+            };
             if candidate.root_element().tag_name().name() != "Project" {
                 return None;
             }
@@ -184,6 +197,189 @@ fn sdk_documents(dotnet_root: &Path, sdk: &str) -> Vec<(PathBuf, String)> {
             Some((file, body))
         })
         .collect()
+}
+
+/// Whether `text` may be an MSBuild document: it holds `<Project`.
+fn project_candidate(text: &str) -> bool {
+    text.contains("<Project")
+}
+
+/// Every candidate MSBuild document of the SDK `sdk` and its loaded workload
+/// manifests ([`project_candidate`]) as text, whatever its root and whether
+/// it parses: decoded, or, for one that starts like XML in an encoding
+/// [`decoded`] does not read, byte for byte as Latin-1 (a property's name is
+/// ASCII, so its bytes read the same).
+fn sdk_candidate_texts(dotnet_root: &Path, sdk: &str) -> Vec<(PathBuf, String)> {
+    let mut files = Vec::new();
+    files_under(&dotnet_root.join("sdk").join(sdk), &mut files);
+    for manifest in loaded_manifests(dotnet_root, sdk) {
+        files.push(dotnet_root.join("sdk-manifests").join(manifest));
+    }
+    files.sort();
+    files
+        .into_iter()
+        .filter_map(|file| {
+            let bytes = host_fs::read(&file).unwrap_or_else(|e| panic!("{}: {e}", file.display()));
+            let text = match decoded(&bytes) {
+                Some(text) => text,
+                None if starts_like_xml(&bytes) => bytes.iter().map(|&b| char::from(b)).collect(),
+                None => return None,
+            };
+            project_candidate(&text).then_some((file, text))
+        })
+        .collect()
+}
+
+/// `text` with XML's character references (`&#x4C;`, `&#76;`) and its five
+/// named entities decoded, as an XML reader would before MSBuild sees it. A
+/// reference to no character is left as it stands.
+fn references_decoded(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find('&') {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + 1..];
+        let decoded = after.split_once(';').and_then(|(name, tail)| {
+            let c = match name {
+                "lt" => Some('<'),
+                "gt" => Some('>'),
+                "amp" => Some('&'),
+                "quot" => Some('"'),
+                "apos" => Some('\''),
+                _ => name
+                    .strip_prefix("#x")
+                    .or_else(|| name.strip_prefix("#X"))
+                    .map(|hex| u32::from_str_radix(hex, 16))
+                    .or_else(|| name.strip_prefix('#').map(str::parse::<u32>))
+                    .and_then(Result::ok)
+                    .and_then(char::from_u32),
+            }?;
+            Some((c, tail))
+        });
+        match decoded {
+            Some((c, tail)) => {
+                out.push(c);
+                rest = tail;
+            }
+            None => {
+                out.push('&');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// `text` without what lies between `open` and `close` (each pair, the
+/// markers too), or with the markers alone dropped when `keep_inside`.
+fn without(text: &str, open: &str, close: &str, keep_inside: bool) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(open) {
+        out.push_str(&rest[..at]);
+        let inside = &rest[at + open.len()..];
+        match inside.find(close) {
+            Some(end) => {
+                if keep_inside {
+                    out.push_str(&inside[..end]);
+                }
+                rest = &inside[end + close.len()..];
+            }
+            None => {
+                rest = inside;
+                if keep_inside {
+                    out.push_str(rest);
+                }
+                rest = "";
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The readings of a document's text a property reference may hide in: the
+/// text with its references decoded, without its comments (MSBuild joins the
+/// text around them), and with its CDATA sections' markers dropped (MSBuild
+/// reads a property's inner XML). A superset of what any one reading holds.
+fn raw_readings(text: &str) -> [String; 3] {
+    let decoded = references_decoded(text);
+    let uncommented = without(&decoded, "<!--", "-->", false);
+    let uncdata = without(&decoded, "<![CDATA[", "]]>", true);
+    [decoded, uncommented, uncdata]
+}
+
+/// The properties a reading reads by name, `$` and `(` and a name with any
+/// whitespace between (lowercased); and the item types whose identities name
+/// the properties it reads by a computed name (`$(%(Item.Identity))`). An
+/// error for a name computed any other way.
+fn raw_reads(reading: &str) -> Result<(BTreeSet<String>, BTreeSet<String>), String> {
+    let (mut names, mut items) = (BTreeSet::new(), BTreeSet::new());
+    for (at, _) in reading.match_indices('$') {
+        let after = reading[at + 1..].trim_start();
+        let Some(after) = after.strip_prefix('(') else {
+            continue;
+        };
+        // MSBuild reads an unclosed `$(` as it stands.
+        let Some(interior) = parenthesised(after) else {
+            continue;
+        };
+        let interior = interior.trim();
+        if interior.starts_with('[') {
+            continue;
+        }
+        let name = name_part(interior).trim();
+        if name.contains(['$', '@', '%']) {
+            let item = name
+                .strip_prefix("%(")
+                .and_then(|rest| rest.strip_suffix(')'))
+                .and_then(|inside| inside.trim().strip_suffix(".Identity"))
+                .map(str::trim)
+                .filter(|item| !item.contains(['(', ')', '$', '@', '%', '.']))
+                .ok_or_else(|| {
+                    format!("a name computed in a way this scan cannot list: {name:?}")
+                })?;
+            items.insert(item.to_ascii_lowercase());
+        } else if name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') {
+            let end = name
+                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+                .unwrap_or(name.len());
+            names.insert(name[..end].to_ascii_lowercase());
+        }
+    }
+    Ok((names, items))
+}
+
+/// A reference spelt through a character reference, hidden in a comment the
+/// text around which MSBuild joins, inside a CDATA section, or with spaces
+/// before its name, is read; a name computed beyond an item's identity is an
+/// error.
+#[test]
+fn raw_readings_find_every_spelling() {
+    let read = |text: &str| -> BTreeSet<String> {
+        raw_readings(text)
+            .iter()
+            .flat_map(|r| raw_reads(r).unwrap().0)
+            .collect()
+    };
+    for (text, name) in [
+        ("<X>$(&#x45;DITOR)</X>", "editor"),
+        ("<X>$&#40;LANG)</X>", "lang"),
+        ("<X>a<![CDATA[b]]><!--$(PAGER)--></X>", "pager"),
+        ("<X>$<!--a--> <!--b-->(TZ)</X>", "tz"),
+        ("<X>$( USER )</X>", "user"),
+        ("<X><![CDATA[$(SHELL)]]></X>", "shell"),
+    ] {
+        assert!(read(text).contains(name), "{text}: {:?}", read(text));
+    }
+    assert!(raw_reads("$(%(Names.Identity)Bar)").is_err());
+    assert!(raw_reads("$(Foo%(Names.Identity))").is_err());
+    assert!(raw_reads("$($(Inner))").is_err());
+    assert_eq!(
+        raw_reads("$(%(Names.Identity))").unwrap().1,
+        BTreeSet::from(["names".to_string()])
+    );
 }
 
 /// Whether `bytes`, which [`decoded`] cannot read, start like XML: a file
@@ -479,6 +675,22 @@ fn sdk_properties(dotnet_root: &Path, sdk: &str) -> (BTreeSet<String>, BTreeSet<
     );
     let mut names = BTreeSet::new();
     let mut computed_from: BTreeSet<String> = BTreeSet::new();
+    // Every candidate's raw readings, beside the parsed reading below: a read
+    // the parsed text hides (in a comment, a CDATA section, a document
+    // `roxmltree` refuses) is in one of them.
+    for (file, text) in sdk_candidate_texts(dotnet_root, sdk) {
+        for reading in raw_readings(&text) {
+            let (read, items) =
+                raw_reads(&reading).unwrap_or_else(|e| panic!("{}: {e}", file.display()));
+            names.extend(read);
+            computed_from.extend(items);
+            for name in environment_function_reads(&reading)
+                .unwrap_or_else(|e| panic!("{}: {e}", file.display()))
+            {
+                names.insert(name.to_ascii_lowercase());
+            }
+        }
+    }
     // Each item type's `Include`s, by lowercased type.
     let mut includes: BTreeMap<String, Vec<(PathBuf, String)>> = BTreeMap::new();
     for (file, text) in &documents {
@@ -543,11 +755,15 @@ fn sdk_properties(dotnet_root: &Path, sdk: &str) -> (BTreeSet<String>, BTreeSet<
     }
     // A prefix stands for every name an identity of the item type takes. An
     // expansion in a declaration could put a `;` in it and so declare a second
-    // identity of any name; the one such read in the verified SDK
-    // (`$(%(PropertyNames.Identity))`, F#'s design-time tools) runs only for a
-    // `PackageReference` with `IsFSharpDesignTimeProvider` metadata, which is
-    // on no list of the derivation's (its build-time site is
-    // `Gate::Unreachable`), so it never runs in the domain.
+    // identity of any name, so a declaration with one fails the scan, but for
+    // the one such site of the verified SDK: F#'s design-time tools
+    // (`PropertyNames`, read as `$(%(PropertyNames.Identity))`), which run
+    // only for a `PackageReference` with `IsFSharpDesignTimeProvider`
+    // metadata. That is on no list of the derivation's (its build-time site
+    // is `Gate::Unreachable`), so it never runs in the domain.
+    let known_unreachable = |item: &str, file: &Path| {
+        item == "propertynames" && file.ends_with("FSharp/Microsoft.FSharp.NetSdk.targets")
+    };
     let mut prefixes = BTreeSet::new();
     for item in &computed_from {
         let specs = includes.get(item).unwrap_or_else(|| {
@@ -565,6 +781,12 @@ fn sdk_properties(dotnet_root: &Path, sdk: &str) -> (BTreeSet<String>, BTreeSet<
                 if head.len() == part.len() {
                     names.insert(part.to_ascii_lowercase());
                 } else {
+                    assert!(
+                        known_unreachable(item, file),
+                        "{} declares @({item}), whose identities name properties, as \
+                         {part:?}: an expansion there may declare an identity of any name",
+                        file.display()
+                    );
                     prefixes.insert(head.to_ascii_lowercase());
                 }
             }
