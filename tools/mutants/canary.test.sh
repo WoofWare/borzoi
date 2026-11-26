@@ -5,9 +5,11 @@
 # job; that the cargo runner and `inner.sh` refuse, end to end, before running
 # anything; and that Cargo really runs the canary under `.cargo/mutants.toml`'s
 # arguments, as the workspace's rustc wrapper and, when that is overridden, as
-# the runner, against a competing runner for the host's triple. Needs `cargo`
-# and `rustc` on PATH (the devshell). It holds outside the sandbox and inside
-# it alike, as each case clears the markers it does not set.
+# the runner, against a competing runner for the host's triple; and that a bare
+# `cargo mutants`, reading `.cargo/mutants.toml` itself, has its baseline
+# refused. Needs `cargo`, `rustc` and `cargo-mutants` on PATH (the devshell).
+# It holds outside the sandbox and inside it alike, as each case clears the
+# markers it does not set.
 
 set -uo pipefail
 
@@ -98,18 +100,24 @@ assert_eq "canary-runner refuses outside the sandbox" "$BORZOI_MUTANTS_REFUSED" 
 assert_eq "canary-runner names the refusal" yes \
   "$(grep -q 'canary-runner: refuse' "$tmp/runner.err" && echo yes || echo no)"
 
-sandboxless bash "$here/inner.sh" nuget-regular-file "$tmp/out" 2>"$tmp/inner.err"
+# Any declared set: the refusals come before a set's files matter.
+# shellcheck source=tools/mutants/sets.sh
+source "$here/sets.sh"
+some_set="$(mutants_set_names "$here/sets.tsv" | sed -n 1p)"
+assert_eq "sets.tsv declares a set to refuse" yes "$([[ -n "$some_set" ]] && echo yes || echo no)"
+
+sandboxless bash "$here/inner.sh" "$some_set" "$tmp/out" 2>"$tmp/inner.err"
 assert_eq "inner.sh refuses outside the sandbox" "$BORZOI_MUTANTS_REFUSED" "$?"
 assert_eq "inner.sh names the refusal" yes \
   "$(grep -q 'inner.sh: refuse' "$tmp/inner.err" && echo yes || echo no)"
 assert_eq "inner.sh wrote no output" no "$([[ -e "$tmp/out" ]] && echo yes || echo no)"
-mkdir -p "$tmp/runner/mutants/nuget-regular-file"
-touch "$tmp/runner/mutants/nuget-regular-file/earlier-run"
-sandboxless RUNNER_TEMP="$tmp/runner" bash "$repo/tools/ci/mutants.sh" nuget-regular-file \
+mkdir -p "$tmp/runner/mutants/$some_set"
+touch "$tmp/runner/mutants/$some_set/earlier-run"
+sandboxless RUNNER_TEMP="$tmp/runner" bash "$repo/tools/ci/mutants.sh" "$some_set" \
   2>"$tmp/ci.err"
 assert_eq "tools/ci/mutants.sh refuses outside CI's mutation job" "$BORZOI_MUTANTS_REFUSED" "$?"
 assert_eq "tools/ci/mutants.sh keeps an earlier run's output when it refuses" yes \
-  "$([[ -e "$tmp/runner/mutants/nuget-regular-file/earlier-run" ]] && echo yes || echo no)"
+  "$([[ -e "$tmp/runner/mutants/$some_set/earlier-run" ]] && echo yes || echo no)"
 assert_eq "nothing ran" "" "$(cat "$tmp/ran" 2>/dev/null)"
 
 # Cargo's own wrapper and runner selection, under the arguments
@@ -182,6 +190,44 @@ exec "$@"
 EOF
 chmod +x "$tmp/passthrough"
 probe "as the runner" RUSTC_WORKSPACE_WRAPPER="$tmp/passthrough"
+
+# The whole route, as an accidental run takes it: a bare `cargo mutants` in a
+# crate carrying the repository's own `.cargo/mutants.toml`, which cargo-mutants
+# reads by itself. Its unmutated baseline must be refused (cargo-mutants exits
+# 4) before the crate's test starts, so no mutant runs.
+mkdir -p "$tmp/bare/src" "$tmp/bare/.cargo" "$tmp/bare/tools/mutants"
+cp "$repo/.cargo/mutants.toml" "$tmp/bare/.cargo/"
+cp "$here/canary.sh" "$here/canary-runner.sh" "$tmp/bare/tools/mutants/"
+cat >"$tmp/bare/Cargo.toml" <<'EOF'
+[package]
+name = "canary-bare"
+version = "0.0.0"
+edition = "2021"
+
+[workspace]
+EOF
+cat >"$tmp/bare/src/lib.rs" <<EOF
+pub fn answer() -> u32 {
+    42
+}
+
+#[test]
+fn started() {
+    std::fs::write("$tmp/bare-started", "").unwrap();
+    assert_eq!(answer(), 42);
+}
+EOF
+(
+  cd "$tmp/bare" &&
+    env -u GITHUB_ACTIONS -u CI -u RUNNER_ENVIRONMENT -u BORZOI_MUTANTS_CI_JOB \
+      -u BORZOI_MUTANTS_CANARY -u CARGO_TARGET_DIR -u RUSTC_WORKSPACE_WRAPPER \
+      CARGO_NET_OFFLINE=true cargo mutants --no-shuffle --output "$tmp/bare-out" >"$tmp/bare.out" 2>&1
+)
+assert_eq "bare cargo mutants: the baseline is refused (exit 4)" 4 "$?"
+assert_eq "bare cargo mutants: the canary is what refused" yes \
+  "$(grep -rqs 'canary-runner: refuse' "$tmp/bare-out" && echo yes || echo no)"
+assert_eq "bare cargo mutants: the crate's test never started" no \
+  "$([[ -e "$tmp/bare-started" ]] && echo yes || echo no)"
 
 if [[ $fails -ne 0 ]]; then
   echo "$fails failure(s)"
