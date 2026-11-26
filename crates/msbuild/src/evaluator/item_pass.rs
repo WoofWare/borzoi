@@ -652,7 +652,8 @@ fn evaluate_item_group(node: Node<'_, '_>, state: &mut State<'_>) {
     // list operations; work out what its children could do before deciding
     // the gate, so each arm below can poison the list appropriately.
     let reference_risk = project_reference_group_risk(node, state);
-    let group_reads_untrusted = state.condition_reads_untrusted_value(node);
+    let group_reads_untrusted =
+        state.condition_reads_untrusted_value(node, &state.entry_project_dir);
     state.compile_context = prev || item_group_has_compile_child_that_may_run(node, state);
     state.package_context = prev_pkg || has_package_child;
     if has_package_child {
@@ -858,7 +859,7 @@ fn project_reference_group_risk(
 fn reference_gate_may_run(node: Node<'_, '_>, state: &State<'_>) -> bool {
     match evaluate_item_condition_silent(node, state).0 {
         CondGate::Run | CondGate::Unsupported => true,
-        CondGate::Skip => state.condition_reads_untrusted_value(node),
+        CondGate::Skip => state.condition_reads_untrusted_value(node, &state.entry_project_dir),
     }
 }
 
@@ -1076,22 +1077,23 @@ fn walk_item_child_unattributed(node: Node<'_, '_>, state: &mut State<'_>) {
     let prev = state.compile_context;
     state.compile_context = compile_affecting;
     let diagnostics_before = state.diagnostics.len();
-    walk_item_child_inner(node, kind, state);
+    let metadata_diagnostics = walk_item_child_inner(node, kind, state);
     // Every way the walk can drop part of a `<ProjectReference Include>` it
     // reached — an unsupported gate, an unevaluable value, a wildcard or item
     // reference we cannot expand — raises a diagnostic, so one raised here
-    // means the captured list may lack an item MSBuild has. (A diagnostic about
-    // a captured item's metadata lands here too; that only costs precision.)
+    // means the captured list may lack an item MSBuild has. A diagnostic about
+    // a captured item's metadata drops nothing (the metadatum carries its own
+    // doubt), so those are not counted.
     if kind == ItemKind::ProjectReference
         && node.has_attribute("Include")
-        && state.diagnostics.len() != diagnostics_before
+        && state.diagnostics.len() - diagnostics_before != metadata_diagnostics
     {
         state.project_reference_includes_hidden = true;
     }
     state.compile_context = prev;
 }
 
-fn walk_item_child_inner(node: Node<'_, '_>, kind: ItemKind, state: &mut State<'_>) {
+fn walk_item_child_inner(node: Node<'_, '_>, kind: ItemKind, state: &mut State<'_>) -> usize {
     let item_type = modelled_item_type(kind);
     if modelled_item_list_operation_may_change_list(node, kind) {
         let (_, condition_tainted) = evaluate_item_condition_silent_with_sdk_taint(node, state);
@@ -1105,7 +1107,7 @@ fn walk_item_child_inner(node: Node<'_, '_>, kind: ItemKind, state: &mut State<'
     // build. Which direction poisons the list depends on the outcome below.
     let untrusted_reference_op = kind == ItemKind::ProjectReference
         && modelled_item_list_operation_may_change_list(node, kind)
-        && state.condition_reads_untrusted_value(node);
+        && state.condition_reads_untrusted_value(node, &state.entry_project_dir);
     let is_mutation = node.has_attribute("Update") || node.has_attribute("Remove");
     match evaluate_item_condition(node, state) {
         CondGate::Run => {
@@ -1130,7 +1132,7 @@ fn walk_item_child_inner(node: Node<'_, '_>, kind: ItemKind, state: &mut State<'
                     state.project_reference_includes_hidden = true;
                 }
             }
-            return;
+            return 0;
         }
         CondGate::Unsupported => {
             emit_unsupported_condition(node, state);
@@ -1140,21 +1142,21 @@ fn walk_item_child_inner(node: Node<'_, '_>, kind: ItemKind, state: &mut State<'
             if kind == ItemKind::ProjectReference && is_mutation {
                 state.project_references_uncertain = true;
             }
-            return;
+            return 0;
         }
     }
     if is_compile_item_kind(kind) && is_metadata_only_item_update(node) {
         if kind == ItemKind::Compile && compile_item_sets_compile_order(node) {
             apply_compile_order_update(node, state);
         }
-        return;
+        return 0;
     }
     if node.has_attribute("Include") || node.has_attribute("Update") || node.has_attribute("Remove")
     {
         state.mark_untracked_item_list(item_type);
     }
     if kind == ItemKind::ProjectReference && apply_project_reference_remove(node, state) {
-        return;
+        return 0;
     }
     if diagnose_item_op(node, "Update", state) || diagnose_item_op(node, "Remove", state) {
         // The mutation is skipped, so earlier `Include`s stand un-mutated in
@@ -1166,31 +1168,32 @@ fn walk_item_child_inner(node: Node<'_, '_>, kind: ItemKind, state: &mut State<'
         if kind == ItemKind::ProjectReference {
             state.project_references_uncertain = true;
         }
-        return;
+        return 0;
     }
     // `Exclude` is only an unsupported operation when there's no glob
     // resolver to honour it; with one present the element routes through
     // the glob seam below (Exclude applies to literal includes too).
     if state.glob_resolver.is_none() && diagnose_item_op(node, "Exclude", state) {
-        return;
+        return 0;
     }
     let placement = match kind {
         ItemKind::ProjectReference => ItemPlacement::ProjectReference,
         ItemKind::Compile | ItemKind::CompileBefore | ItemKind::CompileAfter => {
             let Some(effect) = compile_order_effect(node, kind, state) else {
-                return;
+                return 0;
             };
             ItemPlacement::Compile(effect)
         }
     };
     let include = attribute(node, "Include");
     let Some(include) = include.as_deref() else {
-        return;
+        return 0;
     };
     // `ReferenceOutputAssembly` / `ExcludeAssets` shape what a
     // `<ProjectReference>` contributes to the consumer's reference set and
     // are meaningless on Compile items, which carry no modelled metadata:
     // nothing downstream reads anything but their kind, path and order.
+    let diagnostics_before_metadata = state.diagnostics.len();
     let metadata = match kind {
         ItemKind::ProjectReference => ItemMetadata {
             reference_output_assembly: resolve_string_metadata(
@@ -1217,6 +1220,7 @@ fn walk_item_child_inner(node: Node<'_, '_>, kind: ItemKind, state: &mut State<'
             row: None,
         },
     };
+    let metadata_diagnostics = state.diagnostics.len() - diagnostics_before_metadata;
     // Substitute $(...) FIRST, then split on ';'. Property values are
     // allowed to be semicolon-delimited lists in MSBuild, so
     // `Include="$(ExtraFiles)"` may expand into multiple items even
@@ -1226,7 +1230,7 @@ fn walk_item_child_inner(node: Node<'_, '_>, kind: ItemKind, state: &mut State<'
         // Substitution failure leaves a path with empty fragments or
         // residual `$(...)`. Either way the result is corrupt; we refuse
         // to emit a misleading item.
-        return;
+        return 0;
     }
     let spelled = msbuild_spelling(include, expansion.value.ignoring_trust());
     match state.glob_resolver {
@@ -1241,6 +1245,7 @@ fn walk_item_child_inner(node: Node<'_, '_>, kind: ItemKind, state: &mut State<'
             );
         }
     }
+    metadata_diagnostics
 }
 
 /// Per-element item metadata, resolved once and copied onto every
@@ -4801,7 +4806,7 @@ fn resolve_string_metadata(
         // (A clean decision over undefined-but-never-written properties
         // stays exact under the environment model — the pinned
         // `'$(NoSuchProp)'` cases.)
-        let untrusted_gate = state.condition_reads_untrusted_value(child);
+        let untrusted_gate = state.condition_reads_untrusted_value(child, &state.entry_project_dir);
         match evaluate_item_condition(child, state) {
             CondGate::Run => {
                 if untrusted_gate {

@@ -14,7 +14,9 @@
 //! - **polarity**: the gate MSBuild evaluates true, or false;
 //! - **gate**: one reading a write the walk refused to compute, one reading a
 //!   write under a condition the walk does not model, a condition the walk
-//!   does not model itself, and a literal the walk decides (the control);
+//!   does not model itself, one reading a toolset name the walk holds no
+//!   value of, and two the walk decides (the controls): a literal, and an
+//!   `Exists` probe that settles the gate whatever the doubted names hold;
 //!
 //! and holds, at every point:
 //!
@@ -22,7 +24,7 @@
 //!   exactly (the items' `FullPath`s, or the `DefineConstants` property);
 //! - **agreement**: the three axes, behind the same gate at the same site and
 //!   polarity, are all certain or all doubted;
-//! - **must-commit / must-doubt**: behind the control every axis commits;
+//! - **must-commit / must-doubt**: behind the controls every axis commits;
 //!   behind every other gate every axis doubts, so no cell passes by
 //!   agreeing with MSBuild by luck.
 
@@ -64,17 +66,25 @@ enum Gate {
     /// sets to the directory its process started in and the walk, evaluating
     /// for no process, holds no value of.
     Toolset,
+    /// An `Exists` probe of a file beside the project, which decides the gate
+    /// whatever the refused and toolset names beside it hold: the walk
+    /// decides it.
+    ExistsDecides,
 }
 
 const AXES: [Axis; 3] = [Axis::Compile, Axis::Defines, Axis::References];
 const SITES: [Site; 2] = [Site::Element, Site::Group];
-const GATES: [Gate; 5] = [
+const GATES: [Gate; 6] = [
     Gate::Literal,
     Gate::Refused,
     Gate::Unpinned,
     Gate::Unmodelled,
     Gate::Toolset,
+    Gate::ExistsDecides,
 ];
+
+/// The file [`Gate::ExistsDecides`] probes, beside the project.
+const PRESENT: &str = "Present.txt";
 
 /// The writes every document carries, whichever gate it uses.
 const PROPERTIES: &str = "<PropertyGroup>\
@@ -97,6 +107,12 @@ fn condition(gate: Gate, truth: bool) -> String {
         // MSBuild's startup directory is never empty.
         Gate::Toolset if truth => "'$(MSBuildStartupDirectory)' != ''".to_string(),
         Gate::Toolset => "'$(MSBuildStartupDirectory)' == ''".to_string(),
+        Gate::ExistsDecides if truth => format!(
+            "Exists('{PRESENT}') Or '$(Refused)' == 'x' Or '$(MSBuildStartupDirectory)' == ''"
+        ),
+        Gate::ExistsDecides => format!(
+            "!Exists('{PRESENT}') And ('$(Refused)' == 'D' Or '$(MSBuildStartupDirectory)' != '')"
+        ),
     }
 }
 
@@ -122,8 +138,14 @@ fn document(axis: Axis, site: Site, gate: Gate, truth: bool) -> String {
 }
 
 /// What the walk publishes for `axis`: the file names of its items or the
-/// defines, when it commits to them; `None` when it doubts them.
-fn ours(axis: Axis, xml: &str, path: &Path) -> Option<Vec<String>> {
+/// defines, when it commits to them; `None` when it doubts them. Beside it,
+/// for the references, the claim the list makes and the edges it holds,
+/// which an incomplete list still claims are MSBuild's.
+fn ours(
+    axis: Axis,
+    xml: &str,
+    path: &Path,
+) -> (Option<Vec<String>>, common::ReferenceClaim, Vec<String>) {
     let parsed = parse_fsproj_with_imports(
         &borzoi_msbuild::ProjectFile::buffer(path, xml).expect("a full project path"),
         &HashMap::new(),
@@ -135,13 +157,14 @@ fn ours(axis: Axis, xml: &str, path: &Path) -> Option<Vec<String>> {
     let names = |items: &[borzoi_msbuild::ResolvedItem]| -> Vec<String> {
         items.iter().map(|item| file_name(&item.include)).collect()
     };
-    match axis {
+    let claim = common::reference_claim(&parsed);
+    let held = names(&parsed.project_references);
+    let committed = match axis {
         Axis::Compile => (!parsed.items_uncertain).then(|| names(&parsed.items)),
-        Axis::References => (!parsed.project_references_uncertain
-            && !parsed.project_references_incomplete)
-            .then(|| names(&parsed.project_references)),
+        Axis::References => (claim == common::ReferenceClaim::Exact).then(|| held.clone()),
         Axis::Defines => (!parsed.define_constants_uncertain).then_some(parsed.define_constants),
-    }
+    };
+    (committed, claim, held)
 }
 
 fn file_name(path: &Path) -> String {
@@ -189,6 +212,7 @@ fn theirs(oracle: &mut Oracle, axis: Axis, xml: &str, path: &Path) -> Vec<String
 fn every_axis_doubts_the_gates_the_others_doubt_and_commits_only_to_msbuilds_answer() {
     let dir = tempfile::TempDir::new().expect("a temporary directory");
     let path = dir.path().join("Demo.fsproj");
+    std::fs::write(dir.path().join(PRESENT), "").expect("the probed file");
     let mut oracle = Oracle::spawn();
     let mut failures = Vec::new();
     let mut points = 0;
@@ -198,9 +222,14 @@ fn every_axis_doubts_the_gates_the_others_doubt_and_commits_only_to_msbuilds_ans
                 let mut certain = Vec::new();
                 for axis in AXES {
                     let xml = document(axis, site, gate, truth);
-                    let ours = ours(axis, &xml, &path);
+                    let (ours, claim, held) = ours(axis, &xml, &path);
                     let theirs = theirs(&mut oracle, axis, &xml, &path);
                     points += 1;
+                    if axis == Axis::References
+                        && let Err(failure) = common::check_reference_claim(claim, &held, &theirs)
+                    {
+                        failures.push(format!("{failure}:\n{xml}"));
+                    }
                     // The control's answer is the polarity's, on both sides:
                     // otherwise the cell grades nothing.
                     let expected = if truth { 1 } else { 0 };
@@ -216,7 +245,7 @@ fn every_axis_doubts_the_gates_the_others_doubt_and_commits_only_to_msbuilds_ans
                             "{axis:?} committed {ours:?}; MSBuild holds {theirs:?}:\n{xml}"
                         ));
                     }
-                    let must_commit = gate == Gate::Literal;
+                    let must_commit = matches!(gate, Gate::Literal | Gate::ExistsDecides);
                     if ours.is_some() != must_commit {
                         failures.push(format!(
                             "{axis:?} {} behind a {gate:?} gate on the {site:?} ({truth}):\n{xml}",

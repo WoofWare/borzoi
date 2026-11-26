@@ -1003,6 +1003,61 @@ pub enum Verdict {
     Unsupported,
 }
 
+/// What a `<ProjectReference>` list claims of MSBuild's, under
+/// [`ParsedProject::project_references`]' contract (#1181): every
+/// differential grades the list through [`reference_claim`] and
+/// [`check_reference_claim`], so none can skip the retained edges of an
+/// incomplete list, which the LSP still follows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReferenceClaim {
+    /// Neither flag: MSBuild's list exactly, in its order.
+    Exact,
+    /// Incomplete only: every edge held is one of MSBuild's, in MSBuild's
+    /// order; MSBuild may have more.
+    Within,
+    /// Uncertain: no claim.
+    Nothing,
+}
+
+/// The claim `parsed`'s reference list makes.
+pub fn reference_claim(parsed: &ParsedProject) -> ReferenceClaim {
+    if parsed.project_references_uncertain {
+        ReferenceClaim::Nothing
+    } else if parsed.project_references_incomplete {
+        ReferenceClaim::Within
+    } else {
+        ReferenceClaim::Exact
+    }
+}
+
+/// Holds the walk's list (`ours`, in whatever currency the caller grades) to
+/// MSBuild's (`theirs`, in the same currency) under `claim`: equal for
+/// [`ReferenceClaim::Exact`], a subsequence for [`ReferenceClaim::Within`],
+/// anything for [`ReferenceClaim::Nothing`]. `Err` says how it fails.
+pub fn check_reference_claim<T: PartialEq + std::fmt::Debug>(
+    claim: ReferenceClaim,
+    ours: &[T],
+    theirs: &[T],
+) -> Result<(), String> {
+    match claim {
+        ReferenceClaim::Nothing => Ok(()),
+        ReferenceClaim::Exact if ours == theirs => Ok(()),
+        ReferenceClaim::Exact => Err(format!(
+            "a certain reference list is not MSBuild's: ours {ours:?}, MSBuild's {theirs:?}"
+        )),
+        ReferenceClaim::Within => {
+            let mut rest = theirs.iter();
+            match ours.iter().find(|edge| !rest.any(|t| t == *edge)) {
+                None => Ok(()),
+                Some(edge) => Err(format!(
+                    "an incomplete reference list holds {edge:?}, which is not MSBuild's (or not \
+                     in MSBuild's order): ours {ours:?}, MSBuild's {theirs:?}"
+                )),
+            }
+        }
+    }
+}
+
 /// The differential contract, asserted for one `(condition, props)` case:
 ///
 /// - We commit to `True`/`False` ⟹ MSBuild agrees with that *exact* boolean

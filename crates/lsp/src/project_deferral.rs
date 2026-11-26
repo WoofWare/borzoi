@@ -110,6 +110,25 @@ impl ProjectEvaluation<'_> {
             } => parsed.project_references_uncertain || *not_an_inner_build,
         }
     }
+
+    /// Whether the inter-project reference edges are kept for this project
+    /// but may lack references the build has
+    /// ([`ParsedProject::project_references_incomplete`]), so the assembly env
+    /// built from them is incomplete — the predicate
+    /// `workspace::references_incomplete` applies (modulo the same walk-purpose
+    /// gate). Never together with [`Self::drops_reference_edges`]: a dropped
+    /// list says more.
+    ///
+    /// Shared rather than restated, for the reason
+    /// [`Self::drops_reference_edges`] is.
+    pub fn may_lack_reference_edges(&self) -> bool {
+        match self {
+            ProjectEvaluation::Failed => false,
+            ProjectEvaluation::Evaluated { parsed, .. } => {
+                !self.drops_reference_edges() && parsed.project_references_incomplete
+            }
+        }
+    }
 }
 
 /// A thing the LSP does for a project, which it is not doing for this one.
@@ -121,9 +140,10 @@ impl ProjectEvaluation<'_> {
 ///
 /// # Known coverage limit: graph-level reference suppression
 ///
-/// [`Self::ProjectReferenceEdges`] is reported from the *entry project's own*
-/// evaluation. The compile-closure graph walk suppresses edges per node, on
-/// facts this input does not carry:
+/// [`Self::ProjectReferenceEdges`] and [`Self::CompleteReferenceSet`] are
+/// reported from the *entry project's own* evaluation. The compile-closure
+/// graph walk suppresses edges, or marks a list incomplete, per node, on facts
+/// this input does not carry:
 ///
 /// - a **later target framework** of a multi-targeted project (the walk
 ///   evaluates additional/seeded TFMs; a clean first TFM hides an uncertain
@@ -160,6 +180,17 @@ pub enum DeferredCapability {
     /// [`crate::project_graph::ProjectNode::references_uncertain`] and drops
     /// the edge from the runtime `AssemblyEnv`.
     ProjectReferenceEdges,
+    /// A complete set of referenced assemblies. The project's
+    /// `<ProjectReference>` edges are kept and followed, but the list may lack
+    /// references the build has, so the `AssemblyEnv` is marked incomplete: a
+    /// name it does not find is not proof the build lacks it, and names that
+    /// could come from a missing reference stay unresolved.
+    ///
+    /// Declined by [`crate::workspace`]'s `references_incomplete`, which sets
+    /// [`crate::project_graph::ProjectNode::references_incomplete`]. The
+    /// evaluator records no cause for it, so its explanation is always
+    /// [`Causes::Unrecorded`].
+    CompleteReferenceSet,
 }
 
 impl DeferredCapability {
@@ -174,6 +205,10 @@ impl DeferredCapability {
             DeferredCapability::ProjectReferenceEdges => {
                 "ignoring this project's <ProjectReference> edges, so types from referenced \
                  projects won't resolve"
+            }
+            DeferredCapability::CompleteReferenceSet => {
+                "this project's <ProjectReference> list may lack references the build has, so \
+                 names that could come from a referenced project may not resolve"
             }
         }
     }
@@ -586,6 +621,17 @@ pub fn deferrals(eval: ProjectEvaluation<'_>, fold: FoldOutcome<'_>) -> Vec<Defe
             DeferredCapability::ProjectReferenceEdges,
             DeclineStage::Evaluation,
             causes,
+        ));
+    }
+
+    if eval.may_lack_reference_edges() {
+        // The evaluator records no cause for a dropped `Include`, and no
+        // structural Compile cause explains one (an import it could not follow
+        // withdraws the list instead), so the absence is stated.
+        out.push(Deferral::new(
+            DeferredCapability::CompleteReferenceSet,
+            DeclineStage::Evaluation,
+            std::iter::empty(),
         ));
     }
 
