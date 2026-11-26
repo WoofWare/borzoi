@@ -1414,8 +1414,18 @@ pub struct BestGuess<'a> {
 impl ParsedProject {
     /// The F# preprocessor symbols of the evaluated `$(DefineConstants)`,
     /// when the walk commits to them; otherwise why it does not (every
-    /// recorded cause, never none). See the `define_constants` and
-    /// `define_constants_uncertain` fields for what each means.
+    /// recorded cause, never none).
+    ///
+    /// What `Certain` covers: the list the evaluation of the project's
+    /// documents gives `$(DefineConstants)`, split on the escaped value's
+    /// semicolons, globals and the environment included. **Not** the symbols
+    /// the SDK's targets add at build time (`DEBUG`, `TRACE`, the `NET6_0`
+    /// family), which the walk does not run and does not doubt the list for:
+    /// a symbol missing from a `Certain` list is not proof that the compiler
+    /// leaves it undefined. An uncertain write inside the SDK's own files is
+    /// tolerated on the same grounds. `Unknown` covers a user-authored write
+    /// (or its gate) leaning on a value the walk cannot pin, content the walk
+    /// did not enter, and a project MSBuild may reject.
     pub fn define_constants(&self) -> Verdict<&[String], &[DefineConstantsUncertaintyCause]> {
         if self.define_constants_uncertain {
             Verdict::Unknown(&self.define_constants_uncertainties)
@@ -1425,9 +1435,18 @@ impl ParsedProject {
     }
 
     /// The `<ProjectReference>` items in document order, when the walk
-    /// commits to them; otherwise [`ProjectReferencesUnknown`]. See the
-    /// `project_references` and `project_references_uncertain` fields for what
-    /// each means.
+    /// commits to them; otherwise [`ProjectReferencesUnknown`].
+    ///
+    /// What `Certain` covers is a **subset** of MSBuild's evaluated list: it
+    /// holds no item the build lacks (no phantom edge), but an `Include` the
+    /// walk dropped behind a gate it could not decide may be missing from it,
+    /// as may one whose value it could not compute from names it holds
+    /// exactly. So a reference missing from a `Certain` list is not proof that
+    /// the build has none. `Unknown` covers an item the build may lack or
+    /// whose identity the walk may have wrong: an `Update`/`Remove` that may
+    /// run, a kept `Include` behind a doubted gate or reading a doubted name,
+    /// an `<ItemDefinitionGroup>` default, content the walk did not enter, and
+    /// a project MSBuild may reject. Target-time mutation is out of contract.
     pub fn project_references(&self) -> Verdict<&[ResolvedItem], ProjectReferencesUnknown> {
         if self.project_references_uncertain {
             Verdict::Unknown(ProjectReferencesUnknown)

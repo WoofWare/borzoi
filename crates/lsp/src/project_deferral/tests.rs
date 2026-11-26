@@ -55,7 +55,8 @@ struct Served<'a> {
     not_an_inner_build: bool,
 }
 
-/// The evaluated arm as production forms it ([`ServedBuild::evaluation`]),
+/// The evaluated arm as production forms it
+/// (`workspace::served_evaluation_for_tests`),
 /// with the evaluator's doubt set by `served` in place of the baseline's: an
 /// evaluator cause takes precedence over every served-build fact, as it does
 /// there.
@@ -65,11 +66,7 @@ fn evaluated_as<'a>(parsed: &'a ParsedProject, served: Served<'a>) -> ProjectEva
         references,
         not_an_inner_build,
         ..
-    } = ServedBuild {
-        not_an_inner_build: served.not_an_inner_build,
-        may_be_outer_build: false,
-    }
-    .evaluation(parsed)
+    } = crate::workspace::served_evaluation_for_tests(parsed, served.not_an_inner_build, false)
     else {
         unreachable!("an evaluation is served as `Evaluated`")
     };
@@ -944,19 +941,22 @@ fn an_unknown_fold_still_reports_what_the_evaluation_declines() {
 #[test]
 fn an_unknown_fold_still_publishes_a_known_reference_loss() {
     let parsed = certain_project();
+    // Only the references doubted: the defines are certain, so the fold's
+    // verdict really is unknowable, and reconciliation must not take the
+    // early return a known fold verdict takes.
     let eval = evaluated_as(
         &parsed,
         Served {
-            not_an_inner_build: true,
+            references: true,
             ..Served::default()
         },
     );
+    assert!(!fold_verdict_known(eval, FoldOutcome::Unknown));
     let fresh = deferrals(eval, FoldOutcome::Unknown);
-    assert!(
-        fresh
-            .iter()
-            .any(|d| d.capability() == DeferredCapability::ProjectReferenceEdges),
-        "{fresh:?}"
+    assert_eq!(fresh.len(), 1);
+    assert_eq!(
+        fresh[0].capability(),
+        DeferredCapability::ProjectReferenceEdges
     );
     let reconciled = reconcile(fresh.clone(), &[], eval, FoldOutcome::Unknown);
     assert_eq!(
@@ -1115,11 +1115,7 @@ fn a_discarded_inner_build_explains_its_fold_decline_too() {
     assert!(parsed.compile_item_uncertainties.is_empty());
 
     let ds = deferrals(
-        ServedBuild {
-            not_an_inner_build: true,
-            may_be_outer_build: true,
-        }
-        .evaluation(&parsed),
+        crate::workspace::served_evaluation_for_tests(&parsed, true, true),
         FoldOutcome::Unknown,
     );
     assert_eq!(ds.len(), 2, "{ds:?}");

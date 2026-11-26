@@ -81,10 +81,10 @@ pub enum ProjectEvaluation<'a> {
         /// the evaluator cannot see.
         parsed: &'a ParsedProject,
         /// The served build's `DefineConstants`, or why the LSP does not take
-        /// them for the build's ([`ServedBuild::defines`]).
+        /// them for the build's (`workspace::ServedBuild::defines`).
         defines: Verdict<&'a [String], DefinesUnknown<'a>>,
         /// The served build's `<ProjectReference>` items, or why the LSP does
-        /// not take them for the build's ([`ServedBuild::references`]).
+        /// not take them for the build's (`workspace::ServedBuild::references`).
         references: Verdict<&'a [ResolvedItem], ReferencesUnknown>,
         /// We are serving the **outer dispatch** build of a multi-targeted
         /// project, whose `<ProjectReference>` list is not the real build's
@@ -106,15 +106,15 @@ pub enum ProjectEvaluation<'a> {
 pub enum DefinesUnknown<'a> {
     /// The evaluator does not commit to them, for these causes (never none).
     Evaluation(&'a [DefineConstantsUncertaintyCause]),
-    /// No evaluation of the document is an inner build
-    /// (`workspace::EvaluatedProject::not_an_inner_build`), as for
-    /// [`ReferencesUnknown::NotAnInnerBuild`].
-    NotAnInnerBuild,
+    /// The document may overwrite the `TargetFramework` global it is evaluated
+    /// under (`workspace::EvaluatedProject::not_an_inner_build`), as for
+    /// [`ReferencesUnknown::TargetFrameworkMayBeOverwritten`].
+    TargetFrameworkMayBeOverwritten,
     /// The served evaluation is pass 1, standing in for an inner build that
     /// could not be served (`workspace::discarded_inner_build`), and may be the
     /// outer dispatch build: content gated on `'$(TargetFramework)' == ''` may
-    /// be reached here and in no inner build. ([`ServedBuild::may_be_outer_build`]
-    /// says when it is one for certain and when only possibly.)
+    /// be reached here and in no inner build. (`workspace::ServedBuild` says
+    /// when it is one for certain and when only possibly.)
     MayBeOuterBuild,
 }
 
@@ -128,85 +128,12 @@ pub enum ReferencesUnknown {
     /// The served evaluation may be the outer dispatch build, standing in for
     /// an inner build, as for [`DefinesUnknown::MayBeOuterBuild`].
     MayBeOuterBuild,
-    /// No evaluation of the document is an inner build
+    /// The document may overwrite the `TargetFramework` global it is evaluated
+    /// under: its `TreatAsLocalProperty` names that global, or may expand to it
+    /// (`tfm_policy::ReseedOutcome::Overridable`), so the seed could not be
+    /// proved protected and no evaluation of it is provably an inner build
     /// (`workspace::EvaluatedProject::not_an_inner_build`).
-    NotAnInnerBuild,
-}
-
-/// What the LSP knows of the build an evaluation is served for, beyond the
-/// evaluation itself: the facts that make the evaluator's verdicts on the
-/// defines and the references not the served build's.
-///
-/// Its methods are where the served build's verdicts are formed, from the
-/// evaluator's, and the only place the evaluator's are read
-/// (`crates/lsp/clippy.toml`).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct ServedBuild {
-    /// No evaluation of the document is an inner build: it overwrites the
-    /// `TargetFramework` global it is evaluated under
-    /// (`workspace::EvaluatedProject::not_an_inner_build`).
-    pub not_an_inner_build: bool,
-    /// The evaluation served is pass 1, in place of an inner build that could
-    /// not be served (`workspace::discarded_inner_build`), and may be the outer
-    /// dispatch build. It is one for certain where the plural was read and the
-    /// seeded inner pass could not be served; where the TFMs could not be read
-    /// (`tfm_policy::TfmChoice::PluralUnknown`, `Untrusted { may_dispatch }`)
-    /// MSBuild may have run a single-target build instead.
-    pub may_be_outer_build: bool,
-}
-
-impl ServedBuild {
-    /// The served build's `DefineConstants`, or why the LSP does not take
-    /// `parsed`'s for the build's: the evaluator's verdict, then a document no
-    /// evaluation of which is an inner build, then an outer build possibly
-    /// standing in for an inner one.
-    pub fn defines(self, parsed: &ParsedProject) -> Verdict<&[String], DefinesUnknown<'_>> {
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "forms the served build's verdict from the evaluator's, here and nowhere else"
-        )]
-        let evaluated = parsed.define_constants();
-        match evaluated {
-            Verdict::Unknown(causes) => Verdict::Unknown(DefinesUnknown::Evaluation(causes)),
-            Verdict::Certain(_) if self.not_an_inner_build => {
-                Verdict::Unknown(DefinesUnknown::NotAnInnerBuild)
-            }
-            Verdict::Certain(_) if self.may_be_outer_build => {
-                Verdict::Unknown(DefinesUnknown::MayBeOuterBuild)
-            }
-            Verdict::Certain(defines) => Verdict::Certain(defines),
-        }
-    }
-
-    /// The served build's `<ProjectReference>` items, or why the LSP does not
-    /// take `parsed`'s for the build's, in the order [`Self::defines`] checks.
-    pub fn references(self, parsed: &ParsedProject) -> Verdict<&[ResolvedItem], ReferencesUnknown> {
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "forms the served build's verdict from the evaluator's, here and nowhere else"
-        )]
-        let evaluated = parsed.project_references();
-        match evaluated {
-            Verdict::Unknown(_) => Verdict::Unknown(ReferencesUnknown::Evaluation),
-            Verdict::Certain(_) if self.not_an_inner_build => {
-                Verdict::Unknown(ReferencesUnknown::NotAnInnerBuild)
-            }
-            Verdict::Certain(_) if self.may_be_outer_build => {
-                Verdict::Unknown(ReferencesUnknown::MayBeOuterBuild)
-            }
-            Verdict::Certain(references) => Verdict::Certain(references),
-        }
-    }
-
-    /// Everything the decline decisions read of `parsed` served as this build.
-    pub fn evaluation(self, parsed: &ParsedProject) -> ProjectEvaluation<'_> {
-        ProjectEvaluation::Evaluated {
-            parsed,
-            defines: self.defines(parsed),
-            references: self.references(parsed),
-            not_an_inner_build: self.not_an_inner_build,
-        }
-    }
+    TargetFrameworkMayBeOverwritten,
 }
 
 impl ProjectEvaluation<'_> {
@@ -633,7 +560,9 @@ pub fn deferrals(eval: ProjectEvaluation<'_>, fold: FoldOutcome<'_>) -> Vec<Defe
     // not record, is `outer_build_cause`'s.
     let define_causes: &[DefineConstantsUncertaintyCause] = match defines {
         Verdict::Unknown(DefinesUnknown::Evaluation(causes)) => causes,
-        Verdict::Unknown(DefinesUnknown::NotAnInnerBuild | DefinesUnknown::MayBeOuterBuild)
+        Verdict::Unknown(
+            DefinesUnknown::TargetFrameworkMayBeOverwritten | DefinesUnknown::MayBeOuterBuild,
+        )
         | Verdict::Certain(_) => &[],
     };
 

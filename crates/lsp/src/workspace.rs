@@ -62,9 +62,7 @@ use borzoi_msbuild::{
 };
 
 use crate::paths::{lexically_normalize, paths_equal};
-#[cfg(test)]
-use crate::project_deferral::DefinesUnknown;
-use crate::project_deferral::{ProjectEvaluation, ReferencesUnknown, ServedBuild};
+use crate::project_deferral::{DefinesUnknown, ProjectEvaluation, ReferencesUnknown};
 use crate::project_graph::{
     Edge, EdgeKind, NodeResult, NodeTfm, ProjectGraph, ProjectKind, build_graph, classify,
 };
@@ -277,6 +275,83 @@ struct EvaluatedProject {
     /// caller's own `TargetFramework`, which is no outer build; that one is
     /// [`Self::not_an_inner_build`] alone.
     may_be_outer_build: bool,
+}
+
+/// What the LSP knows of the build an evaluation is served for, beyond the
+/// evaluation itself: the facts that make the evaluator's verdicts on the
+/// defines and the references not the served build's.
+///
+/// Its methods are where the served build's verdicts are formed, from the
+/// evaluator's, and the only place the evaluator's are read
+/// (`crates/lsp/clippy.toml`). Private to this module, so that a verdict is
+/// only ever formed with the facts of the evaluation it is served for
+/// ([`EvaluatedProject::served`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ServedBuild {
+    /// The document may overwrite the `TargetFramework` global it is
+    /// evaluated under ([`EvaluatedProject::not_an_inner_build`]).
+    not_an_inner_build: bool,
+    /// The evaluation served is pass 1, in place of an inner build that could
+    /// not be served ([`discarded_inner_build`]), and may be the outer
+    /// dispatch build. It is one for certain where the plural was read and the
+    /// seeded inner pass could not be served; where the TFMs could not be read
+    /// (`tfm_policy::TfmChoice::PluralUnknown`, `Untrusted { may_dispatch }`)
+    /// MSBuild may have run a single-target build instead.
+    may_be_outer_build: bool,
+}
+
+impl ServedBuild {
+    /// The served build's `DefineConstants`, or why the LSP does not take
+    /// `parsed`'s for the build's: the evaluator's verdict, then a document no
+    /// evaluation of which is an inner build, then an outer build possibly
+    /// standing in for an inner one.
+    fn defines(self, parsed: &ParsedProject) -> Verdict<&[String], DefinesUnknown<'_>> {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "forms the served build's verdict from the evaluator's, here and nowhere else"
+        )]
+        let evaluated = parsed.define_constants();
+        match evaluated {
+            Verdict::Unknown(causes) => Verdict::Unknown(DefinesUnknown::Evaluation(causes)),
+            Verdict::Certain(_) if self.not_an_inner_build => {
+                Verdict::Unknown(DefinesUnknown::TargetFrameworkMayBeOverwritten)
+            }
+            Verdict::Certain(_) if self.may_be_outer_build => {
+                Verdict::Unknown(DefinesUnknown::MayBeOuterBuild)
+            }
+            Verdict::Certain(defines) => Verdict::Certain(defines),
+        }
+    }
+
+    /// The served build's `<ProjectReference>` items, or why the LSP does not
+    /// take `parsed`'s for the build's, in the order [`Self::defines`] checks.
+    fn references(self, parsed: &ParsedProject) -> Verdict<&[ResolvedItem], ReferencesUnknown> {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "forms the served build's verdict from the evaluator's, here and nowhere else"
+        )]
+        let evaluated = parsed.project_references();
+        match evaluated {
+            Verdict::Unknown(_) => Verdict::Unknown(ReferencesUnknown::Evaluation),
+            Verdict::Certain(_) if self.not_an_inner_build => {
+                Verdict::Unknown(ReferencesUnknown::TargetFrameworkMayBeOverwritten)
+            }
+            Verdict::Certain(_) if self.may_be_outer_build => {
+                Verdict::Unknown(ReferencesUnknown::MayBeOuterBuild)
+            }
+            Verdict::Certain(references) => Verdict::Certain(references),
+        }
+    }
+
+    /// Everything the decline decisions read of `parsed` served as this build.
+    fn evaluation(self, parsed: &ParsedProject) -> ProjectEvaluation<'_> {
+        ProjectEvaluation::Evaluated {
+            parsed,
+            defines: self.defines(parsed),
+            references: self.references(parsed),
+            not_an_inner_build: self.not_an_inner_build,
+        }
+    }
 }
 
 impl EvaluatedProject {
@@ -3104,6 +3179,22 @@ fn evaluate_project(
     }
 }
 
+/// `parsed` as production serves it under these served-build facts
+/// ([`ServedBuild::evaluation`]), for the deferral tests, which must hold the
+/// explainer to the verdicts production can form.
+#[cfg(test)]
+pub(crate) fn served_evaluation_for_tests(
+    parsed: &ParsedProject,
+    not_an_inner_build: bool,
+    may_be_outer_build: bool,
+) -> ProjectEvaluation<'_> {
+    ServedBuild {
+        not_an_inner_build,
+        may_be_outer_build,
+    }
+    .evaluation(parsed)
+}
+
 /// Mark an outer dispatch build served in place of a discarded inner one as
 /// uncertain on every axis a `$(TargetFramework)` gate can reach.
 ///
@@ -4172,11 +4263,11 @@ mod tests {
         let evaluated = ws.evaluated(&proj).expect("evaluates");
         assert_eq!(
             evaluated.defines(),
-            Verdict::Unknown(DefinesUnknown::NotAnInnerBuild)
+            Verdict::Unknown(DefinesUnknown::TargetFrameworkMayBeOverwritten)
         );
         assert_eq!(
             evaluated.references(),
-            Verdict::Unknown(ReferencesUnknown::NotAnInnerBuild)
+            Verdict::Unknown(ReferencesUnknown::TargetFrameworkMayBeOverwritten)
         );
     }
 
@@ -4319,7 +4410,7 @@ mod tests {
         let evaluated = ws.evaluated(&proj).expect("evaluates");
         assert_eq!(
             evaluated.defines(),
-            Verdict::Unknown(DefinesUnknown::NotAnInnerBuild),
+            Verdict::Unknown(DefinesUnknown::TargetFrameworkMayBeOverwritten),
             "outer-only defines must not be served as fact, and the verdict names the override"
         );
         assert!(
