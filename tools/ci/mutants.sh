@@ -60,13 +60,18 @@ base="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
 work="$base/mutants-work/$set_name"
 out="$base/mutants/$set_name"
 rm -rf "$work" "$out"
-mkdir -p "$work" "$out/run/mutants.out/log"
+mkdir -p "$work"
 work="$(cd "$work" && pwd -P)"
 commit="$(git rev-parse HEAD)"
 
 status=0
 BORZOI_MUTANTS_COMMIT="$commit" timeout --kill-after=60 "${BORZOI_MUTANTS_TIMEOUT:-5h}" \
   nix develop --command bash tools/mutants/inner.sh "$set_name" "$work/run" || status=$?
+
+# The upload directory is made only now the run is over, and fresh: anything a
+# mutant left at its path is gone, and only staged files go in.
+rm -rf "$out"
+mkdir -p "$out/run/mutants.out/log"
 
 # shellcheck source=tools/mutants/stage.sh
 source tools/mutants/stage.sh

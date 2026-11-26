@@ -288,15 +288,39 @@ fn run(set: &str, out_dir: &Path, repo: &Path) -> Result<Result<(), String>, Str
          Tests its mutants never face: doctests (`tools/mutants/inner.sh` passes\n\
          `--tests`), every #[ignore]d test, and the `scope: skip` filters."
     );
-    let path = root.join(format!("tools/mutants/manifests/{set}.txt"));
+    let rel = format!("tools/mutants/manifests/{set}.txt");
+    let path = root.join(&rel);
     let regenerate = format!("BORZOI_UPDATE_MANIFESTS=1 tools/mutants/run.sh {set}");
+    let update = update_requested();
+    // A check pins the set to the manifest the graded commit holds. The
+    // checkout is that commit with no tracked file changed (`checkout_is`), so
+    // a tracked manifest is the commit's; an untracked one, as a regeneration
+    // leaves a new set's, is in no commit, and a fresh checkout would not
+    // have it.
+    if !update && !tracked(&root, &rel)? {
+        return Ok(Err(format!(
+            "{rel} is not tracked, so commit {} has no manifest for {set}; commit it, \
+             or regenerate with:\n  {regenerate}",
+            info.commit
+        )));
+    }
     Ok(compare_described(
         &path,
         &manifest,
         &description,
         &regenerate,
-        update_requested(),
+        update,
     ))
+}
+
+/// Whether Git tracks `rel` in the checkout at `root`.
+fn tracked(root: &Path, rel: &str) -> Result<bool, String> {
+    let mut cmd = git_in(root)?;
+    cmd.args(["ls-files", "--error-unmatch", "--", rel]);
+    let out = borzoi_spawn::BoundedCommand::new(cmd)
+        .run()
+        .map_err(|e| format!("git ls-files: {e}"))?;
+    Ok(out.status.success())
 }
 
 fn main() -> ExitCode {
@@ -423,6 +447,9 @@ mod tests {
         let second = git(&["rev-parse", "HEAD"]);
         std::fs::write(repo.join("untracked"), "").unwrap();
         assert_eq!(checkout_is(repo, &second), Ok(()));
+        // And it is no manifest a check can pin to; a committed file is.
+        assert_eq!(tracked(repo, "untracked"), Ok(false));
+        assert_eq!(tracked(repo, "f"), Ok(true));
     }
 
     #[test]
