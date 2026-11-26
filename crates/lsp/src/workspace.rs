@@ -62,7 +62,9 @@ use borzoi_msbuild::{
 };
 
 use crate::paths::{lexically_normalize, paths_equal};
-use crate::project_deferral::{DefinesUnknown, ProjectEvaluation, ReferencesUnknown};
+#[cfg(test)]
+use crate::project_deferral::DefinesUnknown;
+use crate::project_deferral::{ProjectEvaluation, ReferencesUnknown, ServedBuild};
 use crate::project_graph::{
     Edge, EdgeKind, NodeResult, NodeTfm, ProjectGraph, ProjectKind, build_graph, classify,
 };
@@ -266,71 +268,44 @@ struct EvaluatedProject {
     /// `WasmNativeWorkload` and `RestoreAdditionalProjectSources`), so this
     /// declines nothing anyone has been observed to write.
     not_an_inner_build: bool,
-    /// `parsed` is pass 1, the outer dispatch build, served in place of an
-    /// inner build that could not be served ([`discarded_inner_build`]): its
-    /// `DefineConstants` and `<ProjectReference>`s are the outer build's, and
-    /// no inner build has them. Nothing in the evaluation says so, so
-    /// [`Self::defines`] and [`Self::references`] fold it in. Not set where
-    /// pass 1 ran under the caller's own `TargetFramework`, which is no outer
-    /// build; that one is [`Self::not_an_inner_build`] alone.
-    outer_build_served: bool,
+    /// `parsed` is pass 1, served in place of an inner build that could not be
+    /// served ([`discarded_inner_build`]), and may be the outer dispatch build
+    /// ([`ServedBuild::may_be_outer_build`]): its `DefineConstants` and
+    /// `<ProjectReference>`s may be the outer build's, which no inner build
+    /// has. Nothing in the evaluation says so, so the served verdicts
+    /// ([`ServedBuild`]) fold it in. Not set where pass 1 ran under the
+    /// caller's own `TargetFramework`, which is no outer build; that one is
+    /// [`Self::not_an_inner_build`] alone.
+    may_be_outer_build: bool,
 }
 
 impl EvaluatedProject {
-    /// The served build's `DefineConstants`, or why the LSP does not take the
-    /// evaluation's for the build's: the evaluator's verdict, then a document
-    /// no evaluation of which is an inner build, then the outer build standing
-    /// in for an inner one. The one place the evaluator's verdict on the
-    /// defines is read.
-    fn defines(&self) -> Verdict<&[String], DefinesUnknown<'_>> {
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "forms the served build's verdict from the evaluator's, here and nowhere else"
-        )]
-        let evaluated = self.parsed.define_constants();
-        match evaluated {
-            Verdict::Unknown(causes) => Verdict::Unknown(DefinesUnknown::Evaluation(causes)),
-            Verdict::Certain(_) if self.not_an_inner_build => {
-                Verdict::Unknown(DefinesUnknown::NotAnInnerBuild)
-            }
-            Verdict::Certain(_) if self.outer_build_served => {
-                Verdict::Unknown(DefinesUnknown::OuterBuildServed)
-            }
-            Verdict::Certain(defines) => Verdict::Certain(defines),
+    /// What the LSP knows of the build `parsed` is served for
+    /// ([`ServedBuild`]).
+    fn served(&self) -> ServedBuild {
+        ServedBuild {
+            not_an_inner_build: self.not_an_inner_build,
+            may_be_outer_build: self.may_be_outer_build,
         }
     }
 
+    /// The served build's `DefineConstants`, or why the LSP does not take the
+    /// evaluation's for the build's ([`ServedBuild::defines`]). Production
+    /// reads it through [`Self::evaluation`]; the tests ask it directly.
+    #[cfg(test)]
+    fn defines(&self) -> Verdict<&[String], DefinesUnknown<'_>> {
+        self.served().defines(&self.parsed)
+    }
+
     /// The served build's `<ProjectReference>` items, or why the LSP does not
-    /// take the evaluation's for the build's: the evaluator's verdict, then a
-    /// document no evaluation of which is an inner build, then the outer build
-    /// standing in for an inner one. The one place the evaluator's verdict on
-    /// the references is read.
+    /// take the evaluation's for the build's ([`ServedBuild::references`]).
     fn references(&self) -> Verdict<&[ResolvedItem], ReferencesUnknown> {
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "forms the served build's verdict from the evaluator's, here and nowhere else"
-        )]
-        let evaluated = self.parsed.project_references();
-        match evaluated {
-            Verdict::Unknown(_) => Verdict::Unknown(ReferencesUnknown::Evaluation),
-            Verdict::Certain(_) if self.not_an_inner_build => {
-                Verdict::Unknown(ReferencesUnknown::NotAnInnerBuild)
-            }
-            Verdict::Certain(_) if self.outer_build_served => {
-                Verdict::Unknown(ReferencesUnknown::OuterBuildServed)
-            }
-            Verdict::Certain(references) => Verdict::Certain(references),
-        }
+        self.served().references(&self.parsed)
     }
 
     /// Everything the decline decisions read ([`ProjectEvaluation`]).
     fn evaluation(&self) -> ProjectEvaluation<'_> {
-        ProjectEvaluation::Evaluated {
-            parsed: &self.parsed,
-            defines: self.defines(),
-            references: self.references(),
-            not_an_inner_build: self.not_an_inner_build,
-        }
+        self.served().evaluation(&self.parsed)
     }
 }
 
@@ -3095,7 +3070,7 @@ fn evaluate_project(
     // so an override widens it — and the override additionally withholds every
     // other TFM-derived conclusion (see `EvaluatedProject::not_an_inner_build`).
     let not_an_inner_build = served.not_an_inner_build;
-    let outer_build_served = served.outer_build_served;
+    let may_be_outer_build = served.may_be_outer_build;
     let tfm_untrusted = pass1_untrusted || not_an_inner_build || served.tfm_unknown;
     // The evaluator reports the `SdkPaths::root` of the entry project's own SDK
     // (`ParsedProject::resolved_sdk_root`); recover the install root from it.
@@ -3122,7 +3097,7 @@ fn evaluate_project(
             body_target_framework,
             tfm_untrusted,
             not_an_inner_build,
-            outer_build_served,
+            may_be_outer_build,
         }),
         reads,
         immutable,
@@ -3141,7 +3116,7 @@ fn evaluate_project(
 ///
 /// The defines and the references the evaluation publishes as verdicts, so the
 /// served build's verdicts fold this in instead
-/// ([`EvaluatedProject::outer_build_served`]). The Compile items are still a
+/// ([`EvaluatedProject::may_be_outer_build`]). The Compile items are still a
 /// value beside a flag, so their flag is set here: `items_uncertain` already
 /// means "this list may not be what the real build sees, so do not fold from
 /// it", and `parses_for_project` refuses the whole fold on it (`semantic.rs`),
@@ -3169,9 +3144,10 @@ struct ServedEvaluation {
     /// The read set of the seeded second pass, when one ran, whether or not
     /// it is the one served: a discarded pass decided `not_an_inner_build`.
     pass2_reads: Option<ReadSet>,
-    /// `parsed` is pass 1, an outer dispatch build, served in place of an inner
-    /// build: [`EvaluatedProject::outer_build_served`], which this becomes.
-    outer_build_served: bool,
+    /// `parsed` is pass 1, served in place of an inner build, and may be the
+    /// outer dispatch build: [`EvaluatedProject::may_be_outer_build`], which
+    /// this becomes.
+    may_be_outer_build: bool,
 }
 
 /// Apply [`tfm_policy::tfm_choice`]'s decision: re-evaluate `pass1`'s project
@@ -3218,7 +3194,7 @@ fn select_target_framework(
                 not_an_inner_build: true,
                 tfm_unknown: false,
                 pass2_reads: None,
-                outer_build_served: false,
+                may_be_outer_build: false,
             };
         }
         // Pass 1 may be the outer dispatch build: exact for itself, and for no
@@ -3230,7 +3206,7 @@ fn select_target_framework(
                 not_an_inner_build: false,
                 tfm_unknown: true,
                 pass2_reads: None,
-                outer_build_served: true,
+                may_be_outer_build: true,
             };
         }
         let chosen_tfm = choice.served().map(str::to_string);
@@ -3240,7 +3216,7 @@ fn select_target_framework(
             not_an_inner_build: false,
             tfm_unknown: false,
             pass2_reads: None,
-            outer_build_served: false,
+            may_be_outer_build: false,
         };
     };
     let mut seeded = extras.clone();
@@ -3254,7 +3230,7 @@ fn select_target_framework(
                 chosen_tfm: Some(seed),
                 not_an_inner_build: false,
                 tfm_unknown: false,
-                outer_build_served: false,
+                may_be_outer_build: false,
             },
             // The document opts `TargetFramework` out of global protection,
             // so the seeded pass may be a chimera: values above an override
@@ -3275,7 +3251,7 @@ fn select_target_framework(
                 not_an_inner_build: true,
                 tfm_unknown: false,
                 pass2_reads: Some(pass2.read_set),
-                outer_build_served: true,
+                may_be_outer_build: true,
             },
         },
         // Same source, same resolver, and the seed key can't collide (a
@@ -3290,7 +3266,7 @@ fn select_target_framework(
             not_an_inner_build: false,
             tfm_unknown: false,
             pass2_reads: None,
-            outer_build_served: true,
+            may_be_outer_build: true,
         },
     }
 }
@@ -3683,7 +3659,7 @@ mod tests {
         );
         assert_eq!(
             evaluated.defines(),
-            Verdict::Unknown(DefinesUnknown::OuterBuildServed),
+            Verdict::Unknown(DefinesUnknown::MayBeOuterBuild),
             "the verdict names the outer build standing in for an inner one"
         );
         assert_eq!(ws.served_tfm_for_project(&proj), ServedTfm::Untrusted);
@@ -3725,7 +3701,7 @@ mod tests {
         );
         assert_eq!(
             evaluated.defines(),
-            Verdict::Unknown(DefinesUnknown::OuterBuildServed),
+            Verdict::Unknown(DefinesUnknown::MayBeOuterBuild),
             "the verdict names the outer build standing in for an inner one"
         );
         assert_eq!(ws.served_tfm_for_project(&proj), ServedTfm::Untrusted);

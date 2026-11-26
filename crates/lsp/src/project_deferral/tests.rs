@@ -55,24 +55,36 @@ struct Served<'a> {
     not_an_inner_build: bool,
 }
 
-/// The evaluated arm with the served build's verdicts formed from `served` as
-/// `workspace::EvaluatedProject` forms them: the evaluator's doubt first, then
-/// a document no evaluation of which is an inner build.
+/// The evaluated arm as production forms it ([`ServedBuild::evaluation`]),
+/// with the evaluator's doubt set by `served` in place of the baseline's: an
+/// evaluator cause takes precedence over every served-build fact, as it does
+/// there.
 fn evaluated_as<'a>(parsed: &'a ParsedProject, served: Served<'a>) -> ProjectEvaluation<'a> {
+    let ProjectEvaluation::Evaluated {
+        defines,
+        references,
+        not_an_inner_build,
+        ..
+    } = ServedBuild {
+        not_an_inner_build: served.not_an_inner_build,
+        may_be_outer_build: false,
+    }
+    .evaluation(parsed)
+    else {
+        unreachable!("an evaluation is served as `Evaluated`")
+    };
     ProjectEvaluation::Evaluated {
         parsed,
         defines: match served.defines {
             Some(causes) => Verdict::Unknown(DefinesUnknown::Evaluation(causes)),
-            None => Verdict::Certain(&[]),
+            None => defines,
         },
         references: if served.references {
             Verdict::Unknown(ReferencesUnknown::Evaluation)
-        } else if served.not_an_inner_build {
-            Verdict::Unknown(ReferencesUnknown::NotAnInnerBuild)
         } else {
-            Verdict::Certain(&[])
+            references
         },
-        not_an_inner_build: served.not_an_inner_build,
+        not_an_inner_build,
     }
 }
 
@@ -760,11 +772,17 @@ fn the_outer_dispatch_build_reports_its_dropped_edges() {
         },
     );
     assert!(eval.drops_reference_edges());
+    // The served defines are withheld for the same reason, so the fold is
+    // declined beside the edges.
     let ds = deferrals(eval, FoldOutcome::Unknown);
-    assert_eq!(ds.len(), 1, "{ds:?}");
+    let capabilities: Vec<_> = ds.iter().map(Deferral::capability).collect();
     assert_eq!(
-        ds[0].capability(),
-        DeferredCapability::ProjectReferenceEdges
+        capabilities,
+        [
+            DeferredCapability::ProjectFold,
+            DeferredCapability::ProjectReferenceEdges
+        ],
+        "{ds:?}"
     );
     let message =
         deferral_message(Path::new("/w/Demo.fsproj"), &ds).expect("dropped edges are reported");
@@ -934,10 +952,11 @@ fn an_unknown_fold_still_publishes_a_known_reference_loss() {
         },
     );
     let fresh = deferrals(eval, FoldOutcome::Unknown);
-    assert_eq!(fresh.len(), 1);
-    assert_eq!(
-        fresh[0].capability(),
-        DeferredCapability::ProjectReferenceEdges
+    assert!(
+        fresh
+            .iter()
+            .any(|d| d.capability() == DeferredCapability::ProjectReferenceEdges),
+        "{fresh:?}"
     );
     let reconciled = reconcile(fresh.clone(), &[], eval, FoldOutcome::Unknown);
     assert_eq!(
@@ -1039,19 +1058,18 @@ fn the_outer_dispatch_build_states_its_reason() {
         ),
         FoldOutcome::Unknown,
     );
-    assert_eq!(ds.len(), 1);
-    assert_eq!(
-        ds[0].capability(),
-        DeferredCapability::ProjectReferenceEdges
-    );
-    let causes = ds[0].causes().recorded();
-    assert_eq!(causes.len(), 1, "{causes:?}");
-    assert!(causes[0].contains("TreatAsLocalProperty"), "{}", causes[0]);
-    // Phrased around the unhonoured TFM selection, because the trigger is not
-    // multi-targeting: a single-target project opting `TargetFramework` out sets
-    // the same flag, and "this project multi-targets" would be a confidently
-    // wrong explanation there.
-    assert!(!causes[0].contains("multi-target"), "{}", causes[0]);
+    // Both capabilities, each stating the one known reason.
+    assert_eq!(ds.len(), 2, "{ds:?}");
+    for deferral in &ds {
+        let causes = deferral.causes().recorded();
+        assert_eq!(causes.len(), 1, "{causes:?}");
+        assert!(causes[0].contains("TreatAsLocalProperty"), "{}", causes[0]);
+        // Phrased around the unhonoured TFM selection, because the trigger is
+        // not multi-targeting: a single-target project opting
+        // `TargetFramework` out sets the same flag, and "this project
+        // multi-targets" would be a confidently wrong explanation there.
+        assert!(!causes[0].contains("multi-target"), "{}", causes[0]);
+    }
 }
 
 /// `evaluation_declines_project_fold` is the gate `semantic::build_parses`
@@ -1089,20 +1107,19 @@ fn the_fold_gate_agrees_with_the_deferral_it_gates() {
 /// reference clause, from the same evaluation, stated it.
 #[test]
 fn a_discarded_inner_build_explains_its_fold_decline_too() {
-    // Exactly what `discarded_inner_build` serves: the Compile axis's flag up
-    // with no cause, and the defines and references doubted for the outer
-    // build, with no evaluator cause.
+    // Exactly what `discarded_inner_build` serves for a pass-2 override: the
+    // Compile axis's flag up with no cause, and the defines and references
+    // withheld by the served-build facts, with no evaluator cause.
     let mut parsed = certain_project();
     parsed.items_uncertain = true;
     assert!(parsed.compile_item_uncertainties.is_empty());
 
     let ds = deferrals(
-        ProjectEvaluation::Evaluated {
-            parsed: &parsed,
-            defines: Verdict::Unknown(DefinesUnknown::OuterBuildServed),
-            references: Verdict::Unknown(ReferencesUnknown::OuterBuildServed),
+        ServedBuild {
             not_an_inner_build: true,
-        },
+            may_be_outer_build: true,
+        }
+        .evaluation(&parsed),
         FoldOutcome::Unknown,
     );
     assert_eq!(ds.len(), 2, "{ds:?}");
