@@ -223,7 +223,11 @@ EOF
       -u BORZOI_MUTANTS_CANARY -u CARGO_TARGET_DIR -u RUSTC_WORKSPACE_WRAPPER \
       CARGO_NET_OFFLINE=true cargo mutants --no-shuffle --output "$tmp/bare-out" >"$tmp/bare.out" 2>&1
 )
-assert_eq "bare cargo mutants: the baseline is refused (exit 4)" 4 "$?"
+bare_status=$?
+assert_eq "bare cargo mutants: the baseline is refused (exit 4)" 4 "$bare_status"
+if [[ $bare_status -ne 4 ]]; then
+  sed -n '1,40p' "$tmp/bare.out"
+fi
 assert_eq "bare cargo mutants: the canary is what refused" yes \
   "$(grep -rqs 'canary-runner: refuse' "$tmp/bare-out" && echo yes || echo no)"
 assert_eq "bare cargo mutants: the crate's test never started" no \

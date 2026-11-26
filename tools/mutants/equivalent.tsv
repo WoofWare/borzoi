@@ -2,9 +2,12 @@
 #
 #   <set>  <manifest key>  <site>  <why no test can observe the mutation>
 #
-# The site is the source line the mutation starts on, its whitespace runs
-# collapsed to single spaces: a key's ` #<n>` passes to another mutant when one
-# with the same description is added before it, and the row must not follow.
+# The site fingerprints the source lines the mutation replaces
+# (`borzoi_oracle_harness::mutants::site_of`): a key's ` #<n>` passes to another
+# mutant when one with the same description is added before it, and an edit to
+# the code the argument covers may make the mutation observable, so either
+# fails the row until it is reviewed. `mutants-manifest` prints the site a
+# row's key has now, so a new row can start from a placeholder.
 #
 # The reason is an argument that the mutated program behaves identically on
 # every input, not that no test checks it today: a mutant only a missing test

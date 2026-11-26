@@ -134,12 +134,18 @@ recovery_hint() {
   echo "        Once \`container list --all\` shows no borzoi-mutants-* container (stop and" >&2
   echo "        delete any a killed run left), \`container volume delete $LOCK_VOLUME\`." >&2
 }
-if ! container volume create -s 1M --label "pid=$$" "$LOCK_VOLUME" >/dev/null 2>&1; then
+if ! create_error="$(container volume create -s 1M --label "pid=$$" "$LOCK_VOLUME" 2>&1)"; then
   # The holder's pid is the lock's label. While that process lives, the lock
   # is held, whether or not a container is running at this moment: a run holds
   # it between its containers too.
-  holder="$(container volume inspect "$LOCK_VOLUME" 2>/dev/null |
-    sed -n 's/.*"pid" : "\([0-9][0-9]*\)".*/\1/p')"
+  if ! lock_info="$(container volume inspect "$LOCK_VOLUME" 2>&1)"; then
+    # No lock to inspect: the creation failed for another reason, such as the
+    # container service being down.
+    echo "run.sh: cannot take the lock volume $LOCK_VOLUME:" >&2
+    printf '        %s\n' "$create_error" "$lock_info" >&2
+    exit 1
+  fi
+  holder="$(sed -n 's/.*"pid" : "\([0-9][0-9]*\)".*/\1/p' <<<"$lock_info")"
   if [[ -z "$holder" ]]; then
     echo "run.sh: the lock volume $LOCK_VOLUME is held, but its owner is unreadable;" >&2
     echo "        delete it only once no run.sh is running." >&2

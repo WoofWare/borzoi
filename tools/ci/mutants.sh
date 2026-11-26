@@ -15,8 +15,13 @@
 #
 # Run it outside `nix develop`: each step enters the devshell itself.
 # `BORZOI_MUTANTS_TIMEOUT` (default 5h) bounds the cargo-mutants run, and
-# `BORZOI_MUTANTS_JOBS` (default 2) is its `--jobs`. The run's output stays
-# under `$RUNNER_TEMP/mutants/SET` for the job to upload.
+# `BORZOI_MUTANTS_JOBS` (default 2) is its `--jobs`.
+#
+# The run writes under `$RUNNER_TEMP/mutants-work/SET`, where mutant code can
+# leave anything. What leaves it is staged into `$RUNNER_TEMP/mutants/SET`,
+# which the job uploads and the manifest step reads: the run's three artifacts
+# and cargo-mutants' logs, each copied only if it is a regular file inside the
+# work directory, the artifacts whole up to 64 MiB and each log's first MiB.
 set -euo pipefail
 unset CDPATH
 # Git's repository-local variables would point `git rev-parse HEAD` below at
@@ -31,7 +36,12 @@ cd "$repo"
 source tools/mutants/sets.sh
 
 if [[ "${1:-}" == --list ]]; then
-  mutants_set_names tools/mutants/sets.tsv || exit 2
+  names="$(mutants_set_names tools/mutants/sets.tsv)" || exit 2
+  if [[ -z "$names" ]]; then
+    echo "tools/ci/mutants.sh: sets.tsv declares no set" >&2
+    exit 2
+  fi
+  printf '%s\n' "$names"
   exit 0
 fi
 if [[ $# -ne 1 ]]; then
@@ -46,12 +56,32 @@ mutants_set_load tools/mutants/sets.tsv "$set_name" || exit 2
 source tools/mutants/canary.sh
 mutants_canary_check tools/ci/mutants.sh
 
-out="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/mutants/$set_name"
-rm -rf "$out"
-mkdir -p "$out"
+base="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+work="$base/mutants-work/$set_name"
+out="$base/mutants/$set_name"
+rm -rf "$work" "$out"
+mkdir -p "$work" "$out/run/mutants.out/log"
+work="$(cd "$work" && pwd -P)"
 commit="$(git rev-parse HEAD)"
 
+status=0
 BORZOI_MUTANTS_COMMIT="$commit" timeout --kill-after=60 "${BORZOI_MUTANTS_TIMEOUT:-5h}" \
-  nix develop --command bash tools/mutants/inner.sh "$set_name" "$out/run"
+  nix develop --command bash tools/mutants/inner.sh "$set_name" "$work/run" || status=$?
+
+# shellcheck source=tools/mutants/stage.sh
+source tools/mutants/stage.sh
+for rel in run-info.tsv listed.txt mutants.out/outcomes.json; do
+  mutants_stage "$work" "$work/run/$rel" "$out/run/$rel" $((64 << 20)) whole
+done
+shopt -s nullglob
+for log in "$work"/run/mutants.out/log/*.log; do
+  mutants_stage "$work" "$log" "$out/run/mutants.out/log/$(basename "$log")" $((1 << 20))
+done
+shopt -u nullglob
+
+if [[ $status -ne 0 ]]; then
+  echo "tools/ci/mutants.sh: the run exited $status" >&2
+  exit "$status"
+fi
 nix develop --command cargo run --quiet -p borzoi-oracle-harness --bin mutants-manifest -- \
   "$set_name" "$out" "$repo"
