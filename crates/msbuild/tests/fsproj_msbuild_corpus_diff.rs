@@ -631,16 +631,14 @@ fn compare_compile(parsed: &ParsedProject, msbuild: &MsbuildOutput) -> FacetRepo
 }
 
 fn compare_project_references(parsed: &ParsedProject, msbuild: &MsbuildOutput) -> FacetReport {
-    if matches!(parsed.project_references(), Verdict::Unknown(_)) {
+    let Verdict::Certain(references) = parsed.project_references() else {
         return FacetReport::skipped(
             "project_references",
             "project_references_uncertain=true".to_string(),
         )
         .classed("decline(project_references_uncertain)".to_string());
-    }
-    let ours: Vec<String> = parsed
-        .best_guess()
-        .project_references
+    };
+    let ours: Vec<String> = references
         .iter()
         .map(|item| path_key(&item.include))
         .collect();
@@ -725,7 +723,7 @@ fn compare_target_frameworks(parsed: &ParsedProject, msbuild: &MsbuildOutput) ->
 }
 
 fn compare_define_constants(parsed: &ParsedProject, msbuild: &MsbuildOutput) -> FacetReport {
-    if matches!(parsed.define_constants(), Verdict::Unknown(_)) {
+    let Verdict::Certain(defines) = parsed.define_constants() else {
         return FacetReport::skipped(
             "define_constants",
             format!(
@@ -733,8 +731,8 @@ fn compare_define_constants(parsed: &ParsedProject, msbuild: &MsbuildOutput) -> 
                 diagnostics_summary(parsed)
             ),
         );
-    }
-    let ours = parsed.best_guess().define_constants.to_vec();
+    };
+    let ours = defines.to_vec();
     let theirs = split_msbuild_list(&msbuild.properties.define_constants);
     if ours == theirs {
         return FacetReport::matched("define_constants", format!("{} symbol(s)", ours.len()));

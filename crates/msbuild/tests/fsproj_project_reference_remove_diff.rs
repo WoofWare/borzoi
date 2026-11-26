@@ -465,15 +465,13 @@ fn check(oracle: &mut Oracle, blocks: &[Block], with_resolver: bool) -> Outcome 
         .map(|p| lexical(p))
         .collect();
 
-    if matches!(parsed.project_references(), Verdict::Unknown(_)) {
+    let Verdict::Certain(references) = parsed.project_references() else {
         return Outcome {
             committed: false,
             committed_through_a_remove: false,
         };
-    }
-    let ours: Vec<PathBuf> = parsed
-        .best_guess()
-        .project_references
+    };
+    let ours: Vec<PathBuf> = references
         .iter()
         .map(|item| lexical(&item.include.to_string_lossy()))
         .collect();
@@ -801,14 +799,13 @@ fn the_non_existent_idiom_commits_on_the_real_sdk() {
         vec![root.join("A/A.fsproj")],
         "MSBuild drops the missing reference"
     );
-    assert!(
-        !matches!(parsed.project_references(), Verdict::Unknown(_)),
-        "the idiom must commit on the real SDK; diagnostics: {:#?}",
-        parsed.diagnostics
-    );
-    let ours: Vec<PathBuf> = parsed
-        .best_guess()
-        .project_references
+    let Verdict::Certain(references) = parsed.project_references() else {
+        panic!(
+            "the idiom must commit on the real SDK; diagnostics: {:#?}",
+            parsed.diagnostics
+        );
+    };
+    let ours: Vec<PathBuf> = references
         .iter()
         .map(|item| lexical(&item.include.to_string_lossy()))
         .collect();

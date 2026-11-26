@@ -107,6 +107,10 @@ pub enum ProjectEvaluation<'a> {
 pub enum DefinesUnknown<'a> {
     /// The evaluator does not commit to them, for these causes (never none).
     Evaluation(&'a [DefineConstantsUncertaintyCause]),
+    /// No evaluation of the document is an inner build
+    /// (`workspace::EvaluatedProject::not_an_inner_build`), as for
+    /// [`ReferencesUnknown::NotAnInnerBuild`].
+    NotAnInnerBuild,
     /// The served evaluation is an outer dispatch build standing in for an
     /// inner build it could not serve (`workspace::discarded_inner_build`):
     /// content gated on `'$(TargetFramework)' == ''` is reached here and in
@@ -553,7 +557,8 @@ pub fn deferrals(eval: ProjectEvaluation<'_>, fold: FoldOutcome<'_>) -> Vec<Defe
     // not record, is `outer_build_cause`'s.
     let define_causes: &[DefineConstantsUncertaintyCause] = match defines {
         Verdict::Unknown(DefinesUnknown::Evaluation(causes)) => causes,
-        Verdict::Unknown(DefinesUnknown::OuterBuildServed) | Verdict::Certain(_) => &[],
+        Verdict::Unknown(DefinesUnknown::NotAnInnerBuild | DefinesUnknown::OuterBuildServed)
+        | Verdict::Certain(_) => &[],
     };
 
     if fold_declined_on_evaluation {

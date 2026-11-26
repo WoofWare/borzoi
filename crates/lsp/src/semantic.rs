@@ -37,7 +37,7 @@ use crate::paths::{lexically_normalize, paths_equal};
 use crate::project_assets::{
     resolve_assemblies_for_tfm, resolve_assemblies_root_only, resolve_transitive_project_tfms,
 };
-use crate::project_deferral::{FoldOutcome, FoldRefusal};
+use crate::project_deferral::{FoldOutcome, FoldRefusal, ProjectEvaluation};
 use crate::project_graph::{NodeTfm, ProjectGraph, ProjectKind};
 use crate::restore::{RestoreOutcome, restore_to_scratch_assemblies};
 use crate::sdk_discovery::SdkDiscoveryEnv;
@@ -47,6 +47,7 @@ use crate::workspace::{EnvChecks, EvaluationId, ProjectsGeneration, ServedTfm, W
 use crate::xml_doc::inherit::{Expansion, expand};
 use crate::xml_doc::key::DocTarget;
 use crate::xml_doc::lookup::{DocLookup, DocSources};
+use borzoi_verdict::Verdict;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct ReferencedAssemblyProjection {
@@ -2459,19 +2460,29 @@ impl ParseInputs {
     /// parses, or the refusal of a project whose evaluation declines the
     /// fold.
     fn of(project: &Path, workspace: &mut Workspace) -> Result<ParseInputs, FoldRefusal> {
-        let symbols = workspace.symbols_for_project(project);
-        let selection = workspace.lang_version_selection(project);
-        let lang = selection.version;
-        let compiler_floor = workspace.compiler_floor_for_project(project);
         // Every exit below is a *value*, not a bare `None`: a refusal the user is
         // never told about is the defect `crate::project_deferral` exists to close,
         // and only a typed refusal makes "we went quiet" and "we said why" the same
         // decision at every exit, not just the first.
-        if crate::project_deferral::evaluation_declines_project_fold(
-            workspace.project_evaluation(project),
-        ) {
+        let evaluation = workspace.project_evaluation(project);
+        if crate::project_deferral::evaluation_declines_project_fold(evaluation) {
             return Err(FoldRefusal::ProjectEvaluation);
         }
+        // The fold parses under the served build's defines, as the gate above
+        // accepted them: `{COMPILED}` (a `<Compile>` item is compiled, never a
+        // script) and the `Certain` verdict's own list.
+        let ProjectEvaluation::Evaluated {
+            defines: Verdict::Certain(defines),
+            ..
+        } = evaluation
+        else {
+            return Err(FoldRefusal::ProjectEvaluation);
+        };
+        let mut symbols = crate::workspace::implicit_symbols(false);
+        symbols.extend(defines.iter().cloned());
+        let selection = workspace.lang_version_selection(project);
+        let lang = selection.version;
+        let compiler_floor = workspace.compiler_floor_for_project(project);
         let parsed = workspace
             .project(project)
             .expect("the evaluation gate above accepted this project");

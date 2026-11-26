@@ -1941,15 +1941,10 @@ fn evaluate(shared: &mut Shared, case: &Case) -> (Outcome, String) {
     // So must a reference list the walk calls certain: the LSP's project graph
     // reads it as the edges MSBuild builds. Identities are relative to the
     // project's directory, as the Compile items' are.
-    if !matches!(parsed.project_references(), Verdict::Unknown(_)) {
+    if let Verdict::Certain(references) = parsed.project_references() {
         outcome.certain_references = true;
         let project_dir = project_path.parent().expect("a project has a directory");
-        let ours: Vec<PathBuf> = parsed
-            .best_guess()
-            .project_references
-            .iter()
-            .map(|item| item.include.clone())
-            .collect();
+        let ours: Vec<PathBuf> = references.iter().map(|item| item.include.clone()).collect();
         let theirs: Vec<PathBuf> = theirs["items"]["ProjectReference"]
             .as_array()
             .expect("the ProjectReference items")
@@ -1969,7 +1964,7 @@ fn evaluate(shared: &mut Shared, case: &Case) -> (Outcome, String) {
     // So must a define set the walk calls certain: the LSP parses every file
     // under it. MSBuild's list is its `DefineConstants` split on semicolons,
     // empty entries dropped; no marker needs escaping.
-    if !matches!(parsed.define_constants(), Verdict::Unknown(_)) {
+    if let Verdict::Certain(defines) = parsed.define_constants() {
         outcome.certain_defines = true;
         let theirs: Vec<String> = theirs["properties"]["DefineConstants"]
             .as_str()
@@ -1984,10 +1979,10 @@ fn evaluate(shared: &mut Shared, case: &Case) -> (Outcome, String) {
                 .strip_prefix("D_")
                 .is_some_and(|marker| marker != "body" && !SDK_MARKERS.contains(&marker))
         });
-        if parsed.best_guess().define_constants != theirs {
+        if defines != theirs {
             outcome.findings.push(Finding {
                 what: "define_constants".to_owned(),
-                ours: format!("{:?}", parsed.best_guess().define_constants),
+                ours: format!("{defines:?}"),
                 theirs: format!("{theirs:?}"),
                 kind: FindingKind::Defines,
             });

@@ -124,10 +124,8 @@ fn all_projects_after_the_property_pass_is_exact_or_declined() {
                     ));
                 }
             }
-            if !matches!(ours.project_references(), Verdict::Unknown(_)) {
-                let our_references: Vec<String> = ours
-                    .best_guess()
-                    .project_references
+            if let Verdict::Certain(references) = ours.project_references() {
+                let our_references: Vec<String> = references
                     .iter()
                     .map(|item| item.include.to_string_lossy().into_owned())
                     .collect();

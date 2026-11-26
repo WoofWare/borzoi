@@ -429,10 +429,8 @@ fn grade_read_document(oracle: &mut Oracle, document: &ReadDocument) -> (ReadOut
         .match_indices("<ProjectReference ")
         .map(|(at, _)| at)
         .collect();
-    let ours_of = |i: usize| -> Vec<PathBuf> {
-        parsed
-            .best_guess()
-            .project_references
+    let ours_of = |references: &[borzoi_msbuild::ResolvedItem], i: usize| -> Vec<PathBuf> {
+        references
             .iter()
             .filter(|item| starts.iter().position(|s| *s == item.span.start) == Some(i))
             .map(|item| lexical(&item.include.to_string_lossy()))
@@ -456,27 +454,26 @@ fn grade_read_document(oracle: &mut Oracle, document: &ReadDocument) -> (ReadOut
         .any(|(i, reference)| {
             reference.reads.iter().any(|name| doubted(name)) && !theirs_of(i).is_empty()
         });
-    if matches!(parsed.project_references(), Verdict::Unknown(_)) {
+    let Verdict::Certain(references) = parsed.project_references() else {
         return (ReadOutcome::Declined { owed }, evaluated);
-    }
+    };
     // A reference MSBuild made reading a name the walk doubts may hold
     // another path in another world, even where this one's agrees.
     assert!(
         !owed,
         "#1098: the list is certain, and a reference MSBuild made reads a name the walk \
-         doubts:\n{xml}\nours: {:#?}",
-        parsed.best_guess().project_references
+         doubts:\n{xml}\nours: {references:#?}",
     );
     assert_eq!(
-        parsed.best_guess().project_references.len(),
+        references.len(),
         (0..document.references.len())
-            .map(|i| ours_of(i).len())
+            .map(|i| ours_of(references, i).len())
             .sum::<usize>(),
         "every item the walk captured is of one reference:\n{xml}"
     );
     for (i, reference) in document.references.iter().enumerate() {
         let reads = &reference.reads;
-        let (ours, mut unmatched) = (ours_of(i), theirs_of(i));
+        let (ours, mut unmatched) = (ours_of(references, i), theirs_of(i));
         for path in &ours {
             let Some(at) = unmatched.iter().position(|p| p == path) else {
                 panic!(
@@ -846,10 +843,8 @@ fn an_implicit_read_leaves_no_certain_list_short() {
     )
     .expect("well-formed XML parses");
     assert_eq!(theirs.len(), 2, "{theirs:?}");
-    if !matches!(parsed.project_references(), Verdict::Unknown(_)) {
-        let mut ours: Vec<PathBuf> = parsed
-            .best_guess()
-            .project_references
+    if let Verdict::Certain(references) = parsed.project_references() {
+        let mut ours: Vec<PathBuf> = references
             .iter()
             .map(|item| lexical(&item.include.to_string_lossy()))
             .collect();
@@ -967,13 +962,10 @@ fn dead_reference_row(oracle: &mut Oracle, row: &str) {
         None,
     )
     .expect("well-formed XML parses");
-    assert!(
-        !matches!(parsed.project_references(), Verdict::Unknown(_)),
-        "{xml}"
-    );
-    let ours: Vec<PathBuf> = parsed
-        .best_guess()
-        .project_references
+    let Verdict::Certain(references) = parsed.project_references() else {
+        panic!("{xml}");
+    };
+    let ours: Vec<PathBuf> = references
         .iter()
         .map(|item| lexical(&item.include.to_string_lossy()))
         .collect();

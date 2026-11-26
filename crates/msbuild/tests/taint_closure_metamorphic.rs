@@ -341,19 +341,22 @@ fn facts(project: &ParsedProject, names: &[&'static str]) -> Facts {
     );
     out.insert(
         Fact::ProjectReferences,
-        (!matches!(project.project_references(), Verdict::Unknown(_))).then(|| {
-            project
-                .best_guess()
-                .project_references
-                .iter()
-                .map(|i| i.include.display().to_string())
-                .collect()
-        }),
+        match project.project_references() {
+            Verdict::Certain(references) => Some(
+                references
+                    .iter()
+                    .map(|i| i.include.display().to_string())
+                    .collect(),
+            ),
+            Verdict::Unknown(_) => None,
+        },
     );
     out.insert(
         Fact::DefineConstants,
-        (!matches!(project.define_constants(), Verdict::Unknown(_)))
-            .then(|| vec![format!("{:?}", project.best_guess().define_constants)]),
+        match project.define_constants() {
+            Verdict::Certain(defines) => Some(vec![format!("{defines:?}")]),
+            Verdict::Unknown(_) => None,
+        },
     );
     out.insert(
         Fact::TargetName,
@@ -1139,12 +1142,12 @@ fn a_project_reference_gated_on_a_refused_name_is_not_certain() {
   <ItemGroup Condition="'$(Bar)' == ''"><ProjectReference Include="x.fsproj" /></ItemGroup>
 </Project>"#,
     );
-    assert!(
-        matches!(project.project_references(), Verdict::Unknown(_))
-            || project.best_guess().project_references.is_empty(),
-        "MSBuild computes `Bar` and skips the group; we captured {:?} as certain",
-        project.best_guess().project_references
-    );
+    if let Verdict::Certain(references) = project.project_references() {
+        assert!(
+            references.is_empty(),
+            "MSBuild computes `Bar` and skips the group; we captured {references:?} as certain"
+        );
+    }
 }
 
 /// #1098: a `ProjectReference` reading a name refused twice (a refused write,
@@ -1248,8 +1251,10 @@ fn a_project_reference_gated_on_a_rewritten_refused_name_is_certain() {
   <ItemGroup Condition="'$(Bar)' == 'x'"><ProjectReference Include="x.fsproj" /></ItemGroup>
 </Project>"#,
     );
-    assert!(!matches!(project.project_references(), Verdict::Unknown(_)));
-    assert_eq!(project.best_guess().project_references.len(), 1);
+    let Verdict::Certain(references) = project.project_references() else {
+        panic!("the rewritten name decides the gate");
+    };
+    assert_eq!(references.len(), 1);
     assert_eq!(
         project.property("Bar"),
         PropertyRead::Value("x".to_string())
