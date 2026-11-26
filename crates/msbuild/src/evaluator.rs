@@ -3494,12 +3494,20 @@ impl<'r> State<'r> {
     /// the environment may supply, one content the walk did not enter may
     /// write. The real build may hold a value there, and the gate may go the
     /// other way (#1181).
-    fn condition_reads_untrusted_value(&self, node: Node<'_, '_>) -> bool {
+    ///
+    /// `exists_dir` is the directory the gate's own evaluation resolves
+    /// `Exists('…')` against (the project's for an item, the containing
+    /// file's for an import), so a probe that settles the gate whatever the
+    /// doubted names hold settles it here too.
+    fn condition_reads_untrusted_value(&self, node: Node<'_, '_>, exists_dir: &Path) -> bool {
         attribute(node, "Condition").as_deref().is_some_and(|cond| {
-            if self.condition_trust(cond, None).reference_is_untrusted() {
+            if self
+                .condition_trust(cond, Some(exists_dir))
+                .reference_is_untrusted()
+            {
                 return true;
             }
-            !self.condition_is_decided_exactly(cond, None, &|name| {
+            !self.condition_is_decided_exactly(cond, Some(exists_dir), &|name| {
                 self.undefined_read_is_exact(name)
             }) && properties::property_references(cond).any(|name| {
                 !self.lookup.is_bound(name)
@@ -4222,7 +4230,7 @@ fn walk_top_level(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State
             // untrusted decision here hides (or phantom-includes) whatever
             // the group's imports carry, `<ProjectReference>` mutations
             // included.
-            if state.condition_reads_untrusted_value(node) {
+            if state.condition_reads_untrusted_value(node, current_file_dir) {
                 state.project_references_uncertain = true;
             }
             // Same rule as `follow_explicit_import`: an undecided group
@@ -6202,7 +6210,7 @@ fn follow_explicit_import(node: Node<'_, '_>, current_file_dir: &Path, state: &m
     // gate we could not decide at all, or one outside our grammar, raised a
     // diagnostic in the gate context, which withdraws the list on its own
     // account.)
-    if state.condition_reads_untrusted_value(node) {
+    if state.condition_reads_untrusted_value(node, current_file_dir) {
         state.project_references_uncertain = true;
     }
     // An import gate we could not decide exactly (its evaluation raised

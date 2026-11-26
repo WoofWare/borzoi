@@ -415,6 +415,8 @@ fn lexical(path: &str) -> PathBuf {
 
 struct Outcome {
     committed: bool,
+    /// The claim the list made ([`common::reference_claim`]).
+    claim: common::ReferenceClaim,
     /// Committed, and a `Remove` changed the list on MSBuild's side — the case
     /// that only a modelled `Remove` can commit.
     committed_through_a_remove: bool,
@@ -464,33 +466,24 @@ fn check(oracle: &mut Oracle, blocks: &[Block], with_resolver: bool) -> Outcome 
         .map(|p| lexical(p))
         .collect();
 
-    if parsed.project_references_uncertain || parsed.project_references_incomplete {
-        return Outcome {
-            committed: false,
-            committed_through_a_remove: false,
-        };
-    }
     let ours: Vec<PathBuf> = parsed
         .project_references
         .iter()
         .map(|item| lexical(&item.include.to_string_lossy()))
         .collect();
-    let mut unmatched = theirs.clone();
-    for path in &ours {
-        let Some(at) = unmatched.iter().position(|p| p == path) else {
-            panic!(
-                "phantom edge: {} is not in MSBuild's list.\nproject:\n{xml}\nours:   {ours:#?}\ntheirs: {theirs:#?}\ndiags: {:#?}",
-                path.display(),
-                parsed.diagnostics
-            );
-        };
-        unmatched.remove(at);
-    }
-    if parsed.diagnostics.is_empty() {
-        assert_eq!(
-            ours, theirs,
-            "a diagnostic-free parse must match exactly.\nproject:\n{xml}"
+    let claim = common::reference_claim(&parsed);
+    if let Err(failure) = common::check_reference_claim(claim, &ours, &theirs) {
+        panic!(
+            "{failure}\nproject:\n{xml}\ndiags: {:#?}",
+            parsed.diagnostics
         );
+    }
+    if claim != common::ReferenceClaim::Exact {
+        return Outcome {
+            committed: false,
+            claim,
+            committed_through_a_remove: false,
+        };
     }
     let removed_something = blocks
         .iter()
@@ -498,6 +491,7 @@ fn check(oracle: &mut Oracle, blocks: &[Block], with_resolver: bool) -> Outcome 
         && theirs.len() < included_count(blocks, oracle, &proj);
     Outcome {
         committed: true,
+        claim,
         committed_through_a_remove: removed_something,
     }
 }
@@ -644,6 +638,43 @@ fn a_hidden_include_cannot_hide_a_removal() {
         for with_resolver in [false, true] {
             check(&mut oracle, &blocks, with_resolver);
         }
+    }
+}
+
+/// An incomplete list (an `Include` behind a gate the walk cannot evaluate)
+/// still applies the `Remove`s after it, and every edge it holds after them is
+/// MSBuild's: the LSP follows those edges (#1181).
+#[test]
+fn an_incomplete_list_still_applies_its_removes() {
+    let mut oracle = Oracle::spawn();
+    let blocks = [Block::Group {
+        gate: "",
+        ops: vec![
+            Op::Include {
+                spec: "../A/A.fsproj",
+                gate: UNSUPPORTED_TRUE,
+            },
+            Op::Include {
+                spec: "../B/B.fsproj",
+                gate: "",
+            },
+            Op::Include {
+                spec: "../M/M.fsproj",
+                gate: "",
+            },
+            Op::Remove {
+                spec: "../M/M.fsproj",
+                gate: "",
+            },
+        ],
+    }];
+    for with_resolver in [false, true] {
+        let outcome = check(&mut oracle, &blocks, with_resolver);
+        assert_eq!(
+            outcome.claim,
+            common::ReferenceClaim::Within,
+            "the gated `Include` leaves the list incomplete, and nothing else doubts it"
+        );
     }
 }
 

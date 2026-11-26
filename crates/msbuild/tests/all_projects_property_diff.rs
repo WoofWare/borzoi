@@ -123,21 +123,17 @@ fn all_projects_after_the_property_pass_is_exact_or_declined() {
                     ));
                 }
             }
-            if !ours.project_references_uncertain && !ours.project_references_incomplete {
-                let our_references: Vec<String> = ours
-                    .project_references
-                    .iter()
-                    .map(|item| item.include.to_string_lossy().into_owned())
-                    .collect();
-                if our_references
-                    .iter()
-                    .any(|reference| !their_references.contains(reference))
-                {
-                    violations.push(format!(
-                        "{label}: ProjectReference {our_references:?} committed, a phantom edge: MSBuild holds \
-                         {their_references:?}"
-                    ));
-                }
+            let our_references: Vec<String> = ours
+                .project_references
+                .iter()
+                .map(|item| item.include.to_string_lossy().into_owned())
+                .collect();
+            if let Err(failure) = common::check_reference_claim(
+                common::reference_claim(&ours),
+                &our_references,
+                &their_references,
+            ) {
+                violations.push(format!("{label}: ProjectReference: {failure}"));
             }
             let probe = ReadProbe {
                 item_types: vec!["ProjectReference".to_owned()],

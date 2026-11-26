@@ -692,19 +692,13 @@ fn compare_compile(parsed: &ParsedProject, msbuild: &MsbuildOutput) -> FacetRepo
 }
 
 fn compare_project_references(parsed: &ParsedProject, msbuild: &MsbuildOutput) -> FacetReport {
-    if parsed.project_references_uncertain {
+    let claim = common::reference_claim(parsed);
+    if claim == common::ReferenceClaim::Nothing {
         return FacetReport::skipped(
             "project_references",
             "project_references_uncertain=true".to_string(),
         )
         .classed("decline(project_references_uncertain)".to_string());
-    }
-    if parsed.project_references_incomplete {
-        return FacetReport::skipped(
-            "project_references",
-            "project_references_incomplete=true".to_string(),
-        )
-        .classed("decline(project_references_incomplete)".to_string());
     }
     let ours: Vec<String> = parsed
         .project_references
@@ -717,6 +711,18 @@ fn compare_project_references(parsed: &ParsedProject, msbuild: &MsbuildOutput) -
         .iter()
         .map(|item| path_key(Path::new(&item.full_path)))
         .collect();
+    if claim == common::ReferenceClaim::Within {
+        // The edges an incomplete list holds are still followed: each must be
+        // MSBuild's.
+        return match common::check_reference_claim(claim, &ours, &theirs) {
+            Ok(()) => FacetReport::skipped(
+                "project_references",
+                "project_references_incomplete=true".to_string(),
+            )
+            .classed("decline(project_references_incomplete)".to_string()),
+            Err(failure) => FacetReport::diverged("project_references", failure),
+        };
+    }
     compare_vec("project_references", ours, theirs)
 }
 

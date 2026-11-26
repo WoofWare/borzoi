@@ -2871,10 +2871,17 @@ fn references_suppressed(evaluated: &EvaluatedProject, purpose: GraphWalkPurpose
 /// Only the compile closure reads completeness: the declared-structure walk's
 /// claims (a cycle, a missing target) are about the edges present. A
 /// suppressed list says more already, so it is not also incomplete.
+///
+/// The project-side half is [`ProjectEvaluation::may_lack_reference_edges`],
+/// shared with the code that explains the incompleteness to the user, for the
+/// reason [`references_suppressed`] shares its half.
 fn references_incomplete(evaluated: &EvaluatedProject, purpose: GraphWalkPurpose) -> bool {
     purpose == GraphWalkPurpose::CompileClosure
-        && !references_suppressed(evaluated, purpose)
-        && evaluated.parsed.project_references_incomplete
+        && ProjectEvaluation::Evaluated {
+            parsed: &evaluated.parsed,
+            not_an_inner_build: evaluated.not_an_inner_build,
+        }
+        .may_lack_reference_edges()
 }
 
 fn edges_of(evaluated: &EvaluatedProject, purpose: GraphWalkPurpose, is_entry: bool) -> Vec<Edge> {
@@ -5434,6 +5441,44 @@ mod tests {
                 .iter()
                 .any(|c| c.contains("MSBuild rejects the whole project")),
             "{causes:?}"
+        );
+    }
+
+    #[test]
+    fn a_reference_behind_an_undecided_gate_is_reported_as_an_incomplete_list() {
+        // The entry project's own list may lack `Other`, which MSBuild keeps
+        // behind a gate the walk cannot decide; its fold is fine, and its kept
+        // edge is followed. The env built from it is marked incomplete
+        // (`semantic`'s `a_reference_dropped_behind_an_undecided_gate_makes_the_env_incomplete`),
+        // so the deferral report must say so (#1181).
+        let tmp = TempDir::new().unwrap();
+        let proj = tmp.path().join("P.fsproj");
+        write_file(
+            &proj,
+            r#"<Project>
+              <PropertyGroup>
+                <TargetFramework>net8.0</TargetFramework>
+                <Gate>$([System.String]::Copy('D'))</Gate>
+              </PropertyGroup>
+              <ItemGroup>
+                <Compile Include="A.fs" />
+                <ProjectReference Include="Lib/Lib.fsproj" />
+              </ItemGroup>
+              <ItemGroup Condition="'$(Gate)' == 'D'">
+                <ProjectReference Include="Other/Other.fsproj" />
+              </ItemGroup>
+            </Project>"#,
+        );
+        write_file(&tmp.path().join("A.fs"), "let x = 1");
+        let mut ws = Workspace::default();
+        let eval = ws.project_evaluation(&proj);
+        assert!(!eval.drops_reference_edges());
+        let deferrals =
+            crate::project_deferral::deferrals(eval, crate::project_deferral::FoldOutcome::Unknown);
+        assert_eq!(
+            deferrals.iter().map(|d| d.capability()).collect::<Vec<_>>(),
+            vec![crate::project_deferral::DeferredCapability::CompleteReferenceSet],
+            "{deferrals:?}"
         );
     }
 

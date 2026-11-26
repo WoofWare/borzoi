@@ -457,17 +457,31 @@ fn grade_read_document(oracle: &mut Oracle, document: &ReadDocument) -> (ReadOut
         .any(|(i, reference)| {
             reference.reads.iter().any(|name| doubted(name)) && !theirs_of(i).is_empty()
         });
-    if parsed.project_references_uncertain || parsed.project_references_incomplete {
+    let claim = common::reference_claim(&parsed);
+    if claim == common::ReferenceClaim::Nothing {
         return (ReadOutcome::Declined { owed }, evaluated);
     }
-    // A reference MSBuild made reading a name the walk doubts may hold
-    // another path in another world, even where this one's agrees.
+    // An incomplete list may lack a reference reading a doubted name; a
+    // certain one may not, as it may hold another path in another world even
+    // where this one's agrees (#1098).
     assert!(
-        !owed,
+        !owed || claim == common::ReferenceClaim::Within,
         "#1098: the list is certain, and a reference MSBuild made reads a name the walk \
          doubts:\n{xml}\nours: {:#?}",
         parsed.project_references
     );
+    let all_ours: Vec<PathBuf> = parsed
+        .project_references
+        .iter()
+        .map(|item| lexical(&item.include.to_string_lossy()))
+        .collect();
+    let all_theirs: Vec<PathBuf> = theirs
+        .iter()
+        .map(|(_, meta)| lexical(&meta["FullPath"]))
+        .collect();
+    if let Err(failure) = common::check_reference_claim(claim, &all_ours, &all_theirs) {
+        panic!("{failure}\n{xml}");
+    }
     assert_eq!(
         parsed.project_references.len(),
         (0..document.references.len())
@@ -492,11 +506,14 @@ fn grade_read_document(oracle: &mut Oracle, document: &ReadDocument) -> (ReadOut
         // from it is a wrong answer whatever its `Include` reads, and one
         // reading a doubted name is #1098 as well.
         assert!(
-            unmatched.is_empty(),
+            unmatched.is_empty() || claim == common::ReferenceClaim::Within,
             "the list is certain without {unmatched:?} of reference E{i} (whose `Include` reads \
              {reads:?}, doubted: {}):\n{xml}\nours: {ours:#?}",
             reads.iter().any(|name| doubted(name))
         );
+    }
+    if claim == common::ReferenceClaim::Within {
+        return (ReadOutcome::Declined { owed }, evaluated);
     }
     (ReadOutcome::Committed, evaluated)
 }
@@ -830,7 +847,7 @@ fn an_implicit_read_leaves_no_certain_list_short() {
     let root = borzoi_msbuild::observed::host_fs::canonicalize(dir.path()).expect("canonicalize");
     let proj = layout(&root);
     std::fs::write(&proj, xml).unwrap();
-    let mut theirs: Vec<PathBuf> = Oracle::spawn_in_dir_with_env(&root, &env)
+    let theirs: Vec<PathBuf> = Oracle::spawn_in_dir_with_env(&root, &env)
         .items(xml, &proj, "ProjectReference", &[])
         .expect("MSBuild evaluates this document")
         .iter()
@@ -848,15 +865,15 @@ fn an_implicit_read_leaves_no_certain_list_short() {
     )
     .expect("well-formed XML parses");
     assert_eq!(theirs.len(), 2, "{theirs:?}");
-    if !parsed.project_references_uncertain && !parsed.project_references_incomplete {
-        let mut ours: Vec<PathBuf> = parsed
-            .project_references
-            .iter()
-            .map(|item| lexical(&item.include.to_string_lossy()))
-            .collect();
-        ours.sort();
-        theirs.sort();
-        assert_eq!(ours, theirs, "a certain list is MSBuild's: {xml}");
+    let ours: Vec<PathBuf> = parsed
+        .project_references
+        .iter()
+        .map(|item| lexical(&item.include.to_string_lossy()))
+        .collect();
+    if let Err(failure) =
+        common::check_reference_claim(common::reference_claim(&parsed), &ours, &theirs)
+    {
+        panic!("{failure}\n{xml}");
     }
 }
 
@@ -1035,17 +1052,76 @@ fn dead_reference_row(oracle: &mut Oracle, expected: DeadRow, row: &str) {
         DeadRow::Exact
     };
     assert_eq!(got, expected, "{xml}\nours: {ours:?}\ntheirs: {theirs:?}");
-    match expected {
-        DeadRow::Exact => {
-            assert_eq!(
-                ours, theirs,
-                "a certain list is MSBuild's whole list: {xml}"
+    assert!(!ours.is_empty(), "the live reference is held: {xml}");
+    if let Err(failure) =
+        common::check_reference_claim(common::reference_claim(&parsed), &ours, &theirs)
+    {
+        panic!("{failure}\n{xml}");
+    }
+}
+
+/// A reference the walk captured, whose only doubt is in a metadatum it
+/// resolves (a refused write, as an attribute or a child element), is in the
+/// list: the list is certain and MSBuild's. What the metadatum does to the
+/// edge is the metadatum's own verdict (`ItemMetadataValue::Unknown`), not a
+/// missing reference.
+#[test]
+fn a_doubted_metadatum_leaves_the_list_certain() {
+    let mut oracle = Oracle::spawn();
+    for name in [
+        "PrivateAssets",
+        "ReferenceOutputAssembly",
+        "ExcludeAssets",
+        "IncludeAssets",
+    ] {
+        for element in [false, true] {
+            let reference = if element {
+                format!(
+                    "<ProjectReference Include=\"B.fsproj\"><{name}>{REFUSED_BODY}</{name}></ProjectReference>"
+                )
+            } else {
+                format!("<ProjectReference Include=\"B.fsproj\" {name}=\"{REFUSED_BODY}\" />")
+            };
+            let xml = format!(
+                "<Project><ItemGroup><ProjectReference Include=\"A.fsproj\" />{reference}</ItemGroup></Project>"
             );
+            let dir = tempfile::TempDir::new().expect("tempdir");
+            let root =
+                borzoi_msbuild::observed::host_fs::canonicalize(dir.path()).expect("canonicalize");
+            let proj = layout(&root);
+            std::fs::write(&proj, &xml).unwrap();
+            let theirs: Vec<PathBuf> = oracle
+                .items(&xml, &proj, "ProjectReference", &[])
+                .expect("MSBuild evaluates this document")
+                .iter()
+                .map(|p| lexical(p))
+                .collect();
+            assert_eq!(theirs.len(), 2, "{theirs:?}");
+            let parsed = parse_fsproj_with_imports(
+                &borzoi_msbuild::ProjectFile::buffer(&proj, &xml)
+                    .expect("a project path spelt as its full path"),
+                &HashMap::new(),
+                &common::oracle_environment(),
+                None,
+                None,
+            )
+            .expect("well-formed XML parses");
+            let ours: Vec<PathBuf> = parsed
+                .project_references
+                .iter()
+                .map(|item| lexical(&item.include.to_string_lossy()))
+                .collect();
+            assert_eq!(
+                common::reference_claim(&parsed),
+                common::ReferenceClaim::Exact,
+                "{xml}"
+            );
+            if let Err(failure) =
+                common::check_reference_claim(common::ReferenceClaim::Exact, &ours, &theirs)
+            {
+                panic!("{failure}\n{xml}");
+            }
         }
-        DeadRow::Incomplete => assert!(
-            !ours.is_empty() && ours.iter().all(|p| theirs.contains(p)),
-            "every edge an incomplete list holds is MSBuild's: {ours:?} {theirs:?}\n{xml}"
-        ),
     }
 }
 
@@ -1089,8 +1165,10 @@ fn a_live_reference_in_an_undecided_group_leaves_the_list_incomplete() {
         .iter()
         .map(|item| lexical(&item.include.to_string_lossy()))
         .collect();
-    assert!(
-        !ours.is_empty() && ours.iter().all(|p| theirs.contains(p)),
-        "every edge an incomplete list holds is MSBuild's: {ours:?} {theirs:?}"
-    );
+    assert!(!ours.is_empty(), "A is held: {xml}");
+    if let Err(failure) =
+        common::check_reference_claim(common::reference_claim(&parsed), &ours, &theirs)
+    {
+        panic!("{failure}\n{xml}");
+    }
 }
