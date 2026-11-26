@@ -73,14 +73,14 @@ fn fsproj_to_csharp_metadata_e2e() {
     // *canonical* file as `fixture.csproj_path()` but a different
     // PathBuf. Compare via canonicalise() so the test asserts identity
     // of file, not byte-equality of paths.
+    // With no SDK resolver the evaluator doubts the list (the SDK it could not
+    // enter may carry `<ProjectReference>` mutations), so the walk's own list
+    // is what this end-to-end test reads.
     #[expect(
         clippy::disallowed_methods,
-        reason = "the evaluator's own verdict is what this end-to-end test checks"
+        reason = "the test checks the walk's own list, which the verdict withholds without an SDK"
     )]
-    let references = match parsed.project_references() {
-        borzoi_verdict::Verdict::Certain(references) => references,
-        borzoi_verdict::Verdict::Unknown(why) => panic!("the reference list is certain: {why:?}"),
-    };
+    let references = parsed.best_guess().project_references;
     assert_eq!(
         references.len(),
         1,
