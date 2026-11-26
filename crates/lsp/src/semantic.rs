@@ -3203,6 +3203,12 @@ struct GraphRefTargets {
     /// assemblies is missing, which is exactly the claim the incompleteness
     /// mark needs.
     suppressed: Vec<PathBuf>,
+    /// Nodes whose `<ProjectReference>` list may lack references the build has
+    /// ([`crate::project_graph::ProjectNode::references_incomplete`]). Their
+    /// edges are kept, so they are in [`Self::fsharp`] and [`Self::csharp`];
+    /// what is missing is not, and one [`ReferenceOutcome::Unread`] per such
+    /// node says so, as for [`Self::suppressed`].
+    incomplete: Vec<PathBuf>,
 }
 
 /// One F# node of the closure, as the env fold consumes it: the
@@ -3241,6 +3247,9 @@ fn graph_ref_targets(graph: &ProjectGraph, entry: &Path, observer: &Observer) ->
                 // references are missing from the env just as a sibling's are.
                 if node.references_uncertain {
                     targets.suppressed.push(canonicalise(&node.path, observer));
+                }
+                if node.references_incomplete {
+                    targets.incomplete.push(canonicalise(&node.path, observer));
                 }
                 if !paths_equal(&node.path, &entry_key) {
                     targets.fsharp.push(FsharpRefTarget {
@@ -3486,10 +3495,20 @@ fn resolve_reference_dlls(
             },
         })
         .collect();
+    // One more per node whose list may lack references the build has: its
+    // present edges were counted above, the absent ones cannot be.
+    let incomplete_edges = ref_targets.incomplete.iter().map(|project| ReferenceEdge {
+        project: project.clone(),
+        outcome: ReferenceOutcome::Unread {
+            why: "the project's own reference list may lack references the build has",
+            transient: false,
+        },
+    });
     let edges: Vec<ReferenceEdge> = fsharp_edges
         .into_iter()
         .chain(csharp_edges)
         .chain(suppressed_edges)
+        .chain(incomplete_edges)
         .collect();
     // Conservation: every edge the graph walk *retained* is accounted for, so a
     // reference that contributed nothing is recorded as missing rather than
@@ -3505,9 +3524,12 @@ fn resolve_reference_dlls(
     // ([`GraphRefTargets::suppressed`]), one outcome each.
     debug_assert_eq!(
         edges.len(),
-        ref_targets.fsharp.len() + ref_targets.csharp.len() + ref_targets.suppressed.len(),
+        ref_targets.fsharp.len()
+            + ref_targets.csharp.len()
+            + ref_targets.suppressed.len()
+            + ref_targets.incomplete.len(),
         "every retained project-reference edge, and every node whose edges were \
-         suppressed, must yield exactly one outcome"
+         suppressed or may be incomplete, must yield exactly one outcome"
     );
     // A transient F# output-scan failure has no `retryable` channel of its own —
     // that flag came from the sidecar — but it needs one for the same reason:
@@ -6639,6 +6661,7 @@ mod tests {
             tfm: crate::project_graph::NodeTfm::NotEvaluated,
             output_name: None,
             references_uncertain: false,
+            references_incomplete: false,
         }
     }
 
@@ -7924,6 +7947,57 @@ mod tests {
             env.identities_incomplete(),
             "a suppressed reference list leaves an unknown number of assemblies \
              missing, so the env must not claim to be complete"
+        );
+    }
+
+    /// #1181: a reference the walk dropped behind a gate it could not decide,
+    /// which MSBuild's build keeps (the gate reads a property MSBuild computes
+    /// as `D` and the walk refuses to compute), leaves the env short of its
+    /// assemblies just as a suppressed list does. The edges the walk did
+    /// capture are real and still fold; the env must not claim completeness,
+    /// or an absence of a name the dropped project declares reads as proof.
+    #[test]
+    fn a_reference_dropped_behind_an_undecided_gate_makes_the_env_incomplete() {
+        let dll_bytes = minilibfs_dll_bytes();
+
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let sibling_dir = root.join("MiniLibFs");
+        std::fs::create_dir_all(&sibling_dir).unwrap();
+        built_fsproj(&sibling_dir, "MiniLibFs", "Release", "net10.0", &dll_bytes);
+
+        let proj = root.join("App.fsproj");
+        write(
+            &proj,
+            r#"<Project>
+              <PropertyGroup><Gate>$([System.String]::Copy('D'))</Gate></PropertyGroup>
+              <ItemGroup>
+                <ProjectReference Include="MiniLibFs/MiniLibFs.fsproj" />
+              </ItemGroup>
+              <ItemGroup Condition="'$(Gate)' == 'D'">
+                <ProjectReference Include="Other/Other.fsproj" />
+              </ItemGroup>
+            </Project>"#,
+        );
+        let dotnet_root = root.join("dotnet");
+        std::fs::create_dir_all(&dotnet_root).unwrap();
+        write_app_assets(root, true);
+
+        let mut sema = SemanticState::new();
+        let env = sema.assembly_env_for_project(
+            &proj,
+            Some(&dotnet_root),
+            &ServedTfm::NoneDeclared,
+            &Workspace::default(),
+        );
+        assert!(
+            env.has_namespace(&["MiniLibFs".to_string()]),
+            "the captured reference is real, so its output still folds"
+        );
+        assert!(
+            env.identities_incomplete(),
+            "MSBuild keeps `Other`, the walk dropped it behind a gate it could not decide, and \
+             the env must not claim to be complete without it"
         );
     }
 

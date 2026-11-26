@@ -123,7 +123,7 @@ fn all_projects_after_the_property_pass_is_exact_or_declined() {
                     ));
                 }
             }
-            if !ours.project_references_uncertain {
+            if !ours.project_references_uncertain && !ours.project_references_incomplete {
                 let our_references: Vec<String> = ours
                     .project_references
                     .iter()

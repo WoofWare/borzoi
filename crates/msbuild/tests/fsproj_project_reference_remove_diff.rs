@@ -464,7 +464,7 @@ fn check(oracle: &mut Oracle, blocks: &[Block], with_resolver: bool) -> Outcome 
         .map(|p| lexical(p))
         .collect();
 
-    if parsed.project_references_uncertain {
+    if parsed.project_references_uncertain || parsed.project_references_incomplete {
         return Outcome {
             committed: false,
             committed_through_a_remove: false,
@@ -800,7 +800,7 @@ fn the_non_existent_idiom_commits_on_the_real_sdk() {
         "MSBuild drops the missing reference"
     );
     assert!(
-        !parsed.project_references_uncertain,
+        !parsed.project_references_uncertain && !parsed.project_references_incomplete,
         "the idiom must commit on the real SDK; diagnostics: {:#?}",
         parsed.diagnostics
     );

@@ -509,7 +509,36 @@ pub struct ParsedProject {
     /// A corresponding diagnostic ([`DiagnosticKind::UnsupportedItemOperation`],
     /// [`DiagnosticKind::UnsupportedCondition`],
     /// [`DiagnosticKind::UnresolvedImport`], …) is emitted alongside.
+    ///
+    /// This flag is about items the list may hold that the build lacks (or
+    /// holds at another identity). Items the build has that the list may
+    /// *lack* are [`Self::project_references_incomplete`]'s; the list is
+    /// MSBuild's exactly only when both are `false`.
     pub project_references_uncertain: bool,
+    /// `true` if [`Self::project_references`] may lack an item MSBuild's
+    /// evaluated list has, while every item it holds is one MSBuild has too
+    /// (unless [`Self::project_references_uncertain`] says otherwise). Set when
+    /// the walk dropped an `Include` it reached that may run in the real
+    /// build:
+    ///
+    /// - behind a gate, on the element or its `<ItemGroup>`, decided by a read
+    ///   the walk doubts (a write it refused to compute, one under a gate it
+    ///   could not decide, an SDK-tainted value), whichever way the gate went
+    ///   for the walk;
+    /// - behind a condition the walk does not model;
+    /// - in a still-possible branch of a `<Choose>` it could not decide;
+    /// - whose value it could not expand (an unevaluable expression, a
+    ///   wildcard or item reference it cannot resolve).
+    ///
+    /// The Compile items and the defines doubt the same gates in both
+    /// directions ([`Self::items_uncertain`], [`Self::define_constants_uncertain`]),
+    /// and so does the reference list, through this flag: a reference missing
+    /// from a list with this set is no proof the build lacks it (#1181). A
+    /// consumer that reads the list as the build's whole reference set — a
+    /// reference closure claiming completeness — must decline when it is set;
+    /// one that reads only the items present (a cycle through captured edges,
+    /// a missing target of a captured reference) may still use them.
+    pub project_references_incomplete: bool,
     /// The effective `<PackageReference>` dependency set in document order,
     /// after collapsing `Update` items onto the `Include` they modify: each
     /// `<PackageReference Update="X" …>` overwrites the matching (case-

@@ -2527,6 +2527,7 @@ fn resolve_node_uncached(
     };
     let outer_edges = edges_of(outer, purpose, is_entry);
     let outer_suppressed = references_suppressed(outer, purpose);
+    let outer_incomplete = references_incomplete(outer, purpose);
     if outer.not_an_inner_build {
         // Ahead of the caller-owned fast path below, for the reason
         // `Workspace::served_tfm_for_project` states: caller ownership excuses
@@ -2543,6 +2544,7 @@ fn resolve_node_uncached(
             tfm: NodeTfm::Unresolved,
             output_name: None,
             references_uncertain: outer_suppressed,
+            references_incomplete: outer_incomplete,
         };
     }
     if caller_owns_target_framework(extra_build_properties) {
@@ -2554,6 +2556,7 @@ fn resolve_node_uncached(
             },
             output_name: evaluated_output_name(path, outer),
             references_uncertain: outer_suppressed,
+            references_incomplete: outer_incomplete,
         };
     }
     if outer.tfm_untrusted {
@@ -2573,6 +2576,7 @@ fn resolve_node_uncached(
             tfm: NodeTfm::Unresolved,
             output_name: None,
             references_uncertain: outer_suppressed,
+            references_incomplete: outer_incomplete,
         };
     }
     if let Some(body) = &outer.body_target_framework {
@@ -2583,6 +2587,7 @@ fn resolve_node_uncached(
             tfm: NodeTfm::Known(body.clone()),
             output_name: evaluated_output_name(path, outer),
             references_uncertain: outer_suppressed,
+            references_incomplete: outer_incomplete,
         };
     }
     let declared = &outer.declared_tfms;
@@ -2613,6 +2618,7 @@ fn resolve_node_uncached(
                 .flatten(),
             tfm,
             references_uncertain: outer_suppressed,
+            references_incomplete: outer_incomplete,
         };
     }
     if let Some(seed) = seed_tfm {
@@ -2629,6 +2635,7 @@ fn resolve_node_uncached(
                     tfm: NodeTfm::Known(current.clone()),
                     output_name: evaluated_output_name(path, outer),
                     references_uncertain: outer_suppressed,
+                    references_incomplete: outer_incomplete,
                 };
             }
             let mut map = extra_build_properties.clone();
@@ -2644,6 +2651,7 @@ fn resolve_node_uncached(
                     tfm: NodeTfm::Unresolved,
                     output_name: None,
                     references_uncertain: references_suppressed(&inner, purpose),
+                    references_incomplete: references_incomplete(&inner, purpose),
                 },
                 Some(inner) => NodeResult::Resolved {
                     edges: edges_of(&inner, purpose, is_entry),
@@ -2654,6 +2662,7 @@ fn resolve_node_uncached(
                     // The inner evaluation is where these edges came from,
                     // so it is the one whose suppression applies.
                     references_uncertain: references_suppressed(&inner, purpose),
+                    references_incomplete: references_incomplete(&inner, purpose),
                 },
                 None => NodeResult::resolved(Vec::new()),
             };
@@ -2676,6 +2685,7 @@ fn resolve_node_uncached(
             tfm: NodeTfm::Unresolved,
             output_name: None,
             references_uncertain: outer_suppressed,
+            references_incomplete: outer_incomplete,
         },
         GraphWalkPurpose::CompileClosure => {
             // `outer` is the first-declared inner pass; re-evaluate under
@@ -2691,6 +2701,9 @@ fn resolve_node_uncached(
             // Any branch whose list was suppressed leaves the intersection
             // short of edges the real build may take, whichever TFM it picks.
             let mut any_suppressed = outer_suppressed;
+            // And any branch whose list may lack a reference leaves it short of
+            // one the real build may take under every TFM.
+            let mut any_incomplete = outer_incomplete;
             for tfm in declared.iter().skip(1) {
                 let mut map = extra_build_properties.clone();
                 seed_target_framework_global(&mut map, tfm);
@@ -2704,9 +2717,11 @@ fn resolve_node_uncached(
                         // suppression like any other — not a project that
                         // references nothing.
                         references_uncertain: true,
+                        references_incomplete: false,
                     };
                 };
                 any_suppressed |= references_suppressed(&branch, purpose);
+                any_incomplete |= references_incomplete(&branch, purpose);
                 let mut branch_kinds: HashMap<PathBuf, EdgeKind> = HashMap::new();
                 for e in edges_of(&branch, purpose, is_entry) {
                     branch_kinds
@@ -2742,6 +2757,7 @@ fn resolve_node_uncached(
                 tfm: NodeTfm::Unresolved,
                 output_name: None,
                 references_uncertain: any_suppressed,
+                references_incomplete: any_incomplete && !any_suppressed,
             }
         }
     }
@@ -2779,6 +2795,20 @@ fn references_suppressed(evaluated: &EvaluatedProject, purpose: GraphWalkPurpose
             not_an_inner_build: evaluated.not_an_inner_build,
         }
         .drops_reference_edges()
+}
+
+/// Whether this evaluation's `<ProjectReference>` list, kept by [`edges_of`],
+/// may lack references the build has
+/// ([`borzoi_msbuild::ParsedProject::project_references_incomplete`]), read
+/// back so the node can carry it
+/// ([`ProjectNode::references_incomplete`](crate::project_graph::ProjectNode::references_incomplete)).
+/// Only the compile closure reads completeness: the declared-structure walk's
+/// claims (a cycle, a missing target) are about the edges present. A
+/// suppressed list says more already, so it is not also incomplete.
+fn references_incomplete(evaluated: &EvaluatedProject, purpose: GraphWalkPurpose) -> bool {
+    purpose == GraphWalkPurpose::CompileClosure
+        && !references_suppressed(evaluated, purpose)
+        && evaluated.parsed.project_references_incomplete
 }
 
 fn edges_of(evaluated: &EvaluatedProject, purpose: GraphWalkPurpose, is_entry: bool) -> Vec<Edge> {

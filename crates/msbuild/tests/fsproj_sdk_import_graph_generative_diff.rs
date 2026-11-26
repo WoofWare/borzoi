@@ -1827,7 +1827,7 @@ fn evaluate(shared: &mut Shared, case: &Case) -> (Outcome, String) {
                 kind: FindingKind::Compile,
             });
         }
-        if !parsed.project_references_uncertain {
+        if !parsed.project_references_uncertain && !parsed.project_references_incomplete {
             outcome.findings.push(Finding {
                 what: "ProjectReference".to_owned(),
                 ours: "a certain reference list".to_owned(),
@@ -1940,7 +1940,7 @@ fn evaluate(shared: &mut Shared, case: &Case) -> (Outcome, String) {
     // So must a reference list the walk calls certain: the LSP's project graph
     // reads it as the edges MSBuild builds. Identities are relative to the
     // project's directory, as the Compile items' are.
-    if !parsed.project_references_uncertain {
+    if !parsed.project_references_uncertain && !parsed.project_references_incomplete {
         outcome.certain_references = true;
         let project_dir = project_path.parent().expect("a project has a directory");
         let ours: Vec<PathBuf> = parsed

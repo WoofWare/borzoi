@@ -682,9 +682,11 @@ fn evaluate_item_group(node: Node<'_, '_>, state: &mut State<'_>) {
         }
         CondGate::Skip => {
             // Skipped only on an untrusted false: a hidden mutation may run
-            // in the real build against the list we captured. Skipped
-            // Includes are at worst missed references — but they leave the
-            // list incomplete for anything derived from it.
+            // in the real build against the list we captured. A skipped
+            // Include is a reference the build may have and the list lacks,
+            // so the list is published incomplete
+            // (`ParsedProject::project_references_incomplete`), as is
+            // anything derived from it.
             if group_reads_untrusted && reference_risk.mutation {
                 state.project_references_uncertain = true;
             }
@@ -876,8 +878,9 @@ pub(super) struct UndecidedChooseItems {
     compile: bool,
     /// A package-affecting item ([`package_item_kind_for_name`]).
     package: bool,
-    /// A `<ProjectReference Include>`: at worst a missed reference, but the
-    /// list is then incomplete for anything derived from it.
+    /// A `<ProjectReference Include>`: a reference the build may have and
+    /// the list lacks, so the list is published incomplete
+    /// (`ParsedProject::project_references_incomplete`).
     project_reference_include: bool,
     /// Any other `<ProjectReference>` operation, which may falsify references
     /// already captured.
@@ -1116,8 +1119,10 @@ fn walk_item_child_inner(node: Node<'_, '_>, kind: ItemKind, state: &mut State<'
         CondGate::Skip => {
             // Excluded only by an untrusted false: the real build may run
             // the mutation against the list we captured. A dropped Include
-            // is at worst a missed reference, which never fabricates — but
-            // it leaves the list incomplete for anything derived from it.
+            // is a reference the build may have and the list lacks, so the
+            // list is published incomplete
+            // (`ParsedProject::project_references_incomplete`), as is
+            // anything derived from it.
             if untrusted_reference_op {
                 if is_mutation {
                     state.project_references_uncertain = true;

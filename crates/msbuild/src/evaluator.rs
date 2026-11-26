@@ -1178,13 +1178,16 @@ struct State<'r> {
     project_references_uncertain: bool,
     /// Whether a `<ProjectReference>` `Include` that may run in the real build
     /// went uncaptured — skipped on an untrusted gate, or one we could not
-    /// evaluate. The list contract tolerates that (a missing edge never
-    /// fabricates one), so this alone does not raise
-    /// [`Self::project_references_uncertain`]; an `Include` whose value read a
-    /// name the walk doubts raises it as well, dropped or kept
-    /// (`item_pass::reads_a_doubted_name`). But a list *derived* from
-    /// `@(ProjectReference)` is then incomplete, and a `Remove` driven by it can
-    /// miss an item MSBuild removes. [`item_pass`]'s item-list view reads it.
+    /// evaluate. Every captured item is still one MSBuild has (that is
+    /// [`Self::project_references_uncertain`]'s to doubt), but the list may lack
+    /// one, so it is published as incomplete
+    /// ([`ParsedProject::project_references_incomplete`]): a missing edge is no
+    /// proof the build lacks it. An `Include` whose value read a name the walk
+    /// doubts raises `project_references_uncertain` as well, dropped or kept
+    /// (`item_pass::reads_a_doubted_name`). A list *derived* from
+    /// `@(ProjectReference)` is then incomplete too, and a `Remove` driven by
+    /// it can miss an item MSBuild removes. [`item_pass`]'s item-list view
+    /// reads it.
     project_reference_includes_hidden: bool,
     /// Whether the captured package/framework-reference set may diverge from
     /// MSBuild. Accumulates into [`ParsedProject::package_references_uncertain`].
@@ -2321,8 +2324,7 @@ impl<'r> State<'r> {
             compile_item_uncertainties,
             package_context: _,
             project_references_uncertain,
-            // Consumed in the item pass, by a `@(ProjectReference)` view.
-            project_reference_includes_hidden: _,
+            project_reference_includes_hidden,
             package_references_uncertain,
             package_reference_uncertainties,
             current_file: _,
@@ -2518,6 +2520,7 @@ impl<'r> State<'r> {
             items,
             project_references,
             project_references_uncertain,
+            project_references_incomplete: project_reference_includes_hidden,
             package_references,
             package_versions,
             global_package_references,
