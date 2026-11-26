@@ -60,15 +60,20 @@ enum Gate {
     /// A condition the walk does not model, MSBuild's value of which is the
     /// polarity's.
     Unmodelled,
+    /// `'$(MSBuildStartupDirectory)' {op} ''`: a toolset name, which MSBuild
+    /// sets to the directory its process started in and the walk, evaluating
+    /// for no process, holds no value of.
+    Toolset,
 }
 
 const AXES: [Axis; 3] = [Axis::Compile, Axis::Defines, Axis::References];
 const SITES: [Site; 2] = [Site::Element, Site::Group];
-const GATES: [Gate; 4] = [
+const GATES: [Gate; 5] = [
     Gate::Literal,
     Gate::Refused,
     Gate::Unpinned,
     Gate::Unmodelled,
+    Gate::Toolset,
 ];
 
 /// The writes every document carries, whichever gate it uses.
@@ -89,6 +94,9 @@ fn condition(gate: Gate, truth: bool) -> String {
         // `Ê` are not. The walk does not model the comparison.
         Gate::Unmodelled if truth => "'\u{c9}' == '\u{e9}'".to_string(),
         Gate::Unmodelled => "'\u{c9}' == '\u{ca}'".to_string(),
+        // MSBuild's startup directory is never empty.
+        Gate::Toolset if truth => "'$(MSBuildStartupDirectory)' != ''".to_string(),
+        Gate::Toolset => "'$(MSBuildStartupDirectory)' == ''".to_string(),
     }
 }
 
