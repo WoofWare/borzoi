@@ -1488,6 +1488,63 @@ jobs:
         if: ${{ !cancelled() }}
         run: bash tools/ci/slowest-tests.sh | tee -a "$GITHUB_STEP_SUMMARY"
 
+  # The mutation sets (tools/mutants/sets.tsv), one matrix entry each.
+  mutants-sets:
+    name: List mutation sets
+    runs-on: ubuntu-latest
+    outputs:
+      sets: ${{ steps.list.outputs.sets }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: List the sets
+        id: list
+        run: echo "sets=$(bash tools/ci/mutants.sh --list | jq -R . | jq -cs .)" >> "$GITHUB_OUTPUT"
+
+  # Each mutation set runs cargo-mutants and checks its exact manifest
+  # (tools/mutants/manifests/<set>.txt). A mutant is arbitrary code, so this is
+  # a job of its own on an ephemeral GitHub-hosted runner, the only CI job whose
+  # environment sets BORZOI_MUTANTS_CI_JOB: tools/mutants/canary.sh refuses a
+  # run anywhere else. Ungated by the change filters, like corpus-diff: a
+  # verdict moves with the set's crate and with its tests.
+  test-mutants:
+    name: Mutation tests (${{ matrix.set }})
+    needs: mutants-sets
+    runs-on: ubuntu-latest
+    # tools/ci/mutants.sh bounds the cargo-mutants run itself at 5 h.
+    timeout-minutes: 330
+    env:
+      BORZOI_MUTANTS_CI_JOB: "true"
+      # cargo-mutants builds each copy of the tree under TMPDIR.
+      TMPDIR: /mnt/mutants-tmp
+    strategy:
+      fail-fast: false
+      matrix:
+        set: ${{ fromJSON(needs.mutants-sets.outputs.sets) }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Move /nix and the mutants' builds to the large /mnt disk
+        run: |
+          df -h / /mnt || true
+          sudo mkdir -p /mnt/nix /nix
+          sudo mount --bind /mnt/nix /nix
+          sudo mkdir -p /mnt/mutants-tmp
+          sudo chown "$(id -u):$(id -g)" /mnt/mutants-tmp
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+
+      - name: Run the set and check its manifest
+        run: bash tools/ci/mutants.sh "${{ matrix.set }}"
+
+      - name: Upload the run
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: mutants-${{ matrix.set }}
+          path: ${{ runner.temp }}/mutants/${{ matrix.set }}
+
   all-required-checks-complete:
     if: ${{ always() }}
     needs:
@@ -1509,6 +1566,8 @@ jobs:
       - test-sidecar
       - test-spawn
       - test-oracle-harness
+      - mutants-sets
+      - test-mutants
       - nix-build
     runs-on: ubuntu-latest
     steps:
