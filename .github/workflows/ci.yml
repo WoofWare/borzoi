@@ -1499,7 +1499,17 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - name: List the sets
         id: list
-        run: echo "sets=$(bash tools/ci/mutants.sh --list | jq -R . | jq -cs .)" >> "$GITHUB_OUTPUT"
+        # A failed listing fails the pipeline, and so the assignment and the
+        # step; and it can print nothing, which `jq -cs` would turn into an
+        # empty matrix, so an empty one fails too.
+        run: |
+          set -o pipefail
+          sets="$(bash tools/ci/mutants.sh --list | jq -R . | jq -cs .)"
+          if [[ "$sets" == "[]" ]]; then
+            echo "tools/ci/mutants.sh --list named no set" >&2
+            exit 1
+          fi
+          echo "sets=$sets" >> "$GITHUB_OUTPUT"
 
   # Each mutation set runs cargo-mutants and checks its exact manifest
   # (tools/mutants/manifests/<set>.txt). A mutant is arbitrary code, so this is
