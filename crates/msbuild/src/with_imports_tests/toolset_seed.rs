@@ -87,9 +87,10 @@ fn a_seed_in_a_refused_slot_is_no_rewrite() {
 /// Nor does another name's rewrite make the seed the build's value: the
 /// project rewrites `P`, which the arm writes too, so the second walk runs,
 /// but it holds `MSBuildExtensionsPath32`, whose refused slot the SDK seeded,
-/// as doubtful as the first does, and finds no throw in `VersionEquals` on
-/// the seed's directory, where the build compares its `1.0` and evaluates the
-/// project (#1153).
+/// as doubtful as the first does, so claims nothing certain of it. The throw
+/// in `VersionEquals` on the seed's directory, which the walk holds there
+/// from before the arm, is a Possible site, where the build compares its
+/// `1.0` and evaluates the project: a decline (#1153, #1164, #1200).
 #[test]
 fn another_names_rewrite_leaves_a_seed_doubted() {
     // The seed as it stands, and copied into its own slot after the SDK.
@@ -117,15 +118,22 @@ fn another_names_rewrite_leaves_a_seed_doubted() {
         );
         let result =
             parse_file_with_sdk_env(&project_path, resolver, HashMap::new(), HashMap::new());
-        assert_eq!(result.rejection, None, "{copy}: {:#?}", result.diagnostics);
+        assert_eq!(
+            result.rejection.as_ref().map(|r| r.certainty),
+            Some(RejectionCertainty::Possible),
+            "{copy}: {:#?}",
+            result.diagnostics
+        );
     }
 }
 
 /// A rewrite that held is undone by a later write that copies a seed: `P`
 /// is refused, rewritten to `z`, then given the seeded
 /// `MSBuildExtensionsPath32`, and the second walk holds it as doubtful as the
-/// first does, so finds no throw in `VersionEquals('$(P)', '1.0')`, which
-/// the build, holding the project's `1.0` there, evaluates true (#1153).
+/// first does, so claims nothing certain of it. `VersionEquals('$(P)',
+/// '1.0')` throws on the seed's directory, which the walk holds, so it is a
+/// Possible site, where the build, holding the project's `1.0` there,
+/// evaluates true: a decline (#1153, #1164, #1200).
 #[test]
 fn a_seed_copied_over_a_rewrite_undoes_it() {
     let tmp = TempDir::new().unwrap();
@@ -143,7 +151,12 @@ fn a_seed_copied_over_a_rewrite_undoes_it() {
          <PropertyGroup><P>$(MSBuildExtensionsPath32)</P><After>ok</After></PropertyGroup></Project>",
     );
     let result = parse_file_with_sdk_env(&project_path, resolver, HashMap::new(), HashMap::new());
-    assert_eq!(result.rejection, None, "{:#?}", result.diagnostics);
+    assert_eq!(
+        result.rejection.as_ref().map(|r| r.certainty),
+        Some(RejectionCertainty::Possible),
+        "{:#?}",
+        result.diagnostics
+    );
 }
 
 /// `Seen`, the body's copy of `$(VisualStudioVersion)`, when committed.

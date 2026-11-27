@@ -5,7 +5,6 @@
 case-0001	9bf8d02c86387fa3 uncertain-value
 case-0015	9c8112595d968213 unmodelled-body
 case-0016	edaee90b3a389a8a uncertain-value
-case-0019	027a98ad7ca58575 uncertain-value
 case-0020	dc926d747f25617f uncertain-value
 case-0027	5641d082c6a1e6d6 uncertain-value
 case-0039	9179fb880457ea73 uncertain-value
@@ -41,7 +40,6 @@ case-0347	49f217ab21d1edc6 uncertain-value
 case-0354	bb724da4109ab360 uncertain-value
 case-0356	0d92fd6a06fd2539 uncertain-value
 case-0358	1210277fa66dbca3 unmodelled-body
-case-0377	6553c50356736c38 uncertain-value
 case-0380	b01e5621b74af435 uncertain-value
 case-0389	99eabd04a74e7bdc unmodelled-body
 case-0400	6b72b844f13e7e4e uncertain-value
@@ -86,7 +84,6 @@ case-0768	36723891252fafdc uncertain-value
 case-0771	5494ec85c8d56a54 uncertain-value
 case-0775	46a09d5a49cd2b66 unmodelled-body
 case-0778	e16559292366f19b uncertain-value
-case-0781	e6b3b88ffc23a166 uncertain-value
 case-0796	9faadf99584c2d48 uncertain-value
 case-0797	8625d38fbeb0d059 uncertain-value
 case-0802	b1c7706bbea8473f unmodelled-body
@@ -123,7 +120,6 @@ case-1118	53bbdacef7fa2b3c unmodelled-body
 case-1121	9ebc67f6d9c31694 unmodelled-body
 case-1123	4debab8f68175cd6 unmodelled-body
 case-1127	e04d1a29cd8db433 unmodelled-body
-case-1129	a25397a9c7ea0eca uncertain-value
 case-1194	5bb11b92c887c97d uncertain-value
 case-1197	f41b792f555b08f9 uncertain-value
 case-1198	063832489f367469 unmodelled-body
@@ -138,7 +134,6 @@ case-1336	59b5d12a277e4702 uncertain-value
 case-1341	c4f9605b6f3433ab uncertain-value
 case-1356	b13a4c26e64be2eb uncertain-value
 case-1358	eedc96683450bff7 uncertain-value
-case-1392	0450945feb5bf718 uncertain-value
 case-1408	49537dda880ba105 uncertain-value
 case-1411	ab911d1647efe758 uncertain-value
 case-1412	0933668fc33cdd8f uncertain-value

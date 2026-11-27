@@ -46,11 +46,15 @@
 //! values; nor is one reading item metadata in a metadatum, which MSBuild
 //! hands the metadatum's value ([`judge_metadata_text`]). Nor is a throw on a
 //! value the walk holds none of (a write it refused to compute, a reserved
-//! name it does not seed), in a condition or a text: whether MSBuild's own
-//! value throws is the judgement over the values a name may hold, #1009's
-//! second stage. A leaf of a condition that reads such a name has none of
+//! name it does not seed), in a condition or a text, unless it throws
+//! whatever values are tried for that name: whether MSBuild's own value
+//! throws is the judgement over the values a name may hold, #1009's second
+//! stage (#1201). A leaf of a condition that reads such a name has none of
 //! MSBuild's booleans, so what comes after it is reached perhaps, and judged
-//! on the values held.
+//! on the values held. A name that content the walk does not take writes is
+//! no such name: it is judged on the value the walk holds from before that
+//! content, and a throw on it is a Possible site
+//! ([`holds_a_value_msbuild_may`], #1164).
 //!
 //! So is a `<UsingTask>` MSBuild refuses as it registers the task without an
 //! expression throwing: a name that expands to empty, a flag no boolean, a
@@ -118,11 +122,11 @@
 //! reference, a property function it does not model) unbinds its name and
 //! leaves a mark on it ([`super::Trust::refused`]) that a later clean write
 //! keeps, for the import points. The judgement reads that mark as doubt too
-//! ([`directory_build::is_certain`]), and its doubt is not monotone in what it
-//! holds: settling the item pass's view of a path the walk did not take
-//! (`State::judge_from_path`) leaves a name the path writes unheld, and a
-//! throw on its final value is then no site, though the build holds that
-//! value (#1153). So wherever the first walk's judgement read a name it
+//! ([`directory_build::is_certain`]), and which of a text's throws it names,
+//! and where a site is certain, turn on that doubt: a throw on a name read
+//! certain is the one a walk names, and a refused-then-rebound name is
+//! doubted though the build holds its value (#1153). So wherever the first
+//! walk's judgement read a name it
 //! doubts only for such a mark, the project having written it again after
 //! the refusal ([`State::rewritten_after_refusal`], [`State::second_walk_needed`]),
 //! the evaluation is walked a second time,
@@ -137,7 +141,7 @@
 //! course and reach with the walk's own code, so the second claims nothing:
 //! it only declines more. The two readings bracket the judgement's doubt about
 //! a refused-then-rebound name; a name neither reading settles (the #1051
-//! class, #1164) is not this walk's to find.
+//! class) is not this walk's to find.
 
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
@@ -451,9 +455,19 @@ pub(super) fn judged_certain(state: &State<'_>, name: &str) -> bool {
 /// refused to compute, or for a reserved name it does not seed, is a value
 /// MSBuild need not hold at all, so what a function does on it says nothing of
 /// the build.
+///
+/// A name that content the walk does not take writes
+/// ([`State::speculatively_unheld`]) is judged on the value the walk holds
+/// from before that content. On the path through the content MSBuild may
+/// hold another value, so the value is not certain
+/// ([`directory_build::is_certain`]), and a throw on it is only a Possible
+/// site: a decline where MSBuild's own value does not throw (#1200). Trying
+/// values for such a name instead was not monotone in which names the
+/// content leaves unknown, which a refused history moves, and lost sites
+/// MSBuild meets (#1164). Whether the content's own value throws is the
+/// judgement over the values a name may hold (#1051).
 pub(super) fn holds_a_value_msbuild_may(state: &State<'_>, name: &str) -> bool {
-    (state.lookup.is_bound(name) || state.undefined_read_is_exact(name))
-        && !state.speculatively_unheld(name)
+    state.lookup.is_bound(name) || state.undefined_read_is_exact(name)
 }
 
 impl State<'_> {
