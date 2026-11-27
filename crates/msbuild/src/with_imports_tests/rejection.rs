@@ -1695,44 +1695,72 @@ fn a_condition_the_walk_doubts_keeps_a_second_walks_site() {
 }
 
 /// But not the gates around a site: under `'$(P)' == 'abcdefghijkl'`, false
-/// on `P`'s final `z`, MSBuild expands no metadatum, update or definition,
-/// but either walk, deciding a gate it judges as main does, takes it as
-/// undecided, and the second walk may find a throw there on `z` (where the
-/// first does not miss it, as for a gated definition, #1172). What MSBuild
-/// reaches is main's to decide in both walks, so such a site stands,
-/// Possible: a decline MSBuild does not need, never a claim (#1153, #1183).
-/// A `<When>`
-/// holds no `<UsingTask>`, so no task is judged from an untaken path.
+/// on `P`'s final `z`, MSBuild expands no metadatum, update or definition, so
+/// it rejects none of these rows. Either walk, deciding a gate it judges as
+/// main does, takes it as undecided, and the second walk finds the throw on
+/// `z` in a gated metadatum or update. What MSBuild reaches is main's to
+/// decide in both walks, so that site stands, Possible: a decline MSBuild does
+/// not need, never a claim (#1153, #1183). Neither walk judges a definition
+/// from an untaken arm, so the definition rows note nothing; that is #1172's
+/// gap, which misses a throw MSBuild does reach, and fixing it may move these
+/// rows to the item rows' Possible. A `<When>` holds no `<UsingTask>`, so no
+/// task is judged from an untaken path.
 #[test]
 fn a_gate_the_walk_doubts_keeps_a_second_walks_site() {
     let gate = "'$(P)' == 'abcdefghijkl'";
-    for group in [
-        format!("<ItemGroup><I Include=\"x\"><M Condition=\"{gate}\">$(P[9])</M></I></ItemGroup>"),
-        format!(
-            "<ItemGroup><I Include=\"x\" /><I Update=\"x\" Condition=\"{gate}\"><M>$(P[9])</M></I></ItemGroup>"
+    let possible = Some(RejectionCertainty::Possible);
+    let rows = [
+        (
+            format!(
+                "<ItemGroup><I Include=\"x\"><M Condition=\"{gate}\">$(P[9])</M></I></ItemGroup>"
+            ),
+            possible,
         ),
-        format!(
-            "<ItemDefinitionGroup><I><M Condition=\"{gate}\">$(P[9])</M></I></ItemDefinitionGroup>"
+        (
+            format!(
+                "<ItemGroup><I Include=\"x\" /><I Update=\"x\" Condition=\"{gate}\"><M>$(P[9])</M></I></ItemGroup>"
+            ),
+            possible,
         ),
-        format!(
-            "<ItemDefinitionGroup Condition=\"{gate}\"><I><M>$(P[9])</M></I></ItemDefinitionGroup>"
+        (
+            format!(
+                "<ItemDefinitionGroup><I><M Condition=\"{gate}\">$(P[9])</M></I></ItemDefinitionGroup>"
+            ),
+            None,
         ),
-        format!(
-            "<ItemDefinitionGroup><I Condition=\"{gate}\"><M>$(P[9])</M></I></ItemDefinitionGroup>"
+        (
+            format!(
+                "<ItemDefinitionGroup Condition=\"{gate}\"><I><M>$(P[9])</M></I></ItemDefinitionGroup>"
+            ),
+            None,
         ),
-    ] {
+        (
+            format!(
+                "<ItemDefinitionGroup><I Condition=\"{gate}\"><M>$(P[9])</M></I></ItemDefinitionGroup>"
+            ),
+            None,
+        ),
+    ];
+    let throw = RejectionCause::ThrowingExpression {
+        expression: "$(P[9])".to_string(),
+    };
+    for (group, expected) in rows {
         let body = format!(
             "<PropertyGroup><P>abc</P></PropertyGroup><Choose><When Condition=\"{UNDECIDED_TRUE}\">\
              <PropertyGroup><P>abcdefghijkl</P></PropertyGroup>{group}</When></Choose>\
              <PropertyGroup><P>@(J)</P><P>z</P></PropertyGroup>"
         );
         for parsed in both_walkers(&format!("  {body}")) {
-            assert_ne!(
-                parsed.rejection.as_ref().map(|r| r.certainty),
-                Some(RejectionCertainty::Certain),
+            let rejection = parsed.rejection.as_ref();
+            assert_eq!(
+                rejection.map(|r| r.certainty),
+                expected,
                 "{group}: {:#?}",
                 parsed.diagnostics
             );
+            if let Some(rejection) = rejection {
+                assert_eq!(rejection.cause, throw, "{group}");
+            }
         }
     }
 }
