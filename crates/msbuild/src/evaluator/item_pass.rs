@@ -31,6 +31,10 @@ use crate::properties::path_fixup;
 /// belong to the one expression. A spec in which an item expression holds a
 /// `;` ([`item_expression_span`]) is refused, rather than cut into fragments
 /// that name items MSBuild never makes, and every caller declines it.
+///
+/// Not claimed: that only the expression is declined. The literal fragments
+/// beside it (`Explicit.fsproj;@(H, ';')`) are MSBuild's whatever the
+/// expression holds, and the refusal declines them with it (#1198).
 fn spec_fragments(spec: &Escaped) -> Result<impl Iterator<Item = &str>, SpansSeparator> {
     let text = spec.as_escaped();
     let mut from = 0;
@@ -2672,10 +2676,19 @@ fn update_may_strand(node: Node<'_, '_>, state: &State<'_>) -> bool {
     if expansion.had_issue() {
         return true;
     }
-    // A spec the walk cannot split may strand anything.
-    let Ok(mut fragments) = spec_fragments(expansion.value.ignoring_trust()) else {
-        return true;
-    };
+    // The question reads only the first fragment and whether a second follows,
+    // and an item expression holding a `;` moves neither answer: in the first
+    // fragment its `@(` falls before its first `;`, so the plain split's first
+    // fragment holds it too; in a later one there is a second fragment either
+    // way. So this split is exact here though [`spec_fragments`] refuses the
+    // spec.
+    let mut fragments = expansion
+        .value
+        .ignoring_trust()
+        .as_escaped()
+        .split(';')
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
     let Some(first) = fragments.next() else {
         return false;
     };

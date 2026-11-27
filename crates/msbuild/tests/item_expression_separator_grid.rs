@@ -189,9 +189,14 @@ fn an_item_expression_holding_a_separator_makes_no_item_msbuild_lacks() {
                     .expect("a well-formed document");
                     let cell = format!("{kind:?} / {route:?} / {form} / resolver: {with_resolver}");
                     let (committed, ours) = ours(kind, &parsed);
+                    let control = form == "literal" && route == Route::Direct;
                     if committed {
+                        // The control's list is MSBuild's exactly, references
+                        // included, so a walk that dropped every reference on
+                        // one seam fails here.
                         let holds = match kind {
                             Kind::Compile | Kind::PackageReference => ours == theirs,
+                            Kind::ProjectReference if control => ours == theirs,
                             Kind::ProjectReference => ours.iter().all(|p| theirs.contains(p)),
                         };
                         if !holds {
@@ -199,7 +204,7 @@ fn an_item_expression_holding_a_separator_makes_no_item_msbuild_lacks() {
                                 "{cell}: committed {ours:?}, MSBuild holds {theirs:?}\n{xml}"
                             ));
                         }
-                    } else if form == "literal" && route == Route::Direct {
+                    } else if control {
                         failures.push(format!("{cell}: the control declined\n{xml}"));
                     }
                 }
@@ -208,4 +213,64 @@ fn an_item_expression_holding_a_separator_makes_no_item_msbuild_lacks() {
     }
     assert_eq!(points, 3 * 2 * 6 * 2);
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+/// A metadata-only `Update` whose spec begins with an item expression strands
+/// nothing in MSBuild's batch of `Update`s, whatever that expression's
+/// arguments hold: MSBuild abandons batching at its first fragment. The walk
+/// keeps the Compile list it would keep for the same `Update` without the
+/// separator argument.
+#[test]
+fn an_update_beginning_with_an_item_expression_strands_nothing() {
+    let dir = tempfile::TempDir::new().expect("a temporary directory");
+    let root = borzoi_msbuild::observed::host_fs::canonicalize(dir.path()).expect("canonicalize");
+    let path = root.join("Demo.fsproj");
+    let mut oracle = Oracle::spawn();
+    for update in ["@(Helper)", "@(Helper, ';')", "@(Helper, ';X.fs;')"] {
+        let xml = format!(
+            "<Project><ItemGroup><Helper Include=\"A.fs\" />\
+             <Compile Include=\"A.fs;B.fs\" />\
+             <Compile Update=\"{update}\" Link=\"Elsewhere.fs\" /></ItemGroup></Project>"
+        );
+        std::fs::write(&path, &xml).expect("the project");
+        let theirs = theirs(&mut oracle, Kind::Compile, &xml, &path);
+        let parsed = parse_fsproj_with_imports(
+            &borzoi_msbuild::ProjectFile::buffer(&path, &xml).expect("a full path"),
+            &HashMap::new(),
+            &common::oracle_environment(),
+            None,
+            None,
+        )
+        .expect("a well-formed document");
+        let (committed, ours) = ours(Kind::Compile, &parsed);
+        assert!(committed, "{update}: {:#?}\n{xml}", parsed.diagnostics);
+        assert_eq!(ours, theirs, "{update}\n{xml}");
+    }
+}
+
+/// The refusal declines the whole spec, so a literal fragment beside an item
+/// expression holding a `;` goes with it, though MSBuild makes it whatever the
+/// expression holds: pinned, so that splitting at top-level separators (#1198)
+/// flips this test.
+#[test]
+fn literal_fragments_beside_a_spanning_expression_are_declined_with_it() {
+    let dir = tempfile::TempDir::new().expect("a temporary directory");
+    let root = borzoi_msbuild::observed::host_fs::canonicalize(dir.path()).expect("canonicalize");
+    let path = root.join("Demo.fsproj");
+    let xml = "<Project><ItemGroup><Helper Include=\"A.fsproj\" />\
+               <ProjectReference Include=\"Explicit.fsproj;@(Helper, ';')\" /></ItemGroup></Project>";
+    std::fs::write(&path, xml).expect("the project");
+    let theirs = theirs(&mut Oracle::spawn(), Kind::ProjectReference, xml, &path);
+    let explicit = normalised(&root.join("Explicit.fsproj"));
+    assert!(theirs.contains(&explicit), "MSBuild makes it: {theirs:?}");
+    let parsed = parse_fsproj_with_imports(
+        &borzoi_msbuild::ProjectFile::buffer(&path, xml).expect("a full path"),
+        &HashMap::new(),
+        &common::oracle_environment(),
+        None,
+        None,
+    )
+    .expect("a well-formed document");
+    let (_, ours) = ours(Kind::ProjectReference, &parsed);
+    assert!(ours.is_empty(), "the whole spec is declined: {ours:?}");
 }
