@@ -133,18 +133,23 @@ fn environment_facts(environment: &HashMap<String, String>) -> BTreeSet<(String,
 }
 
 /// The allowed properties set as a global or a variable whose value is
-/// outside its grammar, as the derivation reads them (`fsc::decide`): the
-/// value as set, and the property's final value in the evaluation `parsed`,
-/// which MSBuild may read otherwise (`%0A` decodes to a line break); a read
-/// the evaluation is not certain of counts too. The fact names the property,
-/// never its value.
+/// outside its grammar, as the derivation reads them (`fsc::decide`): a
+/// global's value as set, and each one's final value in the evaluation
+/// `parsed`, which MSBuild may read otherwise (`%0A` decodes to a line
+/// break); a read the evaluation is not certain of counts too. A variable's
+/// value as set is [`environment_facts`]'s, so one value is one fact. The
+/// fact names the property, never its value.
 fn property_value_facts(
     globals: &HashMap<String, String>,
     environment: &HashMap<String, String>,
     parsed: &ParsedProject,
 ) -> BTreeSet<(String, String)> {
     let mut facts = BTreeSet::new();
-    for (name, value) in globals.iter().chain(environment) {
+    let set = globals
+        .iter()
+        .map(|(name, value)| (name, Some(value)))
+        .chain(environment.keys().map(|name| (name, None)));
+    for (name, global) in set {
         let VariableClass::AllowedProperty(grammar) = classify_variable(name) else {
             continue;
         };
@@ -153,7 +158,7 @@ fn property_value_facts(
             PropertyRead::Value(value) => grammar.admits(&value),
             _ => false,
         };
-        if !grammar.admits(value) || !evaluated {
+        if global.is_some_and(|value| !grammar.admits(value)) || !evaluated {
             facts.insert(("value outside its grammar".to_string(), name.clone()));
         }
     }
@@ -376,6 +381,52 @@ fn an_evaluated_property_value_is_held_to_its_grammar() {
         )])
     );
     assert_eq!(facts_under("plain"), BTreeSet::new());
+}
+
+/// A variable's value outside its grammar that the project overwrites with
+/// one inside it is one fact, the environment's, not a second for the
+/// evaluated property, which is valid.
+#[test]
+fn an_overwritten_variable_is_one_fact() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let dir = host_fs::canonicalize(tmp.path()).unwrap();
+    let project = dir.join("Demo.fsproj");
+    std::fs::write(
+        &project,
+        "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup>\
+         <TargetFramework>net10.0</TargetFramework><Optimize>true</Optimize>\
+         </PropertyGroup></Project>",
+    )
+    .unwrap();
+    let globals = HashMap::new();
+    let mut environment: HashMap<String, String> = BuildEnvironment::inherited(std::env::vars())
+        .vars()
+        .map(|(n, v)| (n.to_string(), v.to_string()))
+        .collect();
+    environment.insert(
+        "MSBuildUserExtensionsPath".to_string(),
+        common::msbuild_user_extensions_path().to_string(),
+    );
+    environment.insert("Optimize".to_string(), "maybe".to_string());
+    let parsed = evaluate(
+        &project,
+        &globals,
+        &environment,
+        &common::dotnet_root_from_env(),
+    )
+    .expect("the project evaluates");
+    assert_eq!(
+        parsed.property("Optimize"),
+        PropertyRead::Value("true".to_string())
+    );
+    assert_eq!(
+        property_value_facts(&globals, &environment, &parsed),
+        BTreeSet::new()
+    );
+    assert!(environment_facts(&environment).contains(&(
+        "environment variable value outside its grammar".to_string(),
+        "Optimize".to_string()
+    )));
 }
 
 #[test]
