@@ -62,19 +62,27 @@ measurements.
 
 ## What in-repo tooling must survive
 
-The harnesses, oracles, test-support modules, CI scripts, and everything else
-under `tools/` and `crates/oracle-harness/` have one consumer: us. Each must
-give the right answer, or refuse loudly, in the environments this repo runs it
-in. Those are the `nix develop` devshell on a developer's macOS machine and
-CI's Ubuntu runners. The following are out of scope, and a refusal or a clear
-panic is a sound answer to any of them:
+The development and test tooling has one consumer: us. That covers the
+harnesses, oracles, test-support modules and CI scripts, everything under
+`crates/oracle-harness/`, and everything under `tools/` except
+`tools/csharp-sidecar/`, which ships with borzoi and runs in users'
+workspaces. Each tool must give the right answer, or refuse loudly, in the
+environments this repo runs it in:
+
+- the `nix develop` devshell on a developer's macOS machine;
+- the developer's own shell, for a script this file says to run outside
+  `nix develop`;
+- CI's Ubuntu runners.
+
+The following are out of scope, and a refusal or a clear panic is a sound
+answer to any of them:
 
 - a hostile or misconfigured environment, such as an odd `PATH`, a broken
   `TMPDIR` or a relative `DOTNET_ROOT`;
 - an operator working against the tool, such as an `assume-unchanged` or
   symlinked manifest, or a script killed mid-run;
 - code under test that acts maliciously;
-- a platform CI does not run.
+- a platform that neither CI nor the developer setup above uses.
 
 What stays in scope is the tool's job. A harness is wrong if it can pass while
 the property it names fails, or if it answers wrongly in the environments
