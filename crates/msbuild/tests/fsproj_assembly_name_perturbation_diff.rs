@@ -43,8 +43,8 @@ use borzoi_oracle_harness::hostile::value::{self, Write};
 use borzoi_oracle_harness::hostile::{Dimension, coverage};
 use borzoi_oracle_harness::hostile::{env as hostile_env, name as hostile_name};
 use borzoi_oracle_harness::msbuild_oracle::{
-    BUILD_ENVIRONMENT_NAMES, BuildInputs, FscArgsDecline, FscArgsRequest, INPUT_NAMES, InputError,
-    build_environment, fsc_args, msbuild_command, msbuild_user_extensions_path,
+    BUILD_ENVIRONMENT_NAMES, BuildEnvironment, BuildInputs, FscArgsDecline, FscArgsRequest,
+    INPUT_NAMES, InputError, fsc_args, msbuild_command, msbuild_user_extensions_path,
 };
 use common::SplitMix64;
 use common::assembly_name::{self, Sdks};
@@ -1059,7 +1059,7 @@ fn library_dll() -> &'static [u8] {
              <ItemGroup><Compile Include=\"L.fs\" /></ItemGroup></Project>",
         )
         .unwrap();
-        let mut cmd = msbuild_command(dir, &BuildInputs::new());
+        let mut cmd = msbuild_command(dir, inherited_environment(), &BuildInputs::new());
         cmd.args(["-nodeReuse:false", "-restore", "-t:Build"]);
         BoundedCommand::new(cmd)
             .timeout(std::time::Duration::from_secs(900))
@@ -1163,12 +1163,27 @@ thread_local! {
     static RESTORES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+/// The environment the grading's builds inherit, and its evaluations are
+/// handed beneath their own variables: this process's, read once.
+fn inherited_environment() -> &'static BuildEnvironment {
+    static ENVIRONMENT: std::sync::OnceLock<BuildEnvironment> = std::sync::OnceLock::new();
+    ENVIRONMENT.get_or_init(|| BuildEnvironment::inherited(std::env::vars()))
+}
+
+/// [`inherited_environment`]'s variables, as an evaluation is handed them.
+fn inherited_variables() -> HashMap<String, String> {
+    inherited_environment()
+        .vars()
+        .map(|(n, v)| (n.to_string(), v.to_string()))
+        .collect()
+}
+
 /// Restore the project at `project` in place, under `inputs`, as the build
 /// would; a failed restore leaves the evaluation unrestored, which the
 /// derivation declines.
 fn restore(project: &Path, inputs: &BuildInputs) {
     RESTORES.with(|n| n.set(n.get() + 1));
-    let mut cmd = msbuild_command(project.parent().unwrap(), inputs);
+    let mut cmd = msbuild_command(project.parent().unwrap(), inherited_environment(), inputs);
     cmd.args(["-nodeReuse:false", "-t:Restore"]);
     for (name, value) in inputs.globals() {
         cmd.arg(format!("-p:{name}={value}"));
@@ -1227,14 +1242,14 @@ fn ours_under(
         .globals()
         .map(|(n, v)| (n.to_string(), v.to_string()))
         .collect();
-    let mut environment: HashMap<String, String> = build_environment().into_iter().collect();
+    let mut environment = inherited_variables();
     // What MSBuild computes for itself, as the oracle's other differentials
     // hand it to our evaluation.
     environment.insert(
         "MSBuildUserExtensionsPath".to_string(),
-        msbuild_user_extensions_path().to_string(),
+        msbuild_user_extensions_path(inherited_environment()).to_string(),
     );
-    environment.extend(inputs.env_vars());
+    environment.extend(inputs.env_vars(inherited_environment()));
     environment.extend(extra.iter().cloned());
     // The SDK the evaluation resolved is the one being graded.
     assembly_name::derive(project, &globals, &environment, dotnet_root, Sdks::Resolved)
@@ -1356,6 +1371,7 @@ fn grade_unbudgeted(case: &Case) -> Result<Outcome, String> {
     }
     let request = FscArgsRequest {
         project: &project,
+        environment: inherited_environment(),
         inputs: &inputs,
     };
     match fsc_args(&request) {
@@ -1461,6 +1477,7 @@ fn plain_arguments() -> String {
             restore(&project, &inputs);
             let build = fsc_args(&FscArgsRequest {
                 project: &project,
+                environment: inherited_environment(),
                 inputs: &inputs,
             })
             .expect("the plain project's build is answered");
@@ -1795,7 +1812,7 @@ fn variables_off_the_oracle_list_never_reach_the_build() {
         let Some((inputs, rest)) = split_variables(case) else {
             continue;
         };
-        for (name, _) in inputs.env_vars() {
+        for (name, _) in inputs.env_vars(inherited_environment()) {
             assert!(
                 INPUT_NAMES.iter().any(|n| n.eq_ignore_ascii_case(&name)),
                 "{}: {name} reaches the build",
@@ -1803,7 +1820,7 @@ fn variables_off_the_oracle_list_never_reach_the_build() {
             );
         }
         assert_eq!(
-            inputs.env_vars().len() + rest.len(),
+            inputs.env_vars(inherited_environment()).len() + rest.len(),
             case.variables.len(),
             "{}",
             case.label()
@@ -1886,7 +1903,7 @@ fn the_build_sees_each_variable_as_set() {
         for name in names {
             inputs = inputs.env(name, value).unwrap();
         }
-        let mut cmd = msbuild_command(&dir, &inputs);
+        let mut cmd = msbuild_command(&dir, inherited_environment(), &inputs);
         cmd.arg("-nologo");
         for name in names {
             cmd.arg(format!("-getProperty:{name}"));
@@ -2366,10 +2383,10 @@ fn devshell_sdk() -> (String, std::collections::BTreeSet<String>) {
     let dir = host_fs::canonicalize(tmp.path()).unwrap();
     let (project, _) = lay_out(&plain_case(), &dir).expect("the plain project lays out");
     let globals: HashMap<String, String> = HashMap::new();
-    let mut environment: HashMap<String, String> = build_environment().into_iter().collect();
+    let mut environment = inherited_variables();
     environment.insert(
         "MSBuildUserExtensionsPath".to_string(),
-        msbuild_user_extensions_path().to_string(),
+        msbuild_user_extensions_path(inherited_environment()).to_string(),
     );
     let parsed = assembly_name::evaluate(
         &project,

@@ -39,8 +39,16 @@ deleted, and the trees the differentials generate hold it by grammar (no
 property function, no build code), which the generators assert. Callers set
 globals and environment variables only through `BuildInputs`, which refuses
 names that choose the toolchain, the compiler, the restore or MSBuild's
-machinery. The build's own environment is closed too: `build_environment`
-carries only `BUILD_ENVIRONMENT_NAMES`, and every build starts from
+machinery. The build's own environment is closed too: a `BuildEnvironment`
+carries only `BUILD_ENVIRONMENT_NAMES`, and the caller hands it to every
+build, probe and host lookup (`msbuild_command`, `fsc_args`'s request,
+`msbuild_user_extensions_path`, `dotnet_host`). The harness reads no
+variable of its own process for a build: the crate's `clippy.toml` bans
+`std::env`'s readers (by resolved path, so no import or alias hides one), and
+each deliberate read that is not a build's (a tool's selector, where the
+oracle's own scratch files go) carries an `allow` with its reason. So the
+caller decides what a build inherits (the differentials pass their process's
+`std::env::vars()`). Every build starts from
 `msbuild_command`, which launches the .NET host itself rather than a
 `dotnet` on `PATH` (the devshell's is a bash wrapper, which rewrites `PWD`,
 `OLDPWD` and `SHLVL`), so the build sees exactly the variables it is handed. `borzoi-msbuild`'s

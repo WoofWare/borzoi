@@ -793,7 +793,12 @@ enum SocketFailure {
 /// too long, one under `/tmp`.
 fn bind_socket(dir: &Path, name: &OsStr) -> Result<(), SocketFailure> {
     let mut too_long = None;
-    for base in [std::env::temp_dir(), PathBuf::from("/tmp")] {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "a short directory for a socket's link, wherever one is; not a build's environment"
+    )]
+    let bases = [std::env::temp_dir(), PathBuf::from("/tmp")];
+    for base in bases {
         let Ok(short) = tempfile::Builder::new().prefix("s").tempdir_in(&base) else {
             continue;
         };

@@ -6,7 +6,7 @@
 //! evaluated as the LSP evaluates it (`Configuration=Debug`,
 //! `Platform=AnyCPU`, `MSBuildUserExtensionsPath` seeded), under this
 //! process's environment, as the LSP would run, and under the build's own
-//! environment alone (`build_environment`). Printed:
+//! environment alone (`BuildEnvironment::inherited`). Printed:
 //!
 //! - each project's verdict under both;
 //! - the census by the derivation's first decline cause, per environment;
@@ -39,7 +39,7 @@ use borzoi_msbuild::fsc::{
 };
 use borzoi_msbuild::observed::host_fs::{self, HostPath};
 use borzoi_msbuild::{ParsedProject, PropertyRead};
-use borzoi_oracle_harness::msbuild_oracle::build_environment;
+use borzoi_oracle_harness::msbuild_oracle::BuildEnvironment;
 use common::assembly_name::{Sdks, derive_from, evaluate};
 
 /// Every `.fsproj` under `dir`, but in `bin/`, `obj/` and hidden directories,
@@ -266,7 +266,12 @@ fn census() {
         ),
         (
             "build env",
-            seeded(build_environment().into_iter().collect()),
+            seeded(
+                BuildEnvironment::inherited(std::env::vars())
+                    .vars()
+                    .map(|(n, v)| (n.to_string(), v.to_string()))
+                    .collect(),
+            ),
         ),
     ];
     let dotnet_root = common::dotnet_root_from_env();

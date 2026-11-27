@@ -81,6 +81,10 @@ pub enum Limited {
 /// In a child: the case this process was spawned to run, as the parent spelled
 /// it to [`run_case`], read from `var`; `None` in the parent, where the
 /// variable is unset.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the case the parent spawned this child to run; not a build's environment"
+)]
 pub fn requested_case(var: &str) -> Option<String> {
     std::env::var(var).ok()
 }
