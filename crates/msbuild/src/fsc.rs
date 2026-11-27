@@ -2393,6 +2393,19 @@ mod tests {
     /// `TOOLCHAIN_VARIABLES`. What each shape admits is `ToolchainValue`'s,
     /// graded by its own example table
     /// ([`toolchain_values_are_held_to_their_shape`]).
+    /// Production's toolchain table is exactly the pinned one, name for name
+    /// and shape for shape: a name added to `TOOLCHAIN_VARIABLES` alone is a
+    /// widening the movement properties would never draw.
+    #[test]
+    fn the_toolchain_table_is_the_pinned_one() {
+        use std::collections::BTreeSet;
+        let pinned: BTreeSet<(&str, ToolchainValue)> = TOOLCHAIN.iter().copied().collect();
+        let production: BTreeSet<(&str, ToolchainValue)> =
+            super::TOOLCHAIN_VARIABLES.iter().copied().collect();
+        assert_eq!(production, pinned);
+        assert_eq!(super::TOOLCHAIN_VARIABLES.len(), TOOLCHAIN.len());
+    }
+
     const TOOLCHAIN: &[(&str, ToolchainValue)] = &[
         ("DOTNET_CLI_HOME", ToolchainValue::Path),
         ("DOTNET_CLI_TELEMETRY_OPTOUT", ToolchainValue::Switch),

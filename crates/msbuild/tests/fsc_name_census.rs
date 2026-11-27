@@ -34,8 +34,8 @@ use borzoi_msbuild::AutoResponseFile;
 use borzoi_msbuild::fsc::{
     ALLOWED_ITEM_TYPES, ALLOWED_METADATA, ALLOWED_PROPERTIES, BUILD_TIME_SITES,
     CompiledAssemblyName, Gate, NameDecline, RESTORE_ITEM_TYPES, RESTORE_METADATA,
-    RESTORE_PROPERTIES, RESTORE_PROPERTY_PREFIX, classify_variable, environment_declines,
-    resolved_sdk_version, restore_props, verified_manifests, verified_sdks,
+    RESTORE_PROPERTIES, RESTORE_PROPERTY_PREFIX, VariableClass, classify_variable,
+    environment_declines, resolved_sdk_version, restore_props, verified_manifests, verified_sdks,
 };
 use borzoi_msbuild::observed::host_fs::{self, HostPath};
 use borzoi_msbuild::{ParsedProject, PropertyRead};
@@ -92,7 +92,17 @@ fn on_list<'a>(list: impl IntoIterator<Item = &'a str>, name: &str) -> bool {
 /// whether or not the project evaluates.
 fn environment_facts(environment: &HashMap<String, String>) -> BTreeSet<(String, String)> {
     let mut facts = BTreeSet::new();
-    for name in environment.keys() {
+    for (name, value) in environment {
+        // An allowed property's value is held to its grammar, as the
+        // derivation holds it; the fact names the property, never the value.
+        if let VariableClass::AllowedProperty(grammar) = classify_variable(name)
+            && !grammar.admits(value)
+        {
+            facts.insert((
+                "environment variable value outside its grammar".to_string(),
+                name.clone(),
+            ));
+        }
         if !classify_variable(name).admitted() {
             facts.insert((
                 "environment variable off the list".to_string(),
@@ -246,6 +256,51 @@ fn blocking_facts(project: &Path, parsed: &ParsedProject) -> BTreeSet<(String, S
         }
     }
     facts
+}
+
+/// The environment's facts name every rule it breaks: an allowed property
+/// outside its grammar (by name, never value), a name on no list, a toolchain
+/// value off its shape, two spellings of one property; and none for an
+/// environment the derivation admits.
+#[test]
+fn the_environment_facts_name_each_rule_broken() {
+    let facts = |pairs: &[(&str, &str)]| {
+        environment_facts(
+            &pairs
+                .iter()
+                .map(|(n, v)| (n.to_string(), v.to_string()))
+                .collect(),
+        )
+    };
+    let fact = |rule: &str, detail: &str| (rule.to_string(), detail.to_string());
+    assert_eq!(
+        facts(&[("Optimize", "maybe")]),
+        BTreeSet::from([fact(
+            "environment variable value outside its grammar",
+            "Optimize"
+        )])
+    );
+    assert_eq!(
+        facts(&[("BORZOI_UNLISTED", "x")]),
+        BTreeSet::from([fact("environment variable off the list", "BORZOI_UNLISTED")])
+    );
+    assert_eq!(
+        facts(&[("NUGET_PACKAGES", "relative")]),
+        BTreeSet::from([fact(
+            "environment variable value off its shape",
+            "NUGET_PACKAGES: a value not of the shape Path"
+        )])
+    );
+    assert!(
+        facts(&[("SHELL", "/bin/sh"), ("shell", "/bin/sh")]).contains(&fact(
+            "environment variables naming one property",
+            "SHELL and shell name one property"
+        ))
+    );
+    assert_eq!(
+        facts(&[("Optimize", "true"), ("LANG", "C"), ("HOME", "/home/u")]),
+        BTreeSet::new()
+    );
 }
 
 #[test]
