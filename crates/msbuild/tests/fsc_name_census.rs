@@ -132,6 +132,34 @@ fn environment_facts(environment: &HashMap<String, String>) -> BTreeSet<(String,
     facts
 }
 
+/// The allowed properties set as a global or a variable whose value is
+/// outside its grammar, as the derivation reads them (`fsc::decide`): the
+/// value as set, and the property's final value in the evaluation `parsed`,
+/// which MSBuild may read otherwise (`%0A` decodes to a line break); a read
+/// the evaluation is not certain of counts too. The fact names the property,
+/// never its value.
+fn property_value_facts(
+    globals: &HashMap<String, String>,
+    environment: &HashMap<String, String>,
+    parsed: &ParsedProject,
+) -> BTreeSet<(String, String)> {
+    let mut facts = BTreeSet::new();
+    for (name, value) in globals.iter().chain(environment) {
+        let VariableClass::AllowedProperty(grammar) = classify_variable(name) else {
+            continue;
+        };
+        let evaluated = match parsed.property(name) {
+            PropertyRead::Unset => true,
+            PropertyRead::Value(value) => grammar.admits(&value),
+            _ => false,
+        };
+        if !grammar.admits(value) || !evaluated {
+            facts.insert(("value outside its grammar".to_string(), name.clone()));
+        }
+    }
+    facts
+}
+
 /// Every domain rule the evaluation `parsed` of `project` breaks, beyond
 /// its environment's ([`environment_facts`]): `(rule, detail)`, the detail a
 /// name off a list or empty.
@@ -303,6 +331,53 @@ fn the_environment_facts_name_each_rule_broken() {
     );
 }
 
+/// A property set to a value its grammar admits as written, which MSBuild
+/// reads otherwise (`%0A`, a line break), is a fact once evaluated; the same
+/// property at a plain value is none.
+#[test]
+fn an_evaluated_property_value_is_held_to_its_grammar() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let dir = host_fs::canonicalize(tmp.path()).unwrap();
+    let project = dir.join("Demo.fsproj");
+    std::fs::write(
+        &project,
+        "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup>\
+         <TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>",
+    )
+    .unwrap();
+    let globals = HashMap::new();
+    let dotnet_root = common::dotnet_root_from_env();
+    let facts_under = |value: &str| {
+        // The census's build column: the build's environment, seeded as the
+        // census seeds it, and the property under test.
+        let mut environment: HashMap<String, String> =
+            BuildEnvironment::inherited(std::env::vars())
+                .vars()
+                .map(|(n, v)| (n.to_string(), v.to_string()))
+                .collect();
+        environment.insert(
+            "MSBuildUserExtensionsPath".to_string(),
+            common::msbuild_user_extensions_path().to_string(),
+        );
+        environment.insert("Description".to_string(), value.to_string());
+        let parsed = evaluate(&project, &globals, &environment, &dotnet_root)
+            .expect("the project evaluates");
+        property_value_facts(&globals, &environment, &parsed)
+    };
+    assert!(
+        borzoi_msbuild::fsc::Grammar::Text.admits("first%0Asecond"),
+        "the case needs a value its grammar admits as written"
+    );
+    assert_eq!(
+        facts_under("first%0Asecond"),
+        BTreeSet::from([(
+            "value outside its grammar".to_string(),
+            "Description".to_string()
+        )])
+    );
+    assert_eq!(facts_under("plain"), BTreeSet::new());
+}
+
 #[test]
 #[ignore = "a report over a corpus named by BORZOI_FSC_NAME_CENSUS_ROOTS"]
 fn census() {
@@ -369,7 +444,10 @@ fn census() {
             let (verdict, facts) = match evaluate(project, &globals, environment, &dotnet_root) {
                 Ok(parsed) => (
                     derive_from(project, &parsed, &globals, environment, Sdks::Verified),
-                    blocking_facts(project, &parsed),
+                    blocking_facts(project, &parsed)
+                        .into_iter()
+                        .chain(property_value_facts(&globals, environment, &parsed))
+                        .collect(),
                 ),
                 Err(e) => (
                     CompiledAssemblyName::Unknown(borzoi_msbuild::fsc::NameDecline::Property(
