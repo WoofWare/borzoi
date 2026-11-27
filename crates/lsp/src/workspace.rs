@@ -2841,12 +2841,23 @@ fn resolve_node_uncached(
             // Each evaluation's list may be exact while the intersection is
             // not the build's: whatever some TFM takes beyond it is missing
             // from the env under that TFM (#1181).
-            let intersection_short = taken_by_some.iter().any(|(target, kind)| {
-                surviving
-                    .iter()
-                    .find(|e| e.target == *target)
-                    .is_none_or(|e| e.kind != *kind)
-            });
+            // Compared by target, the transparent kind winning, as the graph
+            // follows them: a target that survives as `Full` through any of
+            // its edges lost nothing, whichever order they were declared in.
+            let mut surviving_by_target: HashMap<&PathBuf, EdgeKind> = HashMap::new();
+            for e in &surviving {
+                surviving_by_target
+                    .entry(&e.target)
+                    .and_modify(|k| {
+                        if e.kind == EdgeKind::Full {
+                            *k = EdgeKind::Full;
+                        }
+                    })
+                    .or_insert(e.kind);
+            }
+            let intersection_short = taken_by_some
+                .iter()
+                .any(|(target, kind)| surviving_by_target.get(target) != Some(kind));
             NodeResult::Resolved {
                 edges: surviving,
                 tfm: NodeTfm::Unresolved,
@@ -6890,6 +6901,55 @@ mod tests {
             node_paths(&compile_closure),
             vec![lexically_normalize(&a), lexically_normalize(&c)],
         );
+    }
+
+    /// #1181, on an unseeded multi-target entry, where a blocked edge degrades
+    /// to the target's output: an edge one TFM demotes to `OutputOnly` loses
+    /// what flows through it under the other TFM, so the node is incomplete;
+    /// a target referenced twice under every TFM, once blocked and once not,
+    /// survives as `Full` and loses nothing, in either declaration order.
+    #[test]
+    fn an_entry_intersection_compares_each_target_by_its_strongest_edge() {
+        let blocked = r#"<ProjectReference Include="../C/C.fsproj" ExcludeAssets="compile" />"#;
+        let plain = r#"<ProjectReference Include="../C/C.fsproj" />"#;
+        let demoted = r#"<ProjectReference Include="../C/C.fsproj">
+              <ExcludeAssets Condition="'$(TargetFramework)' == 'net8.0'">compile</ExcludeAssets>
+            </ProjectReference>"#;
+        let cases = [
+            ("demoted under one TFM", demoted.to_string(), true),
+            ("blocked, then plain", format!("{blocked}{plain}"), false),
+            ("plain, then blocked", format!("{plain}{blocked}"), false),
+        ];
+        for (label, references, incomplete) in cases {
+            let tmp = TempDir::new().unwrap();
+            let a = tmp.path().join("A/A.fsproj");
+            write_file(
+                &a,
+                &format!(
+                    r#"<Project>
+                      <PropertyGroup>
+                        <TargetFrameworks>net10.0;net8.0</TargetFrameworks>
+                      </PropertyGroup>
+                      <ItemGroup>{references}</ItemGroup>
+                    </Project>"#
+                ),
+            );
+            write_file(
+                &tmp.path().join("C/C.fsproj"),
+                &fsproj_with_refs(&["../D/D.fsproj"]),
+            );
+            write_file(&tmp.path().join("D/D.fsproj"), &fsproj_with_refs(&[]));
+            let ws = Workspace::default();
+            let graph = ws.project_graph_with_producer_tfms(
+                &a,
+                &BTreeMap::new(),
+                &borzoi_msbuild::observed::Observer::new(),
+            );
+            let entry = &graph.nodes[0];
+            assert_eq!(entry.path, lexically_normalize(&a), "{label}");
+            assert!(!entry.references_uncertain, "{label}");
+            assert_eq!(entry.references_incomplete, incomplete, "{label}");
+        }
     }
 
     /// A `<ProjectReference>` item with the given `ReferenceOutputAssembly`

@@ -4321,6 +4321,11 @@ fn route_item_through_resolver(
             // expands here. `push` marks the Compile set uncertain in a
             // Compile context; a reference list is marked by hand, since a
             // dropped `<ProjectReference>` glob is a missing edge.
+            //
+            // Not claimed: that this is the weakest sound verdict. A dropped
+            // glob only omits edges, so publishing the list incomplete
+            // (keeping its other edges) would do; uncertain drops them all
+            // (#1184).
             if kind == ItemKind::ProjectReference {
                 state.project_references_uncertain = true;
             }
