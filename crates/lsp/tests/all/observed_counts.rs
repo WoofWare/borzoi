@@ -71,11 +71,13 @@ impl Client {
                 state.clock = clock;
                 // Hermetic: no `dotnet` is found, so no env is built from the
                 // host's packs. The project is SDK-less, so it evaluates and
-                // folds all the same.
+                // folds all the same. Its ownership walks stop at `root`: the shared
+                // temporary directory above may hold any process's `.fsproj`.
                 state.workspace = crate::common::workspace(SdkDiscoveryEnv {
                     dotnet_root: Some(root.join("no-dotnet")),
                     ..SdkDiscoveryEnv::default()
-                });
+                })
+                .with_ownership_ceiling(&root);
                 let mut caps = json!({
                     "workspace": { "semanticTokens": { "refreshSupport": true } },
                     "textDocument": { "publishDiagnostics": {} },

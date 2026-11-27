@@ -601,7 +601,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut state = State::default();
+        let mut state = State::default().with_ownership_ceiling(tmp.path());
         state.set_workspace_roots(vec![tmp.path().to_path_buf()]);
         let result = handle(&mut state, params());
 
@@ -637,7 +637,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut state = State::default();
+        let mut state = State::default().with_ownership_ceiling(tmp.path());
         state.set_workspace_roots(vec![tmp.path().to_path_buf()]);
         let result = handle(&mut state, params());
 
@@ -727,7 +727,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut state = State::default();
+        let mut state = State::default().with_ownership_ceiling(tmp.path());
         state.set_workspace_roots(vec![tmp.path().to_path_buf()]);
         let result = handle(&mut state, params());
 
@@ -1162,9 +1162,9 @@ mod tests {
         fn stepped_sweep_matches_the_synchronous_pass(tree in tree_strategy()) {
             let tmp = TempDir::new().unwrap();
             write_tree(tmp.path(), &tree);
-            let mut stepped = State::default();
+            let mut stepped = State::default().with_ownership_ceiling(tmp.path());
             stepped.set_workspace_roots(vec![tmp.path().to_path_buf()]);
-            let mut synchronous = State::default();
+            let mut synchronous = State::default().with_ownership_ceiling(tmp.path());
             synchronous.set_workspace_roots(vec![tmp.path().to_path_buf()]);
 
             let cold = handle(&mut stepped, params());
@@ -1188,7 +1188,7 @@ mod tests {
         ) {
             let tmp = TempDir::new().unwrap();
             write_tree(tmp.path(), &before);
-            let mut state = State::default();
+            let mut state = State::default().with_ownership_ceiling(tmp.path());
             state.set_workspace_roots(vec![tmp.path().to_path_buf()]);
             // Each step, and the event, in a generation of its own, as the
             // dispatch loop runs them: a cached evaluation is confirmed only
@@ -1225,7 +1225,7 @@ mod tests {
                 }
             };
 
-            let mut fresh = State::default();
+            let mut fresh = State::default().with_ownership_ceiling(tmp.path());
             fresh.set_workspace_roots(vec![tmp.path().to_path_buf()]);
             proptest::prop_assert_eq!(report, handle(&mut fresh, params()));
         }

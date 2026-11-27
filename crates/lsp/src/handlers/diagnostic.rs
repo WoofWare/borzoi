@@ -292,7 +292,7 @@ mod tests {
         std::fs::write(&path, UNMATCHED_ENDIF).unwrap();
         let uri = Uri::from_file_path(&path).unwrap();
 
-        let mut state = State::default();
+        let mut state = State::default().with_ownership_ceiling(tmp.path());
         // Deliberately *not* inserted into `state.docs`.
         let result = handle(&mut state, params(uri));
         assert!(
@@ -311,7 +311,7 @@ mod tests {
             let path = tmp.path().join("OnDisk.fs");
             std::fs::write(&path, format!("{prefix}let x = \"open\n")).unwrap();
             let uri = Uri::from_file_path(&path).unwrap();
-            let mut state = State::default();
+            let mut state = State::default().with_ownership_ceiling(tmp.path());
             let result = handle(&mut state, params(uri));
             items(&result).iter().map(|d| d.range).collect::<Vec<_>>()
         };
@@ -469,7 +469,7 @@ mod tests {
         std::fs::write(&file, "#if FOO\nlet x = 1\n#endif\n").unwrap();
         let uri = Uri::from_file_path(&file).unwrap();
 
-        let mut state = State::default();
+        let mut state = State::default().with_ownership_ceiling(tmp.path());
         // First pull: no project on disk, so FOO is undefined.
         let id = full_result_id(&handle(&mut state, params(uri.clone())));
         assert!(is_unchanged(&handle(
