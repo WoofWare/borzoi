@@ -1067,10 +1067,10 @@ impl Workspace {
     ///
     /// Every file later asked about must lie under `ceiling`, spelt as
     /// `ceiling` followed by plain names (the comparison is by components, not
-    /// through the file system): a walk for any other file panics
-    /// ([`walk_dirs`]), since it would otherwise climb past the ceiling
-    /// unnoticed. It is set before the first walk (it panics otherwise), so
-    /// no remembered owner was found under another ceiling.
+    /// through the file system): a walk for any other file panics, since it
+    /// would otherwise climb past the ceiling unnoticed. It is set before the
+    /// first walk (it panics otherwise), so no remembered owner was found
+    /// under another ceiling.
     pub fn with_ownership_ceiling(mut self, ceiling: &Path) -> Self {
         assert!(
             self.owners.is_empty() && self.dir_listings.by_dir.is_empty(),
