@@ -275,7 +275,7 @@ pub enum RejectionCertainty {
 }
 
 /// What may make MSBuild reject the project.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum RejectionCause {
     /// An `<Import>` MSBuild may make names no file it can load, and MSBuild
     /// fails the evaluation when it makes one (MSB4019 for a missing file,
@@ -333,7 +333,7 @@ pub enum RejectionCause {
 /// A construct MSBuild's loader (`ProjectParser`) refuses when it loads a
 /// file (#888, #917). Element and attribute names are as MSBuild reads them,
 /// prefix included.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum LoadTimeError {
     /// A property element (or a task output's `PropertyName`) named for a
     /// reserved property (any case), or for one of the names MSBuild reserves
@@ -377,7 +377,7 @@ pub enum LoadTimeError {
 }
 
 /// Why an import may load no file.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum UnloadableImport {
     /// The walk could not compute the path, so the build's may name no file.
     PathUndecided,
@@ -421,7 +421,7 @@ impl DiagnosticKind {
 /// the walk — the offending `<Import>` element's range (or `0..0`
 /// for implicit imports) is carried by the enclosing
 /// [`Diagnostic::span`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ImportFailReason {
     /// The resolved path does not exist on disk, or is not a regular
     /// file. The most common case: a typo in `Project="…"`, or an

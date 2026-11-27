@@ -128,11 +128,46 @@ pub fn walk(
     extra_properties: &HashMap<String, String>,
     environment: &HashMap<String, String>,
 ) -> ParsedProject {
-    let root = doc.root_element();
-    let local_overrides = collect_local_overrides(root);
     // The pure walker follows no import and resolves no SDK, so nothing
     // reaches the observer; `parse_fsproj` promises that.
     let observer = Observer::new();
+    let first = |second_walk: bool| {
+        pure_walk(
+            doc,
+            project_path,
+            extra_properties,
+            environment,
+            &observer,
+            second_walk,
+        )
+    };
+    let mut state = first(false);
+    if state.second_walk_needed.get() {
+        let second = first(true);
+        state.adopt_second_walk(second);
+    }
+    #[cfg(feature = "test-support")]
+    state.record_published_sites();
+    let project = state.into_project();
+    assert!(
+        observer.finish().0.is_empty(),
+        "the pure walker observed the file system"
+    );
+    project
+}
+
+/// [`walk`]'s walk, the first or the second ([`State::second_walk`]), up to
+/// its publication.
+fn pure_walk<'r>(
+    doc: &Document<'_>,
+    project_path: &Path,
+    extra_properties: &HashMap<String, String>,
+    environment: &HashMap<String, String>,
+    observer: &'r Observer,
+    second_walk: bool,
+) -> State<'r> {
+    let root = doc.root_element();
+    let local_overrides = collect_local_overrides(root);
     let mut state = State::new(
         project_path,
         extra_properties,
@@ -142,8 +177,9 @@ pub fn walk(
         None,
         None,
         None,
-        &observer,
+        observer,
     );
+    state.second_walk = second_walk;
     let project_dir = project_path.parent().unwrap_or_else(|| Path::new(""));
     state
         .foreign_definitions
@@ -172,12 +208,7 @@ pub fn walk(
     }
     walk_doc_body(root, project_dir, &mut state);
     replay_deferred_item_groups(doc, &mut state);
-    let project = state.into_project();
-    assert!(
-        observer.finish().0.is_empty(),
-        "the pure walker observed the file system"
-    );
-    project
+    state
 }
 
 /// With-imports walker reachable from [`super::parse_fsproj_with_imports`].
@@ -214,6 +245,69 @@ pub fn walk_with_imports<'r>(
     observer: &'r Observer,
     #[cfg(any(test, feature = "test-support"))] probe: Option<&ReadProbe>,
 ) -> Walked {
+    let first = |second_walk: bool| {
+        walk_imported(
+            doc,
+            project_path,
+            extra_properties,
+            environment,
+            implicit_props,
+            implicit_targets,
+            detected_packages_props,
+            sdk_resolver,
+            glob_resolver,
+            startup_directory,
+            observer,
+            second_walk,
+        )
+    };
+    let mut state = first(false);
+    if state.second_walk_needed.get() {
+        let second = first(true);
+        state.adopt_second_walk(second);
+    }
+    #[cfg(feature = "test-support")]
+    state.record_published_sites();
+    #[cfg(any(test, feature = "test-support"))]
+    let reads = probe.map(|probe| state.read_probe(probe));
+    let project = state.into_project();
+    // The published reads answer every name as the probe's read of it does:
+    // the table enumerates only some names, and the rest must fall to the
+    // rule it states for them.
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(reads) = &reads {
+        for (name, read) in &reads.properties {
+            assert_eq!(
+                project.property(name),
+                *read,
+                "the published read of `{name}` differs from the walk's"
+            );
+        }
+    }
+    Walked {
+        project,
+        #[cfg(any(test, feature = "test-support"))]
+        reads,
+    }
+}
+
+/// [`walk_with_imports`]'s walk, the first or the second
+/// ([`State::second_walk`]), up to its publication.
+#[allow(clippy::too_many_arguments)]
+fn walk_imported<'r>(
+    doc: &Document<'_>,
+    project_path: &Path,
+    extra_properties: &HashMap<String, String>,
+    environment: &HashMap<String, String>,
+    implicit_props: Option<&Path>,
+    implicit_targets: Option<&Path>,
+    detected_packages_props: Option<&Path>,
+    sdk_resolver: Option<&'r SdkResolver<'r>>,
+    glob_resolver: Option<&'r GlobResolver<'r>>,
+    startup_directory: Option<&Path>,
+    observer: &'r Observer,
+    second_walk: bool,
+) -> State<'r> {
     let root = doc.root_element();
     let local_overrides = collect_local_overrides(root);
     let mut state = State::new(
@@ -227,6 +321,7 @@ pub fn walk_with_imports<'r>(
         startup_directory,
         observer,
     );
+    state.second_walk = second_walk;
     // The entry project is never inside an SDK.
     state
         .foreign_definitions
@@ -370,28 +465,7 @@ pub fn walk_with_imports<'r>(
                 origin: DiagnosticOrigin::Imported,
             });
     }
-
-    #[cfg(any(test, feature = "test-support"))]
-    let reads = probe.map(|probe| state.read_probe(probe));
-    let project = state.into_project();
-    // The published reads answer every name as the probe's read of it does:
-    // the table enumerates only some names, and the rest must fall to the
-    // rule it states for them.
-    #[cfg(any(test, feature = "test-support"))]
-    if let Some(reads) = &reads {
-        for (name, read) in &reads.properties {
-            assert_eq!(
-                project.property(name),
-                *read,
-                "the published read of `{name}` differs from the walk's"
-            );
-        }
-    }
-    Walked {
-        project,
-        #[cfg(any(test, feature = "test-support"))]
-        reads,
-    }
+    state
 }
 
 /// [`walk_with_imports`]'s result.
@@ -1285,6 +1359,34 @@ struct State<'r> {
     /// ([`rejection`]); [`Self::into_project`] withdraws what the walk publishes
     /// when it is set.
     rejection: Option<crate::Rejection>,
+    /// Every site the rejection judgement noted, in order: what a second
+    /// walk's sites are compared to, and adopted from
+    /// ([`State::adopt_second_walk`]).
+    noted_sites: Vec<rejection::NotedSite>,
+    /// Whether this is the second walk, whose rejection judgement holds a
+    /// bound name whose only doubt is a refusal's mark certain
+    /// ([`rejection::judged_certain`]).
+    second_walk: bool,
+    /// The names (lower-cased) a clean write stored a value to after their
+    /// last refused one, of a value reading no name whose refusal no such
+    /// write discharged: whose bound value is the project's own, though the
+    /// mark stays for the import points. A toolset seed filling the slot a
+    /// refusal emptied is none, nor a copy of one
+    /// ([`directory_build::is_certain_setting_aside_refusal`]). A value
+    /// resting on a seed through another assignment, or written under a gate
+    /// that read one, is held all the same, and a throw on it is a decline
+    /// (#1183).
+    rewritten_after_refusal: HashSet<String>,
+    /// Whether the first walk's judgement read a name the second walk's
+    /// would hold certain where the first doubts it ([`rejection::judged_certain`]):
+    /// the trigger for the second walk, which can differ nowhere else.
+    second_walk_needed: std::cell::Cell<bool>,
+    /// The file the walk is in, as a site's construct names it: the entry
+    /// project, whose text is the caller's buffer (`None`), or an imported
+    /// document, by the path it opened, as [`State::walked_files`] names it:
+    /// two fallback walks may open two documents one duplicate key covers.
+    /// The two walks take one course, so they open each file at one path.
+    site_file: Option<std::rc::Rc<Path>>,
     /// How many constructs the walk is inside whose gate it did not decide
     /// from certain inputs and took: a `<PropertyGroup>`, a `<Choose>` past a
     /// `<When>` so decided, or an import whose path it did not compute from
@@ -1468,6 +1570,10 @@ struct PathWrites {
     /// The names written whose final value is not certain, computed once, in
     /// the item pass, when the table is final.
     settled: Option<std::rc::Rc<HashSet<String>>>,
+    /// Of [`Self::settled`], those whose only doubt is a refusal's mark,
+    /// computed with it: `WalkCosts::refusal_paths`'s census.
+    #[cfg(any(test, feature = "test-support"))]
+    refusal_only: Vec<String>,
 }
 
 /// Where an item group deferred from a walk of content the walk does not
@@ -1483,9 +1589,24 @@ impl PathOf {
     /// no arm another arm of whose `<Choose>` holds the group. Asked of the
     /// names a judgement reads, so its cost is theirs, not the walk's.
     fn reaches(&self, name: &str) -> bool {
+        self.reaches_counting(name, true)
+    }
+
+    /// [`Self::reaches`], counting nothing: for a census, whose work is not
+    /// the walk's.
+    #[cfg(any(test, feature = "test-support"))]
+    fn reaches_uncounted(&self, name: &str) -> bool {
+        self.reaches_counting(name, false)
+    }
+
+    /// [`Self::reaches`], counting the writes it examines where `counted`.
+    #[cfg_attr(not(any(test, feature = "test-support")), allow(unused_variables))]
+    fn reaches_counting(&self, name: &str, counted: bool) -> bool {
         self.writes.borrow().writes.get(name).is_some_and(|writes| {
             writes.iter().any(|arms| {
-                crate::cost::count(|costs| costs.path_writes_examined += 1);
+                if counted {
+                    crate::cost::count(|costs| costs.path_writes_examined += 1);
+                }
                 arms.iter().all(|(choose, arm)| {
                     self.arms
                         .iter()
@@ -1855,6 +1976,11 @@ impl<'r> State<'r> {
             env_property_names,
             walk_opaque: None,
             rejection: None,
+            noted_sites: Vec::new(),
+            second_walk: false,
+            rewritten_after_refusal: HashSet::new(),
+            second_walk_needed: std::cell::Cell::new(false),
+            site_file: None,
             reach_doubted: 0,
             taken_import_path_certain: false,
             item_pass: None,
@@ -2339,6 +2465,11 @@ impl<'r> State<'r> {
             env_property_names: _,
             walk_opaque: _,
             rejection,
+            noted_sites: _,
+            second_walk: _,
+            rewritten_after_refusal: _,
+            second_walk_needed: _,
+            site_file: _,
             reach_doubted: _,
             taken_import_path_certain: _,
             item_pass: _,
@@ -2906,6 +3037,10 @@ impl<'r> State<'r> {
     /// value (skipped under a gate, or refused after [`PropertyMap::unbind`]).
     /// A write that stores one goes through [`Self::write_property`].
     fn apply_property_provenance(&mut self, name: &str, provenance: PropertyProvenance) {
+        if matches!(provenance.refused, RefusedOutcome::Set) {
+            self.rewritten_after_refusal
+                .remove(&name.to_ascii_lowercase());
+        }
         // A write that stored nothing holds a value only if it may have
         // happened: one under a gate that decided against it holds none.
         if provenance.is_doubtful() {
@@ -2920,6 +3055,14 @@ impl<'r> State<'r> {
     /// cannot enter the table without the write saying what it does to the
     /// name's trust.
     fn write_property(&mut self, name: &str, value: Escaped, provenance: PropertyProvenance) {
+        let second_walk = self.second_walk;
+        crate::cost::count(|costs| {
+            if second_walk {
+                costs.second_walk_property_writes += 1;
+            } else {
+                costs.property_writes += 1;
+            }
+        });
         let held = (!provenance.is_doubtful()).then_some(&value);
         self.note_foreign_write(name, held);
         self.directory_build.note_write(name);
@@ -4856,7 +4999,13 @@ fn walk_property_child_inner(
     if !expansion.throws.is_empty() {
         let reached = rejection::reach_is_certain(state) && own_gate(state) == Some(true);
         let expressions = expansion.throws.clone();
-        rejection::judge_throwing_expression(state, expressions, reached, node.range());
+        rejection::judge_throwing_expression(
+            state,
+            expressions,
+            reached,
+            node.range(),
+            rejection::text_at(node, None),
+        );
     }
     let value_taints_property = condition_taints_property
         || value_uses_sdk_taint
@@ -5008,8 +5157,27 @@ fn walk_property_child_inner(
         // a `Directory.Build.*` import point ([`directory_build`]).
         stale: StaleOutcome::after_write(stale_by, write_condition_maybe_wrong),
     };
+    // A rewrite of a refused name whose value is the project's own
+    // (`State::rewritten_after_refusal`): clean, and reading no name whose
+    // refusal no such rewrite discharged (a toolset seed in a refused slot,
+    // the name itself before this write).
+    let rewrites_a_refusal = state.lookup.trust(&name).refused()
+        && !provenance.is_doubtful()
+        && !properties::property_references(&raw).any(|read| {
+            state.lookup.trust(read).refused()
+                && !state
+                    .rewritten_after_refusal
+                    .contains(&read.to_ascii_lowercase())
+        });
     let (value, carried) = expansion.value.into_parts();
     state.write_property(&name, value, provenance);
+    // The mark describes the name's binding now: a later write that does not
+    // qualify (a copy of a seed over the rewrite) takes it away.
+    if rewrites_a_refusal {
+        state.rewritten_after_refusal.insert(lower.clone());
+    } else {
+        state.rewritten_after_refusal.remove(&lower);
+    }
     // The verdict above is computed from the value's text (the reference
     // scan) and the write's gate; the value itself carries the trust of what
     // its expansion actually read. The stored trust must hold everything the
@@ -5270,6 +5438,7 @@ fn evaluate_condition_with_exemptions(
             current_file_dir,
             reached,
             node.range(),
+            rejection::text_at(node, Some("Condition")),
         );
     }
     match eval.outcome {
@@ -7305,6 +7474,10 @@ fn walk_import_file(path: &Path, span: Range<usize>, collapse: bool, state: &mut
     // against the link target, picking the wrong sibling file.
     // `canon` is reserved for `walked_files` identity.
     let frame = state.enter_this_file(path);
+    // The file's constructs are its own, for a site's construct
+    // ([`State::site_file`]); what failed before it loaded is the import's,
+    // in the importing file.
+    let saved_site_file = state.site_file.replace(canon.as_path().into());
     // Deferred `<ItemGroup>`s recorded while inside this file must know
     // which document to replay against — same pre-canonical-path identity
     // as the `MSBuildThisFile` frame above. `retained: None` until the
@@ -7526,6 +7699,7 @@ fn walk_import_file(path: &Path, span: Range<usize>, collapse: bool, state: &mut
     state.in_foreign_document = saved_in_foreign_document;
     state.depth -= 1;
     state.current_file = saved_current_file;
+    state.site_file = saved_site_file;
     state.exit_this_file(frame);
 }
 

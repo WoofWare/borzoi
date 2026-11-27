@@ -36,6 +36,116 @@ fn canonical_sdk(
     }
 }
 
+/// A toolset seed filling a slot a refused write emptied is no rewrite: the
+/// project's `String.Copy('1.0')` to `MSBuildExtensionsPath32` is refused,
+/// the SDK then seeds its own path there, and the second walk, which sets a
+/// rewrite's refusal aside, must not read the seed as the build's value. The
+/// build holds `1.0`, so the metadatum's gate holds, and its `$(P[9])` on
+/// `P`'s final `z` rejects the project (MSB4184; #1153).
+#[test]
+fn a_seed_in_a_refused_slot_is_no_rewrite() {
+    // The seed as it stands, and the seed copied into its own slot after the
+    // SDK, which reads the refused name.
+    // The seeded name gating a metadatum, and as the operand before the throw
+    // in one condition, which MSBuild reaches on its `1.0`.
+    let items = [
+        "<I Include=\"x\"><M Condition=\"'$(MSBuildExtensionsPath32)' == '1.0'\">$(P[9])</M></I>",
+        "<I Include=\"x\" Condition=\"'$(MSBuildExtensionsPath32)' == '1.0' And '$(P[9])' != ''\" />",
+    ];
+    for (copy, item) in [
+        "",
+        "<PropertyGroup><MSBuildExtensionsPath32>$(MSBuildExtensionsPath32)</MSBuildExtensionsPath32></PropertyGroup>",
+    ]
+    .into_iter()
+    .flat_map(|copy| items.map(|item| (copy, item)))
+    {
+        let tmp = TempDir::new().unwrap();
+        let resolver = canonical_sdk(tmp.path(), "10.0.100");
+        let project_path = write_at(
+            tmp.path(),
+            "Demo.fsproj",
+            &format!(
+                "<Project>\
+         <Choose><When Condition=\"'É' == 'é'\"><PropertyGroup><P>abcdefghijkl</P></PropertyGroup>\
+         <ItemGroup>{item}</ItemGroup></When></Choose>\
+         <PropertyGroup><MSBuildExtensionsPath32>$([System.String]::Copy('1.0'))</MSBuildExtensionsPath32>\
+         <P>@(J)</P><P>z</P></PropertyGroup>\
+         <Import Project=\"Sdk.props\" Sdk=\"MySdk\" />{copy}\
+         <PropertyGroup><After>ok</After></PropertyGroup></Project>"
+            ),
+        );
+        let result =
+            parse_file_with_sdk_env(&project_path, resolver, HashMap::new(), HashMap::new());
+        assert!(
+            result.rejection.is_some(),
+            "{copy} {item}: {:#?}",
+            result.diagnostics
+        );
+    }
+}
+
+/// Nor does another name's rewrite make the seed the build's value: the
+/// project rewrites `P`, which the arm writes too, so the second walk runs,
+/// but it holds `MSBuildExtensionsPath32`, whose refused slot the SDK seeded,
+/// as doubtful as the first does, and finds no throw in `VersionEquals` on
+/// the seed's directory, where the build compares its `1.0` and evaluates the
+/// project (#1153).
+#[test]
+fn another_names_rewrite_leaves_a_seed_doubted() {
+    // The seed as it stands, and copied into its own slot after the SDK.
+    for copy in [
+        "",
+        "<PropertyGroup><MSBuildExtensionsPath32>$(MSBuildExtensionsPath32)</MSBuildExtensionsPath32></PropertyGroup>",
+    ] {
+        let tmp = TempDir::new().unwrap();
+        let resolver = canonical_sdk(tmp.path(), "10.0.100");
+        let project_path = write_at(
+            tmp.path(),
+            "Demo.fsproj",
+            &format!(
+                "<Project>\
+         <Choose><When Condition=\"'É' == 'é'\"><PropertyGroup>\
+         <MSBuildExtensionsPath32>2.0</MSBuildExtensionsPath32><P>x</P></PropertyGroup>\
+         <ItemGroup><I Include=\"$([MSBuild]::VersionEquals('$(MSBuildExtensionsPath32)', '1.0'))\" />\
+         </ItemGroup></When></Choose>\
+         <PropertyGroup><MSBuildExtensionsPath32>1.0</MSBuildExtensionsPath32>\
+         <MSBuildExtensionsPath32>$([System.String]::Copy('1.0'))</MSBuildExtensionsPath32>\
+         <P>@(J)</P><P>z</P></PropertyGroup>\
+         <Import Project=\"Sdk.props\" Sdk=\"MySdk\" />{copy}\
+         <PropertyGroup><After>ok</After></PropertyGroup></Project>"
+            ),
+        );
+        let result =
+            parse_file_with_sdk_env(&project_path, resolver, HashMap::new(), HashMap::new());
+        assert_eq!(result.rejection, None, "{copy}: {:#?}", result.diagnostics);
+    }
+}
+
+/// A rewrite that held is undone by a later write that copies a seed: `P`
+/// is refused, rewritten to `z`, then given the seeded
+/// `MSBuildExtensionsPath32`, and the second walk holds it as doubtful as the
+/// first does, so finds no throw in `VersionEquals('$(P)', '1.0')`, which
+/// the build, holding the project's `1.0` there, evaluates true (#1153).
+#[test]
+fn a_seed_copied_over_a_rewrite_undoes_it() {
+    let tmp = TempDir::new().unwrap();
+    let resolver = canonical_sdk(tmp.path(), "10.0.100");
+    let project_path = write_at(
+        tmp.path(),
+        "Demo.fsproj",
+        "<Project>\
+         <Choose><When Condition=\"'É' == 'é'\"><PropertyGroup><P>2.0</P></PropertyGroup>\
+         <ItemGroup><I Include=\"$([MSBuild]::VersionEquals('$(P)', '1.0'))\" /></ItemGroup>\
+         </When></Choose>\
+         <PropertyGroup><MSBuildExtensionsPath32>$([System.String]::Copy('1.0'))</MSBuildExtensionsPath32>\
+         <P>@(J)</P><P>z</P></PropertyGroup>\
+         <Import Project=\"Sdk.props\" Sdk=\"MySdk\" />\
+         <PropertyGroup><P>$(MSBuildExtensionsPath32)</P><After>ok</After></PropertyGroup></Project>",
+    );
+    let result = parse_file_with_sdk_env(&project_path, resolver, HashMap::new(), HashMap::new());
+    assert_eq!(result.rejection, None, "{:#?}", result.diagnostics);
+}
+
 /// `Seen`, the body's copy of `$(VisualStudioVersion)`, when committed.
 fn committed_seen(result: &ParsedProject) -> Option<&str> {
     let value = result.properties.get("Seen")?;

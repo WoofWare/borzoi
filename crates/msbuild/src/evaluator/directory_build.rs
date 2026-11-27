@@ -850,7 +850,32 @@ fn named_file(state: &State<'_>, path_name: &str, dir: &Path) -> Option<PathBuf>
 /// `TargetFramework` is judged by the walk's mode, as every other read of it
 /// is, and leaning on its exactness is recorded as every other read records it.
 pub(super) fn is_certain(state: &State<'_>, name: &str) -> bool {
-    state.trust_of(name).is_certain()
+    is_certain_reading(state, name, false)
+}
+
+/// [`is_certain`], but that the refusal mark of a name a clean write stored a
+/// value to after its refusal ([`State::rewritten_after_refusal`]) is no doubt
+/// ([`super::Trust::is_certain_but_for_refusal`]). A name bound otherwise (a
+/// toolset seed filling the slot a refusal emptied) keeps it. The rejection
+/// judgement's second walk reads names so (`rejection::judged_certain`).
+pub(super) fn is_certain_setting_aside_refusal(state: &State<'_>, name: &str) -> bool {
+    is_certain_reading(state, name, true)
+}
+
+/// [`is_certain`], or [`is_certain_setting_aside_refusal`] where
+/// `refusal_set_aside`.
+fn is_certain_reading(state: &State<'_>, name: &str, refusal_set_aside: bool) -> bool {
+    let trust = state.trust_of(name);
+    let trusted = if refusal_set_aside
+        && state
+            .rewritten_after_refusal
+            .contains(&name.to_ascii_lowercase())
+    {
+        trust.is_certain_but_for_refusal()
+    } else {
+        trust.is_certain()
+    };
+    trusted
         && (state.lookup.is_bound(name) || state.undefined_read_is_exact(name))
         && !state.speculatively_unheld(name)
 }

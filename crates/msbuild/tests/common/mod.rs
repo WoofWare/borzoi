@@ -64,24 +64,54 @@ pub fn parse_fsproj_with_imports(
     sdk_resolver: Option<&SdkResolver<'_>>,
     glob_resolver: Option<&GlobResolver<'_>>,
 ) -> Result<ParsedProject, ParseError> {
-    let reference = borzoi_msbuild::parse_fsproj_with_imports_asking_every_time(
+    parse_fsproj_with_imports_costed(
         project,
         extra_properties,
         environment,
         sdk_resolver,
         glob_resolver,
-    );
-    let reused = DOCUMENTS.with(|documents| {
-        borzoi_msbuild::parse_fsproj_with_imports_reusing(
+    )
+    .0
+}
+
+/// [`parse_fsproj_with_imports`], and the work of the one evaluation it
+/// publishes, the reused one ([`borzoi_msbuild::test_support::WalkCosts`]):
+/// the reference evaluation's is not counted.
+#[allow(dead_code)]
+pub fn parse_fsproj_with_imports_costed(
+    project: &borzoi_msbuild::ProjectFile,
+    extra_properties: &HashMap<String, String>,
+    environment: &HashMap<String, String>,
+    sdk_resolver: Option<&SdkResolver<'_>>,
+    glob_resolver: Option<&GlobResolver<'_>>,
+) -> (
+    Result<ParsedProject, ParseError>,
+    borzoi_msbuild::test_support::WalkCosts,
+) {
+    // The reference evaluation checks the reused one; only the reused one's
+    // sites and costs are the evaluation's.
+    let reference = borzoi_msbuild::test_support::outside_second_walk_sites(|| {
+        borzoi_msbuild::parse_fsproj_with_imports_asking_every_time(
             project,
             extra_properties,
             environment,
             sdk_resolver,
             glob_resolver,
-            &mut documents.borrow_mut(),
         )
     });
-    match (reference, reused) {
+    let (reused, costs) = borzoi_msbuild::test_support::count_walk_costs(|| {
+        DOCUMENTS.with(|documents| {
+            borzoi_msbuild::parse_fsproj_with_imports_reusing(
+                project,
+                extra_properties,
+                environment,
+                sdk_resolver,
+                glob_resolver,
+                &mut documents.borrow_mut(),
+            )
+        })
+    });
+    let parsed = match (reference, reused) {
         (Ok(reference), Ok(reused)) => Ok(borzoi_msbuild::observed::reuse::same_as_reference(
             reference, reused,
         )),
@@ -92,7 +122,8 @@ pub fn parse_fsproj_with_imports(
         (reference, reused) => panic!(
             "reuse changed whether the evaluation fails:\nreference: {reference:?}\nreused: {reused:?}"
         ),
-    }
+    };
+    (parsed, costs)
 }
 
 /// Root of the F# corpus the differential tests walk, taken from the
