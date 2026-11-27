@@ -566,13 +566,14 @@ const VERSION_SHAPED: &[&str] = &["", "v1.0", "1.0", "1", "2.0.1", "abc", "v"];
 const SHAPE_STREAM: u64 = 0x1164_5ba9_e000;
 
 /// A [`HISTORY_SITES`] template's `{v}`, `{va}` and `{vb}`, as
-/// (placeholder, text) pairs: a version function of `A`, `B` and `U`, each
-/// argument one name or two spliced, and version-shaped values of the
-/// rewrites of `A` and `B`. Where a splice of two names parses as a version
-/// on some of their values and not others, which names MSBuild's throw rests
-/// on turns on the values tried for the names the walk holds none of.
+/// (placeholder, text) pairs: a version function of `A`, `B`, `U` and `X`
+/// (a write the walk refuses, so holds no value of), each argument one name
+/// or two spliced, and version-shaped values of the rewrites of `A` and `B`.
+/// Where a splice of two names parses as a version on some of their values
+/// and not others, which names MSBuild's throw rests on turns on the values
+/// tried for the names the walk holds none of.
 fn history_shape(rng: &mut SplitMix64) -> [(&'static str, String); 3] {
-    let names = ["A", "B", "U"];
+    let names = ["A", "B", "U", "X"];
     let argument = |rng: &mut SplitMix64| {
         let first = *rng.pick(&names);
         if rng.below(2) == 0 {
@@ -2567,7 +2568,7 @@ fn a_throw_in_an_arm_is_judged_alike_whatever_the_history() {
             )
             .unwrap();
             assert!(
-                !matches!(parsed.property("After"), PropertyRead::Value(_)),
+                !parsed.property("After").is_exact(),
                 "MSBuild rejects the project, but we commit {:?} ({:?}):\n{xml}",
                 parsed.property("After"),
                 parsed.rejection
@@ -2607,7 +2608,9 @@ fn arm_history_cells() -> Vec<GridCell> {
         }
     };
     let mut cells = Vec::new();
-    // (Include text, condition) pairs, each calling on `U`.
+    // (Include text, condition) pairs, each calling on `U`, the last beside
+    // `X`, a write the walk refuses, so holds no value of, and MSBuild holds
+    // `Debug` of.
     let calls: &[(&str, &str)] = &[
         (
             "$([MSBuild]::VersionLessThan('$(B)$(A)','$(U)'))",
@@ -2618,6 +2621,10 @@ fn arm_history_cells() -> Vec<GridCell> {
             "$([MSBuild]::VersionLessThan('$(A)','$(U)'))",
         ),
         ("a$(U[3])b", "'$(U[3])' == ''"),
+        (
+            "$([MSBuild]::VersionLessThan('$(U)v$(X)','1.0'))",
+            "$([MSBuild]::VersionLessThan('$(U)v$(X)','1.0'))",
+        ),
     ];
     for arm in [UNDECIDED_TRUE, UNDECIDED_FALSE] {
         for (text, condition) in calls {
@@ -2628,7 +2635,7 @@ fn arm_history_cells() -> Vec<GridCell> {
                     xml_attribute(condition)
                 ),
             ] {
-                for before in ["bad", "2.0", "abcd"] {
+                for before in ["", "bad", "2.0", "abcd"] {
                     for written in ["nope", "3.0"] {
                         for a in ["v1.0", "abc"] {
                             for b in ["", "1"] {
@@ -2636,7 +2643,7 @@ fn arm_history_cells() -> Vec<GridCell> {
                                 let document = move |arm_write: &str, history: &[bool]| {
                                     let site = &site_text;
                                     format!(
-                                        "<Project>\n  <PropertyGroup><U>{before}</U></PropertyGroup>\n  \
+                                        "<Project>\n  <PropertyGroup><U>{before}</U><X>{REFUSED}</X></PropertyGroup>\n  \
                                          <Choose><When Condition=\"{}\">\
                                          <PropertyGroup><A>abc</A><B>abc</B>{arm_write}</PropertyGroup>\
                                          <ItemGroup>{site}</ItemGroup></When></Choose>\n  \
@@ -2775,14 +2782,20 @@ fn arm_history_grid() {
             .zip(&cell.documents)
             .map(|(history, xml)| (history, xml, walk(xml)))
             .collect();
-        let mut verdicts = BTreeSet::new();
+        let mut verdicts: Vec<&str> = Vec::new();
         for (history, xml, parsed) in &walked {
             cases += 1;
-            let committed = parsed.property("After");
+            // An exact `Unset` claims the empty value, as MSBuild reports an
+            // undefined property.
+            let committed = match parsed.property("After") {
+                PropertyRead::Unset => Some(String::new()),
+                read => read.value().map(str::to_owned),
+            };
+            let mut verdict = "-";
             match &theirs {
-                None if matches!(committed, PropertyRead::Value(_)) => {
+                None if committed.is_some() => {
                     if held_evaluates {
-                        verdicts.insert("commits on a rejection resting on a value the walk does not hold (#1051)");
+                        verdict = "commits on a rejection resting on a value the walk does not hold (#1051)";
                     } else {
                         failures.push(format!(
                             "{} / {history:?}: MSBuild rejects, and the walk commits {committed:?}\n{xml}",
@@ -2798,7 +2811,7 @@ fn arm_history_grid() {
                             cell.label, parsed.rejection
                         ));
                     }
-                    if let PropertyRead::Value(value) = &committed
+                    if let Some(value) = &committed
                         && values.get("After") != Some(value)
                     {
                         failures.push(format!(
@@ -2808,11 +2821,11 @@ fn arm_history_grid() {
                         ));
                     }
                     if parsed.rejection.is_some() {
-                        verdicts.insert("withdraws a project MSBuild evaluates");
+                        verdict = "withdraws a project MSBuild evaluates";
                     }
                     if cell.taken && held_evaluates {
                         must_commit += 1;
-                        if !matches!(committed, PropertyRead::Value(_)) {
+                        if committed.is_none() {
                             failures.push(format!(
                                 "{} / {history:?}: the call throws on no value either side holds, \
                                  and the walk withdraws: {:?}\n{xml}",
@@ -2822,6 +2835,7 @@ fn arm_history_grid() {
                     }
                 }
             }
+            verdicts.push(verdict);
         }
         for (fewer, fewer_xml, fewer_parsed) in &walked {
             for (more, _, more_parsed) in &walked {
@@ -2842,11 +2856,10 @@ fn arm_history_grid() {
                 }
             }
         }
-        if !verdicts.is_empty() {
-            pinned.push((
-                cell.label.clone(),
-                verdicts.into_iter().collect::<Vec<_>>().join("; "),
-            ));
+        // Each history's verdict, in [`HISTORIES`]' order, so that one moving
+        // shows whichever history it is.
+        if verdicts.iter().any(|verdict| *verdict != "-") {
+            pinned.push((cell.label.clone(), verdicts.join(" | ")));
         }
     }
     eprintln!(
@@ -2873,7 +2886,8 @@ fn arm_history_grid() {
          rejection_generative_diff arm_history_grid\n\
          Each entry is a grid cell where, in some history, the walk commits on a project MSBuild \
          rejects over a value the walk does not hold (#1051), or withdraws a project MSBuild \
-         evaluates: the decline's cost.",
+         evaluates: the decline's cost. Its value is each history's verdict, in HISTORIES' order \
+         (`-` for none).",
     );
 }
 

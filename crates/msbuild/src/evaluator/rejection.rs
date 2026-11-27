@@ -713,7 +713,13 @@ pub(super) fn judge_condition_rejection(
         exists: &exists,
         observer,
     });
-    let doubted = |name: &str| !holds_a_value_msbuild_may(state, name);
+    // A condition reading a name untaken content writes is judged on the
+    // values held throughout: values are tried for a name the walk holds none
+    // of only beside names holding MSBuild's values as far as the walk knows
+    // ([`judge_throwing_expression`], #1164).
+    let reads_unsettled =
+        properties::property_references(condition).any(|name| state.speculatively_unheld(name));
+    let doubted = |name: &str| !reads_unsettled && !holds_a_value_msbuild_may(state, name);
     // Which operands MSBuild reaches is main's to decide, in either walk: a
     // name the second walk holds certain may be one whose value is not the
     // build's (#1153). What the second walk holds is the path's settlement.
@@ -810,13 +816,20 @@ pub(super) fn throws_in(issues: &[properties::Issue]) -> Vec<Thrown> {
 /// certain ([`directory_build::is_certain`]).
 ///
 /// Short of that it is Possible, where every name one of them read holds a
-/// value MSBuild may hold ([`holds_a_value_msbuild_may`]), or where one
-/// throws whatever its expressions on the names that do not return
+/// value MSBuild may hold ([`holds_a_value_msbuild_may`]), or where it read a
+/// name that content the walk does not take writes
+/// ([`State::speculatively_unheld`]), or where one throws whatever its
+/// expressions on the names that do not return
 /// ([`condition::expression_throws_whatever_they_return`]). Any other throw on
 /// such a name is no site: the value held is none MSBuild need hold, and
 /// whether the function throws on MSBuild's own value is the judgement over
-/// the values a name may hold (#1009's second stage), as for a condition
-/// ([`condition::may_throw_on_held`]).
+/// the values a name may hold (#1009's second stage, #1201), as for a
+/// condition ([`condition::may_throw_on_held`]). Values are tried only for an
+/// expression whose other names hold MSBuild's values as far as the walk
+/// knows: beside a name untaken content writes, whose value on that path the
+/// walk does not hold, what a value tried does proves nothing, and trying
+/// values there is not monotone in which names such content leaves unknown
+/// (#1164).
 pub(super) fn judge_throwing_expression(
     state: &mut State<'_>,
     thrown: Vec<Thrown>,
@@ -825,9 +838,13 @@ pub(super) fn judge_throwing_expression(
     text: u32,
 ) {
     let unheld = |name: &str| !holds_a_value_msbuild_may(state, name);
-    let (held, on_unheld): (Vec<Thrown>, Vec<Thrown>) = thrown
-        .into_iter()
-        .partition(|thrown| !thrown.reads.iter().any(|name| unheld(name)));
+    let (held, on_unheld): (Vec<Thrown>, Vec<Thrown>) = thrown.into_iter().partition(|thrown| {
+        !thrown.reads.iter().any(|name| unheld(name))
+            || thrown
+                .reads
+                .iter()
+                .any(|name| state.speculatively_unheld(name))
+    });
     // The first held throw on names read certain, as each walk reads them:
     // the second walk sets a rewritten name's refusal aside. Which throw is
     // named is all that can differ (a second walk's certainty is discarded),
