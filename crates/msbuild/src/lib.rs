@@ -530,6 +530,16 @@ pub struct ParsedProject {
     /// - whose value it could not expand (an unevaluable expression, a
     ///   wildcard or item reference it cannot resolve).
     ///
+    /// Not claimed: that the flag is set only where MSBuild's list really may
+    /// be longer. It over-declines on shapes the walk could decide (#1184): a
+    /// `<When>` after an undecided one that a clean write decides false, the
+    /// same nested in the undecided branch, an `Exclude` reading a doubted
+    /// name from an `Include` that is empty whatever any name holds, a padded
+    /// bare read (`$( P)`) in an `Include`, and a proven
+    /// `Remove="@(ProjectReference)"` after a dropped `Include` (the mark
+    /// carries no position in item order to clear it by). Each costs the
+    /// project its env's completeness, not an edge.
+    ///
     /// The Compile items and the defines doubt the same gates in both
     /// directions ([`Self::items_uncertain`], [`Self::define_constants_uncertain`]),
     /// and so does the reference list, through this flag: a reference missing
