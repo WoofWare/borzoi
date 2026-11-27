@@ -8031,7 +8031,10 @@ mod tests {
         );
         let dotnet_root = root.join("dotnet");
         std::fs::create_dir_all(&dotnet_root).unwrap();
-        assert!(!root.join("obj").join("project.assets.json").exists());
+        {
+            use crate::observed::host_fs::HostPath as _;
+            assert!(!root.join("obj").join("project.assets.json").host_exists());
+        }
         let mut sema = SemanticState::new();
         let env = sema.assembly_env_for_project(
             &proj,
