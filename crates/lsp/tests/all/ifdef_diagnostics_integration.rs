@@ -71,7 +71,7 @@ fn active_branch_selection_suppresses_dead_branch_diagnostics() {
     write(&proj, &fsproj("FOO"));
     write(&file, SOURCE_WITH_BAD_ELSE);
 
-    let mut ws = Workspace::new();
+    let mut ws = Workspace::new().with_ownership_ceiling(tmp.path());
     let symbols = ws.symbols_for(&file);
     assert!(
         symbols.contains("FOO"),
@@ -94,7 +94,7 @@ fn dropping_define_exposes_dead_branch_diagnostic() {
     write(&proj, &fsproj(""));
     write(&file, SOURCE_WITH_BAD_ELSE);
 
-    let mut ws = Workspace::new();
+    let mut ws = Workspace::new().with_ownership_ceiling(tmp.path());
     let symbols = ws.symbols_for(&file);
     assert!(
         !symbols.contains("FOO"),
@@ -150,7 +150,7 @@ fn sdk_supplied_define_constants_suppress_dead_branch_diagnostics() {
         dotnet_root: Some(dotnet),
         ..SdkDiscoveryEnv::default()
     };
-    let mut ws = crate::common::workspace(env);
+    let mut ws = crate::common::workspace(env).with_ownership_ceiling(tmp.path());
     let symbols = ws.symbols_for(&file);
     assert!(
         symbols.contains("FOO"),
@@ -239,7 +239,7 @@ fn sdk_paths_resolves_repo_local_sdk_for_defines() {
     let tmp = TempDir::new().unwrap();
     let (file, env) = build_paths_fixture(&tmp, r#"["./dotnet-local", "$host$"]"#);
 
-    let mut ws = crate::common::workspace(env);
+    let mut ws = crate::common::workspace(env).with_ownership_ceiling(tmp.path());
     let symbols = ws.symbols_for(&file);
     assert!(
         symbols.contains("FROM_LOCAL"),
@@ -291,7 +291,7 @@ fn file_outside_any_project_uses_default_symbol_set() {
     let file = tmp.path().join("Lib.fs");
     write(&file, SOURCE_WITH_BAD_ELSE);
 
-    let mut ws = Workspace::new();
+    let mut ws = Workspace::new().with_ownership_ceiling(tmp.path());
     let symbols = ws.symbols_for(&file);
     assert!(
         !symbols.contains("FOO"),

@@ -601,7 +601,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut state = State::default();
+        let mut state = State::default().with_ownership_ceiling(tmp.path());
         state.set_workspace_roots(vec![tmp.path().to_path_buf()]);
         let result = handle(&mut state, params());
 
@@ -637,7 +637,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut state = State::default();
+        let mut state = State::default().with_ownership_ceiling(tmp.path());
         state.set_workspace_roots(vec![tmp.path().to_path_buf()]);
         let result = handle(&mut state, params());
 
@@ -727,7 +727,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut state = State::default();
+        let mut state = State::default().with_ownership_ceiling(tmp.path());
         state.set_workspace_roots(vec![tmp.path().to_path_buf()]);
         let result = handle(&mut state, params());
 
@@ -1121,6 +1121,18 @@ mod tests {
             .prop_map(|(projects, sources)| Tree { projects, sources })
     }
 
+    /// A fresh temporary directory and the generated workspace's root, one
+    /// level inside it. A root project's `../X.fs` and `../Shared/X.fs` then
+    /// name files in the test's own directory, which it never writes, rather
+    /// than in the shared temporary directory; and the ownership ceiling, the
+    /// temporary directory, holds every file the sweep names.
+    fn tree_root() -> (TempDir, std::path::PathBuf) {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("w");
+        fs::create_dir(&root).unwrap();
+        (tmp, root)
+    }
+
     fn write_tree(root: &std::path::Path, tree: &Tree) {
         for dir in TREE_DIRS {
             fs::create_dir_all(root.join(dir)).unwrap();
@@ -1160,12 +1172,12 @@ mod tests {
         /// first one's result ids.
         #[test]
         fn stepped_sweep_matches_the_synchronous_pass(tree in tree_strategy()) {
-            let tmp = TempDir::new().unwrap();
-            write_tree(tmp.path(), &tree);
-            let mut stepped = State::default();
-            stepped.set_workspace_roots(vec![tmp.path().to_path_buf()]);
-            let mut synchronous = State::default();
-            synchronous.set_workspace_roots(vec![tmp.path().to_path_buf()]);
+            let (tmp, root) = tree_root();
+            write_tree(&root, &tree);
+            let mut stepped = State::default().with_ownership_ceiling(tmp.path());
+            stepped.set_workspace_roots(vec![root.clone()]);
+            let mut synchronous = State::default().with_ownership_ceiling(tmp.path());
+            synchronous.set_workspace_roots(vec![root]);
 
             let cold = handle(&mut stepped, params());
             proptest::prop_assert_eq!(&cold, &reference::handle(&mut synchronous, params()));
@@ -1186,10 +1198,10 @@ mod tests {
             after in tree_strategy(),
             at in 0usize..48,
         ) {
-            let tmp = TempDir::new().unwrap();
-            write_tree(tmp.path(), &before);
-            let mut state = State::default();
-            state.set_workspace_roots(vec![tmp.path().to_path_buf()]);
+            let (tmp, root) = tree_root();
+            write_tree(&root, &before);
+            let mut state = State::default().with_ownership_ceiling(tmp.path());
+            state.set_workspace_roots(vec![root.clone()]);
             // Each step, and the event, in a generation of its own, as the
             // dispatch loop runs them: a cached evaluation is confirmed only
             // inside one.
@@ -1208,10 +1220,10 @@ mod tests {
                 }
             }
 
-            fs::remove_dir_all(tmp.path()).unwrap();
-            fs::create_dir(tmp.path()).unwrap();
-            write_tree(tmp.path(), &after);
-            let changed = tmp.path().join("P.fsproj");
+            fs::remove_dir_all(&root).unwrap();
+            fs::create_dir(&root).unwrap();
+            write_tree(&root, &after);
+            let changed = root.join("P.fsproj");
             state.begin_generation();
             state.apply_watched_changes(&[lsp_types::FileEvent {
                 uri: <lsp_types::Uri as crate::uri::UriExt>::from_file_path(&changed).unwrap(),
@@ -1225,8 +1237,8 @@ mod tests {
                 }
             };
 
-            let mut fresh = State::default();
-            fresh.set_workspace_roots(vec![tmp.path().to_path_buf()]);
+            let mut fresh = State::default().with_ownership_ceiling(tmp.path());
+            fresh.set_workspace_roots(vec![root]);
             proptest::prop_assert_eq!(report, handle(&mut fresh, params()));
         }
     }

@@ -169,6 +169,10 @@ pub struct Workspace {
     /// which every owner whose walk read it shares; its counts are the
     /// generation's ownership counts.
     dir_listings: DirListings,
+    /// The highest directory an ownership walk lists ([`walk_dirs`]); `None`
+    /// climbs to the file system's root, as the server always does. Set only
+    /// by [`Self::with_ownership_ceiling`].
+    ownership_ceiling: Option<PathBuf>,
     /// The identity the next cached evaluation gets
     /// ([`CachedEvaluation::id`]).
     next_evaluation: Cell<u64>,
@@ -1047,10 +1051,33 @@ impl Workspace {
             retired: HashMap::new(),
             owners: HashMap::new(),
             dir_listings: DirListings::default(),
+            ownership_ceiling: None,
             next_evaluation: Cell::new(0),
             env,
             extra_build_properties,
         }
+    }
+
+    /// This workspace, its ownership walks ([`Self::owning_project`]) climbing
+    /// no higher than `ceiling`: they list `ceiling` and stop there, never
+    /// reading the directories above it. For a test whose tree sits in a
+    /// directory it does not own, such as the shared temporary directory,
+    /// where any process may leave a `.fsproj`: with `ceiling` the tree's
+    /// root, what the walks find depends only on the tree.
+    ///
+    /// Every file later asked about must lie under `ceiling`, spelt as
+    /// `ceiling` followed by plain names (the comparison is by components, not
+    /// through the file system): a walk for any other file panics, since it
+    /// would otherwise climb past the ceiling unnoticed. It is set before the
+    /// first walk lists a directory (it panics otherwise), inside a
+    /// generation or out of one, so no answer was read above it.
+    pub fn with_ownership_ceiling(mut self, ceiling: &Path) -> Self {
+        assert!(
+            self.dir_listings.next == 0,
+            "the ownership ceiling is set before any walk"
+        );
+        self.ownership_ceiling = Some(ceiling.to_path_buf());
+        self
     }
 
     /// The SDK discovery environment in use. Borrowed by the fsproj-buffer
@@ -2002,9 +2029,9 @@ impl Workspace {
     ) -> Result<Owner, Superseded> {
         let mut listings = Vec::new();
         let mut consulted = Vec::new();
-        let mut dir = file.parent();
         let mut owner = None;
-        'climb: while let Some(d) = dir {
+        let ceiling = self.ownership_ceiling.clone();
+        'climb: for d in walk_dirs(file, ceiling.as_deref()) {
             let mut inconclusive = false;
             let (projects, listing) = self.dir_listings.projects_in(d);
             listings.push((d.to_path_buf(), listing));
@@ -2031,11 +2058,15 @@ impl Workspace {
             if inconclusive {
                 break;
             }
-            dir = d.parent();
         }
         let project = match owner {
             Some(member) => member,
-            None => find_owning_project(file, &mut self.dir_listings, &mut listings),
+            None => find_owning_project(
+                file,
+                ceiling.as_deref(),
+                &mut self.dir_listings,
+                &mut listings,
+            ),
         };
         Ok(Owner {
             project,
@@ -2379,11 +2410,47 @@ enum Membership {
     Unknown,
 }
 
-/// Walk `file`'s ancestor directories looking for the closest one that
-/// contains a `.fsproj`, reading each directory's listing through
-/// `dir_listings` and adding it to `listings`. Returns the absolute path of
-/// the chosen project file, or `None` when no ancestor contains any
-/// `.fsproj`.
+/// The directories an ownership walk for `file` lists, nearest first: the
+/// file's parent (the file itself may not exist) and each of its ancestors,
+/// up to and including `ceiling`, or up to the file system's root when there
+/// is none ([`Workspace::with_ownership_ceiling`]). Lexical: nothing is read.
+///
+/// With a ceiling, panics unless `file`'s parent is `ceiling` followed only by
+/// plain names (no `..`, which would climb back above it lexically), since
+/// the walk would otherwise list directories above the ceiling. Only a test
+/// sets a ceiling, so the server's walks, which have none, never panic here.
+fn walk_dirs<'a>(file: &'a Path, ceiling: Option<&'a Path>) -> impl Iterator<Item = &'a Path> {
+    let start = file.parent();
+    if let Some(ceiling) = ceiling {
+        let below = start
+            .and_then(|start| start.strip_prefix(ceiling).ok())
+            .is_some_and(|rest| {
+                rest.components()
+                    .all(|c| matches!(c, std::path::Component::Normal(_)))
+            });
+        assert!(
+            below,
+            "the ownership walk for {} would climb past its ceiling {}",
+            file.display(),
+            ceiling.display()
+        );
+    }
+    let mut passed_ceiling = false;
+    start
+        .into_iter()
+        .flat_map(Path::ancestors)
+        .take_while(move |dir| {
+            let listed = !passed_ceiling;
+            passed_ceiling = ceiling == Some(*dir);
+            listed
+        })
+}
+
+/// Walk `file`'s ancestor directories ([`walk_dirs`], up to `ceiling`)
+/// looking for the closest one that contains a `.fsproj`, reading each
+/// directory's listing through `dir_listings` and adding it to `listings`.
+/// Returns the absolute path of the chosen project file, or `None` when no
+/// directory walked contains any `.fsproj`.
 ///
 /// On ties (a single directory containing more than one `.fsproj`), the
 /// alphabetically-first filename wins. This is the membership-blind
@@ -2391,19 +2458,18 @@ enum Membership {
 /// top and uses this only as the fallback when no candidate lists `file`.
 fn find_owning_project(
     file: &Path,
+    ceiling: Option<&Path>,
     dir_listings: &mut DirListings,
     listings: &mut Vec<(PathBuf, ListingId)>,
 ) -> Option<PathBuf> {
-    // Start from the file's parent (the file itself may not exist).
-    let mut dir = file.parent()?;
-    loop {
+    for dir in walk_dirs(file, ceiling) {
         let (projects, listing) = dir_listings.projects_in(dir);
         listings.push((dir.to_path_buf(), listing));
         if let Some(found) = projects.into_iter().next() {
             return Some(found);
         }
-        dir = dir.parent()?;
     }
+    None
 }
 
 /// The `.fsproj` entries of `dir`'s listing `observation`, as paths in
@@ -3366,9 +3432,153 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
-    /// [`find_owning_project`], listing through listings nobody keeps.
-    fn heuristic(file: &Path) -> Option<PathBuf> {
-        find_owning_project(file, &mut DirListings::default(), &mut Vec::new())
+    /// [`find_owning_project`] climbing no higher than `ceiling`, listing
+    /// through listings nobody keeps.
+    fn heuristic(file: &Path, ceiling: &Path) -> Option<PathBuf> {
+        find_owning_project(
+            file,
+            Some(ceiling),
+            &mut DirListings::default(),
+            &mut Vec::new(),
+        )
+    }
+
+    /// A workspace whose ownership walks stay inside `tmp`'s tree
+    /// ([`Workspace::with_ownership_ceiling`]): the shared temporary directory
+    /// above it may hold any process's `.fsproj`.
+    fn walled(ws: Workspace, tmp: &TempDir) -> Workspace {
+        ws.with_ownership_ceiling(tmp.path())
+    }
+
+    proptest! {
+        /// [`walk_dirs`] lists the file's parent and each ancestor, nearest
+        /// first, up to and including its ceiling; without one, up to the
+        /// root, as [`Path::ancestors`] does.
+        #[test]
+        fn walk_dirs_stops_at_its_ceiling(
+            names in prop::collection::vec("[ab]{1,2}", 1..6),
+            cut in any::<prop::sample::Index>(),
+        ) {
+            let file: PathBuf = std::iter::once("/").chain(names.iter().map(String::as_str)).collect();
+            let all: Vec<&Path> = file.parent().unwrap().ancestors().collect();
+            prop_assert_eq!(walk_dirs(&file, None).collect::<Vec<_>>(), all.clone());
+            let at = cut.index(all.len());
+            prop_assert_eq!(
+                walk_dirs(&file, Some(all[at])).collect::<Vec<_>>(),
+                all[..=at].to_vec()
+            );
+        }
+    }
+
+    /// A ceiling the file does not lie under, by plain names, panics the walk
+    /// rather than letting it list directories above the ceiling: a sibling,
+    /// a name that only shares the ceiling's prefix, a `..` back above it,
+    /// and a file spelt relative to nowhere.
+    #[test]
+    fn a_walk_from_outside_its_ceiling_panics() {
+        for (file, ceiling) in [
+            ("/a/b/Lib.fs", "/c"),
+            ("/ab/Lib.fs", "/a"),
+            ("/a/b/../../Lib.fs", "/a/b"),
+            ("/a/b/../c/Lib.fs", "/a/b"),
+            ("Lib.fs", "/a"),
+        ] {
+            let walked = borzoi_oracle_harness::panic_silence::catch_unwind_silent(|| {
+                walk_dirs(Path::new(file), Some(Path::new(ceiling))).count()
+            });
+            assert!(walked.is_err(), "{file} under {ceiling}: {walked:?}");
+        }
+        // The ceiling itself, and the file directly in it, are inside.
+        assert_eq!(
+            walk_dirs(Path::new("/a/Lib.fs"), Some(Path::new("/a"))).collect::<Vec<_>>(),
+            [Path::new("/a")]
+        );
+    }
+
+    /// A project above the ceiling is never read, however greedily it lists:
+    /// without the ceiling it owns the file (so the fixture is live), and with
+    /// it the walks list only the tree, finding no owner, or the tree's own
+    /// project through the membership-blind fallback.
+    #[test]
+    fn a_project_above_the_ownership_ceiling_is_never_read() {
+        let tmp = TempDir::new().unwrap();
+        let above = tmp.path().join("Greedy.fsproj");
+        let root = tmp.path().join("tree");
+        let file = root.join("src").join("Lib.fs");
+        write_file(&above, &fsproj_with_compile("tree/src/Lib.fs"));
+        write_file(&file, "let x = 1");
+        assert_eq!(
+            Workspace::default().owning_project(&file),
+            Some(above.clone())
+        );
+
+        let walk = |ws: &mut Workspace| {
+            crate::inbox::never_superseded(ws.walk_for_owner(
+                &file,
+                0,
+                &crate::inbox::Watch::unwatched(),
+            ))
+        };
+        let mut ws = Workspace::default().with_ownership_ceiling(&root);
+        let walked = walk(&mut ws);
+        assert_eq!(walked.project, None);
+        assert!(
+            walked
+                .listings
+                .iter()
+                .all(|(dir, _)| dir.starts_with(&root)),
+            "{:?}",
+            walked.listings
+        );
+        assert_eq!(heuristic(&file, &root), None);
+        assert_eq!(ws.lang_version_for(&file), LanguageVersion::Preview);
+
+        let inner = root.join("Inner.fsproj");
+        write_file(&inner, &fsproj_with_compile("Other.fs"));
+        let mut ws = Workspace::default().with_ownership_ceiling(&root);
+        let walked = walk(&mut ws);
+        assert_eq!(walked.project, Some(inner.clone()));
+        assert!(
+            walked
+                .listings
+                .iter()
+                .all(|(dir, _)| dir.starts_with(&root)),
+            "{:?}",
+            walked.listings
+        );
+        assert_eq!(
+            walked.consulted,
+            [(
+                ProjectId::new(&inner),
+                ws.projects[&ProjectId::new(&inner)].id
+            )]
+        );
+        assert_eq!(heuristic(&file, &root), Some(inner));
+    }
+
+    /// The ceiling is set before any walk lists a directory, whether the walk
+    /// ran inside a generation (and is remembered) or outside one (and is
+    /// not): either may already have read above the ceiling.
+    #[test]
+    fn the_ownership_ceiling_is_set_before_any_walk() {
+        let tmp = TempDir::new().unwrap();
+        let file = tmp.path().join("Lib.fs");
+        write_file(&file, "let x = 1");
+        for in_generation in [true, false] {
+            let mut ws = walled(Workspace::default(), &tmp);
+            if in_generation {
+                ws.begin_generation(Nanos(i128::MAX / 2));
+            }
+            assert_eq!(ws.owning_project(&file), None);
+            if in_generation {
+                ws.end_generation();
+            }
+            let ceiling = tmp.path().to_path_buf();
+            let set = borzoi_oracle_harness::panic_silence::catch_unwind_silent(move || {
+                ws.with_ownership_ceiling(&ceiling)
+            });
+            assert!(set.is_err(), "in a generation: {in_generation}");
+        }
     }
 
     fn write_file(path: &Path, content: &str) {
@@ -3534,7 +3744,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let file = tmp.path().join("Orphan.fs");
         write_file(&file, "let x = 1\n");
-        let mut ws = Workspace::default();
+        let mut ws = walled(Workspace::default(), &tmp);
         assert_eq!(ws.lang_version_for(&file), LanguageVersion::Preview);
     }
 
@@ -4528,7 +4738,7 @@ mod tests {
         let file = tmp.path().join("Lib.fs");
         write_file(&proj, &fsproj_with_lang("8.0"));
         write_file(&file, "let x = 1\n");
-        let mut ws = Workspace::default();
+        let mut ws = walled(Workspace::default(), &tmp);
         assert_eq!(ws.lang_version_for(&file), LanguageVersion::V8_0);
     }
 
@@ -4545,7 +4755,7 @@ mod tests {
         write_file(&proj, &fsproj_with_defines(""));
         write_file(&file, "let x = 1");
 
-        assert_eq!(heuristic(&file), Some(proj));
+        assert_eq!(heuristic(&file, tmp.path()), Some(proj));
     }
 
     #[test]
@@ -4556,7 +4766,7 @@ mod tests {
         write_file(&proj, &fsproj_with_defines(""));
         write_file(&file, "let x = 1");
 
-        assert_eq!(heuristic(&file), Some(proj));
+        assert_eq!(heuristic(&file, tmp.path()), Some(proj));
     }
 
     #[test]
@@ -4565,10 +4775,9 @@ mod tests {
         let file = tmp.path().join("Lib.fs");
         write_file(&file, "let x = 1");
 
-        // The temp dir's ancestors (system temp, then `/tmp`, then `/`)
-        // are extremely unlikely to contain a `.fsproj`. If they do, this
-        // assertion catches it as a test-environment issue.
-        assert_eq!(heuristic(&file), None);
+        // The walk stops at the tree's root: whatever the shared temporary
+        // directory above it holds is not read.
+        assert_eq!(heuristic(&file, tmp.path()), None);
     }
 
     #[test]
@@ -4581,7 +4790,7 @@ mod tests {
         write_file(&zeta, &fsproj_with_defines(""));
         write_file(&alpha, &fsproj_with_defines(""));
 
-        assert_eq!(heuristic(&file), Some(alpha));
+        assert_eq!(heuristic(&file, tmp.path()), Some(alpha));
     }
 
     #[test]
@@ -4596,7 +4805,7 @@ mod tests {
         write_file(&inner_proj, &fsproj_with_defines(""));
         write_file(&file, "");
 
-        assert_eq!(heuristic(&file), Some(inner_proj));
+        assert_eq!(heuristic(&file, tmp.path()), Some(inner_proj));
     }
 
     #[test]
@@ -4609,7 +4818,7 @@ mod tests {
         write_file(&csproj, "<Project/>");
         write_file(&file, "");
 
-        assert_eq!(heuristic(&file), None);
+        assert_eq!(heuristic(&file, tmp.path()), None);
     }
 
     // ----- Stage 1.1: membership-aware `Workspace::owning_project` -----
@@ -4628,7 +4837,7 @@ mod tests {
         write_file(&file, "let x = 1");
 
         // Sanity: the membership-blind heuristic picks the wrong one here.
-        assert_eq!(heuristic(&file), Some(alpha));
+        assert_eq!(heuristic(&file, tmp.path()), Some(alpha));
 
         let mut ws = Workspace::default();
         assert_eq!(ws.owning_project(&file), Some(zeta));
@@ -4668,9 +4877,9 @@ mod tests {
         write_file(&zeta, &fsproj_with_compile("Another.fs"));
         write_file(&file, "");
 
-        let mut ws = Workspace::default();
+        let mut ws = walled(Workspace::default(), &tmp);
         assert_eq!(ws.owning_project(&file), Some(alpha));
-        assert_eq!(ws.owning_project(&file), heuristic(&file));
+        assert_eq!(ws.owning_project(&file), heuristic(&file, tmp.path()));
     }
 
     // ----- `symbols_for_linked` / `lang_version_for_linked` -----
@@ -4704,7 +4913,7 @@ mod tests {
         write_file(&file, "");
         write_file(&proj, &fsproj_linking("../Shared/Foo.fs", "FOO", "5.0"));
 
-        let mut ws = Workspace::default();
+        let mut ws = walled(Workspace::default(), &tmp);
         assert!(
             !ws.symbols_for(&file).contains("FOO"),
             "ancestor walk misses"
@@ -4754,7 +4963,7 @@ mod tests {
         write_file(&file, "");
         write_file(&proj, &fsproj_linking("Other.fs", "FOO", "5.0"));
 
-        let mut ws = Workspace::default();
+        let mut ws = walled(Workspace::default(), &tmp);
         assert_eq!(ws.symbols_for_linked(&file, &proj), ws.symbols_for(&file));
         assert_eq!(
             ws.lang_version_for_linked(&file, &proj),
@@ -4785,7 +4994,7 @@ mod tests {
             </Project>"#,
         );
 
-        let mut ws = Workspace::default();
+        let mut ws = walled(Workspace::default(), &tmp);
         assert!(
             ws.project(&proj).expect("evaluates").items_uncertain,
             "precondition: the Remove's condition must be unevaluable"
@@ -4835,7 +5044,7 @@ mod tests {
         write_file(&file, "let x = 1");
 
         // The membership-blind heuristic stops at the nearer (wrong) project.
-        assert_eq!(heuristic(&file), Some(other));
+        assert_eq!(heuristic(&file, tmp.path()), Some(other));
 
         let mut ws = Workspace::default();
         assert_eq!(ws.owning_project(&file), Some(root));
@@ -4880,9 +5089,9 @@ mod tests {
         );
     }
 
-    /// A file no project lists climbs to the file system's root, then falls
-    /// back to the nearest project, listing the directories up to it again:
-    /// every listing of both passes is kept.
+    /// A file no project lists climbs to the walk's ceiling, then falls back
+    /// to the nearest project, listing the directories up to it again: every
+    /// listing of both passes is kept.
     #[test]
     fn the_ownership_walks_fallback_keeps_its_listings_too() {
         let tmp = TempDir::new().unwrap();
@@ -4891,15 +5100,15 @@ mod tests {
         write_file(&root, &fsproj_with_compile("Other.fs"));
         write_file(&file, "let x = 1");
 
-        let mut ws = Workspace::default();
+        let mut ws = walled(Workspace::default(), &tmp);
         let walked = crate::inbox::never_superseded(ws.walk_for_owner(
             &file,
             0,
             &crate::inbox::Watch::unwatched(),
         ));
         assert_eq!(walked.project, Some(root));
-        let climbed = file.parent().unwrap().ancestors().count();
-        assert_eq!(walked.listings.len(), climbed + 3);
+        // `src/sub`, `src` and the tree's root, in each pass.
+        assert_eq!(walked.listings.len(), 3 + 3);
     }
 
     /// Inside generations the answer is remembered: the generation that
@@ -5154,7 +5363,7 @@ mod tests {
 
         let mut ws = Workspace::default();
         assert_ne!(ws.owning_project(&file), Some(root));
-        assert_eq!(ws.owning_project(&file), heuristic(&file));
+        assert_eq!(ws.owning_project(&file), heuristic(&file, tmp.path()));
     }
 
     #[test]
@@ -6733,7 +6942,7 @@ mod tests {
         write_file(&proj, &fsproj_with_defines("FOO;BAR"));
         write_file(&file, "");
 
-        let mut ws = Workspace::new();
+        let mut ws = walled(Workspace::new(), &tmp);
         let symbols = ws.symbols_for(&file);
         assert_eq!(
             symbols,
@@ -6792,7 +7001,7 @@ mod tests {
         let file = tmp.path().join("Lib.fs");
         write_file(&file, "");
 
-        let mut ws = Workspace::new();
+        let mut ws = walled(Workspace::new(), &tmp);
         let symbols = ws.symbols_for(&file);
         assert_eq!(
             symbols,
@@ -6809,7 +7018,7 @@ mod tests {
         let file = tmp.path().join("Script.fsx");
         write_file(&file, "");
 
-        let mut ws = Workspace::new();
+        let mut ws = walled(Workspace::new(), &tmp);
         let symbols = ws.symbols_for(&file);
         assert_eq!(
             symbols,
@@ -6830,7 +7039,7 @@ mod tests {
         write_file(&proj, &fsproj_with_defines("FOO"));
         write_file(&file, "");
 
-        let mut ws = Workspace::new();
+        let mut ws = walled(Workspace::new(), &tmp);
         let symbols = ws.symbols_for(&file);
         assert_eq!(
             symbols,
@@ -6873,7 +7082,7 @@ mod tests {
         let file = tmp.path().join("Script.FSX");
         write_file(&file, "");
 
-        let mut ws = Workspace::new();
+        let mut ws = walled(Workspace::new(), &tmp);
         let symbols = ws.symbols_for(&file);
         assert_eq!(
             symbols,
@@ -6893,7 +7102,7 @@ mod tests {
         write_file(&proj, &fsproj_with_defines("FOO"));
         write_file(&file, "");
 
-        let mut ws = Workspace::new();
+        let mut ws = walled(Workspace::new(), &tmp);
         let first = ws.symbols_for(&file);
         assert!(first.contains("FOO"));
 
@@ -6940,7 +7149,7 @@ mod tests {
         write_file(&proj, &fsproj_with_defines("  FOO ;; BAR  "));
         write_file(&file, "");
 
-        let mut ws = Workspace::new();
+        let mut ws = walled(Workspace::new(), &tmp);
         let symbols = ws.symbols_for(&file);
         assert_eq!(
             symbols,
@@ -6963,7 +7172,7 @@ mod tests {
             fs::write(&proj, fsproj_with_defines(&defines)).unwrap();
             fs::write(&file, "").unwrap();
 
-            let mut ws = Workspace::new();
+            let mut ws = walled(Workspace::new(), &tmp);
             let first = ws.symbols_for(&file);
             let second = ws.symbols_for(&file);
             prop_assert_eq!(first, second);
@@ -7165,7 +7374,7 @@ mod tests {
             for dir in DIRS {
                 fs::create_dir_all(root.join(dir)).unwrap();
             }
-            let mut ws = Workspace::default();
+            let mut ws = walled(Workspace::default(), &tmp);
             let mut last: Vec<Option<Option<PathBuf>>> = vec![None; FILES.len()];
             for op in ops {
                 match op {
@@ -7199,7 +7408,7 @@ mod tests {
                                 (Some(_), _) => seen.rewalked += 1,
                                 (None, _) => {}
                             }
-                            let fresh = Workspace::default().owning_project(&file);
+                            let fresh = walled(Workspace::default(), &tmp).owning_project(&file);
                             prop_assert_eq!(&remembered, &fresh, "the owner of {}", FILES[f]);
                             if last[f].as_ref().is_some_and(|before| *before != fresh) {
                                 seen.moved += 1;
@@ -7310,7 +7519,7 @@ mod tests {
             write_file(&proj, r#"<Project Sdk="Test.Sdk"></Project>"#);
             write_file(&file, "");
 
-            let mut ws = Workspace::with_env(hermetic_env(dotnet));
+            let mut ws = walled(Workspace::with_env(hermetic_env(dotnet)), &tmp);
             let symbols = ws.symbols_for(&file);
             assert!(
                 symbols.contains("FROM_SDK"),
@@ -7348,7 +7557,7 @@ mod tests {
             );
             write_file(&file, "");
 
-            let mut ws = Workspace::with_env(hermetic_env(dotnet));
+            let mut ws = walled(Workspace::with_env(hermetic_env(dotnet)), &tmp);
             let symbols = ws.symbols_for(&file);
             assert!(
                 symbols.contains("FROM_SDK") && symbols.contains("BODY_ADDED"),
@@ -7433,7 +7642,7 @@ mod tests {
 
             // Empty env is fine — no SDK resolution is needed; this
             // test is purely about the build-globals defaulting.
-            let mut ws = Workspace::with_env(SdkDiscoveryEnv::default());
+            let mut ws = walled(Workspace::with_env(SdkDiscoveryEnv::default()), &tmp);
             let symbols = ws.symbols_for(&file);
             assert!(
                 symbols.contains("DEBUG_BUILD"),
@@ -7460,7 +7669,7 @@ mod tests {
             );
             write_file(&file, "");
 
-            let mut ws = Workspace::with_env(SdkDiscoveryEnv::default());
+            let mut ws = walled(Workspace::with_env(SdkDiscoveryEnv::default()), &tmp);
             let symbols = ws.symbols_for(&file);
             assert!(
                 !symbols.contains("RELEASE_ONLY"),
@@ -7482,7 +7691,7 @@ mod tests {
             write_file(&proj, &fsproj_with_defines("FOO"));
             write_file(&file, "");
 
-            let mut ws = Workspace::with_env(hermetic_env(dotnet));
+            let mut ws = walled(Workspace::with_env(hermetic_env(dotnet)), &tmp);
             let symbols = ws.symbols_for(&file);
             assert_eq!(
                 symbols,

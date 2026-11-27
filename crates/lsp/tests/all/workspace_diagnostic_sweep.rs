@@ -48,8 +48,14 @@ const PROJECTS: usize = 24;
 /// A root holding [`PROJECTS`] SDK-less projects, each compiling one file.
 fn wide_root() -> TempDir {
     let tmp = TempDir::new().unwrap();
+    fill_wide_root(tmp.path());
+    tmp
+}
+
+/// Lay [`wide_root`]'s projects out in the existing directory `root`.
+fn fill_wide_root(root: &Path) {
     for i in 0..PROJECTS {
-        let dir = tmp.path().join(format!("P{i:02}"));
+        let dir = root.join(format!("P{i:02}"));
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(
             dir.join(format!("P{i:02}.fsproj")),
@@ -58,7 +64,6 @@ fn wide_root() -> TempDir {
         .unwrap();
         std::fs::write(dir.join(format!("F{i:02}.fs")), "let x = 1\n").unwrap();
     }
-    tmp
 }
 
 fn request<R: RequestTrait>(id: &str, params: R::Params) -> Message
@@ -140,11 +145,14 @@ enum End {
 
 /// Queue `script` on a fresh in-memory connection, then run the server loop
 /// over it with `root` as the only workspace root and `docs` open, ending the
-/// session as `end` says.
+/// session as `end` says. Its ownership walks stop at `ceiling`, which holds
+/// every file the script names: the shared temporary directory above may hold
+/// any process's `.fsproj`.
 ///
 /// Returns every message the server sent, in order.
 fn run_script(
     root: &Path,
+    ceiling: &Path,
     caps: ClientCapabilities,
     docs: Vec<(Uri, String)>,
     script: Vec<Message>,
@@ -168,8 +176,9 @@ fn run_script(
         _ => Some(client_sender),
     };
     let root = root.to_path_buf();
+    let ceiling = ceiling.to_path_buf();
     let handle = thread::spawn(move || {
-        let mut state = State::default();
+        let mut state = State::default().with_ownership_ceiling(&ceiling);
         state.set_client_capabilities(caps);
         state.set_workspace_roots(vec![root]);
         for (uri, text) in docs {
@@ -302,10 +311,14 @@ const FULL_REPORT_ITEMS: usize = 2 * PROJECTS;
 
 #[test]
 fn a_hover_queued_behind_a_sweep_is_answered_first() {
-    let root = wide_root();
-    // Outside the swept root, so the hover is no part of the sweep's work.
-    let elsewhere = TempDir::new().unwrap();
-    let uri = Uri::from_file_path(elsewhere.path().join("Open.fs")).unwrap();
+    // One tree holding the swept root and, outside it, the hovered file, so
+    // the hover is no part of the sweep's work and both stay under the
+    // ownership ceiling.
+    let tree = TempDir::new().unwrap();
+    let root = tree.path().join("root");
+    std::fs::create_dir(&root).unwrap();
+    fill_wide_root(&root);
+    let uri = Uri::from_file_path(tree.path().join("elsewhere").join("Open.fs")).unwrap();
     let hover = request::<HoverRequest>(
         "hover",
         HoverParams {
@@ -320,7 +333,8 @@ fn a_hover_queued_behind_a_sweep_is_answered_first() {
         },
     );
     let sent = run_script(
-        root.path(),
+        &root,
+        tree.path(),
         ClientCapabilities::default(),
         vec![(uri, "let x = 1\n".to_string())],
         vec![sweep("sweep"), hover],
@@ -343,6 +357,7 @@ fn a_hover_queued_behind_a_sweep_is_answered_first() {
 fn cancel_request_ends_the_sweep() {
     let root = wide_root();
     let sent = run_script(
+        root.path(),
         root.path(),
         ClientCapabilities::default(),
         Vec::new(),
@@ -368,6 +383,7 @@ fn cancelling_another_request_leaves_the_sweep_alone() {
     let root = wide_root();
     let sent = run_script(
         root.path(),
+        root.path(),
         ClientCapabilities::default(),
         Vec::new(),
         vec![sweep("sweep"), cancel("other")],
@@ -381,6 +397,7 @@ fn cancelling_another_request_leaves_the_sweep_alone() {
 fn a_newer_sweep_supersedes_the_one_in_flight() {
     let root = wide_root();
     let sent = run_script(
+        root.path(),
         root.path(),
         ClientCapabilities::default(),
         Vec::new(),
@@ -410,6 +427,7 @@ fn shutdown_cancels_the_sweep_in_flight() {
     let root = wide_root();
     let sent = run_script(
         root.path(),
+        root.path(),
         ClientCapabilities::default(),
         Vec::new(),
         vec![sweep("sweep"), shutdown("shutdown"), exit()],
@@ -431,6 +449,7 @@ fn hang_up_abandons_the_sweep() {
     let root = wide_root();
     let sent = run_script(
         root.path(),
+        root.path(),
         ClientCapabilities::default(),
         Vec::new(),
         vec![sweep("sweep")],
@@ -446,6 +465,7 @@ fn hang_up_abandons_the_sweep() {
 fn exit_abandons_the_sweep() {
     let root = wide_root();
     let sent = run_script(
+        root.path(),
         root.path(),
         ClientCapabilities::default(),
         Vec::new(),
