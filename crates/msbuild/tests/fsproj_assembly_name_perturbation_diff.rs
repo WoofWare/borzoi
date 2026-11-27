@@ -1528,6 +1528,23 @@ fn grade_unbudgeted(case: &Case) -> Result<Outcome, String> {
                     case.label()
                 ));
             }
+            // Variables the grading holds fixed, each at a value of its shape,
+            // are admitted and reach no build: the case is the shared
+            // fixture's under them, which must commit. A decline is the
+            // fixture's own failure, or the derivation declining an admitted
+            // environment, and either fails.
+            if case.place == Place::Variables
+                && !case.variables.is_empty()
+                && case
+                    .variables
+                    .iter()
+                    .all(|(name, value)| held_fixed(name, value))
+            {
+                return Err(format!(
+                    "{}: declined ({why:?}), though every variable is held fixed",
+                    case.label()
+                ));
+            }
             return match &case.must_commit {
                 Some(_) => Err(format!("{}: declined ({why:?}), must commit", case.label())),
                 None => {

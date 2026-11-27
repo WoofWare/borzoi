@@ -2342,6 +2342,44 @@ mod tests {
     use proptest::prelude::*;
     use std::collections::HashMap;
 
+    /// The names of `ALLOWED_PROPERTIES` as they stood before the allow-list
+    /// (#1064 PR 1), frozen beside [`OLD_GRADED`], so the baseline cannot
+    /// move with production's list.
+    const OLD_PROPERTIES: &[&str] = &[
+        "AssemblyName",
+        "Authors",
+        "Configuration",
+        "DebugType",
+        "Description",
+        "Deterministic",
+        "GenerateDocumentationFile",
+        "IsPackable",
+        "IsTestProject",
+        "LangVersion",
+        "NoWarn",
+        "Nullable",
+        "Optimize",
+        "OtherFlags",
+        "OutputType",
+        "Platform",
+        "RootNamespace",
+        "TargetFramework",
+        "TargetFrameworks",
+        "TreatWarningsAsErrors",
+        "Version",
+        "WarnOn",
+        "WarningsAsErrors",
+    ];
+
+    /// The allow-list moves no property: production's allowed property names
+    /// are the baseline's, so a property added or removed is a change this
+    /// claim does not make, and fails here.
+    #[test]
+    fn the_allowed_properties_are_the_baseline_s() {
+        let production: Vec<&str> = ALLOWED_PROPERTIES.iter().map(|(name, _)| *name).collect();
+        assert_eq!(production, OLD_PROPERTIES);
+    }
+
     /// `ALLOWED_ENVIRONMENT` as it stood before the allow-list (#1064 PR 1),
     /// frozen, so the rule's movement is measured from a fixed point.
     const OLD_GRADED: &[&str] = &[
@@ -2382,9 +2420,9 @@ mod tests {
         let graded = OLD_GRADED
             .iter()
             .any(|allowed| allowed.eq_ignore_ascii_case(name));
-        let property = ALLOWED_PROPERTIES
+        let property = OLD_PROPERTIES
             .iter()
-            .any(|(allowed, _)| allowed.eq_ignore_ascii_case(name));
+            .any(|allowed| allowed.eq_ignore_ascii_case(name));
         !toolchain && !graded && !property
     }
 
@@ -2515,9 +2553,9 @@ mod tests {
             .iter()
             .chain(WIDENED)
             .any(|allowed| allowed.eq_ignore_ascii_case(name));
-        let property = ALLOWED_PROPERTIES
+        let property = OLD_PROPERTIES
             .iter()
-            .any(|(allowed, _)| allowed.eq_ignore_ascii_case(name));
+            .any(|allowed| allowed.eq_ignore_ascii_case(name));
         by_prefix && !graded && !property
     }
 
@@ -2584,6 +2622,7 @@ mod tests {
             .iter()
             .copied()
             .chain(ALLOWED_PROPERTIES.iter().map(|(name, _)| *name))
+            .chain(OLD_PROPERTIES.iter().copied())
             .chain(TOOLCHAIN.iter().map(|(name, _)| *name))
             .chain([
                 "DOTNET_",
