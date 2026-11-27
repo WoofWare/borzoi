@@ -33,6 +33,7 @@ fn ensure_oracle_built() -> &'static Path {
     static BUILT: OnceLock<PathBuf> = OnceLock::new();
     BUILT
         .get_or_init(|| {
+            #[allow(clippy::disallowed_methods, reason = "which prebuilt oracle answers, the developer's choice; not a build's environment")]
             if let Some(bin) = std::env::var_os("BORZOI_WORKLOAD_ORACLE") {
                 return PathBuf::from(bin);
             }

@@ -32,17 +32,19 @@
 //! The inputs a caller may set are closed: [`BuildInputs`] holds global
 //! properties and environment variables by names on a positive list
 //! ([`INPUT_NAMES`]), none of which chooses the toolchain, the compiler, the
-//! restore or MSBuild's own machinery.
+//! restore or MSBuild's own machinery. What a build inherits beneath them is
+//! a [`BuildEnvironment`] the caller hands it: the oracle reads no variable
+//! of its own process for a build.
 //!
 //! The tool is built once (marker-gated, with the marker and fingerprint
 //! `borzoi-msbuild`'s tests use, so the two never rebuild over each other).
 //! `borzoi-msbuild`'s `fsc_args_oracle_calibration` holds the reading to the
 //! files fsc writes and to the arguments MSBuild reports.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
 use crate::BoundedCommand;
@@ -73,6 +75,7 @@ pub fn apphost() -> &'static Path {
     static BUILT: OnceLock<PathBuf> = OnceLock::new();
     BUILT
         .get_or_init(|| {
+            #[allow(clippy::disallowed_methods, reason = "which prebuilt oracle answers, the developer's choice; not a build's environment")]
             if let Some(bin) = std::env::var_os("BORZOI_MSBUILD_CONDITION_ORACLE") {
                 // Absolute here, since the builds run in other directories.
                 return std::path::absolute(PathBuf::from(&bin)).unwrap_or_else(|e| {
@@ -148,9 +151,9 @@ pub fn source_fingerprint(project: &Path) -> u64 {
     h.finish()
 }
 
-/// The variables of this process [`build_environment`] carries into a build,
-/// by exact name: the runtime essentials, the .NET install and NuGet's package
-/// folder, `RestoreSources` (the devshell's offline feed, so the restore is
+/// The variables a [`BuildEnvironment`] carries into a build, by exact name:
+/// the runtime essentials, the .NET install and NuGet's package folder,
+/// `RestoreSources` (the devshell's offline feed, so the restore is
 /// hermetic), the CLI's switches the devshell sets, and `DOTNET_CLI_HOME`,
 /// where a machine whose home is not writable keeps the CLI's state (the CLI
 /// writes its first-use sentinel there before MSBuild starts). A closed list,
@@ -171,32 +174,59 @@ pub const BUILD_ENVIRONMENT_NAMES: &[&str] = &[
     "TMPDIR",
 ];
 
-/// The environment [`fsc_args`]'s build runs under: this process's variables
-/// of [`BUILD_ENVIRONMENT_NAMES`], nothing else, since MSBuild reads every
-/// variable as a property. An evaluation compared with the build must see the
-/// same set.
-pub fn build_environment() -> Vec<(String, String)> {
-    std::env::vars()
-        .filter(|(key, _)| BUILD_ENVIRONMENT_NAMES.contains(&key.as_str()))
-        .collect()
+/// The environment a build here starts from, beneath its inputs' variables
+/// ([`BuildInputs`]): variables of [`BUILD_ENVIRONMENT_NAMES`] and nothing
+/// else, since MSBuild reads every variable as a property, each with the
+/// value the caller gave it. An evaluation compared with the build must see
+/// the same set. The oracle reads no variable of its own process for a build
+/// (the crate's `clippy.toml` holds it to that): the host, every build and
+/// every probe are chosen from the environment their caller hands them.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct BuildEnvironment {
+    /// Each name of [`BUILD_ENVIRONMENT_NAMES`] the caller set, with its
+    /// value.
+    vars: BTreeMap<String, String>,
 }
 
-/// The .NET host every build here runs under: `dotnet` in
-/// [`build_environment`]'s `DOTNET_ROOT`, launched directly. A `dotnet` on
-/// `PATH` may be a launcher script (the devshell's is a bash wrapper), and a
-/// shell sets `PWD`, `OLDPWD` and `SHLVL` for itself before MSBuild reads
-/// them, so a variable a caller set would not be the one the build saw.
+impl BuildEnvironment {
+    /// The variables of `inherited` named on [`BUILD_ENVIRONMENT_NAMES`],
+    /// each with its value verbatim, and nothing else. A caller passing its
+    /// process's `std::env::vars()` gives every build that process's values
+    /// of those names.
+    pub fn inherited(inherited: impl IntoIterator<Item = (String, String)>) -> BuildEnvironment {
+        BuildEnvironment {
+            vars: inherited
+                .into_iter()
+                .filter(|(key, _)| BUILD_ENVIRONMENT_NAMES.contains(&key.as_str()))
+                .collect(),
+        }
+    }
+
+    /// The variables, by name.
+    pub fn vars(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.vars.iter().map(|(n, v)| (n.as_str(), v.as_str()))
+    }
+
+    /// The value of the variable `name`, if set.
+    pub fn get(&self, name: &str) -> Option<&str> {
+        self.vars.get(name).map(String::as_str)
+    }
+}
+
+/// The .NET host every build under `environment` runs: `dotnet` in its
+/// `DOTNET_ROOT`, launched directly. A `dotnet` on `PATH` may be a launcher
+/// script (the devshell's is a bash wrapper), and a shell sets `PWD`,
+/// `OLDPWD` and `SHLVL` for itself before MSBuild reads them, so a variable a
+/// caller set would not be the one the build saw.
 ///
 /// # Panics
 ///
 /// When `DOTNET_ROOT` is not an absolute path, as it is in the devshell: an
 /// unset, empty or relative root would leave the program's name to a lookup
 /// on `PATH`.
-pub fn dotnet_host() -> PathBuf {
-    let root = build_environment()
-        .into_iter()
-        .find_map(|(name, value)| (name == "DOTNET_ROOT").then_some(value));
-    host_in(root.as_deref()).unwrap_or_else(|e| panic!("{e} (run under `nix develop`)"))
+pub fn dotnet_host(environment: &BuildEnvironment) -> PathBuf {
+    host_in(environment.get("DOTNET_ROOT"))
+        .unwrap_or_else(|e| panic!("{e} (run under `nix develop`)"))
 }
 
 /// The host in the .NET install `root`, or why there is none to launch: an
@@ -213,43 +243,54 @@ fn host_in(root: Option<&str>) -> Result<PathBuf, String> {
 }
 
 /// `dotnet msbuild` in `dir`, as every build here starts: [`dotnet_host`]
-/// launched directly, under [`build_environment`] plus `inputs`' variables
-/// and nothing else. The caller adds the switches, `inputs`' globals among
-/// them, and the project.
-pub fn msbuild_command(dir: &Path, inputs: &BuildInputs) -> Command {
-    let mut cmd = Command::new(dotnet_host());
+/// launched directly, under `environment` plus `inputs`' variables and
+/// nothing else. The caller adds the switches, `inputs`' globals among them,
+/// and the project.
+pub fn msbuild_command(
+    dir: &Path,
+    environment: &BuildEnvironment,
+    inputs: &BuildInputs,
+) -> Command {
+    let mut cmd = Command::new(dotnet_host(environment));
     cmd.current_dir(dir).arg("msbuild").env_clear();
-    cmd.envs(build_environment());
-    cmd.envs(inputs.env_vars());
+    cmd.envs(environment.vars());
+    cmd.envs(inputs.env_vars(environment));
     cmd
 }
 
-/// `MSBuildUserExtensionsPath` as the builds here compute it, probed once
-/// through [`msbuild_command`], so under exactly their environment: an
-/// evaluation compared with a build is handed it, as MSBuild computes it for
-/// itself rather than reading it from the environment.
-pub fn msbuild_user_extensions_path() -> &'static str {
-    static PATH: OnceLock<String> = OnceLock::new();
-    PATH.get_or_init(|| {
-        let dir = tempfile::TempDir::new().expect("a directory for the probe");
-        let stub = dir.path().join("Probe.proj");
-        std::fs::write(&stub, "<Project/>").expect("the probe project is written");
-        let mut cmd = msbuild_command(dir.path(), &BuildInputs::new());
-        cmd.args(["-nologo", "-getProperty:MSBuildUserExtensionsPath"])
-            .arg(&stub);
-        let out = BoundedCommand::new(cmd)
-            .timeout(Duration::from_secs(300))
-            .run_ok("probing MSBuildUserExtensionsPath");
-        let value = String::from_utf8(out.stdout)
-            .expect("the probe's output is UTF-8")
-            .trim()
-            .to_string();
-        assert!(
-            Path::new(&value).is_absolute() && !value.contains('\n'),
-            "the MSBuildUserExtensionsPath probe answered {value:?}, not one absolute path"
-        );
-        value
-    })
+/// `MSBuildUserExtensionsPath` as the builds under `environment` compute it,
+/// probed once per environment through [`msbuild_command`], so under exactly
+/// their environment: an evaluation compared with a build is handed it, as
+/// MSBuild computes it for itself rather than reading it from the
+/// environment.
+pub fn msbuild_user_extensions_path(environment: &BuildEnvironment) -> &'static str {
+    // Each answer is leaked: a run probes one environment, or a handful.
+    static PATHS: Mutex<Option<HashMap<BuildEnvironment, &'static str>>> = Mutex::new(None);
+    let mut paths = PATHS.lock().unwrap_or_else(PoisonError::into_inner);
+    let paths = paths.get_or_insert_with(HashMap::new);
+    if let Some(path) = paths.get(environment) {
+        return path;
+    }
+    let dir = tempfile::TempDir::new().expect("a directory for the probe");
+    let stub = dir.path().join("Probe.proj");
+    std::fs::write(&stub, "<Project/>").expect("the probe project is written");
+    let mut cmd = msbuild_command(dir.path(), environment, &BuildInputs::new());
+    cmd.args(["-nologo", "-getProperty:MSBuildUserExtensionsPath"])
+        .arg(&stub);
+    let out = BoundedCommand::new(cmd)
+        .timeout(Duration::from_secs(300))
+        .run_ok("probing MSBuildUserExtensionsPath");
+    let value = String::from_utf8(out.stdout)
+        .expect("the probe's output is UTF-8")
+        .trim()
+        .to_string();
+    assert!(
+        Path::new(&value).is_absolute() && !value.contains('\n'),
+        "the MSBuildUserExtensionsPath probe answered {value:?}, not one absolute path"
+    );
+    let value: &'static str = Box::leak(value.into_boxed_str());
+    paths.insert(environment.clone(), value);
+    value
 }
 
 /// `path` with its `.` and `..` components folded away lexically, as MSBuild
@@ -404,8 +445,8 @@ pub enum InputError {
 }
 
 /// What a caller sets for a build beyond the tree: global properties (`-p:`)
-/// and environment variables, over [`build_environment`]. Built only through
-/// its checked methods.
+/// and environment variables, over its [`BuildEnvironment`]. Built only
+/// through its checked methods.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BuildInputs {
     globals: Vec<(InputName, String)>,
@@ -415,7 +456,7 @@ pub struct BuildInputs {
 }
 
 impl BuildInputs {
-    /// No globals and no variables beyond [`build_environment`].
+    /// No globals and no variables beyond the [`BuildEnvironment`].
     pub fn new() -> BuildInputs {
         BuildInputs::default()
     }
@@ -452,7 +493,7 @@ impl BuildInputs {
     }
 
     /// With the local package folder `dir` added to the restore's sources
-    /// (`RestoreSources`, after [`build_environment`]'s own), so a fixture can
+    /// (`RestoreSources`, after the [`BuildEnvironment`]'s own), so a fixture can
     /// reference a package it made.
     pub fn package_source(mut self, dir: &Path) -> BuildInputs {
         self.package_source = Some(dir.to_path_buf());
@@ -460,7 +501,7 @@ impl BuildInputs {
     }
 
     /// With the restore extracting into the package folder `dir`
-    /// (`NUGET_PACKAGES`) in place of [`build_environment`]'s, so a fixture's
+    /// (`NUGET_PACKAGES`) in place of the [`BuildEnvironment`]'s, so a fixture's
     /// own packages stay out of the shared one.
     pub fn packages_folder(mut self, dir: &Path) -> BuildInputs {
         self.packages_folder = Some(dir.to_path_buf());
@@ -468,20 +509,16 @@ impl BuildInputs {
     }
 
     /// The environment variables a build under these inputs sets over
-    /// [`build_environment`]: those set by name, in the order set, then the
-    /// package source and folder.
-    pub fn env_vars(&self) -> Vec<(String, String)> {
+    /// `environment`: those set by name, in the order set, then the package
+    /// source and folder.
+    pub fn env_vars(&self, environment: &BuildEnvironment) -> Vec<(String, String)> {
         let mut vars: Vec<(String, String)> = self
             .env
             .iter()
             .map(|(n, v)| (n.as_str().to_string(), v.clone()))
             .collect();
         if let Some(dir) = &self.package_source {
-            let base = build_environment()
-                .into_iter()
-                .find(|(name, _)| name == "RestoreSources")
-                .map(|(_, value)| value);
-            let value = match base {
+            let value = match environment.get("RestoreSources") {
                 Some(base) if !base.is_empty() => format!("{base};{}", dir.display()),
                 _ => dir.display().to_string(),
             };
@@ -515,6 +552,8 @@ pub struct FscArgsRequest<'a> {
     /// The project file to build, where it lies. The build writes beside it
     /// (and beside the projects it references), as a build does.
     pub project: &'a Path,
+    /// The environment the build inherits.
+    pub environment: &'a BuildEnvironment,
     /// The global properties and environment variables to build under.
     pub inputs: &'a BuildInputs,
 }
@@ -527,7 +566,7 @@ pub fn fsc_args(request: &FscArgsRequest) -> Result<FscBuild, FscArgsDecline> {
             .unwrap_or_else(|e| panic!("absolute path of {}: {e}", request.project.display())),
     );
     let scratch = ScratchDir::new();
-    instrumented_build(&scratch.0, &project, request.inputs)
+    instrumented_build(&scratch.0, &project, request.environment, request.inputs)
 }
 
 /// [`fsc_args`]'s build: [`build_command`] with `FscArgsLogger` and a
@@ -536,6 +575,7 @@ pub fn fsc_args(request: &FscArgsRequest) -> Result<FscBuild, FscArgsDecline> {
 fn instrumented_build(
     scratch: &Path,
     project: &Path,
+    environment: &BuildEnvironment,
     inputs: &BuildInputs,
 ) -> Result<FscBuild, FscArgsDecline> {
     // MSBuild splits a logger switch at `,` and `;`, and decodes `%XX`, so a
@@ -556,7 +596,7 @@ fn instrumented_build(
         logger.display()
     );
 
-    let mut cmd = build_command(project, inputs);
+    let mut cmd = build_command(project, environment, inputs);
     cmd.arg(format!(
         "-logger:MsBuildConditionOracle.Program+FscArgsLogger,{};{}",
         logger.display(),
@@ -616,12 +656,12 @@ fn instrumented_build(
 
 /// The build [`fsc_args`] runs, before its loggers: `dotnet msbuild
 /// -nodeReuse:false -restore -t:Build` of `project`, in its directory, under
-/// `inputs`' globals, through [`msbuild_command`].
+/// `inputs`' globals, under `environment`, through [`msbuild_command`].
 /// `-nodeReuse:false` keeps MSBuild from leaving worker nodes behind, which
 /// could hold the driver's pipes open; it changes nothing fsc is handed.
-fn build_command(project: &Path, inputs: &BuildInputs) -> Command {
+fn build_command(project: &Path, environment: &BuildEnvironment, inputs: &BuildInputs) -> Command {
     let dir = project.parent().expect("a project file has a directory");
-    let mut cmd = msbuild_command(dir, inputs);
+    let mut cmd = msbuild_command(dir, environment, inputs);
     cmd.args(["-nodeReuse:false", "-restore", "-t:Build"]);
     for (name, value) in inputs.globals() {
         cmd.arg(format!("-p:{name}={value}"));
@@ -696,6 +736,11 @@ const HOST_SDK_FAILURES: &[&str] = &[
 fn scratch_dir() -> PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
+    // The oracle's own files, not anything a build inherits.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "where the oracle's own scratch files go; not a build's environment"
+    )]
     let temp = std::env::temp_dir();
     loop {
         let dir = temp.join(format!(
@@ -827,6 +872,7 @@ mod tests {
             let result = super::instrumented_build(
                 std::path::Path::new(scratch),
                 std::path::Path::new("/nonexistent/Demo.fsproj"),
+                &inherited(),
                 &super::BuildInputs::new(),
             );
             assert!(
@@ -837,9 +883,79 @@ mod tests {
     }
 
     use super::{
-        BUILD_ENVIRONMENT_NAMES, BuildInputs, FscArgsRequest, InputError, dotnet_host, fsc_args,
-        host_in, msbuild_command, scratch_dir,
+        BUILD_ENVIRONMENT_NAMES, BuildEnvironment, BuildInputs, FscArgsRequest, InputError,
+        dotnet_host, fsc_args, host_in, msbuild_command, scratch_dir,
     };
+
+    /// The environment the tests here build under: this process's.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "a test stands for a caller, which hands the oracle its process's variables"
+    )]
+    fn inherited() -> BuildEnvironment {
+        BuildEnvironment::inherited(std::env::vars())
+    }
+
+    /// A build environment holds every inherited variable of
+    /// `BUILD_ENVIRONMENT_NAMES` with its value verbatim, whatever its shape,
+    /// and no other variable: each name at each kind of value beside its
+    /// lower-case twin and an unlisted name.
+    #[test]
+    fn a_build_environment_keeps_its_names_verbatim() {
+        let values = [
+            "1",
+            "/usr/local",
+            "/usr/bin:bin",
+            "",
+            "relative",
+            "https://private.example.org/v3/index.json",
+            "/opt/SDK%20Tools",
+            "/a\tb",
+        ];
+        for name in BUILD_ENVIRONMENT_NAMES {
+            for value in values {
+                let inherited = [
+                    (name.to_string(), value.to_string()),
+                    (name.to_ascii_lowercase(), "other".to_string()),
+                    ("NUGET_FALLBACK_PACKAGES".to_string(), value.to_string()),
+                ];
+                let environment = BuildEnvironment::inherited(inherited);
+                let vars: Vec<(&str, &str)> = environment.vars().collect();
+                assert_eq!(vars, vec![(*name, value)], "{name}={value:?}");
+                assert_eq!(environment.get(name), Some(value));
+            }
+        }
+    }
+
+    /// The oracle reads no variable of its own process: clippy holds the
+    /// crate to no call of `std::env`'s readers (its `clippy.toml`), by
+    /// resolved path, so no import, alias or raw identifier hides one. Each
+    /// deliberate read elsewhere (a tool's selector) carries an `allow` with
+    /// its reason. The configuration must keep the bans, and repeat the
+    /// workspace's, which it replaces.
+    #[test]
+    fn the_crate_bans_reading_the_process_environment() {
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let workspace = std::fs::read_to_string(manifest.join("../../clippy.toml")).unwrap();
+        let config = std::fs::read_to_string(manifest.join("clippy.toml")).unwrap();
+        for line in workspace
+            .lines()
+            .filter(|line| !line.trim().is_empty() && !line.trim_start().starts_with('#'))
+        {
+            assert!(
+                config.lines().any(|l| l == line),
+                "crates/oracle-harness/clippy.toml is missing the workspace's {line:?}"
+            );
+        }
+        // Every function of `std::env` that reads a variable.
+        for banned in ["var", "var_os", "vars", "vars_os", "home_dir", "temp_dir"] {
+            let entry = format!("{{ path = \"std::env::{banned}\",");
+            assert!(
+                config.lines().any(|l| l.trim_start().starts_with(&entry)),
+                "crates/oracle-harness/clippy.toml does not ban std::env::{banned}"
+            );
+        }
+    }
 
     /// Every build starts from one command: the host itself, not a launcher
     /// on `PATH`. The build it starts sees the caller's variable, and not a
@@ -847,20 +963,21 @@ mod tests {
     /// (`CARGO_MANIFEST_DIR`, which cargo sets for a test it runs).
     #[test]
     fn every_build_starts_from_the_host_under_the_closed_environment() {
-        let inherited = "CARGO_MANIFEST_DIR";
+        let own = "CARGO_MANIFEST_DIR";
         assert!(
-            std::env::var_os(inherited).is_some() && !BUILD_ENVIRONMENT_NAMES.contains(&inherited),
+            inherited_has(own) && !BUILD_ENVIRONMENT_NAMES.contains(&own),
             "the test needs a variable of its own off the build environment's list"
         );
         let tmp = tempfile::TempDir::new().unwrap();
         std::fs::write(tmp.path().join("Probe.proj"), "<Project/>").unwrap();
         let inputs = BuildInputs::new().env("LANG", "Evil").unwrap();
-        let mut cmd = msbuild_command(tmp.path(), &inputs);
-        assert_eq!(cmd.get_program(), dotnet_host().as_os_str());
+        let environment = inherited();
+        let mut cmd = msbuild_command(tmp.path(), &environment, &inputs);
+        assert_eq!(cmd.get_program(), dotnet_host(&environment).as_os_str());
         cmd.args([
             "-nologo",
             "-getProperty:LANG",
-            &format!("-getProperty:{inherited}"),
+            &format!("-getProperty:{own}"),
             "Probe.proj",
         ]);
         let out = crate::BoundedCommand::new(cmd)
@@ -868,10 +985,7 @@ mod tests {
             .run_ok("reading the build's view of its environment");
         let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
         assert_eq!(json["Properties"]["LANG"], "Evil");
-        assert_eq!(
-            json["Properties"][inherited], "",
-            "{inherited} reached the build"
-        );
+        assert_eq!(json["Properties"][own], "", "{own} reached the build");
     }
 
     /// The build carries the variables a build needs to start where the
@@ -882,6 +996,47 @@ mod tests {
         for name in ["DOTNET_ROOT", "DOTNET_CLI_HOME", "HOME", "PATH", "TMPDIR"] {
             assert!(BUILD_ENVIRONMENT_NAMES.contains(&name), "{name}");
         }
+    }
+
+    /// Whether this process has the variable `name`.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "a test checks its own precondition on the process it runs in"
+    )]
+    fn inherited_has(name: &str) -> bool {
+        std::env::var_os(name).is_some()
+    }
+
+    /// The probe answers one absolute path under this process's environment,
+    /// and each environment its own answer, from its own host, however the
+    /// probes interleave: two fake hosts, each answering a path of its own,
+    /// and the first asked again after the second.
+    #[test]
+    fn the_probe_answers_per_environment() {
+        let real = super::msbuild_user_extensions_path(&inherited());
+        assert!(std::path::Path::new(real).is_absolute(), "{real:?}");
+        let fake = |answer: &str| {
+            let root = tempfile::TempDir::new().unwrap();
+            let host = root.path().join("dotnet");
+            std::fs::write(&host, format!("#!/bin/sh\necho {answer}\n")).unwrap();
+            #[cfg(unix)]
+            std::fs::set_permissions(&host, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+                .unwrap();
+            let environment = BuildEnvironment::inherited([(
+                "DOTNET_ROOT".to_string(),
+                root.path().display().to_string(),
+            )]);
+            (root, environment)
+        };
+        let (_a, first) = fake("/probe/first");
+        let (_b, second) = fake("/probe/second");
+        assert_eq!(super::msbuild_user_extensions_path(&first), "/probe/first");
+        assert_eq!(
+            super::msbuild_user_extensions_path(&second),
+            "/probe/second"
+        );
+        assert_eq!(super::msbuild_user_extensions_path(&first), "/probe/first");
+        assert_eq!(super::msbuild_user_extensions_path(&inherited()), real);
     }
 
     /// The host is launched by an absolute path, never looked up: an unset,
@@ -895,8 +1050,9 @@ mod tests {
         for root in [None, Some(""), Some("dotnet"), Some("./share/dotnet")] {
             assert!(host_in(root).is_err(), "{root:?}");
         }
-        assert!(dotnet_host().is_absolute());
+        assert!(dotnet_host(&inherited()).is_absolute());
     }
+
     use std::collections::BTreeSet;
 
     #[test]
@@ -990,12 +1146,20 @@ mod tests {
             })
             .collect();
         let inputs = BuildInputs::new();
+        let environment = inherited();
         let answers: Vec<_> = std::thread::scope(|scope| {
             let handles: Vec<_> = projects
                 .iter()
                 .map(|project| {
                     let inputs = &inputs;
-                    scope.spawn(move || fsc_args(&FscArgsRequest { project, inputs }))
+                    let environment = &environment;
+                    scope.spawn(move || {
+                        fsc_args(&FscArgsRequest {
+                            project,
+                            environment,
+                            inputs,
+                        })
+                    })
                 })
                 .collect();
             handles

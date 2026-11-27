@@ -51,8 +51,15 @@ use borzoi_msbuild::test_support::unescape;
 use borzoi_oracle_harness::BoundedCommand;
 use borzoi_oracle_harness::fsc_args::assembly_name_of;
 use borzoi_oracle_harness::msbuild_oracle::{
-    BuildInputs, FscArgsDecline, FscArgsRequest, FscBuild, fsc_args, msbuild_command,
+    BuildEnvironment, BuildInputs, FscArgsDecline, FscArgsRequest, FscBuild, fsc_args,
+    msbuild_command,
 };
+
+/// The environment every build here inherits: this process's, read once.
+fn inherited_environment() -> &'static BuildEnvironment {
+    static ENVIRONMENT: std::sync::OnceLock<BuildEnvironment> = std::sync::OnceLock::new();
+    ENVIRONMENT.get_or_init(|| BuildEnvironment::inherited(std::env::vars()))
+}
 
 /// What `fsc_args` must report for a fixture.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -330,7 +337,7 @@ fn fixtures() -> Vec<Fixture> {
 fn reported_arguments(project: &Path, globals: &[(&str, &str)]) -> Vec<String> {
     let dir = project.parent().unwrap();
     let out_file = dir.join("fsc-args-items.json");
-    let mut cmd = msbuild_command(dir, &BuildInputs::new());
+    let mut cmd = msbuild_command(dir, inherited_environment(), &BuildInputs::new());
     cmd.args([
         "-nodeReuse:false",
         "-restore",
@@ -370,7 +377,7 @@ fn reported_arguments(project: &Path, globals: &[(&str, &str)]) -> Vec<String> {
 
 /// A plain build of `project` in place, under `inputs`, which must succeed.
 fn plain_build(project: &Path, inputs: &BuildInputs) {
-    let mut cmd = msbuild_command(project.parent().unwrap(), inputs);
+    let mut cmd = msbuild_command(project.parent().unwrap(), inherited_environment(), inputs);
     cmd.args(["-nodeReuse:false", "-restore", "-t:Build"]);
     for (name, value) in inputs.globals() {
         cmd.arg(format!("-p:{name}={value}"));
@@ -548,6 +555,7 @@ fn fsc_args_reads_what_real_builds_hand_fsc() {
         }
         let request = FscArgsRequest {
             project: &project,
+            environment: inherited_environment(),
             inputs: &inputs,
         };
         match (fixture.expect, fsc_args(&request)) {

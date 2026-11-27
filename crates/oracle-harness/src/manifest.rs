@@ -322,6 +322,10 @@ impl ManifestDiff {
 }
 
 /// Whether [`UPDATE_ENV`] asks for manifests to be rewritten rather than compared.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the developer's request to rewrite manifests; not a build's environment"
+)]
 pub fn update_requested() -> bool {
     std::env::var_os(UPDATE_ENV).is_some_and(|v| !v.is_empty() && v != "0")
 }
