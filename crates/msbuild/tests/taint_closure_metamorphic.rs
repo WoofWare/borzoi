@@ -400,13 +400,26 @@ impl Fact {
         }
     }
 
-    /// Whether `claim` needs no world to commit it: only an incomplete list's
-    /// edges, held to every world that publishes a certain list, with nothing
-    /// to hold them to where none does (the worlds keep a gate the walk cannot
-    /// decide). A certain list, even an empty one, claims the build's whole
-    /// list and needs a world that commits one.
-    fn claim_is_vacuous(&self, _claim: &[String]) -> bool {
-        matches!(self, Fact::ProjectReferencesRetained)
+    /// Whether `claim` needs no world to commit it: only an incomplete list
+    /// that keeps no edge, which names nothing a world could lack. A certain
+    /// list, even an empty one, needs a world that commits one; an incomplete
+    /// list's edges need a world whose certain or incomplete list holds them
+    /// ([`Self::witnessed_by_retained`]).
+    fn claim_is_vacuous(&self, claim: &[String]) -> bool {
+        matches!(self, Fact::ProjectReferencesRetained) && claim.is_empty()
+    }
+
+    /// Whether a world's incomplete list witnesses an incomplete `claim`: its
+    /// edges are the build's, so a claim it holds, in order, is the build's
+    /// too.
+    fn witnessed_by_retained(&self, claim: &[String], retained: &[String]) -> bool {
+        match self {
+            Fact::ProjectReferencesRetained => {
+                let mut rest = retained.iter();
+                claim.iter().all(|edge| rest.any(|r| r == edge))
+            }
+            _ => false,
+        }
     }
 
     /// Whether a world's incomplete list contradicts a certain `claim`: every
@@ -540,7 +553,14 @@ fn check(
                         )
                     })
             });
-        let nobody_commits = world_committed.is_empty() && !fact.claim_is_vacuous(claim);
+        let witnessed_by_retained = worlds.iter().any(|(_, facts)| {
+            facts
+                .get(&Fact::ProjectReferencesRetained)
+                .and_then(Option::as_ref)
+                .is_some_and(|kept| fact.witnessed_by_retained(claim, kept))
+        });
+        let nobody_commits =
+            world_committed.is_empty() && !witnessed_by_retained && !fact.claim_is_vacuous(claim);
         if disagreeing.is_none() && !nobody_commits {
             if world_committed.len() < values.len() {
                 census.world_declined += 1;

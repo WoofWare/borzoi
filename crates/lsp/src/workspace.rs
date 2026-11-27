@@ -2763,6 +2763,23 @@ fn resolve_node_uncached(
             // too: only a contribution present under every TFM is invariant,
             // so a target that any branch demotes to OutputOnly (e.g. a
             // TFM-conditioned `ExcludeAssets`) survives as OutputOnly.
+            // What any TFM takes, by target, the transparent kind winning: the
+            // intersection's shortfall against it is a reference the real build
+            // may take that the env lacks.
+            let mut taken_by_some: HashMap<PathBuf, EdgeKind> = HashMap::new();
+            let mut note_taken = |target: &PathBuf, kind: EdgeKind| {
+                taken_by_some
+                    .entry(target.clone())
+                    .and_modify(|k| {
+                        if kind == EdgeKind::Full {
+                            *k = EdgeKind::Full;
+                        }
+                    })
+                    .or_insert(kind);
+            };
+            for e in &outer_edges {
+                note_taken(&e.target, e.kind);
+            }
             let mut surviving = outer_edges;
             // Any branch whose list was suppressed leaves the intersection
             // short of edges the real build may take, whichever TFM it picks.
@@ -2802,6 +2819,9 @@ fn resolve_node_uncached(
                         })
                         .or_insert(e.kind);
                 }
+                for (target, kind) in &branch_kinds {
+                    note_taken(target, *kind);
+                }
                 surviving.retain_mut(|e| match branch_kinds.get(&e.target) {
                     None => false,
                     Some(EdgeKind::Full) => true,
@@ -2818,12 +2838,21 @@ fn resolve_node_uncached(
                 // retain below is a no-op on an empty vector, so the only cost
                 // is the remaining evaluations.
             }
+            // Each evaluation's list may be exact while the intersection is
+            // not the build's: whatever some TFM takes beyond it is missing
+            // from the env under that TFM (#1181).
+            let intersection_short = taken_by_some.iter().any(|(target, kind)| {
+                surviving
+                    .iter()
+                    .find(|e| e.target == *target)
+                    .is_none_or(|e| e.kind != *kind)
+            });
             NodeResult::Resolved {
                 edges: surviving,
                 tfm: NodeTfm::Unresolved,
                 output_name: None,
                 references_uncertain: any_suppressed,
-                references_incomplete: any_incomplete && !any_suppressed,
+                references_incomplete: (any_incomplete || intersection_short) && !any_suppressed,
             }
         }
     }
@@ -5658,6 +5687,73 @@ mod tests {
                 lexically_normalize(&d),
             ],
         );
+    }
+
+    /// #1181: the TFM-invariant intersection keeps only what every TFM takes,
+    /// so whatever any one TFM takes beyond it — a reference only some TFMs
+    /// make, or one another TFM blocks or demotes to `OutputOnly` — is a
+    /// reference the real build may take that the env lacks: the node's list
+    /// is incomplete, though each evaluation's list is exact. Where every TFM
+    /// takes the same edges, nothing is lost.
+    #[test]
+    fn an_unseeded_intersection_that_drops_an_edge_is_incomplete() {
+        let cases = [
+            (
+                "one TFM's extra reference",
+                r#"<ProjectReference Include="../C/C.fsproj" />
+                   <ProjectReference Include="../D/D.fsproj" Condition="'$(TargetFramework)' == 'net10.0'" />"#,
+                true,
+            ),
+            (
+                "a different reference under each TFM",
+                r#"<ProjectReference Include="../C/C.fsproj" Condition="'$(TargetFramework)' == 'net8.0'" />
+                   <ProjectReference Include="../D/D.fsproj" Condition="'$(TargetFramework)' == 'net10.0'" />"#,
+                true,
+            ),
+            (
+                "a reference one TFM blocks",
+                r#"<ProjectReference Include="../C/C.fsproj" ExcludeAssets="compile" Condition="'$(TargetFramework)' == 'net8.0'" />
+                   <ProjectReference Include="../C/C.fsproj" Condition="'$(TargetFramework)' == 'net10.0'" />"#,
+                true,
+            ),
+            (
+                "the same references under every TFM",
+                r#"<ProjectReference Include="../C/C.fsproj" />"#,
+                false,
+            ),
+        ];
+        for (label, references, incomplete) in cases {
+            let tmp = TempDir::new().unwrap();
+            let a = tmp.path().join("A/A.fsproj");
+            let b = tmp.path().join("B/B.fsproj");
+            write_file(&a, &fsproj_with_refs(&["../B/B.fsproj"]));
+            write_file(
+                &b,
+                &format!(
+                    r#"<Project>
+                      <PropertyGroup>
+                        <TargetFrameworks>net10.0;net8.0</TargetFrameworks>
+                      </PropertyGroup>
+                      <ItemGroup>{references}</ItemGroup>
+                    </Project>"#
+                ),
+            );
+            write_file(&tmp.path().join("C/C.fsproj"), &fsproj_with_refs(&[]));
+            write_file(&tmp.path().join("D/D.fsproj"), &fsproj_with_refs(&[]));
+            let ws = Workspace::default();
+            let graph = ws.project_graph_with_producer_tfms(
+                &a,
+                &BTreeMap::new(),
+                &borzoi_msbuild::observed::Observer::new(),
+            );
+            let node = graph
+                .nodes
+                .iter()
+                .find(|n| n.path == lexically_normalize(&b))
+                .unwrap_or_else(|| panic!("{label}: B is a node"));
+            assert!(!node.references_uncertain, "{label}");
+            assert_eq!(node.references_incomplete, incomplete, "{label}");
+        }
     }
 
     /// `<ProjectReference>` metadata the P2P protocol treats as significant
