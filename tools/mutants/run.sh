@@ -96,6 +96,12 @@ command -v container >/dev/null || {
   echo "run.sh: Apple's \`container\` is not on PATH" >&2
   exit 1
 }
+# The deadline needs GNU `timeout`, which macOS does not ship (coreutils, or
+# `nix shell nixpkgs#coreutils`, provides it).
+command -v timeout >/dev/null || {
+  echo "run.sh: \`timeout\` (GNU coreutils) is not on PATH" >&2
+  exit 1
+}
 
 if [[ -n "$(git -C "$repo" status --porcelain --untracked-files=no)" ]]; then
   echo "run.sh: the tree has uncommitted changes to tracked files; commit them first," >&2

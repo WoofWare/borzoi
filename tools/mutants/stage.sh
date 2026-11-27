@@ -15,7 +15,8 @@
 mutants_stage() {
   local work="$1" src="$2" dest="$3" limit="$4" mode="${5:-}" real
   [[ -e "$src" || -L "$src" ]] || return 0
-  if ! real="$(realpath -e -- "$src" 2>/dev/null)" || [[ "$real" != "$work"/* ]]; then
+  # `realpath` and `wc` as both GNU and BSD spell them: SRC is absolute.
+  if ! real="$(realpath "$src" 2>/dev/null)" || [[ "$real" != "$work"/* ]]; then
     echo "stage.sh: $src leads outside $work; not staged" >&2
     return 0
   fi
@@ -23,7 +24,7 @@ mutants_stage() {
     echo "stage.sh: $src is not a regular file; not staged" >&2
     return 0
   fi
-  if [[ $mode == whole && "$(stat -c %s -- "$real")" -gt $limit ]]; then
+  if [[ $mode == whole && "$(wc -c <"$real")" -gt $limit ]]; then
     echo "stage.sh: $src is over $limit bytes; not staged" >&2
     return 0
   fi
