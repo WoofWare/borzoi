@@ -66,25 +66,19 @@ fn decline_spanning_spec(node: Node<'_, '_>, spec: &str, state: &mut State<'_>) 
     );
 }
 
-/// The byte range of the first item expression in `text` at or after `from`:
-/// from its `@(` through the `)` that closes it, counting parentheses outside
-/// `'…'` quotes (a quoted transform or separator may hold any character), or
-/// to the end of `text` when nothing closes it. `None` when `text` holds no
-/// `@(` at or after `from`.
+/// The byte range of the first item expression in `text` at or after `from`,
+/// as MSBuild's `SemiColonTokenizer` reads one: from its `@(` through the
+/// first `)` outside `'…'` quotes, or to the end of `text` when no such `)`
+/// follows. The tokenizer counts no nesting and toggles on `'` alone, so a
+/// `(` or `"` inside the expression opens nothing. `None` when `text` holds
+/// no `@(` at or after `from`.
 pub(crate) fn item_expression_span(text: &str, from: usize) -> Option<std::ops::Range<usize>> {
     let start = from + text.get(from..)?.find("@(")?;
-    let mut depth = 0usize;
     let mut quoted = false;
-    for (offset, c) in text[start + 1..].char_indices() {
+    for (offset, c) in text[start + 2..].char_indices() {
         match c {
             '\'' => quoted = !quoted,
-            '(' if !quoted => depth += 1,
-            ')' if !quoted => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(start..start + 1 + offset + 1);
-                }
-            }
+            ')' if !quoted => return Some(start..start + 2 + offset + 1),
             _ => {}
         }
     }
@@ -5005,4 +4999,85 @@ fn finalize_metadata_value(
         return None;
     }
     Some(value.unescape())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// MSBuild's `SemiColonTokenizer` (`src/Build/Evaluation/SemiColonTokenizer.cs`),
+    /// ported as the reference: a `;` separates only outside an item list,
+    /// which opens at `@(` and closes at the first `)` outside `'…'` quotes;
+    /// each segment is trimmed, and an empty one dropped.
+    fn reference_segments(text: &str) -> Vec<&str> {
+        let mut segments = Vec::new();
+        let mut start = 0;
+        let mut inside_item_list = false;
+        let mut quoted = false;
+        let bytes = text.as_bytes();
+        for (index, &byte) in bytes.iter().enumerate() {
+            match byte {
+                b';' if !inside_item_list => {
+                    segments.push(&text[start..index]);
+                    start = index + 1;
+                    quoted = false;
+                }
+                b'@' if bytes.get(index + 1) == Some(&b'(') => inside_item_list = true,
+                b')' if inside_item_list && !quoted => inside_item_list = false,
+                b'\'' if inside_item_list => quoted = !quoted,
+                _ => {}
+            }
+        }
+        segments.push(&text[start..]);
+        segments
+            .into_iter()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect()
+    }
+
+    /// Every string up to six characters over the characters the tokenizer
+    /// reads (and a letter and a space): where [`spec_fragments`] splits a
+    /// spec, it splits it as MSBuild does, and it refuses exactly the specs
+    /// whose MSBuild segments hold a `;`.
+    #[test]
+    fn spec_fragments_split_as_msbuild_splits_or_refuse() {
+        const ALPHABET: [char; 8] = ['@', '(', ')', '\'', '"', ';', 'a', ' '];
+        let mut checked = 0usize;
+        let mut refused = 0usize;
+        let mut text = String::new();
+        // Depth-first over every string of length 0..=6.
+        fn walk(text: &mut String, depth: usize, checked: &mut usize, refused: &mut usize) {
+            let expected = reference_segments(text);
+            let spanning = expected.iter().any(|segment| segment.contains(';'));
+            match spec_fragments(&Escaped::from_xml(text.clone())) {
+                Ok(fragments) => {
+                    let ours: Vec<&str> = fragments.collect();
+                    assert_eq!(ours, expected, "{text:?}");
+                }
+                Err(SpansSeparator) => {
+                    *refused += 1;
+                    assert!(
+                        spanning,
+                        "refused {text:?}, which MSBuild splits as {expected:?}"
+                    );
+                }
+            }
+            *checked += 1;
+            if depth == 6 {
+                return;
+            }
+            for c in ALPHABET {
+                text.push(c);
+                walk(text, depth + 1, checked, refused);
+                text.pop();
+            }
+        }
+        walk(&mut text, 0, &mut checked, &mut refused);
+        assert_eq!(
+            checked,
+            (0..=6).map(|n| ALPHABET.len().pow(n)).sum::<usize>()
+        );
+        assert!(refused > 0, "the alphabet reaches the refusal");
+    }
 }

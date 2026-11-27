@@ -64,7 +64,7 @@ enum Route {
 }
 
 /// The `Include` for each form, over a `Helper` list of one item `A.<ext>`.
-fn forms(ext: &str) -> [(&'static str, String); 6] {
+fn forms(ext: &str) -> [(&'static str, String); 8] {
     [
         ("separator", format!("@(Helper, ';Wrong.{ext};')")),
         ("transform", format!("@(Helper->'%(Identity);Wrong.{ext}')")),
@@ -75,6 +75,18 @@ fn forms(ext: &str) -> [(&'static str, String); 6] {
         (
             "function transform",
             format!("@(Helper->Replace('A', 'A.{ext};Wrong'))"),
+        ),
+        // MSBuild's tokenizer quotes with `'` only: a `;` inside `"…"`
+        // before the expression's first unquoted `)` is still inside it.
+        (
+            "double-quoted separator",
+            format!("@(Helper->Replace(\"A\", \"A.{ext};Wrong\"))"),
+        ),
+        // A `(` inside `"…"` opens nothing: the expression ends at its first
+        // unquoted `)`, and the `;` after it separates a literal.
+        (
+            "double-quoted parenthesis then a literal",
+            format!("@(Helper->Replace(\"(\", \"_\"));B.{ext}"),
         ),
         ("plain", "@(Helper)".to_string()),
         ("literal", format!("A.{ext};B.{ext}")),
@@ -166,10 +178,17 @@ fn an_item_expression_holding_a_separator_makes_no_item_msbuild_lacks() {
                 } else {
                     ""
                 };
+                // An `Include` holding `"` is written in `'…'`, which none
+                // of those forms holds.
+                let attribute = if include.contains('"') {
+                    format!("'{include}'")
+                } else {
+                    format!("\"{include}\"")
+                };
                 let items = match route {
-                    Route::Direct => format!("<{element} Include=\"{include}\"{version} />"),
+                    Route::Direct => format!("<{element} Include={attribute}{version} />"),
                     Route::ThroughHelper => format!(
-                        "<H2 Include=\"{include}\" /><{element} Include=\"@(H2)\"{version} />"
+                        "<H2 Include={attribute} /><{element} Include=\"@(H2)\"{version} />"
                     ),
                 };
                 let xml = format!(
@@ -211,7 +230,7 @@ fn an_item_expression_holding_a_separator_makes_no_item_msbuild_lacks() {
             }
         }
     }
-    assert_eq!(points, 3 * 2 * 6 * 2);
+    assert_eq!(points, 3 * 2 * 8 * 2);
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
 
@@ -273,4 +292,43 @@ fn literal_fragments_beside_a_spanning_expression_are_declined_with_it() {
     .expect("a well-formed document");
     let (_, ours) = ours(Kind::ProjectReference, &parsed);
     assert!(ours.is_empty(), "the whole spec is declined: {ours:?}");
+}
+
+/// An item expression ends, as MSBuild's tokenizer ends it, at its first `)`
+/// outside `'…'` quotes: a `(` inside a double-quoted argument opens nothing,
+/// so the `;` after the expression separates a literal MSBuild makes, and the
+/// walk keeps it.
+#[test]
+fn a_literal_after_an_expression_with_a_double_quoted_parenthesis_is_kept() {
+    let dir = tempfile::TempDir::new().expect("a temporary directory");
+    let root = borzoi_msbuild::observed::host_fs::canonicalize(dir.path()).expect("canonicalize");
+    let path = root.join("Demo.fsproj");
+    let xml = "<Project><ItemGroup><Helper Include=\"A(B.fsproj\" />\
+               <ProjectReference Include='@(Helper->Replace(\"(\", \"_\"));Explicit.fsproj' />\
+               </ItemGroup></Project>";
+    std::fs::write(&path, xml).expect("the project");
+    let theirs = theirs(&mut Oracle::spawn(), Kind::ProjectReference, xml, &path);
+    let explicit = normalised(&root.join("Explicit.fsproj"));
+    assert!(theirs.contains(&explicit), "MSBuild makes it: {theirs:?}");
+    let resolver: &GlobResolver<'_> = &glob_resolver::resolve;
+    for with_resolver in [false, true] {
+        let parsed = parse_fsproj_with_imports(
+            &borzoi_msbuild::ProjectFile::buffer(&path, xml).expect("a full path"),
+            &HashMap::new(),
+            &common::oracle_environment(),
+            None,
+            with_resolver.then_some(resolver),
+        )
+        .expect("a well-formed document");
+        let (committed, ours) = ours(Kind::ProjectReference, &parsed);
+        assert!(
+            ours.contains(&explicit),
+            "resolver: {with_resolver}: {ours:?} {:#?}",
+            parsed.diagnostics
+        );
+        assert!(
+            !committed || ours.iter().all(|p| theirs.contains(p)),
+            "resolver: {with_resolver}: {ours:?} {theirs:?}"
+        );
+    }
 }
