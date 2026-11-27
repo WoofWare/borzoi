@@ -3113,13 +3113,15 @@ struct ReferenceSet {
 impl ReferenceSet {
     /// The resolution declined before it reached the project-reference edges —
     /// an untrusted TFM verdict, no dotnet root, no assets file, a failed
-    /// resolve. The env is empty, so it makes no assembly reading at all and
-    /// there is nothing for a missing reference to be wrong about; claiming
-    /// edges here would only invent a degradation nobody can observe.
-    fn declined(retryable: bool) -> Self {
+    /// resolve. The env is empty. The edges it did not reach claim nothing;
+    /// what the graph walk already knows its lists lack
+    /// ([`graph_doubt_edges`]) it still says, so the empty env does not claim
+    /// completeness over a reference the graph knows is missing (#1181).
+    /// Whether a declined env is complete at all is #1190.
+    fn declined(retryable: bool, ref_targets: &GraphRefTargets) -> Self {
         ReferenceSet {
             dlls: Vec::new(),
-            edges: Vec::new(),
+            edges: graph_doubt_edges(ref_targets).collect(),
             retryable,
             unrecorded: Vec::new(),
             package_folders: Vec::new(),
@@ -3313,14 +3315,14 @@ fn resolve_reference_dlls(
             project = %project.display(),
             "entry TFM provenance is untrusted; assembly env defaults to empty"
         );
-        return ReferenceSet::declined(false);
+        return ReferenceSet::declined(false, ref_targets);
     }
     let Some(dotnet_root) = dotnet_root else {
         tracing::info!(
             project = %project.display(),
             "no dotnet_root; assembly env defaults to empty"
         );
-        return ReferenceSet::declined(false);
+        return ReferenceSet::declined(false, ref_targets);
     };
     let assets_path = match project.parent() {
         Some(dir) => dir.join("obj").join("project.assets.json"),
@@ -3329,7 +3331,7 @@ fn resolve_reference_dlls(
                 project = %project.display(),
                 "project path has no parent; assembly env defaults to empty"
             );
-            return ReferenceSet::declined(false);
+            return ReferenceSet::declined(false, ref_targets);
         }
     };
     // Assets file present → read restore output (the authoritative path).
@@ -3371,7 +3373,7 @@ fn resolve_reference_dlls(
                     error = %err,
                     "resolve_assemblies_root_only failed; assembly env defaults to empty"
                 );
-                return ReferenceSet::declined(false);
+                return ReferenceSet::declined(false, ref_targets);
             }
         }
     } else {
@@ -3405,7 +3407,7 @@ fn resolve_reference_dlls(
                 );
                 return ReferenceSet {
                     unrecorded,
-                    ..ReferenceSet::declined(false)
+                    ..ReferenceSet::declined(false, ref_targets)
                 };
             }
             RestoreOutcome::TransientFailure => {
@@ -3418,7 +3420,7 @@ fn resolve_reference_dlls(
                 );
                 return ReferenceSet {
                     unrecorded,
-                    ..ReferenceSet::declined(true)
+                    ..ReferenceSet::declined(true, ref_targets)
                 };
             }
         }
@@ -3480,35 +3482,10 @@ fn resolve_reference_dlls(
         .chain(ref_dlls)
         .chain(csharp_ref_dlls)
         .collect();
-    // One outcome per node whose references were suppressed. There is nothing
-    // to look for — the edges are gone — so this is a pure incompleteness
-    // claim, and `transient: false` because only an edit to that project can
-    // change it.
-    let suppressed_edges: Vec<ReferenceEdge> = ref_targets
-        .suppressed
-        .iter()
-        .map(|project| ReferenceEdge {
-            project: project.clone(),
-            outcome: ReferenceOutcome::Unread {
-                why: "the project's own reference list could not be trusted",
-                transient: false,
-            },
-        })
-        .collect();
-    // One more per node whose list may lack references the build has: its
-    // present edges were counted above, the absent ones cannot be.
-    let incomplete_edges = ref_targets.incomplete.iter().map(|project| ReferenceEdge {
-        project: project.clone(),
-        outcome: ReferenceOutcome::Unread {
-            why: "the project's own reference list may lack references the build has",
-            transient: false,
-        },
-    });
     let edges: Vec<ReferenceEdge> = fsharp_edges
         .into_iter()
         .chain(csharp_edges)
-        .chain(suppressed_edges)
-        .chain(incomplete_edges)
+        .chain(graph_doubt_edges(ref_targets))
         .collect();
     // Conservation: every edge the graph walk *retained* is accounted for, so a
     // reference that contributed nothing is recorded as missing rather than
@@ -3547,6 +3524,32 @@ fn resolve_reference_dlls(
         retryable: set.retryable || set.has_transient_failure(),
         ..set
     }
+}
+
+/// What the graph walk already knows its nodes' reference lists lack, as one
+/// [`ReferenceOutcome::Unread`] per node: one whose references were
+/// suppressed ([`GraphRefTargets::suppressed`]), and one whose list may lack
+/// references the build has ([`GraphRefTargets::incomplete`]). There is
+/// nothing to look for — the edges are gone, or were never found — so each is
+/// a pure incompleteness claim, and `transient: false` because only an edit to
+/// that project can change it. It holds whether or not the resolution reached
+/// the edges the walk kept.
+fn graph_doubt_edges(ref_targets: &GraphRefTargets) -> impl Iterator<Item = ReferenceEdge> + '_ {
+    let suppressed = ref_targets.suppressed.iter().map(|project| ReferenceEdge {
+        project: project.clone(),
+        outcome: ReferenceOutcome::Unread {
+            why: "the project's own reference list could not be trusted",
+            transient: false,
+        },
+    });
+    let incomplete = ref_targets.incomplete.iter().map(|project| ReferenceEdge {
+        project: project.clone(),
+        outcome: ReferenceOutcome::Unread {
+            why: "the project's own reference list may lack references the build has",
+            transient: false,
+        },
+    });
+    suppressed.chain(incomplete)
 }
 
 /// Whether the env build may read C# `<ProjectReference>`s, and the sidecar it
@@ -7622,9 +7625,8 @@ mod tests {
         let inputs = EnvInputs::of(&unread);
         assert!(inputs.not_built && inputs.incomplete, "{inputs:?}");
 
-        // A declined resolution claims neither: the env is empty, so it makes no
-        // assembly reading for a missing reference to be wrong about.
-        let declined = ReferenceSet::declined(false);
+        // A declined resolution claims neither of the edges it did not reach.
+        let declined = ReferenceSet::declined(false, &GraphRefTargets::default());
         assert_eq!(declined.unread().count(), 0);
         assert_eq!(declined.not_built().count(), 0);
         assert!(!EnvInputs::of(&declined).not_built);
@@ -7998,6 +8000,52 @@ mod tests {
             env.identities_incomplete(),
             "MSBuild keeps `Other`, the walk dropped it behind a gate it could not decide, and \
              the env must not claim to be complete without it"
+        );
+    }
+
+    /// #1181: the same project unrestored, with on-demand restore off, so the
+    /// reference resolution declines and the env is empty. The graph still
+    /// knows the list may lack `Other`, and the empty env must not claim
+    /// completeness over it. (Whether a declined env is complete at all is
+    /// #1190.)
+    #[test]
+    fn a_declined_resolution_keeps_the_graphs_incompleteness() {
+        let dll_bytes = minilibfs_dll_bytes();
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let sibling_dir = root.join("MiniLibFs");
+        std::fs::create_dir_all(&sibling_dir).unwrap();
+        built_fsproj(&sibling_dir, "MiniLibFs", "Release", "net10.0", &dll_bytes);
+        let proj = root.join("App.fsproj");
+        write(
+            &proj,
+            r#"<Project>
+              <PropertyGroup><Gate>$([System.String]::Copy('D'))</Gate></PropertyGroup>
+              <ItemGroup>
+                <ProjectReference Include="MiniLibFs/MiniLibFs.fsproj" />
+              </ItemGroup>
+              <ItemGroup Condition="'$(Gate)' == 'D'">
+                <ProjectReference Include="Other/Other.fsproj" />
+              </ItemGroup>
+            </Project>"#,
+        );
+        let dotnet_root = root.join("dotnet");
+        std::fs::create_dir_all(&dotnet_root).unwrap();
+        assert!(!root.join("obj").join("project.assets.json").exists());
+        let mut sema = SemanticState::new();
+        let env = sema.assembly_env_for_project(
+            &proj,
+            Some(&dotnet_root),
+            &ServedTfm::NoneDeclared,
+            &Workspace::default(),
+        );
+        assert!(
+            !env.has_namespace(&["MiniLibFs".to_string()]),
+            "the resolution declined, so nothing folds"
+        );
+        assert!(
+            env.identities_incomplete(),
+            "the graph knows the list may lack `Other`"
         );
     }
 

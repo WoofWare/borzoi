@@ -400,17 +400,24 @@ impl Fact {
         }
     }
 
-    /// Whether `claim` needs no world to commit it. A reference list that
-    /// holds no edge names nothing a world could lack, and an incomplete
-    /// list's edges are held to every world that publishes a certain list,
-    /// with nothing to hold them to where none does (the worlds keep a gate
-    /// the walk cannot decide). A certain empty list is still held to every
-    /// world that commits one, by equality ([`Self::claim_holds_in`]). Every
-    /// other claim needs a world that commits it.
-    fn claim_is_vacuous(&self, claim: &[String]) -> bool {
+    /// Whether `claim` needs no world to commit it: only an incomplete list's
+    /// edges, held to every world that publishes a certain list, with nothing
+    /// to hold them to where none does (the worlds keep a gate the walk cannot
+    /// decide). A certain list, even an empty one, claims the build's whole
+    /// list and needs a world that commits one.
+    fn claim_is_vacuous(&self, _claim: &[String]) -> bool {
+        matches!(self, Fact::ProjectReferencesRetained)
+    }
+
+    /// Whether a world's incomplete list contradicts a certain `claim`: every
+    /// edge it keeps is the build's, so a certain list must hold each, in
+    /// order.
+    fn contradicted_by_retained(&self, claim: &[String], retained: &[String]) -> bool {
         match self {
-            Fact::ProjectReferences => claim.is_empty(),
-            Fact::ProjectReferencesRetained => true,
+            Fact::ProjectReferences => {
+                let mut rest = claim.iter();
+                !retained.iter().all(|edge| rest.any(|c| c == edge))
+            }
             _ => false,
         }
     }
@@ -516,7 +523,23 @@ fn check(
                     .as_ref()
                     .is_some_and(|world| !fact.claim_holds_in(claim, world))
             })
-            .map(|(world, facts)| (world.clone(), facts[&graded].clone()));
+            .map(|(world, facts)| (world.clone(), facts[&graded].clone()))
+            .or_else(|| {
+                worlds
+                    .iter()
+                    .find(|(_, facts)| {
+                        facts
+                            .get(&Fact::ProjectReferencesRetained)
+                            .and_then(Option::as_ref)
+                            .is_some_and(|kept| fact.contradicted_by_retained(claim, kept))
+                    })
+                    .map(|(world, facts)| {
+                        (
+                            world.clone(),
+                            facts[&Fact::ProjectReferencesRetained].clone(),
+                        )
+                    })
+            });
         let nobody_commits = world_committed.is_empty() && !fact.claim_is_vacuous(claim);
         if disagreeing.is_none() && !nobody_commits {
             if world_committed.len() < values.len() {
