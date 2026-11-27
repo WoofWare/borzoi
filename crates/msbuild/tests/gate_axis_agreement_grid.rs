@@ -137,7 +137,7 @@ fn document(axis: Axis, site: Site, gate: Gate, truth: bool) -> String {
     format!("<Project>{PROPERTIES}{body}</Project>")
 }
 
-/// What the walk publishes for `axis`: the file names of its items or the
+/// What the walk publishes for `axis`: the full paths of its items or the
 /// defines, when it commits to them; `None` when it doubts them. Beside it,
 /// for the references, the claim the list makes and the edges it holds,
 /// which an incomplete list still claims are MSBuild's.
@@ -155,7 +155,7 @@ fn ours(
     )
     .expect("a well-formed document");
     let names = |items: &[borzoi_msbuild::ResolvedItem]| -> Vec<String> {
-        items.iter().map(|item| file_name(&item.include)).collect()
+        items.iter().map(|item| full_path(&item.include)).collect()
     };
     let claim = common::reference_claim(&parsed);
     let held = names(&parsed.project_references);
@@ -167,11 +167,20 @@ fn ours(
     (committed, claim, held)
 }
 
-fn file_name(path: &Path) -> String {
-    path.file_name()
-        .expect("an item names a file")
-        .to_string_lossy()
-        .into_owned()
+/// A path as the grid compares it: lexically normalised, so a committed item
+/// is held to MSBuild's `FullPath` whole, not by its file name alone.
+fn full_path(path: &Path) -> String {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    out.to_string_lossy().into_owned()
 }
 
 /// MSBuild's answer for `axis`, in the same currency as [`ours`].
@@ -187,7 +196,7 @@ fn theirs(oracle: &mut Oracle, axis: Axis, xml: &str, path: &Path) -> Vec<String
                 .items(xml, path, item_type, &[])
                 .unwrap_or_else(|| panic!("MSBuild evaluates the cell:\n{xml}"))
                 .iter()
-                .map(|full| file_name(&PathBuf::from(full)))
+                .map(|full| full_path(&PathBuf::from(full)))
                 .collect()
         }
         Axis::Defines => {
@@ -211,8 +220,10 @@ fn theirs(oracle: &mut Oracle, axis: Axis, xml: &str, path: &Path) -> Vec<String
 #[test]
 fn every_axis_doubts_the_gates_the_others_doubt_and_commits_only_to_msbuilds_answer() {
     let dir = tempfile::TempDir::new().expect("a temporary directory");
-    let path = dir.path().join("Demo.fsproj");
-    std::fs::write(dir.path().join(PRESENT), "").expect("the probed file");
+    // Canonical, so the walk's paths and MSBuild's agree on the root.
+    let root = borzoi_msbuild::observed::host_fs::canonicalize(dir.path()).expect("canonicalize");
+    let path = root.join("Demo.fsproj");
+    std::fs::write(root.join(PRESENT), "").expect("the probed file");
     let mut oracle = Oracle::spawn();
     let mut failures = Vec::new();
     let mut points = 0;
