@@ -276,11 +276,19 @@ fn run(set: &str, out_dir: &Path, repo: &Path) -> Result<Result<(), String>, Str
         sources.insert(file, committed(file)?);
     }
     attach_sites(&mut outcomes.mutants, &sources);
-    let listed: Vec<String> = read_artifact(out_dir, "run/listed.txt")?
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(str::to_string)
-        .collect();
+    // At most one name per graded mutant: more already fails the comparison,
+    // and stopping there keeps a malformed list from costing the host more.
+    let listed_text = read_artifact(out_dir, "run/listed.txt")?;
+    let mut listed: Vec<String> = Vec::new();
+    for line in listed_text.lines().filter(|l| !l.is_empty()) {
+        if listed.len() == outcomes.mutants.len() {
+            return Err(format!(
+                "listed.txt names more mutants than the run graded ({})",
+                outcomes.mutants.len()
+            ));
+        }
+        listed.push(line.to_string());
+    }
     let declared = declared_sets(&sets_tsv);
     let manifest = manifest_items(set, &outcomes, &listed, &scope, &declared, &equivalents)
         .map_err(|e| e.to_string())?;

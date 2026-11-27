@@ -2,11 +2,13 @@
 #
 #   <set>  <manifest key>  <site>  <why no test can observe the mutation>
 #
-# The site fingerprints the source lines the mutation replaces
-# (`borzoi_oracle_harness::mutants::site_of`): a key's ` #<n>` passes to another
-# mutant when one with the same description is added before it, and an edit to
-# the code the argument covers may make the mutation observable, so either
-# fails the row until it is reviewed. `mutants-manifest` prints the site a
+# The site fingerprints the whole function the mutation sits in, and where in
+# it the mutation starts (`borzoi_oracle_harness::mutants::site_of`): a key's
+# ` #<n>` passes to another mutant when one with the same description is added
+# before it, and an edit to the function, its signature included, may make the
+# mutation observable, so either fails the row until it is reviewed. An
+# argument that leans on code outside the function (a type's definition, a
+# caller) must say so, and is the reviewer's to re-check when that moves. `mutants-manifest` prints the site a
 # row's key has now, so a new row can start from a placeholder.
 #
 # The reason is an argument that the mutated program behaves identically on

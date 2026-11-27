@@ -22,10 +22,11 @@
 //! missed mutant listed in `tools/mutants/equivalent.tsv` is
 //! `equivalent: <reason>` instead: a mutation no test can observe, with the
 //! argument for why. A row names its mutant by key *and* by site, a
-//! fingerprint of the source lines the mutation replaces ([`site_of`]): a
-//! key's ` #<n>` moves to another mutant when one with the same description
-//! is added before it, and an edit to the code the argument covers may make
-//! the mutation observable; neither may leave the row standing. A row whose
+//! fingerprint of the whole function the mutation sits in and of where in it
+//! the mutation starts ([`site_of`]): a key's ` #<n>` moves to another mutant
+//! when one with the same description is added before it, and an edit to the
+//! function, its signature included, may make the mutation observable;
+//! neither may leave the row standing. A row whose
 //! key has another site now, whose mutant this run did not miss, or that names
 //! no mutant at all is stale and fails the run, printing the site the key has
 //! now.
@@ -82,15 +83,17 @@ pub struct Graded {
     pub file: String,
     /// Where the mutation starts: line, then column, both 1-based.
     pub start: (u32, u32),
-    /// The 1-based line the mutation ends on.
-    pub end_line: u32,
+    /// The 1-based lines, first and last, a site fingerprints: the function
+    /// the mutation sits in, as cargo-mutants reports it, or the mutation's
+    /// own lines when it reports none.
+    pub context: (u32, u32),
     /// cargo-mutants' description of the mutation, without the file and
     /// position (`replace f -> bool with true`).
     pub description: String,
     /// The verdict.
     pub verdict: Verdict,
-    /// The fingerprint of the lines the mutation replaces ([`site_of`]);
-    /// `None` until the caller reads them. Shared, as mutants of one span
+    /// The mutation's site ([`site_of`]); `None` until the caller reads the
+    /// source. Shared, as mutants that start at one place in one function
     /// have one site.
     pub site: Option<Arc<str>>,
 }
@@ -126,6 +129,13 @@ enum RawScenario {
 struct RawMutant {
     file: String,
     name: String,
+    span: RawSpan,
+    #[serde(default)]
+    function: Option<RawFunction>,
+}
+
+#[derive(Deserialize)]
+struct RawFunction {
     span: RawSpan,
 }
 
@@ -181,11 +191,21 @@ pub fn parse_outcomes(json: &str) -> Result<Outcomes, String> {
                         m.name
                     ));
                 }
+                let context = match &m.function {
+                    Some(f) => (f.span.start.line, f.span.end.line),
+                    None => (start.0, m.span.end.line),
+                };
+                if !(context.0 <= start.0 && m.span.end.line <= context.1) {
+                    return Err(format!(
+                        "outcomes.json: mutant {:?} is not inside its function",
+                        m.name
+                    ));
+                }
                 mutants.push(Graded {
                     description: description.to_string(),
                     file: m.file,
                     start,
-                    end_line: m.span.end.line,
+                    context,
                     verdict,
                     site: None,
                 });
@@ -198,14 +218,21 @@ pub fn parse_outcomes(json: &str) -> Result<Outcomes, String> {
     })
 }
 
-/// The site of a mutation spanning 1-based lines `start..=end` of `source`:
-/// `fnv1a64:` and the 64-bit FNV-1a hash of those lines' exact text, joined
-/// by line feeds, in hex. Whole lines, every character kept, so any edit to
-/// the code the mutation replaces moves the site. `None` when the span is not
-/// within `source`.
-pub fn site_of(source: &str, start: u32, end: u32) -> Option<String> {
-    let first = usize::try_from(start).ok()?.checked_sub(1)?;
-    let count = usize::try_from(end.checked_sub(start)?).ok()? + 1;
+/// The site of a mutation starting at 1-based `start` (line, column) inside
+/// the 1-based lines `context` of `source` (its function's):
+/// `fnv1a64:<hash>@<line>:<column>`, the 64-bit FNV-1a hash of the context
+/// lines' exact text, joined by line feeds, in hex, and where the mutation
+/// starts relative to the context's first line. Whole lines, every character
+/// kept, so any edit to the function, its signature included, moves the site;
+/// and two mutants in one function differ by position. `None` when the
+/// context is not within `source` or does not contain `start`.
+pub fn site_of(source: &str, context: (u32, u32), start: (u32, u32)) -> Option<String> {
+    let (first_line, last_line) = context;
+    if !(first_line <= start.0 && start.0 <= last_line) {
+        return None;
+    }
+    let first = usize::try_from(first_line).ok()?.checked_sub(1)?;
+    let count = usize::try_from(last_line.checked_sub(first_line)?).ok()? + 1;
     let lines: Vec<&str> = source.lines().skip(first).take(count).collect();
     if lines.len() != count {
         return None;
@@ -215,7 +242,11 @@ pub fn site_of(source: &str, start: u32, end: u32) -> Option<String> {
         hash ^= u64::from(byte);
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
-    Some(format!("fnv1a64:{hash:016x}"))
+    Some(format!(
+        "fnv1a64:{hash:016x}@{}:{}",
+        start.0 - first_line,
+        start.1
+    ))
 }
 
 /// The files whose sites `set`'s equivalence rows need: the file part of each
@@ -229,16 +260,17 @@ pub fn equivalence_files<'a>(set: &str, equivalents: &'a [Equivalent]) -> BTreeS
 }
 
 /// Gives each mutant in one of `sources`' files (path to text) its site, made
-/// once per span and shared; mutants in other files keep `None`.
+/// once per place and shared; mutants in other files keep `None`.
 pub fn attach_sites(mutants: &mut [Graded], sources: &BTreeMap<&str, String>) {
-    let mut sites: BTreeMap<(String, u32, u32), Option<Arc<str>>> = BTreeMap::new();
+    type Place = (String, (u32, u32), (u32, u32));
+    let mut sites: BTreeMap<Place, Option<Arc<str>>> = BTreeMap::new();
     for m in mutants {
         let Some(text) = sources.get(m.file.as_str()) else {
             continue;
         };
         let site = sites
-            .entry((m.file.clone(), m.start.0, m.end_line))
-            .or_insert_with(|| site_of(text, m.start.0, m.end_line).map(Arc::from));
+            .entry((m.file.clone(), m.context, m.start))
+            .or_insert_with(|| site_of(text, m.context, m.start).map(Arc::from));
         m.site = site.clone();
     }
 }
@@ -639,7 +671,7 @@ mod tests {
         Graded {
             file: file.into(),
             start: (line, 5),
-            end_line: line,
+            context: (line, line),
             description: description.into(),
             verdict,
             site: Some(format!("line {line}").into()),
@@ -684,7 +716,7 @@ mod tests {
         Graded {
             file: file.into(),
             start,
-            end_line: start.0,
+            context: (start.0, start.0),
             description: description.into(),
             verdict,
             site: None,
@@ -948,10 +980,15 @@ mod tests {
             graded_at("a.rs", (2, 9), "z", Verdict::Caught),
             graded_at("b.rs", (1, 1), "z", Verdict::Missed),
         ];
+        // The second mutant starts where the first does.
+        mutants[1].start = mutants[0].start;
         let src = "fn f() {\n  if  !x {\n";
         let sources: BTreeMap<&str, String> = [("a.rs", src.to_string())].into();
         attach_sites(&mut mutants, &sources);
-        assert_eq!(mutants[0].site.as_deref(), site_of(src, 2, 2).as_deref());
+        assert_eq!(
+            mutants[0].site.as_deref(),
+            site_of(src, (2, 2), (2, 1)).as_deref()
+        );
         assert!(Arc::ptr_eq(
             mutants[0].site.as_ref().unwrap(),
             mutants[1].site.as_ref().unwrap()
@@ -960,28 +997,65 @@ mod tests {
     }
 
     #[test]
-    fn a_site_covers_every_character_of_its_span_and_nothing_else() {
-        let src = "fn f(n: u8) -> bool {\n    let m = u16::from(n);\n    m < 256\n}\nfn g() {}\n";
-        let site = site_of(src, 1, 4).unwrap();
-        assert!(site.starts_with("fnv1a64:") && site.len() == "fnv1a64:".len() + 16);
-        // An edit on a later line of the span moves it, a literal included.
-        assert_ne!(site_of(&src.replace("256", "255"), 1, 4).unwrap(), site);
-        // So does whitespace inside the span.
+    fn a_site_covers_its_whole_function_and_nothing_else() {
+        let src =
+            "fn f(n: u8)\n    -> bool\n{\n    let m = u16::from(n);\n    m < 256\n}\nfn g() {}\n";
+        // The mutation is on line 5; the function is lines 1 to 6.
+        let site = site_of(src, (1, 6), (5, 5)).unwrap();
+        assert!(site.starts_with("fnv1a64:") && site.ends_with("@4:5"));
+        // An edit to the signature, on its own line, moves it.
         assert_ne!(
-            site_of(&src.replace("m < 256", "m <  256"), 1, 4).unwrap(),
+            site_of(&src.replace("n: u8", "n: u16"), (1, 6), (5, 5)).unwrap(),
             site
         );
-        // An edit outside it does not.
+        // So does one on a later line, a literal included, and whitespace.
+        assert_ne!(
+            site_of(&src.replace("256", "255"), (1, 6), (5, 5)).unwrap(),
+            site
+        );
+        assert_ne!(
+            site_of(&src.replace("m < 256", "m <  256"), (1, 6), (5, 5)).unwrap(),
+            site
+        );
+        // Another mutant of the same function has another site.
+        assert_ne!(site_of(src, (1, 6), (4, 13)).unwrap(), site);
+        // An edit outside the function moves nothing.
         assert_eq!(
-            site_of(&src.replace("fn g() {}", "fn g() { }"), 1, 4).unwrap(),
+            site_of(&src.replace("fn g() {}", "fn g() { }"), (1, 6), (5, 5)).unwrap(),
             site
         );
-        // A span past the end, or turned around, has no site.
-        assert_eq!(site_of(src, 0, 1), None);
-        assert_eq!(site_of(src, 5, 6), None);
-        assert_eq!(site_of(src, 3, 2), None);
+        // A context past the end, turned around, or missing the start has none.
+        assert_eq!(site_of(src, (0, 1), (1, 1)), None);
+        assert_eq!(site_of(src, (8, 9), (8, 1)), None);
+        assert_eq!(site_of(src, (3, 2), (3, 1)), None);
+        assert_eq!(site_of(src, (1, 3), (5, 5)), None);
     }
 
+    #[test]
+    fn the_function_span_is_the_context_when_reported() {
+        let json = r#"{"outcomes": [
+            {"scenario": {"Mutant": {"file": "a.rs", "name": "a.rs:5:5: replace < with <= in f",
+              "span": {"start": {"line": 5, "column": 5}, "end": {"line": 5, "column": 6}},
+              "function": {"function_name": "f", "span": {"start": {"line": 1, "column": 1}, "end": {"line": 6, "column": 2}}}}},
+             "summary": "MissedMutant"},
+            {"scenario": {"Mutant": {"file": "a.rs", "name": "a.rs:9:1: delete ! in g",
+              "span": {"start": {"line": 9, "column": 1}, "end": {"line": 9, "column": 2}},
+              "function": {"function_name": "g", "span": {"start": {"line": 10, "column": 1}, "end": {"line": 12, "column": 2}}}}},
+             "summary": "CaughtMutant"}
+        ]}"#;
+        assert!(
+            parse_outcomes(json)
+                .unwrap_err()
+                .contains("not inside its function")
+        );
+        let ok = json.replace(
+            r#""line": 10, "column": 1}, "end": {"line": 12"#,
+            r#""line": 8, "column": 1}, "end": {"line": 12"#,
+        );
+        let parsed = parse_outcomes(&ok).unwrap();
+        assert_eq!(parsed.mutants[0].context, (1, 6));
+        assert_eq!(parsed.mutants[1].context, (8, 12));
+    }
     #[test]
     fn a_span_that_ends_before_it_starts_fails() {
         let json = r#"{"outcomes": [
@@ -997,11 +1071,11 @@ mod tests {
         assert!(parse_equivalents("s\tk\twhy").is_err());
         assert!(parse_equivalents("s\tk\tline\t ").is_err());
         assert_eq!(
-            parse_equivalents("# c\n\ns\tk\tfnv1a64:0123456789abcdef\twhy\n").unwrap(),
+            parse_equivalents("# c\n\ns\tk\tfnv1a64:0123456789abcdef@2:5\twhy\n").unwrap(),
             vec![Equivalent {
                 set: "s".into(),
                 key: "k".into(),
-                site: "fnv1a64:0123456789abcdef".into(),
+                site: "fnv1a64:0123456789abcdef@2:5".into(),
                 reason: "why".into()
             }]
         );
