@@ -32,10 +32,11 @@
 
 mod common;
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use borzoi_msbuild::test_support::{
-    Issue, PropertyMap, Throws, judge, property_references, substitute,
+    Issue, PropertyMap, Throws, judge, property_references, published_sites, second_walk_sites,
+    substitute,
 };
 use borzoi_msbuild::{PropertyRead, RejectionCertainty};
 use borzoi_oracle_harness::hostile::{self, Dimension, coverage, value};
@@ -519,6 +520,18 @@ const SITES: &[&str] = &[
     "<Choose><When Condition=\"UNDECIDED_TRUE\"><PropertyGroup><A>1</A></PropertyGroup><ItemGroup Condition=\"{c}\"><I Include=\"x\" /></ItemGroup></When></Choose>",
 ];
 
+/// Sites [`refused_history_sweep`] draws beside [`SITES`]: in an arm the walk
+/// does not take, after a write of `A` there, a text under a gate MSBuild
+/// evaluates first, of a metadatum, an update and a definition. A gate reading
+/// a name the arm writes decides whether MSBuild reaches the text at all, in
+/// any reading of the name (#1153). [`project_sweep`] draws [`SITES`] alone,
+/// so its pinned projects do not move.
+const HISTORY_SITES: &[&str] = &[
+    "<Choose><When Condition=\"UNDECIDED_TRUE\"><PropertyGroup><A>1</A></PropertyGroup><ItemGroup><I Include=\"x\"><M Condition=\"{c}\">{t}</M></I></ItemGroup></When></Choose>",
+    "<Choose><When Condition=\"UNDECIDED_TRUE\"><PropertyGroup><A>1</A></PropertyGroup><ItemGroup><I Include=\"x\" /><I Update=\"x\" Condition=\"{c}\"><M>{t}</M></I></ItemGroup></When></Choose>",
+    "<Choose><When Condition=\"UNDECIDED_TRUE\"><PropertyGroup><A>1</A></PropertyGroup><ItemDefinitionGroup><I Condition=\"{c}\"><M>{t}</M></I></ItemDefinitionGroup></When></Choose>",
+];
+
 /// Whether `template` puts its text in a metadatum's value, where MSBuild
 /// expands metadata references before properties.
 fn is_metadata_site(template: &str) -> bool {
@@ -580,6 +593,12 @@ struct ProjectCensus {
     committed: usize,
     /// Projects MSBuild evaluates whose every value the walk commits.
     evaluated_and_committed: usize,
+    /// Of the projects whose rewrite follows a refused write of its name
+    /// ([`REFUSED_BEFORE_REWRITE`]): those MSBuild rejects that the walk
+    /// withdraws, and those MSBuild evaluates whose every value the walk
+    /// commits.
+    refused_rewrite_withdrawn: usize,
+    refused_rewrite_committed: usize,
     /// Projects MSBuild rejects over a value it holds and the walk does not
     /// (of `U`, or of a write the walk refused to compute), which the walk
     /// commits: the judgement over the values a name may hold, #1009's second
@@ -718,10 +737,137 @@ const PROJECT_EXCLUDED: &[(Dimension, &str)] = &[(
      there, which MSBuild may throw on, is no rejection site yet (#1094)",
 )];
 
+/// The hostile values [`refused_history_sweep`] does not draw, nor its census
+/// credit:
+/// [`PROJECT_EXCLUDED`]'s, and the overwritten-later dimension, which is
+/// hostile only to a read between the write and its reset. Which reads
+/// MSBuild makes, a walk-only comparison of a twin with its project does not
+/// observe; [`project_sweep`] credits it against MSBuild.
+const HISTORY_EXCLUDED: &[(Dimension, &str)] = &[
+    PROJECT_EXCLUDED[0],
+    (
+        Dimension::OverwrittenLater,
+        "hostile only to a read between the write and its reset, and a walk-only comparison of \
+         a twin with its project does not observe which reads MSBuild makes",
+    ),
+];
+
 /// The body of `X`, a write the walk refuses to compute (a function it does
 /// not model), so that it holds no value of `X`; MSBuild holds `Debug`, and
 /// throws on nothing.
 const REFUSED: &str = "$([System.String]::Copy('Debug'))";
+
+/// A write of a name with [`REFUSED`] just before one of its clean writes: a
+/// write history MSBuild does not see (it computes the refused body, which
+/// throws on nothing, and the clean write overwrites it), and the walk keeps
+/// a mark of after the clean write (`Trust::refused`), though it holds the
+/// clean value as MSBuild does (#1153).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RefusedBefore {
+    /// No such write.
+    Nothing,
+    /// Before the first write of `A` or `B`.
+    FirstWrite(&'static str),
+    /// Before the rewrite after the site, whose value the item pass reads.
+    Rewrite,
+}
+
+/// Which history [`project_sweep`] draws for a project with a rewrite: the
+/// one whose value the item pass reads after it. Drawn from a stream of its
+/// own ([`HISTORY_STREAM`]), so that a project without it is the one the
+/// generator drew before the axis was.
+const REFUSED_BEFORE_REWRITE: &[RefusedBefore] = &[RefusedBefore::Nothing, RefusedBefore::Rewrite];
+
+/// What [`project_sweep`]'s draws of [`REFUSED_BEFORE_REWRITE`] are seeded
+/// with, beside the sweep's own seed.
+const HISTORY_STREAM: u64 = 0x1153_4157_0b1e;
+
+/// A drawn project as text: the site, the writes before it (the first
+/// group's), the resets of values overwritten later, the writes after the
+/// site, and the whole document.
+struct Rendered {
+    site: String,
+    writes: String,
+    resets: String,
+    later: String,
+    xml: String,
+}
+
+/// The writes after the site: `resets`, then the rewrite of `rewrite`, its
+/// body `body` as given, after a refused write of its name where
+/// `refused_before_rewrite` says.
+fn writes_after_site(
+    resets: &str,
+    rewrite: Option<&str>,
+    refused_before_rewrite: bool,
+    body: &str,
+) -> String {
+    match rewrite {
+        Some(name) if refused_before_rewrite => {
+            format!("{resets}<{name}>{REFUSED}</{name}><{name}>{body}</{name}>")
+        }
+        Some(name) => format!("{resets}<{name}>{body}</{name}>"),
+        None => resets.to_owned(),
+    }
+}
+
+/// The project: its first group's `writes`, the items, the `site`, and the
+/// group after it, holding `later`.
+fn document_text(writes: &str, later: &str, site: &str) -> String {
+    format!(
+        "<Project>\n  <PropertyGroup>{writes}</PropertyGroup>\n  {ITEMS}\n  {site}\n  \
+         <PropertyGroup><After>ok</After>{later}</PropertyGroup>\n</Project>\n"
+    )
+}
+
+/// `drawing` as text, with the refused writes `refused` names.
+fn render(drawing: &Drawing, refused: &[RefusedBefore]) -> Rendered {
+    let site = drawing
+        .template
+        .replace("{c}", &xml_attribute(&drawing.gate))
+        .replace("{t}", &xml_attribute(&drawing.body))
+        .replace("UNDECIDED_TRUE", &xml_attribute(UNDECIDED_TRUE))
+        .replace("UNDECIDED_FALSE", &xml_attribute(UNDECIDED_FALSE));
+    // A value overwritten later has been read by the site in between.
+    let mut resets = String::new();
+    for (name, drawn) in [("A", &drawing.a), ("B", &drawing.b)] {
+        if drawn.hostile.contains(&Dimension::OverwrittenLater) {
+            resets.push_str(&format!("<{name}>{RESET}</{name}>"));
+        }
+    }
+    let later = writes_after_site(
+        &resets,
+        drawing.rewrite,
+        refused.contains(&RefusedBefore::Rewrite),
+        &xml_text(&drawing.rewritten.value),
+    );
+    // The first group's writes as given: `U` as the walk holds it, then
+    // (`real`) as MSBuild holds it, which the walk cannot know.
+    let first_write = |name: &'static str, drawn: &hostile::Drawn<String>| {
+        let refused_write = if refused.contains(&RefusedBefore::FirstWrite(name)) {
+            format!("<{name}>{REFUSED}</{name}>")
+        } else {
+            String::new()
+        };
+        format!("{refused_write}<{name}>{}</{name}>", xml_text(&drawn.value))
+    };
+    let writes = format!(
+        "{}{}<U>{}</U><U Condition=\"{}\">{}</U><X>{REFUSED}</X>",
+        first_write("A", &drawing.a),
+        first_write("B", &drawing.b),
+        xml_text(&drawing.held.value),
+        xml_attribute(UNDECIDED_TRUE),
+        xml_text(&drawing.real.value),
+    );
+    let xml = document_text(&writes, &later, &site);
+    Rendered {
+        site,
+        writes,
+        resets,
+        later,
+        xml,
+    }
+}
 
 /// The values the names the walk is not sure of are varied over (beside
 /// `""`), to show that MSBuild's rejection rests on them: a number, a word, a
@@ -815,9 +961,13 @@ struct Drawing {
     gate: String,
 }
 
-/// A project drawn from `rng`, or `None` where a value it drew carries an
-/// `excluded` dimension, before it draws the pieces.
-fn draw_project(rng: &mut SplitMix64, excluded: &BTreeSet<Dimension>) -> Option<Drawing> {
+/// A project drawn from `rng`, at one of `sites`, or `None` where a value it
+/// drew carries an `excluded` dimension, before it draws the pieces.
+fn draw_project(
+    rng: &mut SplitMix64,
+    excluded: &BTreeSet<Dimension>,
+    sites: &[&'static str],
+) -> Option<Drawing> {
     let a = draw_value(rng);
     let b = draw_value(rng);
     let held = draw_value(rng);
@@ -833,7 +983,7 @@ fn draw_project(rng: &mut SplitMix64, excluded: &BTreeSet<Dimension>) -> Option<
     }
     // `X` is a write the walk refuses to compute: it holds no value of it.
     let operands = ["A", "B", "U", "X"];
-    let template = *rng.pick(SITES);
+    let template = *rng.pick(sites);
     let body = text(rng, &operands);
     let gate = condition(rng, &operands, 3);
     Some(Drawing {
@@ -970,6 +1120,7 @@ fn project_sweep(
         .map(String::from)
         .to_vec();
     let mut tally = ProjectCensus::default();
+    let mut histories = SplitMix64(rng.0 ^ HISTORY_STREAM);
     // The witnesses first, each held to the gap it pins; then the drawn
     // projects.
     let mut witnesses = WITNESSES.iter().enumerate();
@@ -996,12 +1147,24 @@ fn project_sweep(
                 witness.drawing(),
                 Some((index, witness.gap, witness.both_strikes)),
             ),
-            None if tally.cases < cases => match draw_project(rng, &excluded) {
+            None if tally.cases < cases => match draw_project(rng, &excluded, SITES) {
                 Some(drawing) => (drawing, None),
                 None => continue,
             },
             None => break,
         };
+        let refused = match (witness, drawing.rewrite) {
+            (None, Some(_)) => *histories.pick(REFUSED_BEFORE_REWRITE),
+            _ => RefusedBefore::Nothing,
+        };
+        let Rendered {
+            site,
+            writes,
+            resets,
+            later,
+            xml,
+        } = render(&drawing, &[refused]);
+        let refused_rewrite = refused == RefusedBefore::Rewrite;
         let Drawing {
             a,
             b,
@@ -1060,44 +1223,11 @@ fn project_sweep(
         let read_at_site = |name: &str, drawn: &'_ hostile::Drawn<String>| {
             value_read_at_site(item_pass, name, drawn, rewrite, &rewritten)
         };
-        let site = template
-            .replace("{c}", &xml_attribute(&gate))
-            .replace("{t}", &xml_attribute(&body))
-            .replace("UNDECIDED_TRUE", &xml_attribute(UNDECIDED_TRUE))
-            .replace("UNDECIDED_FALSE", &xml_attribute(UNDECIDED_FALSE));
-        // A value overwritten later has been read by the site in between.
-        let mut resets = String::new();
-        for (name, drawn) in [("A", &a), ("B", &b)] {
-            if drawn.hostile.contains(&Dimension::OverwrittenLater) {
-                resets.push_str(&format!("<{name}>{RESET}</{name}>"));
-            }
-        }
-        // The writes after the site: the resets, then the rewrite, its body
-        // as given.
-        let after_site = |rewrite_body: &str| match rewrite {
-            Some(name) => format!("{resets}<{name}>{rewrite_body}</{name}>"),
-            None => resets.clone(),
-        };
-        let later = after_site(&xml_text(&rewritten.value));
-        // The project, its first group's writes as given: `U` as the walk
-        // holds it, then (`real`) as MSBuild holds it, which the walk cannot
-        // know.
-        let document = |(writes, later): &(String, String), site: &str| {
-            format!(
-                "<Project>\n  <PropertyGroup>{writes}</PropertyGroup>\n  {ITEMS}\n  {site}\n  \
-                 <PropertyGroup><After>ok</After>{later}</PropertyGroup>\n</Project>\n"
-            )
-        };
-        let a_write = format!("<A>{}</A>", xml_text(&a.value));
-        let b_write = format!("<B>{}</B>", xml_text(&b.value));
-        let x_write = format!("<X>{REFUSED}</X>");
-        let writes = format!(
-            "{a_write}{b_write}<U>{}</U><U Condition=\"{}\">{}</U>{x_write}",
-            xml_text(&held.value),
-            xml_attribute(UNDECIDED_TRUE),
-            xml_text(&real.value),
-        );
-        let xml = document(&(writes.clone(), later.clone()), &site);
+        // The writes after the site, a rewrite's body as given.
+        let after_site =
+            |rewrite_body: &str| writes_after_site(&resets, rewrite, refused_rewrite, rewrite_body);
+        let document =
+            |(writes, later): &(String, String), site: &str| document_text(writes, later, site);
         std::fs::write(&project_path, &xml).unwrap();
         let parsed = parse_fsproj_with_imports(
             &borzoi_msbuild::ProjectFile::buffer(&project_path, &xml)
@@ -1164,6 +1294,10 @@ fn project_sweep(
         let Some(theirs) = both.design_time else {
             counts.msbuild_rejects += 1;
             if ours.is_empty() {
+                // A rejection the property pass makes before the rewrite is
+                // none of its history's.
+                counts.refused_rewrite_withdrawn +=
+                    usize::from(refused_rewrite && rewrite_is_graded(item_pass, false));
                 counts.baseline_wrong_now_not += usize::from(baseline_wrong == Some(true));
                 reach(&hostile, outcome(true, false));
                 continue;
@@ -1416,6 +1550,11 @@ fn project_sweep(
         }
         let committed = ours.iter().any(|(name, _)| name.as_str() == "After");
         counts.evaluated_and_committed += usize::from(committed);
+        // A commit of the refused history is one of the rewritten name.
+        let rewritten_read =
+            rewrite.is_some_and(|name| ours.iter().any(|(n, _)| n.as_str() == name));
+        counts.refused_rewrite_committed +=
+            usize::from(committed && refused_rewrite && rewritten_read);
         counts.baseline_wrong_now_not += usize::from(baseline_wrong == Some(true));
         reach(&hostile, outcome(false, committed));
     }
@@ -1475,6 +1614,9 @@ fn project_sweep_fixed_seed() {
     assert!(tally.certain >= 100, "{tally:?}");
     assert!(tally.possible >= 100, "{tally:?}");
     assert!(tally.evaluated_and_committed >= 200, "{tally:?}");
+    // The refused-then-rewritten history reaches both outcomes.
+    assert!(tally.refused_rewrite_withdrawn > 0, "{tally:?}");
+    assert!(tally.refused_rewrite_committed > 0, "{tally:?}");
     let manifest = Manifest::from_keyed(grading.wrong).expect("well-formed entries");
     manifest::check(
         &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1497,6 +1639,725 @@ fn project_sweep_soak() {
     let mut rng = SplitMix64(seed);
     let tally = project_sweep(&mut rng, cases, None);
     eprintln!("rejection project soak: {tally:?}");
+}
+
+/// What [`refused_history_sweep`] compared.
+#[derive(Debug, Default)]
+struct HistoryCensus {
+    /// Twins compared with their project, by where a refused write went, and
+    /// those with more than one.
+    first_write: usize,
+    rewrite: usize,
+    several: usize,
+    /// Of the twins compared, those whose project the walk withdraws, and
+    /// those whose project it commits a value of.
+    withdrawn: usize,
+    committed: usize,
+    /// Sites a twin's walk adopted from its second walk, and of them those
+    /// the project's walk does not find.
+    second_walk_sites: usize,
+    second_walk_sites_beyond_project: usize,
+}
+
+/// [`RefusedBefore`]'s claim, held to the walk alone. A refused write just
+/// before a clean write of the same name changes nothing MSBuild does, so the
+/// walk may withdraw more for a project's twin with such writes (the mark it
+/// keeps of a refusal is a doubt), never less: where it claims MSBuild may
+/// reject the project, it claims so of the twin, and every value it commits of
+/// the twin it commits, the same, of the project. A twin it judges more kindly
+/// is one whose rejection site it lost to the history (#1153). Each twin holds
+/// a non-empty set of the refused writes the project admits, so histories on
+/// several names are held too. No oracle is asked, so it covers far more
+/// drawn projects than [`project_sweep`] can.
+///
+/// Only a twin and its project are compared, not two twins: what the walk's
+/// judgement makes of two sets of unknown names is not ordered by the sets
+/// (#1009's second stage, #1164).
+///
+/// A write whose body reads its own name is passed over: there the refused
+/// write's value is MSBuild's input, not history.
+///
+/// The other way, it counts the sites the twin's walk adopts from its second
+/// walk, which holds a refused-then-rebound name certain
+/// (`test_support::second_walk_sites`), that the project's walk does not
+/// find. The project holds the same values, unmarked, but the walk's own
+/// course doubts a refused name in a gate around the site, as on main, so the
+/// second walk may judge content MSBuild does not reach: a decline, which
+/// [`refused_history_sweep_fixed_seed`] pins by count. Its drawn sites are
+/// [`SITES`] and [`HISTORY_SITES`].
+fn refused_history_sweep(rng: &mut SplitMix64, cases: usize) -> HistoryCensus {
+    let excluded: BTreeSet<Dimension> = HISTORY_EXCLUDED.iter().map(|(d, _)| *d).collect();
+    let tmp = TempDir::new().unwrap();
+    let dir = borzoi_msbuild::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    std::fs::write(
+        dir.join("there.props"),
+        "<Project><PropertyGroup><Delta>d</Delta></PropertyGroup></Project>",
+    )
+    .unwrap();
+    let project_path = dir.join("Demo.fsproj");
+    // Both sides walk under one fixed environment, and no oracle is asked, so
+    // the host's SDK is never probed.
+    let environment = HashMap::new();
+    let walk = |xml: &str| {
+        parse_fsproj_with_imports(
+            &borzoi_msbuild::ProjectFile::buffer(&project_path, xml)
+                .expect("a project path spelt as its full path"),
+            &HashMap::new(),
+            &environment,
+            None,
+            None,
+        )
+        .expect("well-formed")
+    };
+    let census = coverage::open(
+        "crates/msbuild/tests/rejection_generative_diff.rs",
+        "refused_history",
+        HISTORY_EXCLUDED,
+    );
+    let names = ["A", "B", "U", "X", "R", "After", "Delta"];
+    let sites: Vec<&'static str> = SITES.iter().chain(HISTORY_SITES).copied().collect();
+    let mut tally = HistoryCensus::default();
+    let mut drawn = 0;
+    while drawn < cases {
+        let Some(drawing) = draw_project(rng, &excluded, &sites) else {
+            continue;
+        };
+        drawn += 1;
+        let reads_itself = |name: &str, value: &str| property_references(value).contains(&name);
+        let mut eligible = Vec::new();
+        for (name, value) in [("A", &drawing.a.value), ("B", &drawing.b.value)] {
+            if !reads_itself(name, value) {
+                eligible.push(RefusedBefore::FirstWrite(name));
+            }
+        }
+        if let Some(name) = drawing.rewrite
+            && !reads_itself(name, &drawing.rewritten.value)
+        {
+            eligible.push(RefusedBefore::Rewrite);
+        }
+        let twins = (1..1usize << eligible.len()).map(|mask| {
+            eligible
+                .iter()
+                .enumerate()
+                .filter(|(bit, _)| mask & (1 << bit) != 0)
+                .map(|(_, refused)| *refused)
+                .collect::<Vec<_>>()
+        });
+        let plain = render(&drawing, &[]);
+        let (ours, ours_published) = published_sites(|| walk(&plain.xml));
+        for refused in twins {
+            let twin = render(&drawing, &refused);
+            let ((theirs, second_sites), theirs_published) =
+                published_sites(|| second_walk_sites(|| walk(&twin.xml)));
+            if refused.contains(&RefusedBefore::Rewrite) {
+                tally.rewrite += 1;
+            }
+            if refused.len() > 1 {
+                tally.several += 1;
+            }
+            if refused
+                .iter()
+                .any(|r| matches!(r, RefusedBefore::FirstWrite(_)))
+            {
+                tally.first_write += 1;
+            }
+            let describe = || {
+                format!(
+                    "--- project ---\n{}\n{:#?}\n--- twin ({refused:?}) ---\n{}\n{:#?}",
+                    elide(&plain.xml),
+                    ours.rejection,
+                    elide(&twin.xml),
+                    theirs.rejection
+                )
+            };
+            let certainty = |parsed: &borzoi_msbuild::ParsedProject| {
+                parsed.rejection.as_ref().map(|r| r.certainty)
+            };
+            // A site the twin's walk adopts from its second walk that the
+            // project's walk does not find is a decline the walk's own course
+            // costs.
+            let project_sites: Vec<&borzoi_msbuild::RejectionCause> = ours
+                .diagnostics
+                .iter()
+                .filter_map(|d| match &d.kind {
+                    borzoi_msbuild::DiagnosticKind::Rejected { cause }
+                    | borzoi_msbuild::DiagnosticKind::MayBeRejected { cause } => Some(cause),
+                    _ => None,
+                })
+                .collect();
+            for published in [&ours_published, &theirs_published] {
+                assert_no_site_twice(published, &describe);
+            }
+            for site in &second_sites {
+                tally.second_walk_sites += 1;
+                if !project_sites.contains(&site) {
+                    tally.second_walk_sites_beyond_project += 1;
+                }
+            }
+            assert!(
+                twin_verdict_claims_no_more(certainty(&ours), certainty(&theirs)),
+                "the walk judges a project {:?} and its twin with a refused write before a clean \
+                 one, which MSBuild evaluates alike, {:?}\n{}",
+                certainty(&ours),
+                certainty(&theirs),
+                describe()
+            );
+            for name in names {
+                assert!(
+                    twin_claims_no_more(&ours.property(name), &theirs.property(name)),
+                    "the walk reads {name} of the twin with a refused write before a clean one \
+                     exactly as {:?}, and of the project as {:?}\n{}",
+                    theirs.property(name),
+                    ours.property(name),
+                    describe()
+                );
+            }
+            let mut carried: BTreeSet<Dimension> = BTreeSet::new();
+            for drawn in [&drawing.a, &drawing.b, &drawing.held, &drawing.real] {
+                carried.extend(drawn.hostile.iter().copied());
+            }
+            if drawing.rewrite.is_some() {
+                carried.extend(drawing.rewritten.hostile.iter().copied());
+            }
+            census.reached(
+                &carried,
+                if ours.rejection.is_some() {
+                    "withdraw"
+                } else {
+                    "commit"
+                },
+            );
+            if ours.rejection.is_some() {
+                tally.withdrawn += 1;
+            } else if names
+                .iter()
+                .any(|name| matches!(ours.property(name), PropertyRead::Value(_)))
+            {
+                tally.committed += 1;
+            }
+        }
+    }
+    census.finish(
+        "BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-msbuild --test \
+         rejection_generative_diff refused_history_sweep_fixed_seed",
+    );
+    tally
+}
+
+/// Whether the twin's verdict, `twin`, claims nothing the project's,
+/// `project`, does not, MSBuild evaluating the two alike: a withdrawal of
+/// the project is one of the twin, and a certain rejection of the twin, an
+/// exact claim, is one of the project.
+fn twin_verdict_claims_no_more(
+    project: Option<RejectionCertainty>,
+    twin: Option<RejectionCertainty>,
+) -> bool {
+    match (project, twin) {
+        (Some(_), None) => false,
+        (project, Some(RejectionCertainty::Certain)) => {
+            project == Some(RejectionCertainty::Certain)
+        }
+        _ => true,
+    }
+}
+
+#[test]
+fn a_twin_is_withdrawn_with_its_project_and_certain_only_with_it() {
+    use RejectionCertainty::{Certain, Possible};
+    for (project, twin, claims_no_more) in [
+        (None, None, true),
+        (None, Some(Possible), true),
+        (None, Some(Certain), false),
+        (Some(Possible), None, false),
+        (Some(Possible), Some(Possible), true),
+        (Some(Possible), Some(Certain), false),
+        (Some(Certain), None, false),
+        (Some(Certain), Some(Possible), true),
+        (Some(Certain), Some(Certain), true),
+    ] {
+        assert_eq!(
+            twin_verdict_claims_no_more(project, twin),
+            claims_no_more,
+            "{project:?} {twin:?}"
+        );
+    }
+}
+
+/// Whether the twin's read of a name, `twin`, claims nothing the project's,
+/// `project`, does not: it is no exact read ([`PropertyRead::is_exact`], a
+/// value or an absence MSBuild shares), or it is the project's read.
+fn twin_claims_no_more(project: &PropertyRead, twin: &PropertyRead) -> bool {
+    !twin.is_exact() || project == twin
+}
+
+#[test]
+fn a_twin_claims_an_absence_as_it_claims_a_value() {
+    let value = |v: &str| PropertyRead::Value(v.to_owned());
+    let inexact = PropertyRead::UnsetInexact(borzoi_msbuild::InexactUnset::Refused);
+    assert!(twin_claims_no_more(&value("x"), &value("x")));
+    assert!(twin_claims_no_more(
+        &PropertyRead::Unset,
+        &PropertyRead::Unset
+    ));
+    assert!(twin_claims_no_more(&value("x"), &inexact));
+    assert!(!twin_claims_no_more(&value("x"), &value("y")));
+    assert!(!twin_claims_no_more(&value("x"), &PropertyRead::Unset));
+    assert!(!twin_claims_no_more(&inexact, &PropertyRead::Unset));
+    assert!(!twin_claims_no_more(&PropertyRead::Unset, &value("")));
+}
+
+/// Where a reach-grid case writes `P` before its arm and after it: the
+/// refused write of the twin goes just before the write that settles `P`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HistoryAt {
+    /// `P` is `abc` before the `<Choose>` and rewritten to the final value
+    /// after it, the refused write just before the rewrite: the arm's gate
+    /// reads `abc`.
+    AfterTheChoose,
+    /// `P` is written its final value before the `<Choose>`, the refused write
+    /// just before that, and not after: the arm's gate reads the final value,
+    /// and the arm's own write, where MSBuild takes it, is `P`'s last.
+    BeforeTheChoose,
+}
+
+/// The grid cells where a walk commits a value MSBuild does not hold, each
+/// with which walks do and how ([`wrong_commits`]'s spelling), and the gap it
+/// is: a gated item definition's throw on a final value (#1172), or a throw
+/// on the value of the arm's own write, which the walk does not hold (#1051).
+/// Pinned by [`refused_history_reach_grid`]'s label and compared exactly, so
+/// that one closing, another opening, or a cell moving from one walk or kind
+/// to another fails it; none is the history's.
+const BOTH_COMMIT_ON_REJECTED: &str =
+    "project: commits on a project MSBuild rejects; twin: commits on a project MSBuild rejects";
+
+const REACH_GRID_KNOWN_WRONG: &[(&str, &str, &str)] = &[
+    (
+        "AfterTheChoose / '$(P)' == 'abc' / <ItemDefinitionGroup Condition=\"'$(P)' == 'z'\"><I><M>$(P.Split(';')[3])</M></I></ItemDefinitionGroup> / z",
+        BOTH_COMMIT_ON_REJECTED,
+        "#1172",
+    ),
+    (
+        "AfterTheChoose / '$(P)' == 'abc' / <ItemDefinitionGroup Condition=\"'$(P)' == 'z'\"><I><M>$(P[9])</M></I></ItemDefinitionGroup> / z",
+        BOTH_COMMIT_ON_REJECTED,
+        "#1172",
+    ),
+    (
+        "AfterTheChoose / '$(P)' == 'abc' / <ItemDefinitionGroup><I Condition=\"'$(P)' == 'z'\"><M>$(P.Split(';')[3])</M></I></ItemDefinitionGroup> / z",
+        BOTH_COMMIT_ON_REJECTED,
+        "#1172",
+    ),
+    (
+        "AfterTheChoose / '$(P)' == 'abc' / <ItemDefinitionGroup><I Condition=\"'$(P)' == 'z'\"><M>$(P[9])</M></I></ItemDefinitionGroup> / z",
+        BOTH_COMMIT_ON_REJECTED,
+        "#1172",
+    ),
+    (
+        "AfterTheChoose / 'É' == 'é' / <ItemDefinitionGroup Condition=\"'$(P)' == 'z'\"><I><M>$(P.Split(';')[3])</M></I></ItemDefinitionGroup> / z",
+        BOTH_COMMIT_ON_REJECTED,
+        "#1172",
+    ),
+    (
+        "AfterTheChoose / 'É' == 'é' / <ItemDefinitionGroup Condition=\"'$(P)' == 'z'\"><I><M>$(P[9])</M></I></ItemDefinitionGroup> / z",
+        BOTH_COMMIT_ON_REJECTED,
+        "#1172",
+    ),
+    (
+        "AfterTheChoose / 'É' == 'é' / <ItemDefinitionGroup><I Condition=\"'$(P)' == 'z'\"><M>$(P.Split(';')[3])</M></I></ItemDefinitionGroup> / z",
+        BOTH_COMMIT_ON_REJECTED,
+        "#1172",
+    ),
+    (
+        "AfterTheChoose / 'É' == 'é' / <ItemDefinitionGroup><I Condition=\"'$(P)' == 'z'\"><M>$(P[9])</M></I></ItemDefinitionGroup> / z",
+        BOTH_COMMIT_ON_REJECTED,
+        "#1172",
+    ),
+    (
+        "BeforeTheChoose / '$(P)' == 'z' / <ItemDefinitionGroup Condition=\"'$(P)' != 'z'\"><I><M>$(P.Split(';')[3])</M></I></ItemDefinitionGroup> / z",
+        BOTH_COMMIT_ON_REJECTED,
+        "#1172",
+    ),
+    (
+        "BeforeTheChoose / '$(P)' == 'z' / <ItemDefinitionGroup Condition=\"'$(P)' == 'abcdefghijkl'\"><I><M>$(P.Split(';')[3])</M></I></ItemDefinitionGroup> / z",
+        BOTH_COMMIT_ON_REJECTED,
+        "#1172",
+    ),
+    (
+        "BeforeTheChoose / '$(P)' == 'z' / <ItemDefinitionGroup><I Condition=\"'$(P)' != 'z'\"><M>$(P.Split(';')[3])</M></I></ItemDefinitionGroup> / z",
+        BOTH_COMMIT_ON_REJECTED,
+        "#1172",
+    ),
+    (
+        "BeforeTheChoose / '$(P)' == 'z' / <ItemDefinitionGroup><I Condition=\"'$(P)' == 'abcdefghijkl'\"><M>$(P.Split(';')[3])</M></I></ItemDefinitionGroup> / z",
+        BOTH_COMMIT_ON_REJECTED,
+        "#1172",
+    ),
+    (
+        "BeforeTheChoose / 'É' == 'é' / <ItemDefinitionGroup Condition=\"'$(P)' != 'z'\"><I><M>$(P.Split(';')[3])</M></I></ItemDefinitionGroup> / abcdefghijklmn;b;c;d",
+        BOTH_COMMIT_ON_REJECTED,
+        "#1172",
+    ),
+    (
+        "BeforeTheChoose / 'É' == 'é' / <ItemDefinitionGroup Condition=\"'$(P)' != 'z'\"><I><M>$(P.Split(';')[3])</M></I></ItemDefinitionGroup> / z",
+        BOTH_COMMIT_ON_REJECTED,
+        "#1172",
+    ),
+    (
+        "BeforeTheChoose / 'É' == 'é' / <ItemDefinitionGroup Condition=\"'$(P)' == 'abcdefghijkl'\"><I><M>$(P.Split(';')[3])</M></I></ItemDefinitionGroup> / abcdefghijklmn;b;c;d",
+        BOTH_COMMIT_ON_REJECTED,
+        "#1172",
+    ),
+    (
+        "BeforeTheChoose / 'É' == 'é' / <ItemDefinitionGroup Condition=\"'$(P)' == 'abcdefghijkl'\"><I><M>$(P.Split(';')[3])</M></I></ItemDefinitionGroup> / z",
+        BOTH_COMMIT_ON_REJECTED,
+        "#1172",
+    ),
+    (
+        "BeforeTheChoose / 'É' == 'é' / <ItemDefinitionGroup><I Condition=\"'$(P)' != 'z'\"><M>$(P.Split(';')[3])</M></I></ItemDefinitionGroup> / abcdefghijklmn;b;c;d",
+        BOTH_COMMIT_ON_REJECTED,
+        "#1172",
+    ),
+    (
+        "BeforeTheChoose / 'É' == 'é' / <ItemDefinitionGroup><I Condition=\"'$(P)' != 'z'\"><M>$(P.Split(';')[3])</M></I></ItemDefinitionGroup> / z",
+        BOTH_COMMIT_ON_REJECTED,
+        "#1172",
+    ),
+    (
+        "BeforeTheChoose / 'É' == 'é' / <ItemDefinitionGroup><I Condition=\"'$(P)' == 'abcdefghijkl'\"><M>$(P.Split(';')[3])</M></I></ItemDefinitionGroup> / abcdefghijklmn;b;c;d",
+        BOTH_COMMIT_ON_REJECTED,
+        "#1172",
+    ),
+    (
+        "BeforeTheChoose / 'É' == 'é' / <ItemDefinitionGroup><I Condition=\"'$(P)' == 'abcdefghijkl'\"><M>$(P.Split(';')[3])</M></I></ItemDefinitionGroup> / z",
+        BOTH_COMMIT_ON_REJECTED,
+        "#1172",
+    ),
+    (
+        "BeforeTheChoose / 'É' == 'é' / <ItemGroup><I Include=\"x\" /><I Update=\"x\" Condition=\"'$(P)' != 'z'\"><M>$(P.Split(';')[3])</M></I></ItemGroup> / abcdefghijklmn;b;c;d",
+        BOTH_COMMIT_ON_REJECTED,
+        "#1051",
+    ),
+    (
+        "BeforeTheChoose / 'É' == 'é' / <ItemGroup><I Include=\"x\" /><I Update=\"x\" Condition=\"'$(P)' != 'z'\"><M>$(P.Split(';')[3])</M></I></ItemGroup> / z",
+        BOTH_COMMIT_ON_REJECTED,
+        "#1051",
+    ),
+    (
+        "BeforeTheChoose / 'É' == 'é' / <ItemGroup><I Include=\"x\" /><I Update=\"x\" Condition=\"'$(P)' == 'abcdefghijkl'\"><M>$(P.Split(';')[3])</M></I></ItemGroup> / abcdefghijklmn;b;c;d",
+        BOTH_COMMIT_ON_REJECTED,
+        "#1051",
+    ),
+    (
+        "BeforeTheChoose / 'É' == 'é' / <ItemGroup><I Include=\"x\" /><I Update=\"x\" Condition=\"'$(P)' == 'abcdefghijkl'\"><M>$(P.Split(';')[3])</M></I></ItemGroup> / z",
+        BOTH_COMMIT_ON_REJECTED,
+        "#1051",
+    ),
+    (
+        "BeforeTheChoose / 'É' == 'é' / <ItemGroup><I Include=\"x\"><M Condition=\"'$(P)' != 'z'\">$(P.Split(';')[3])</M></I></ItemGroup> / abcdefghijklmn;b;c;d",
+        BOTH_COMMIT_ON_REJECTED,
+        "#1051",
+    ),
+    (
+        "BeforeTheChoose / 'É' == 'é' / <ItemGroup><I Include=\"x\"><M Condition=\"'$(P)' != 'z'\">$(P.Split(';')[3])</M></I></ItemGroup> / z",
+        BOTH_COMMIT_ON_REJECTED,
+        "#1051",
+    ),
+    (
+        "BeforeTheChoose / 'É' == 'é' / <ItemGroup><I Include=\"x\"><M Condition=\"'$(P)' == 'abcdefghijkl'\">$(P.Split(';')[3])</M></I></ItemGroup> / abcdefghijklmn;b;c;d",
+        BOTH_COMMIT_ON_REJECTED,
+        "#1051",
+    ),
+    (
+        "BeforeTheChoose / 'É' == 'é' / <ItemGroup><I Include=\"x\"><M Condition=\"'$(P)' == 'abcdefghijkl'\">$(P.Split(';')[3])</M></I></ItemGroup> / z",
+        BOTH_COMMIT_ON_REJECTED,
+        "#1051",
+    ),
+];
+
+/// The reach of a site from an arm the walk does not take, in the second walk
+/// of a refused-then-rebound name (#1153): every container a gate decides
+/// MSBuild's reach of a text in (a metadatum, an update, a definition, a
+/// definition group, a condition's short-circuit), every gate on `P` true on
+/// the arm's value or the final one, every throw on `P`, every final value,
+/// and the arm's own gate (one the walk cannot decide, or one on `P`, false
+/// or true on what it reads) with the history before or after the
+/// `<Choose>` ([`HistoryAt`]), each walked as is and with a refused write of
+/// `P` before the write that settles it. The two projects hold the same
+/// values, and MSBuild evaluates them alike, so per case:
+///
+/// - where MSBuild evaluates the twin, neither walk's rejection is Certain;
+/// - a value either walk commits is MSBuild's, but in the cells of
+///   [`REACH_GRID_KNOWN_WRONG`], which pins which walk is wrong and how, and
+///   nowhere else;
+/// - per cell, `manifests/rejection_reach_grid_declines.txt` pins whether the
+///   twin's walk adopts a site from its second walk that the project's walk
+///   does not find, and whether, where MSBuild evaluates the twin and the
+///   project's walk commits, the twin's walk is withdrawn by its second walk's
+///   sites alone. Each walk decides reach with the walk's own code, which
+///   doubts a refused name in the arm's gate, so the second walk may find a
+///   site in an arm MSBuild does not take. Such a site is Possible, a decline,
+///   and the manifest is its cost. A site the first walk notes is the
+///   refusal's doubt, as on main, and is not counted.
+#[test]
+fn refused_history_reach_grid() {
+    const CONTAINERS: &[&str] = &[
+        "<ItemGroup><I Include=\"x\"><M Condition=\"{g}\">{t}</M></I></ItemGroup>",
+        "<ItemGroup><I Include=\"x\" /><I Update=\"x\" Condition=\"{g}\"><M>{t}</M></I></ItemGroup>",
+        "<ItemDefinitionGroup><I Condition=\"{g}\"><M>{t}</M></I></ItemDefinitionGroup>",
+        "<ItemDefinitionGroup Condition=\"{g}\"><I><M>{t}</M></I></ItemDefinitionGroup>",
+        "<ItemGroup Condition=\"{g} And '{t}' != ''\"><I Include=\"x\" /></ItemGroup>",
+        "<ItemGroup Condition=\"!({g}) Or '{t}' != ''\"><I Include=\"x\" /></ItemGroup>",
+    ];
+    const GATES: &[&str] = &["'$(P)' == 'abcdefghijkl'", "'$(P)' == 'z'", "'$(P)' != 'z'"];
+    const THROWS: &[&str] = &["$(P[9])", "$(P.Split(';')[3])"];
+    const FINALS: &[&str] = &["z", "abcdefghijklmn;b;c;d"];
+    // The arm's own gate: one the walk cannot decide, ones on `P`, false and
+    // true on `z` and on `abc`, and one whose second operand throws on a
+    // short `P`, which a walk doubting `P` judges a site, and so leaves the
+    // `<Choose>` undecided, where one holding `P` short-circuits: the walks'
+    // courses part.
+    const ARMS: &[&str] = &[
+        UNDECIDED_TRUE,
+        "'$(P)' == 'off'",
+        "'$(P)' == 'z'",
+        "'$(P)' == 'abc'",
+        "'$(P)' == 'off' And '$(P[12])' != ''",
+    ];
+    let tmp = TempDir::new().unwrap();
+    let dir = borzoi_msbuild::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    let project_path = dir.join("Demo.fsproj");
+    let names = ["P", "After"];
+    let oracle_names: Vec<String> = names.map(String::from).to_vec();
+    let environment = HashMap::new();
+    let walk = |xml: &str| {
+        parse_fsproj_with_imports(
+            &borzoi_msbuild::ProjectFile::buffer(&project_path, xml)
+                .expect("a project path spelt as its full path"),
+            &HashMap::new(),
+            &environment,
+            None,
+            None,
+        )
+        .expect("well-formed")
+    };
+    let sites_of = |parsed: &borzoi_msbuild::ParsedProject| -> Vec<borzoi_msbuild::RejectionCause> {
+        parsed
+            .diagnostics
+            .iter()
+            .filter_map(|d| match &d.kind {
+                borzoi_msbuild::DiagnosticKind::Rejected { cause }
+                | borzoi_msbuild::DiagnosticKind::MayBeRejected { cause } => Some(cause.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    let mut oracle = Oracle::spawn();
+    let (mut cases, mut second, mut must_commit) = (0, 0, 0);
+    let mut failures = Vec::new();
+    let mut wrong: BTreeMap<String, String> = BTreeMap::new();
+    let mut declines = Vec::new();
+    for at in [HistoryAt::AfterTheChoose, HistoryAt::BeforeTheChoose] {
+        for arm in ARMS {
+            for container in CONTAINERS {
+                for gate in GATES {
+                    for throw in THROWS {
+                        for last in FINALS {
+                            let site = container
+                                .replace("{g}", &xml_attribute(gate))
+                                .replace("{t}", &xml_attribute(throw));
+                            let document = |refused: &str| {
+                                let (before, after) = match at {
+                                    HistoryAt::AfterTheChoose => {
+                                        ("<P>abc</P>".to_owned(), format!("{refused}<P>{last}</P>"))
+                                    }
+                                    HistoryAt::BeforeTheChoose => {
+                                        (format!("{refused}<P>{last}</P>"), String::new())
+                                    }
+                                };
+                                format!(
+                                    "<Project>\n  <PropertyGroup>{before}</PropertyGroup>\n  \
+                                     <ItemGroup><J Include=\"1.0\" /></ItemGroup>\n  \
+                                     <Choose><When Condition=\"{}\"><PropertyGroup><P>abcdefghijkl</P></PropertyGroup>{site}</When></Choose>\n  \
+                                     <PropertyGroup><After>ok</After>{after}</PropertyGroup>\n</Project>\n",
+                                    xml_attribute(arm)
+                                )
+                            };
+                            let plain_xml = document("");
+                            let twin_xml = document(&format!("<P>{REFUSED}</P>"));
+                            let (plain, plain_published) = published_sites(|| walk(&plain_xml));
+                            let ((twin, second_sites), twin_published) =
+                                published_sites(|| second_walk_sites(|| walk(&twin_xml)));
+                            for published in [&plain_published, &twin_published] {
+                                assert_no_site_twice(published, &|| twin_xml.clone());
+                            }
+                            cases += 1;
+                            second += second_sites.len();
+                            let label = format!("{at:?} / {arm} / {site} / {last}");
+                            let plain_sites = sites_of(&plain);
+                            if second_sites
+                                .iter()
+                                .any(|found| !plain_sites.contains(found))
+                            {
+                                declines.push((
+                                    label.clone(),
+                                    "adopts a site the project's walk does not find".to_owned(),
+                                ));
+                            }
+                            std::fs::write(&project_path, &twin_xml).unwrap();
+                            let theirs = oracle.project_design_time(
+                                &twin_xml,
+                                &oracle_names,
+                                Some(&project_path),
+                                &[],
+                            );
+                            if theirs.is_some() {
+                                for (which, parsed) in [("twin", &twin), ("project", &plain)] {
+                                    if parsed
+                                        .rejection
+                                        .as_ref()
+                                        .is_some_and(|r| r.certainty == RejectionCertainty::Certain)
+                                    {
+                                        failures.push(format!(
+                                            "{label}: MSBuild evaluates the project, and the \
+                                             {which}'s walk claims it rejects it: {:?}",
+                                            parsed.rejection
+                                        ));
+                                    }
+                                }
+                            }
+                            if theirs.is_some() && plain.rejection.is_none() {
+                                must_commit += 1;
+                                let twin_sites = sites_of(&twin);
+                                if twin.rejection.is_some()
+                                    && twin_sites.iter().all(|site| second_sites.contains(site))
+                                {
+                                    declines.push((
+                                        label.clone(),
+                                        "withdrawn by the second walk alone".to_owned(),
+                                    ));
+                                }
+                            }
+                            let verdict = wrong_commits(
+                                [("project", &plain), ("twin", &twin)],
+                                theirs.as_ref(),
+                                &names,
+                            );
+                            if !verdict.is_empty() {
+                                wrong.insert(label, verdict);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    eprintln!(
+        "refused history reach grid: {cases} cases, {second} second-walk sites, {must_commit} \
+         must-commit points, {} decline verdicts",
+        declines.len()
+    );
+    let known: BTreeMap<String, String> = REACH_GRID_KNOWN_WRONG
+        .iter()
+        .map(|(label, verdict, _)| ((*label).to_owned(), (*verdict).to_owned()))
+        .collect();
+    for label in known.keys().chain(wrong.keys()).collect::<BTreeSet<_>>() {
+        match (known.get(label), wrong.get(label)) {
+            (Some(pinned), Some(found)) if pinned == found => {}
+            (pinned, found) => failures.push(format!(
+                "{label}: pinned as wrong with {pinned:?}, found wrong with {found:?}"
+            )),
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} failures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+    let manifest = Manifest::from_keyed(declines).expect("well-formed entries");
+    manifest::check(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/manifests/rejection_reach_grid_declines.txt"),
+        &manifest,
+        "BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-msbuild --test \
+         rejection_generative_diff refused_history_reach_grid\n\
+         Each entry is a grid cell where the twin's second walk finds a site the project's walk \
+         does not, or where MSBuild evaluates the twin, the project's walk commits, and the \
+         twin's second walk alone withdraws it: a decline, the second walk's cost.",
+    );
+    assert!(second > 0 && must_commit > 0, "the grid exercises nothing");
+}
+
+/// That the evaluation `sites` describe ([`published_sites`]) noted no
+/// construct's cause twice: one construct noted by both walks and adopted as
+/// if new, or noted twice by the second. A document none of whose files two
+/// import points both walk has no other way to note a construct twice.
+fn assert_no_site_twice(sites: &[Vec<String>], describe: &dyn Fn() -> String) {
+    let [sites] = sites else {
+        panic!("one evaluation published: {sites:?}");
+    };
+    let mut seen = BTreeSet::new();
+    let twice: Vec<&String> = sites.iter().filter(|site| !seen.insert(*site)).collect();
+    assert!(
+        twice.is_empty(),
+        "a construct's cause noted twice: {twice:?}\n{}",
+        describe()
+    );
+}
+
+/// Which of `walks` commit a value of `names` (an exact `Unset` among them)
+/// that MSBuild, answering `theirs`, does not hold, and how, spelt for
+/// [`REACH_GRID_KNOWN_WRONG`]:
+/// `<walk>: commits on a project MSBuild rejects` or `<walk>: commits a
+/// value MSBuild does not hold`, `; `-separated, empty where none does.
+fn wrong_commits(
+    walks: [(&str, &borzoi_msbuild::ParsedProject); 2],
+    theirs: Option<&HashMap<String, String>>,
+    names: &[&str],
+) -> String {
+    walks
+        .iter()
+        .filter_map(|(which, parsed)| {
+            let wrong = names.iter().any(|name| {
+                // An exact `Unset` claims the empty value, as MSBuild reports
+                // an undefined property.
+                let committed = match parsed.property(name) {
+                    PropertyRead::Unset => Some(String::new()),
+                    read => read.value().map(str::to_owned),
+                };
+                committed.is_some_and(|value| theirs.and_then(|t| t.get(*name)) != Some(&value))
+            });
+            wrong.then(|| match theirs {
+                None => format!("{which}: commits on a project MSBuild rejects"),
+                Some(_) => format!("{which}: commits a value MSBuild does not hold"),
+            })
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// [`refused_history_sweep`] at a fixed seed.
+#[test]
+fn refused_history_sweep_fixed_seed() {
+    let mut rng = SplitMix64(0x1153_0b5e_55ed);
+    let census = refused_history_sweep(&mut rng, 3_000);
+    eprintln!("refused history sweep: {census:?}");
+    assert!(
+        census.first_write > 0 && census.rewrite > 0 && census.several > 0,
+        "{census:?}"
+    );
+    assert!(census.second_walk_sites > 0, "{census:?}");
+    assert_eq!(census.second_walk_sites_beyond_project, 0, "{census:?}");
+    assert!(census.withdrawn > 0 && census.committed > 0, "{census:?}");
+}
+
+/// Fresh-seed twin of [`refused_history_sweep_fixed_seed`].
+#[test]
+#[ignore = "fresh-seed soak; run it when touching the rejection judgement"]
+fn refused_history_sweep_soak() {
+    let (seed, cases) = soak_parameters("refused history", 20_000);
+    let mut rng = SplitMix64(seed);
+    let census = refused_history_sweep(&mut rng, cases);
+    eprintln!("refused history soak: {census:?}");
 }
 
 /// The table the oracle's `eval` evaluates against, which writes each value
@@ -1956,4 +2817,156 @@ fn a_group_guard_does_not_rule_out_rejecting_an_uncomputed_import() {
         "we claim {:?}",
         parsed.property("After")
     );
+}
+
+/// The blocks [`second_walk_site_sweep`] composes documents from: the
+/// refused-then-rebound history of `P` and clean writes, sites only the first
+/// walk finds, only the second, and both, a `<Choose>` whose course the two
+/// walks take apart, a group only the first walk defers, a file
+/// (`other.props`, holding a site) the two walks load through different
+/// imports, two files (`x.props`, `y.props`) failing one import at one span,
+/// a file failing an import that the walks reach through two spellings of
+/// its directory (`sub/z.props`, `SUB/z.props`, one file where the file
+/// system folds case), and one cause in two texts of an element.
+const SITE_BLOCKS: &[&str] = &[
+    "<PropertyGroup><P>@(J)</P><P>z</P></PropertyGroup>",
+    "<PropertyGroup><P>@(J)</P><P></P></PropertyGroup>",
+    "<PropertyGroup><P>abc</P></PropertyGroup>",
+    "<Choose><When Condition=\"'$(P)' == 'off' And '$(S[9])' != ''\"><PropertyGroup><W>1</W></PropertyGroup></When><Otherwise><PropertyGroup><W>2</W></PropertyGroup></Otherwise></Choose>",
+    "<Choose><When Condition=\"'É' == 'é'\"><PropertyGroup><P>abcdefghijkl</P></PropertyGroup><ItemGroup><I Include=\"$(P[9])\" /></ItemGroup></When></Choose>",
+    "<ItemGroup><K Include=\"$(S[9])\" /></ItemGroup>",
+    "<ItemGroup><K Include=\"$(P[9])\" /></ItemGroup>",
+    "<PropertyGroup><T>$(S[9])</T></PropertyGroup>",
+    "<Choose><When Condition=\"'É' == 'é'\"><Choose><When Condition=\"'$(P)' == 'off'\"><ItemGroup><I Include=\"x\" /></ItemGroup></When></Choose></When></Choose>",
+    "<Choose><When Condition=\"'É' == 'é'\"><PropertyGroup><Q>nope</Q></PropertyGroup><ItemGroup><I Include=\"$([MSBuild]::VersionLessThan('$(P)v1.0','$(Q)'))\" /></ItemGroup></When></Choose>",
+    "<Choose><When Condition=\"'É' == 'é'\"><PropertyGroup><P>abcdefghijkl</P></PropertyGroup><ItemGroup><I Include=\"$(P[9])$(S[9])\" Exclude=\"$(S[9])\" /></ItemGroup></When></Choose>",
+    "<Choose><When Condition=\"'$(P)' == 'off' And '$(S[9])' != ''\"><PropertyGroup><W>1</W></PropertyGroup></When><Otherwise><PropertyGroup><F>other.props</F></PropertyGroup></Otherwise></Choose><Import Project=\"$(F)\" Condition=\"'$(F)' != ''\" /><Import Project=\"other.props\" />",
+    "<Choose><When Condition=\"'$(P)' == 'off' And '$(S[9])' != ''\"><PropertyGroup><W>1</W></PropertyGroup></When><Otherwise><PropertyGroup><G>x.props</G></PropertyGroup></Otherwise></Choose><Import Project=\"$(G)\" Condition=\"'$(G)' != ''\" /><Import Project=\"y.props\" />",
+    "<Choose><When Condition=\"'$(P)' == 'off' And '$(S[9])' != ''\"><PropertyGroup><W>1</W></PropertyGroup></When><Otherwise><PropertyGroup><H>SUB/z.props</H></PropertyGroup></Otherwise></Choose><Import Project=\"$(H)\" Condition=\"'$(H)' != ''\" /><Import Project=\"sub/z.props\" />",
+    "<Choose><When Condition=\"'É' == 'é'\"><PropertyGroup><P>abcdefghijkl</P><Q>nope</Q></PropertyGroup><ItemGroup><I Include=\"$([MSBuild]::VersionLessThan('$(P)v1.0','$(Q)'))$([MSBuild]::VersionLessThan('nope','$(Q)'))\" Exclude=\"$([MSBuild]::VersionLessThan('nope','$(Q)'))\" /></ItemGroup></When></Choose>",
+];
+
+/// What [`second_walk_site_sweep`] compared.
+#[derive(Debug, Default)]
+struct SiteSweepCensus {
+    cases: usize,
+    /// Cases whose evaluation adopted a site from its second walk.
+    adopted: usize,
+    /// Rejection diagnostics compared, over the entry forms.
+    sites: usize,
+}
+
+/// A site is one construct, however the two walks' courses part and
+/// wherever the construct's file stands (#1153). Each case composes two to
+/// six [`SITE_BLOCKS`] and evaluates them in the entry project and, behind an
+/// `<Import>`, in an imported file, whose constructs share one published span.
+/// Per case:
+///
+/// - neither form notes a construct's cause twice
+///   ([`assert_no_site_twice`]): one construct noted by both walks and
+///   adopted as if new;
+/// - the imported form notes the same causes as the entry form, as many
+///   times each: a construct of an imported file matched to another by their
+///   shared published span would be lost there.
+///
+/// No oracle is asked.
+fn second_walk_site_sweep(rng: &mut SplitMix64, cases: usize) -> SiteSweepCensus {
+    let tmp = TempDir::new().unwrap();
+    let dir = borzoi_msbuild::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    let project_path = dir.join("Demo.fsproj");
+    std::fs::write(
+        dir.join("other.props"),
+        "<Project><ItemGroup><K Include=\"$(S[9])\" /></ItemGroup></Project>",
+    )
+    .unwrap();
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    // `SUB/` reaches `sub/` on every host: a case-folding file system folds
+    // it, and elsewhere a link spells it.
+    #[cfg(unix)]
+    if borzoi_msbuild::observed::host_fs::symlink_metadata(dir.join("SUB")).is_err() {
+        std::os::unix::fs::symlink(dir.join("sub"), dir.join("SUB")).unwrap();
+    }
+    for parent in ["x.props", "y.props", "sub/z.props"] {
+        std::fs::write(
+            dir.join(parent),
+            "<Project><Import Project=\"missing.props\" /></Project>",
+        )
+        .unwrap();
+    }
+    let environment = HashMap::new();
+    let walk = |xml: &str| {
+        parse_fsproj_with_imports(
+            &borzoi_msbuild::ProjectFile::buffer(&project_path, xml)
+                .expect("a project path spelt as its full path"),
+            &HashMap::new(),
+            &environment,
+            None,
+            None,
+        )
+        .expect("well-formed")
+    };
+    let causes = |parsed: &borzoi_msbuild::ParsedProject| -> Vec<String> {
+        let mut causes: Vec<String> = parsed
+            .diagnostics
+            .iter()
+            .filter_map(|d| match &d.kind {
+                borzoi_msbuild::DiagnosticKind::Rejected { cause }
+                | borzoi_msbuild::DiagnosticKind::MayBeRejected { cause } => {
+                    Some(format!("{cause:?}"))
+                }
+                _ => None,
+            })
+            .collect();
+        causes.sort();
+        causes
+    };
+    let prefix = "<PropertyGroup><S>a</S><Q>bad</Q></PropertyGroup><ItemGroup><J Include=\"1.0\" /></ItemGroup>";
+    let mut census = SiteSweepCensus::default();
+    for _ in 0..cases {
+        let count = 2 + rng.below(5);
+        let blocks: String = (0..count).map(|_| *rng.pick(SITE_BLOCKS)).collect();
+        let entry_xml = format!("<Project>{prefix}{blocks}</Project>");
+        std::fs::write(
+            dir.join("inner.props"),
+            format!("<Project>{blocks}</Project>"),
+        )
+        .unwrap();
+        let imported_xml = format!("<Project>{prefix}<Import Project=\"inner.props\" /></Project>");
+        let ((entry, adopted), entry_published) =
+            published_sites(|| second_walk_sites(|| walk(&entry_xml)));
+        let (imported, imported_published) = published_sites(|| walk(&imported_xml));
+        census.cases += 1;
+        census.adopted += usize::from(!adopted.is_empty());
+        census.sites += causes(&entry).len();
+        assert_no_site_twice(&entry_published, &|| entry_xml.clone());
+        assert_no_site_twice(&imported_published, &|| imported_xml.clone());
+        assert_eq!(
+            causes(&entry),
+            causes(&imported),
+            "the entry project and the imported file note different sites\n{entry_xml}\n\
+             entry: {:#?}\nimported: {:#?}",
+            entry.diagnostics,
+            imported.diagnostics
+        );
+    }
+    census
+}
+
+/// [`second_walk_site_sweep`] at a fixed seed.
+#[test]
+fn second_walk_site_sweep_fixed_seed() {
+    let mut rng = SplitMix64(0x1153_517e);
+    let census = second_walk_site_sweep(&mut rng, 1_500);
+    eprintln!("second walk site sweep: {census:?}");
+    assert!(census.adopted > 100, "{census:?}");
+}
+
+/// Fresh-seed twin of [`second_walk_site_sweep_fixed_seed`].
+#[test]
+#[ignore = "fresh-seed soak; run it when touching the rejection judgement"]
+fn second_walk_site_sweep_soak() {
+    let (seed, cases) = soak_parameters("second walk sites", 20_000);
+    let mut rng = SplitMix64(seed);
+    let census = second_walk_site_sweep(&mut rng, cases);
+    eprintln!("second walk site soak: {census:?}");
 }

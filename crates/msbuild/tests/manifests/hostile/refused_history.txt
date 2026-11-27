@@ -1,0 +1,22 @@
+# Generated; do not edit by hand. One line per graded item, sorted.
+# Regenerate with:
+#   BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-msbuild --test rejection_generative_diff refused_history_sweep_fixed_seed
+plain	owed
+value.blank	owed
+value.boolean-spelling	owed
+value.case-folding	owed
+value.item-expression	owed
+value.item-separator	owed
+value.long-value	owed
+value.number-spelling	owed
+value.option	owed
+value.option-after-line-break	owed
+value.overwritten-later	excluded: hostile only to a read between the write and its reset, and a walk-only comparison of a twin with its project does not observe which reads MSBuild makes
+value.padded	owed
+value.padded-option	owed
+value.path-separator	owed
+value.quoted-argument	owed
+value.reads-the-build	excluded: each value calls a property function in a property body, and one the walk does not model there, which MSBuild may throw on, is no rejection site yet (#1094)
+value.response-file	owed
+value.self-set-property	owed
+value.version-spelling	owed

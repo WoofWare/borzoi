@@ -75,7 +75,7 @@ use borzoi_oracle_harness::manifest::{self, Manifest, ManifestDiff, UPDATE_ENV};
 
 mod common;
 
-use crate::common::parse_fsproj_with_imports;
+use crate::common::parse_fsproj_with_imports_costed;
 use borzoi_msbuild::{
     Diagnostic, GlobResolver, GlobalJson, ItemKind, PackageRefOp, PackageReference,
     PackageReferenceUncertaintyCause, PackageReferenceUncertaintyCauseKind, ParsedProject,
@@ -102,7 +102,14 @@ fn manifest_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/manifests/fsproj_msbuild_corpus_diff.txt")
 }
 
-/// The one command that regenerates [`manifest_path`].
+/// The checked-in second-walk census: one `<project>\t<census>` entry per
+/// pinned-corpus project the walk evaluated ([`WalkCensus::entry`]).
+fn census_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/manifests/fsproj_msbuild_corpus_second_walk.txt")
+}
+
+/// The one command that regenerates [`manifest_path`] and [`census_path`].
 const REGENERATE: &str = "BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-msbuild \
      --test fsproj_msbuild_corpus_diff -- --ignored";
 
@@ -307,6 +314,7 @@ impl Run {
         let mut divergences = Vec::new();
         let mut unmanifested_errors = 0usize;
         let mut actual: BTreeMap<String, String> = BTreeMap::new();
+        let mut census: BTreeMap<String, String> = BTreeMap::new();
         let (mut compared_projects, mut matched_facets, mut skipped_facets, mut error_projects) =
             (0usize, 0usize, 0usize, 0usize);
 
@@ -329,6 +337,9 @@ impl Run {
             }
             match self.manifest_key(&report.project) {
                 Some(key) => {
+                    if let Some(walk) = &report.walk {
+                        census.insert(key.clone(), walk.entry());
+                    }
                     let outcome = report.manifest_outcome();
                     if let Some(other) = actual.insert(key.clone(), outcome) {
                         panic!("two projects share the manifest key {key} (one was {other})");
@@ -361,6 +372,13 @@ impl Run {
             self.config.max_errors
         );
 
+        self.check_manifest(&manifest_path(), actual);
+        self.check_manifest(&census_path(), census);
+    }
+
+    /// Hold `actual`, keyed by project, to the manifest at `path`: exactly on
+    /// a whole-corpus run, and on the projects it visited otherwise.
+    fn check_manifest(&self, path: &Path, actual: BTreeMap<String, String>) {
         let actual = Manifest::from_entries(
             actual
                 .into_iter()
@@ -368,10 +386,9 @@ impl Run {
         )
         .unwrap_or_else(|e| panic!("manifest entry: {e}"));
         if self.config.whole_pinned_corpus {
-            manifest::check(&manifest_path(), &actual, REGENERATE);
+            manifest::check(path, &actual, REGENERATE);
         } else if !actual.entries().is_empty() {
-            let path = manifest_path();
-            let text = host_fs::read_to_string(&path)
+            let text = host_fs::read_to_string(path)
                 .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
             let expected = Manifest::parse(&text).unwrap_or_else(|(line, e)| {
                 panic!(
@@ -436,19 +453,37 @@ fn compare_project(project: &Path, host: &DotnetHost) -> ProjectReport {
         |name: &str, observer: &borzoi_msbuild::observed::Observer| sdk.resolve(name, observer);
     let mut extra_properties = HashMap::new();
     extra_properties.insert("DISABLE_ARCADE".to_string(), "true".to_string());
-    let parsed = match parse_fsproj_with_imports(
-        &borzoi_msbuild::ProjectFile::buffer(&fsproj, &source)
-            .expect("a project path spelt as its full path"),
-        &extra_properties,
-        &host.environment,
-        Some(&resolver),
-        // The resolver the LSP passes: without it every wildcard or `Exclude`
-        // item declines, and the comparison cannot see them at all.
-        Some(&glob_resolver::resolve as &GlobResolver<'_>),
-    ) {
+    let (parsed, costs) = borzoi_msbuild::test_support::with_refusal_census(|| {
+        parse_fsproj_with_imports_costed(
+            &borzoi_msbuild::ProjectFile::buffer(&fsproj, &source)
+                .expect("a project path spelt as its full path"),
+            &extra_properties,
+            &host.environment,
+            Some(&resolver),
+            // The resolver the LSP passes: without it every wildcard or
+            // `Exclude` item declines, and the comparison cannot see them at
+            // all.
+            Some(&glob_resolver::resolve as &GlobResolver<'_>),
+        )
+    });
+    let parsed = match parsed {
         Ok(parsed) => parsed,
         Err(e) => return ProjectReport::error(display, Stage::Parse, e.to_string()),
     };
+    let walk = WalkCensus {
+        second_walk: costs.second_walks > 0,
+        refusal_paths: costs.refusal_paths,
+    };
+    // What the second walk costs (`evaluator::rejection`'s module docs, "The
+    // second walk"), per project.
+    eprintln!(
+        "{display}: second walk {}, {} property writes in the first walk, {} in the second, \
+         {} refusal paths",
+        walk.second_walk,
+        costs.property_writes,
+        costs.second_walk_property_writes,
+        costs.refusal_paths,
+    );
     // What an evaluation's read set costs to validate (Stage 3b of
     // `docs/incremental-lsp-plan.md`), per project.
     let counts = parsed.read_counts;
@@ -463,7 +498,12 @@ fn compare_project(project: &Path, host: &DotnetHost) -> ProjectReport {
 
     let msbuild = match run_msbuild(&fsproj, host) {
         Ok(msbuild) => msbuild,
-        Err(e) => return ProjectReport::error(display, Stage::Oracle, e),
+        Err(e) => {
+            return ProjectReport {
+                walk: Some(walk),
+                ..ProjectReport::error(display, Stage::Oracle, e)
+            };
+        }
     };
 
     let facets = vec![
@@ -497,6 +537,28 @@ fn compare_project(project: &Path, host: &DotnetHost) -> ProjectReport {
             .map(render_diagnostic)
             .collect(),
         omitted_diagnostics: parsed.diagnostics.len().saturating_sub(20),
+        walk: Some(walk),
+    }
+}
+
+/// Whether an evaluation ran the second walk of a refused-then-rebound name,
+/// and how many groups its first walk judged from an untaken path writing
+/// such a name (`WalkCosts::refusal_paths`): the narrower trigger the second
+/// walk does not use, kept as a census of how far the two trigger apart.
+#[derive(Debug, Clone, Copy)]
+struct WalkCensus {
+    second_walk: bool,
+    refusal_paths: u64,
+}
+
+impl WalkCensus {
+    /// The census's manifest entry.
+    fn entry(&self) -> String {
+        format!(
+            "second walk={} | refusal paths={}",
+            if self.second_walk { "yes" } else { "no" },
+            self.refusal_paths
+        )
     }
 }
 
@@ -1512,6 +1574,9 @@ struct ProjectReport {
     facets: Vec<FacetReport>,
     diagnostics: Vec<String>,
     omitted_diagnostics: usize,
+    /// The walk's census, where the walk evaluated the project.
+    #[serde(skip)]
+    walk: Option<WalkCensus>,
 }
 
 /// The facets the manifest records. `define_constants` is compared but left
@@ -1557,6 +1622,7 @@ impl ProjectReport {
             facets: Vec::new(),
             diagnostics: Vec::new(),
             omitted_diagnostics: 0,
+            walk: None,
         }
     }
 }

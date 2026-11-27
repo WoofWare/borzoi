@@ -1645,6 +1645,755 @@ fn a_certain_write_after_the_path_settles_an_items_value() {
     }
 }
 
+/// So does one after a write the walk refused (an item list, a function it
+/// does not model): the walk holds `z` as MSBuild does, whether the refusal
+/// came first or just before, and the mark it keeps of it is history the item
+/// pass does not read (#1153). A text and a condition alike.
+#[test]
+fn a_certain_write_after_a_refused_one_settles_an_items_value() {
+    for refused in ["@(J)", "$([System.String]::Copy('d'))"] {
+        for (first, last) in [
+            (format!("<P>{refused}</P>"), "<P>z</P>".to_owned()),
+            ("<P>abc</P>".to_owned(), format!("<P>{refused}</P><P>z</P>")),
+        ] {
+            for group in [
+                "<ItemGroup><I Include=\"$(P[9])\" /></ItemGroup>",
+                "<ItemGroup Condition=\"'$(P[9])' != ''\"><I Include=\"x\" /></ItemGroup>",
+            ] {
+                let body = format!(
+                    "<PropertyGroup>{first}</PropertyGroup><Choose><When Condition=\"{UNDECIDED_TRUE}\">\
+                     <PropertyGroup><P>abcdefghijkl</P></PropertyGroup>{group}</When></Choose>\
+                     <PropertyGroup>{last}</PropertyGroup>"
+                );
+                for parsed in both_walkers(&format!("  {body}")) {
+                    assert_withdrawn(&parsed, &["Before", "After"]);
+                }
+            }
+        }
+    }
+}
+
+/// A name the second walk holds settled does not decide a condition's
+/// course: `'$(P)' == 'abcdefghijkl'` is false on `P`'s final `z`, so MSBuild
+/// never reaches `$(P[9])` and evaluates the project, but which operands
+/// MSBuild reaches is main's to decide in either walk, and main doubts the
+/// refused `P` there, so the second walk judges `$(P[9])` on `z`. The site
+/// stands, Possible: a decline, never a claim (#1153, #1183).
+#[test]
+fn a_condition_the_walk_doubts_keeps_a_second_walks_site() {
+    let body = format!(
+        "<PropertyGroup><P>abc</P></PropertyGroup><Choose><When Condition=\"{UNDECIDED_TRUE}\">\
+         <PropertyGroup><P>abcdefghijkl</P></PropertyGroup>\
+         <ItemGroup Condition=\"'$(P)' == 'abcdefghijkl' And '$(P[9])' != ''\"><I Include=\"x\" /></ItemGroup>\
+         </When></Choose>\
+         <PropertyGroup><P>@(J)</P><P>z</P></PropertyGroup>"
+    );
+    for parsed in both_walkers(&format!("  {body}")) {
+        let rejection = parsed.rejection.as_ref().expect("the second walk's site");
+        assert_eq!(rejection.certainty, RejectionCertainty::Possible, "{body}");
+    }
+}
+
+/// But not the gates around a site: under `'$(P)' == 'abcdefghijkl'`, false
+/// on `P`'s final `z`, MSBuild expands no metadatum, update or definition,
+/// but either walk, deciding a gate it judges as main does, takes it as
+/// undecided, and the second walk may find a throw there on `z` (where the
+/// first does not miss it, as for a gated definition, #1172). What MSBuild
+/// reaches is main's to decide in both walks, so such a site stands,
+/// Possible: a decline MSBuild does not need, never a claim (#1153, #1183).
+/// A `<When>`
+/// holds no `<UsingTask>`, so no task is judged from an untaken path.
+#[test]
+fn a_gate_the_walk_doubts_keeps_a_second_walks_site() {
+    let gate = "'$(P)' == 'abcdefghijkl'";
+    for group in [
+        format!("<ItemGroup><I Include=\"x\"><M Condition=\"{gate}\">$(P[9])</M></I></ItemGroup>"),
+        format!(
+            "<ItemGroup><I Include=\"x\" /><I Update=\"x\" Condition=\"{gate}\"><M>$(P[9])</M></I></ItemGroup>"
+        ),
+        format!(
+            "<ItemDefinitionGroup><I><M Condition=\"{gate}\">$(P[9])</M></I></ItemDefinitionGroup>"
+        ),
+        format!(
+            "<ItemDefinitionGroup Condition=\"{gate}\"><I><M>$(P[9])</M></I></ItemDefinitionGroup>"
+        ),
+        format!(
+            "<ItemDefinitionGroup><I Condition=\"{gate}\"><M>$(P[9])</M></I></ItemDefinitionGroup>"
+        ),
+    ] {
+        let body = format!(
+            "<PropertyGroup><P>abc</P></PropertyGroup><Choose><When Condition=\"{UNDECIDED_TRUE}\">\
+             <PropertyGroup><P>abcdefghijkl</P></PropertyGroup>{group}</When></Choose>\
+             <PropertyGroup><P>@(J)</P><P>z</P></PropertyGroup>"
+        );
+        for parsed in both_walkers(&format!("  {body}")) {
+            assert_ne!(
+                parsed.rejection.as_ref().map(|r| r.certainty),
+                Some(RejectionCertainty::Certain),
+                "{group}: {:#?}",
+                parsed.diagnostics
+            );
+        }
+    }
+}
+
+/// The second walk holds a refused-then-rebound name certain only where
+/// nothing else leaves its value unknown: the arm the walk does not take
+/// writes `P` again, so in the arm `P` is unknown to either walk, and
+/// `$(P[9])`, which throws on the `abc` before the arm but not on the arm's
+/// `abcdefghijkl`, MSBuild's value there, is no site (#1153).
+#[test]
+fn a_second_walk_holds_no_name_a_speculation_leaves_unknown() {
+    let body = format!(
+        "<PropertyGroup><P>@(J)</P><P>abc</P></PropertyGroup>\
+         <Choose><When Condition=\"{UNDECIDED_TRUE}\"><PropertyGroup><P>abcdefghijkl</P>\
+         <Q Condition=\"'$(P[9])' != ''\">q</Q></PropertyGroup></When></Choose>"
+    );
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_eq!(parsed.rejection, None, "{:#?}", parsed.diagnostics);
+        assert!(parsed.property("After").is_exact());
+    }
+}
+
+/// But not the `<Choose>` the site's group stands in: `'$(P)' == 'off'` is
+/// false on `P`'s `z`, so MSBuild takes no arm and evaluates the project, but
+/// the walk's own course doubts the refused name, so it judges the arm in
+/// either walk, and the second, holding `P` at its final `z`, finds `$(P[9])`
+/// throwing there. What each walk judges is main's to decide, so the site
+/// stands, Possible: a decline MSBuild does not need, never a claim (#1153).
+#[test]
+fn an_arm_the_walk_doubts_keeps_a_second_walks_site() {
+    let body = "<PropertyGroup><P>@(J)</P><P>z</P></PropertyGroup>\
+                <Choose><When Condition=\"'$(P)' == 'off'\">\
+                <PropertyGroup><P>abcdefghijkl</P></PropertyGroup>\
+                <ItemGroup><I Include=\"$(P[9])\" /></ItemGroup></When></Choose>";
+    for parsed in both_walkers(&format!("  {body}")) {
+        let rejection = parsed.rejection.as_ref().expect("the second walk's site");
+        assert_eq!(rejection.certainty, RejectionCertainty::Possible);
+        assert!(!parsed.property("After").is_exact());
+    }
+}
+
+/// The record of sites adopted from a second walk is kept only while a
+/// caller collects it: a walk that adopts one, uncollected, keeps nothing,
+/// and a collection a panic leaves is closed (#1153). This pins the test
+/// collector, not an outcome the oracle grades.
+#[test]
+fn an_uncollected_walk_keeps_no_second_walk_site() {
+    let body = format!(
+        "<PropertyGroup><P>abc</P></PropertyGroup><Choose><When Condition=\"{UNDECIDED_TRUE}\">\
+         <PropertyGroup><P>abcdefghijkl</P></PropertyGroup>\
+         <ItemGroup><I Include=\"$(P[9])\" /></ItemGroup></When></Choose>\
+         <PropertyGroup><P>@(J)</P><P>z</P></PropertyGroup>"
+    );
+    let (_, collected) =
+        crate::test_support::second_walk_sites(|| both_walkers(&format!("  {body}")));
+    assert!(
+        !collected.is_empty(),
+        "the walk adopts a second walk's site"
+    );
+    assert!(crate::test_support::second_walk_collector_idle());
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert!(parsed.rejection.is_some());
+    }
+    assert!(crate::test_support::second_walk_collector_idle());
+    let unwound = std::panic::catch_unwind(|| {
+        crate::test_support::second_walk_sites(|| {
+            both_walkers(&format!("  {body}"));
+            panic!("out of the collected walk");
+        })
+    });
+    assert!(unwound.is_err());
+    assert!(crate::test_support::second_walk_collector_idle());
+    let (_, collected) =
+        crate::test_support::second_walk_sites(|| both_walkers(&format!("  {body}")));
+    let index = crate::RejectionCause::ThrowingExpression {
+        expression: "$(P[9])".to_string(),
+    };
+    assert!(
+        !collected.is_empty() && collected.iter().all(|cause| *cause == index),
+        "{collected:?}"
+    );
+}
+
+/// A refusal a later write overwrote settles its name only to add sites, not
+/// to lose one: `VersionLessThan('$(P)v1.0', '$(Q)')` throws whatever `P` and
+/// `Q` hold, judged with both unknown, though with `P` settled to its final
+/// `""` it throws only on some of the values tried for `Q`. MSBuild throws on
+/// `Q`'s `nope` (MSB4184), so the walk withdraws as it does without the
+/// settlement (#1153).
+#[test]
+fn settling_a_refused_name_keeps_a_site_its_unknown_value_shows() {
+    let body = format!(
+        "<PropertyGroup><Q>bad</Q></PropertyGroup><Choose><When Condition=\"{UNDECIDED_TRUE}\">\
+         <PropertyGroup><P>abc</P><Q>nope</Q></PropertyGroup>\
+         <ItemGroup><I Include=\"$([MSBuild]::VersionLessThan('$(P)v1.0','$(Q)'))\" /></ItemGroup>\
+         </When></Choose>\
+         <PropertyGroup><P>@(J)</P><P></P></PropertyGroup>"
+    );
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_withdrawn(&parsed, &["Before", "After"]);
+    }
+}
+
+/// Each site of a path's group is weighed under both readings of a name
+/// refused then rewritten (#1153), in place: `$(P[9])` throws on `P`'s
+/// settled `z` only, `$(Short[9])` on a certain `a` under either, and the
+/// evaluation's rejection is the first of them, as MSBuild reports it, with a
+/// diagnostic at each, two items or one item's `Include` and `Exclude`; two
+/// attributes throwing alike are two sites.
+#[test]
+fn a_second_walks_sites_follow_the_first_walks() {
+    let throw = |expression: &str| RejectionCause::ThrowingExpression {
+        expression: expression.to_owned(),
+    };
+    for (items, sites) in [
+        (
+            "<I Include=\"$(P[9])\" /><I Include=\"$(Short[9])\" />",
+            ["$(Short[9])", "$(P[9])"],
+        ),
+        (
+            "<I Include=\"$(P[9])\" Exclude=\"$(Short[9])\" />",
+            ["$(Short[9])", "$(P[9])"],
+        ),
+        (
+            "<I Include=\"$(Short[9])\" Exclude=\"$(Short[9])\" />",
+            ["$(Short[9])", "$(Short[9])"],
+        ),
+    ] {
+        let body = format!(
+            "<PropertyGroup><P>abc</P><Short>a</Short></PropertyGroup>\
+             <Choose><When Condition=\"{UNDECIDED_TRUE}\">\
+             <PropertyGroup><P>abcdefghijkl</P></PropertyGroup>\
+             <ItemGroup>{items}</ItemGroup>\
+             </When></Choose>\
+             <PropertyGroup><P>@(J)</P><P>z</P></PropertyGroup>"
+        );
+        for parsed in both_walkers(&format!("  {body}")) {
+            assert_withdrawn(&parsed, &["Before", "After"]);
+            let rejection = parsed.rejection.as_ref().expect("withdrawn");
+            assert_eq!(rejection.cause, throw(sites[0]), "{items}: {rejection:#?}");
+            let noted: Vec<_> = parsed
+                .diagnostics
+                .iter()
+                .filter_map(|d| match &d.kind {
+                    DiagnosticKind::MayBeRejected { cause } => Some(cause.clone()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                noted,
+                sites.map(throw),
+                "{items}: {:#?}",
+                parsed.diagnostics
+            );
+        }
+    }
+}
+
+/// Each site of one group is noted once, whichever walk finds it: the first
+/// walk's in its order, then the second walk's own in theirs, and the first of
+/// them is the evaluation's rejection (#1153). Every sequence of two or three
+/// items, and every item with an `Include` and an `Exclude`, drawn from a
+/// throw only the first walk finds (`VersionLessThan` on `P` unknown; settled
+/// to `""` it throws on some of `Q`'s values only), one only the second finds
+/// (`$(P[9])`, on `P`'s final `""`), and one both find (`$(Short[9])`), in the
+/// entry project and in an imported file, whose sites share one published
+/// span.
+#[test]
+fn sites_from_either_walk_are_each_noted_once() {
+    #[derive(Clone, Copy, Debug)]
+    enum Found {
+        FirstWalk,
+        SecondWalk,
+        Both,
+    }
+    let expression = |found: Found| match found {
+        Found::FirstWalk => "$([MSBuild]::VersionLessThan('$(P)v1.0','$(Q)'))",
+        Found::SecondWalk => "$(P[9])",
+        Found::Both => "$(Short[9])",
+    };
+    let all = [Found::FirstWalk, Found::SecondWalk, Found::Both];
+    let mut cases: Vec<(String, Vec<Found>)> = Vec::new();
+    for a in all {
+        for b in all {
+            let include = |f: Found| format!("<I Include=\"{}\" />", expression(f));
+            cases.push((format!("{}{}", include(a), include(b)), vec![a, b]));
+            cases.push((
+                format!(
+                    "<I Include=\"{}\" Exclude=\"{}\" />",
+                    expression(a),
+                    expression(b)
+                ),
+                vec![a, b],
+            ));
+            for c in all {
+                cases.push((
+                    format!("{}{}{}", include(a), include(b), include(c)),
+                    vec![a, b, c],
+                ));
+            }
+        }
+    }
+    let mut adopted = 0;
+    for (items, found) in cases {
+        let group = format!(
+            "<PropertyGroup><P>abc</P><Q>bad</Q><Short>a</Short></PropertyGroup>\
+             <Choose><When Condition=\"{UNDECIDED_TRUE}\">\
+             <PropertyGroup><P>abcdefghijkl</P><Q>nope</Q></PropertyGroup>\
+             <ItemGroup>{items}</ItemGroup>\
+             </When></Choose>\
+             <PropertyGroup><P>@(J)</P><P></P></PropertyGroup>"
+        );
+        let cause = |f: &Found| RejectionCause::ThrowingExpression {
+            expression: expression(*f).to_owned(),
+        };
+        let expected: Vec<RejectionCause> = found
+            .iter()
+            .filter(|f| !matches!(f, Found::SecondWalk))
+            .chain(found.iter().filter(|f| matches!(f, Found::SecondWalk)))
+            .map(cause)
+            .collect();
+        let tmp = TempDir::new().unwrap();
+        let imported = project(
+            &tmp,
+            "  <Import Project=\"inner.props\" />",
+            &[("proj/inner.props", &format!("<Project>{group}</Project>"))],
+        );
+        let ((entry, imported), collected) = crate::test_support::second_walk_sites(|| {
+            (both_walkers(&format!("  {group}")), parse_file(&imported))
+        });
+        adopted += collected.len();
+        for (place, parsed) in [
+            ("entry", &entry[0]),
+            ("pure", &entry[1]),
+            ("imported", &imported),
+        ] {
+            let noted: Vec<_> = parsed
+                .diagnostics
+                .iter()
+                .filter_map(|d| match &d.kind {
+                    DiagnosticKind::MayBeRejected { cause } => Some(cause.clone()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                noted, expected,
+                "{place} {items}: {:#?}",
+                parsed.diagnostics
+            );
+            assert_eq!(
+                parsed.rejection.as_ref().map(|r| &r.cause),
+                expected.first(),
+                "{place} {items}"
+            );
+        }
+    }
+    assert!(adopted > 0, "no case adopts a second walk's site");
+}
+
+/// One attribute whose expressions throw, the first only on the final value
+/// of a name refused then rebound: each walk names the first it judges a
+/// site, the second walk `$(P[9])`, the first `$(Short[9])`. Both are noted,
+/// the first walk's first and the evaluation's rejection: a possible site's
+/// order claims nothing about the error MSBuild reports (#1153).
+#[test]
+fn each_walks_throw_in_one_text_is_noted() {
+    let body = format!(
+        "<PropertyGroup><P>abc</P><Short>a</Short></PropertyGroup>\
+         <Choose><When Condition=\"{UNDECIDED_TRUE}\">\
+         <PropertyGroup><P>abcdefghijkl</P></PropertyGroup>\
+         <ItemGroup><I Include=\"$(P[9])$(Short[9])\" /></ItemGroup>\
+         </When></Choose>\
+         <PropertyGroup><P>@(J)</P><P>z</P></PropertyGroup>"
+    );
+    let throw = |expression: &str| RejectionCause::ThrowingExpression {
+        expression: expression.to_owned(),
+    };
+    for parsed in both_walkers(&format!("  {body}")) {
+        let noted: Vec<_> = parsed
+            .diagnostics
+            .iter()
+            .filter_map(|d| match &d.kind {
+                DiagnosticKind::MayBeRejected { cause } => Some(cause.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            noted,
+            [throw("$(Short[9])"), throw("$(P[9])")],
+            "{:#?}",
+            parsed.diagnostics
+        );
+        assert_eq!(
+            parsed.rejection.as_ref().map(|r| &r.cause),
+            Some(&throw("$(Short[9])"))
+        );
+    }
+}
+
+/// No second walk where its reading cannot differ: the refused `P` is
+/// rewritten, but the judgement reads it only in a gate, which both walks
+/// decide as main does, so the first walk never reads `P` where the second
+/// would hold it certain, and the evaluation is walked once; its certain throw
+/// is one site (#1153).
+#[test]
+fn no_second_walk_where_its_reading_cannot_differ() {
+    let body = format!(
+        "<PropertyGroup><P>@(J)</P><P>z</P><Short>a</Short></PropertyGroup>\
+         <Choose><When Condition=\"{UNDECIDED_TRUE}\"><Choose>\
+         <When Condition=\"'$(P)' == 'off'\"><ItemGroup><I Include=\"x\" /></ItemGroup></When>\
+         </Choose></When></Choose>\
+         <ItemGroup><K Include=\"$(Short[9])\" /></ItemGroup>"
+    );
+    let (parsed, costs) =
+        crate::test_support::count_walk_costs(|| both_walkers(&format!("  {body}")));
+    assert_eq!(costs.second_walks, 0, "{costs:?}");
+    for parsed in parsed {
+        let sites = parsed
+            .diagnostics
+            .iter()
+            .filter(|d| {
+                matches!(
+                    d.kind,
+                    DiagnosticKind::Rejected { .. } | DiagnosticKind::MayBeRejected { .. }
+                )
+            })
+            .count();
+        assert_eq!(sites, 1, "{:#?}", parsed.diagnostics);
+        assert_rejected(&parsed, &["Before", "After"]);
+    }
+}
+
+/// A site only the second walk finds in an SDK's `Sdk.props` or
+/// `Sdk.targets` is noted, after the first walk's site in the project's body,
+/// which is the evaluation's rejection (#1153).
+#[test]
+fn a_second_walks_site_in_an_sdks_file_is_noted() {
+    // The arm's write of `P` is not its last: a refused write and `z`
+    // follow it, in the project's body or after the arm in `Sdk.targets`.
+    let arm = |site: &str, after: &str| {
+        format!(
+            "<Project><Choose><When Condition=\"{UNDECIDED_TRUE}\">\
+             <PropertyGroup><P>abcdefghijkl</P></PropertyGroup>\
+             <ItemGroup><I Include=\"{site}\" /></ItemGroup></When></Choose>{after}</Project>"
+        )
+    };
+    let rebind = "<PropertyGroup><P>@(J)</P><P>z</P></PropertyGroup>";
+    let throw = |expression: &str| RejectionCause::ThrowingExpression {
+        expression: expression.to_owned(),
+    };
+    for (props, targets, expected) in [
+        (
+            "<Project></Project>".to_owned(),
+            arm("$(P[9])", rebind),
+            [throw("$(Short[9])"), throw("$(P[9])")],
+        ),
+        (
+            arm("$(P[10])", ""),
+            "<Project></Project>".to_owned(),
+            [throw("$(Short[9])"), throw("$(P[10])")],
+        ),
+    ] {
+        let tmp = TempDir::new().unwrap();
+        let (sdk_dir, props_path, targets_path) =
+            write_synthetic_sdk(tmp.path(), "Order.Sdk", &props, &targets);
+        let project_path = write_at(
+            tmp.path(),
+            "Demo.fsproj",
+            &format!(
+                "<Project Sdk=\"Order.Sdk\"><PropertyGroup><Short>a</Short></PropertyGroup>\
+                 <ItemGroup><J Include=\"1.0\" /></ItemGroup>\
+                 <Choose><When Condition=\"{UNDECIDED_TRUE}\">\
+                 <ItemGroup><K Include=\"$(Short[9])\" /></ItemGroup></When></Choose>\
+                 <PropertyGroup><P>@(J)</P><P>z</P></PropertyGroup></Project>"
+            ),
+        );
+        let parsed = parse_file_with_sdk(&project_path, |_| {
+            Ok(SdkPaths {
+                root: sdk_dir.clone(),
+                props: props_path.clone(),
+                targets: targets_path.clone(),
+            })
+        });
+        let noted: Vec<_> = parsed
+            .diagnostics
+            .iter()
+            .filter_map(|d| match &d.kind {
+                DiagnosticKind::MayBeRejected { cause } => Some(cause.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(noted, expected, "{:#?}", parsed.diagnostics);
+        assert_eq!(
+            parsed.rejection.as_ref().map(|r| &r.cause),
+            expected.first()
+        );
+    }
+}
+
+/// Two files' constructs at one span are two sites: `x.props` and
+/// `y.props` lay `$(P[9])` out alike, the first walk notes it in `y.props`,
+/// whose arm does not write `P`, and only the second in `x.props`, whose arm
+/// does. Each is noted, at its own import (#1153).
+#[test]
+fn constructs_of_two_files_at_one_span_are_two_sites() {
+    let file = |written: &str| {
+        format!(
+            "<Project><Choose><When Condition=\"{UNDECIDED_TRUE}\">\
+             <PropertyGroup><{written}>abcdefghijkl</{written}></PropertyGroup>\
+             <ItemGroup><I Include=\"$(P[9])\" /></ItemGroup></When></Choose></Project>"
+        )
+    };
+    let tmp = TempDir::new().unwrap();
+    let project_path = project(
+        &tmp,
+        "  <Import Project=\"x.props\" /><Import Project=\"y.props\" />\
+         <PropertyGroup><P>@(J)</P><P>z</P></PropertyGroup>",
+        &[("proj/x.props", &file("P")), ("proj/y.props", &file("Q"))],
+    );
+    let parsed = parse_file(&project_path);
+    let item = RejectionCause::ThrowingExpression {
+        expression: "$(P[9])".to_owned(),
+    };
+    let spans: BTreeSet<_> = parsed
+        .diagnostics
+        .iter()
+        .filter(|d| matches!(&d.kind, DiagnosticKind::MayBeRejected { cause } if *cause == item))
+        .map(|d| (d.span.start, d.span.end))
+        .collect();
+    assert_eq!(spans.len(), 2, "{:#?}", parsed.diagnostics);
+}
+
+/// One cause in two texts of an element is two sites: the first walk notes
+/// `$([MSBuild]::VersionLessThan('nope','$(Q)'))` in the `Exclude` alone (in
+/// the `Include` it names the throw before it, which only it finds), the
+/// second in both, and both are noted (#1153).
+#[test]
+fn one_cause_in_two_texts_of_an_element_is_two_sites() {
+    let first_only = "$([MSBuild]::VersionLessThan('$(P)v1.0','$(Q)'))";
+    let both = "$([MSBuild]::VersionLessThan('nope','$(Q)'))";
+    let body = format!(
+        "<PropertyGroup><P>abc</P><Q>bad</Q></PropertyGroup>\
+         <Choose><When Condition=\"{UNDECIDED_TRUE}\">\
+         <PropertyGroup><P>abcdefghijkl</P><Q>nope</Q></PropertyGroup>\
+         <ItemGroup><I Include=\"{first_only}{both}\" Exclude=\"{both}\" /></ItemGroup>\
+         </When></Choose>\
+         <PropertyGroup><P>@(J)</P><P></P></PropertyGroup>"
+    );
+    let cause = RejectionCause::ThrowingExpression {
+        expression: both.to_owned(),
+    };
+    for parsed in both_walkers(&format!("  {body}")) {
+        let noted = parsed
+            .diagnostics
+            .iter()
+            .filter(
+                |d| matches!(&d.kind, DiagnosticKind::MayBeRejected { cause: c } if *c == cause),
+            )
+            .count();
+        assert_eq!(noted, 2, "{:#?}", parsed.diagnostics);
+    }
+}
+
+/// A construct the second walk notes twice is one site: two undecided
+/// `Directory.Build.props` points walk the file twice, and its `$(P[9])`,
+/// which only the second walk finds, is noted once (#1153).
+#[test]
+fn a_construct_the_second_walk_notes_twice_is_one_site() {
+    let tmp = TempDir::new().unwrap();
+    let block = COMMON_PROPS_BLOCK.replace(
+        "exists('$(DirectoryBuildPropsPath)')\"/>",
+        &format!("({UNDECIDED_TRUE} Or exists('$(DirectoryBuildPropsPath)'))\"/>"),
+    );
+    let (sdk_dir, props, targets) = write_synthetic_sdk(
+        tmp.path(),
+        "S",
+        &format!("<Project>\n{block}{block}</Project>\n"),
+        "<Project />",
+    );
+    write_at(
+        tmp.path(),
+        "Directory.Build.props",
+        &format!(
+            "<Project><Choose><When Condition=\"{UNDECIDED_TRUE}\">\
+             <PropertyGroup><P>abcdefghijkl</P></PropertyGroup>\
+             <ItemGroup><I Include=\"$(P[9])\" /></ItemGroup></When></Choose></Project>"
+        ),
+    );
+    let project_path = write_at(
+        tmp.path(),
+        "proj/p.fsproj",
+        "<Project Sdk=\"S\"><PropertyGroup><P>@(J)</P><P>z</P></PropertyGroup></Project>\n",
+    );
+    let parsed = parse_file_with_sdk(&project_path, |name| {
+        if name == "S" {
+            Ok(SdkPaths {
+                root: sdk_dir.clone(),
+                props: props.clone(),
+                targets: targets.clone(),
+            })
+        } else {
+            Err(SdkResolveError::NotFound)
+        }
+    });
+    let item = RejectionCause::ThrowingExpression {
+        expression: "$(P[9])".to_owned(),
+    };
+    let noted = parsed
+        .diagnostics
+        .iter()
+        .filter(|d| matches!(&d.kind, DiagnosticKind::MayBeRejected { cause } if *cause == item))
+        .count();
+    assert_eq!(noted, 1, "{:#?}", parsed.diagnostics);
+}
+
+/// The entry project's buffer and a document opened from its file are two
+/// files to a site: `link.props`, a link to the project's own file, holds the
+/// project's text, and the item in its arm, which only the second walk finds,
+/// is noted in each (#1153).
+#[cfg(unix)]
+#[test]
+fn the_entry_buffer_and_its_file_opened_again_are_two_files() {
+    let tmp = TempDir::new().unwrap();
+    let body = format!(
+        "  <Choose><When Condition=\"{UNDECIDED_TRUE}\">\
+         <PropertyGroup><P>abcdefghijkl</P></PropertyGroup>\
+         <ItemGroup><I Include=\"$(P[9])\" /></ItemGroup></When></Choose>\
+         <Import Project=\"link.props\" />\
+         <PropertyGroup><P>@(J)</P><P>z</P></PropertyGroup>"
+    );
+    let project_path = project(&tmp, &body, &[]);
+    std::os::unix::fs::symlink(&project_path, tmp.path().join("proj/link.props")).unwrap();
+    let parsed = parse_file(&project_path);
+    let item = RejectionCause::ThrowingExpression {
+        expression: "$(P[9])".to_owned(),
+    };
+    let noted = parsed
+        .diagnostics
+        .iter()
+        .filter(|d| matches!(&d.kind, DiagnosticKind::MayBeRejected { cause } if *cause == item))
+        .count();
+    assert_eq!(noted, 2, "{:#?}", parsed.diagnostics);
+}
+
+/// What MSBuild reaches is main's to decide in either walk: the walk doubts
+/// the refused `P` in the group's gate, so either walk judges the group, and
+/// in it the write to `R` under the same gate, which neither decides, leaves
+/// `R` unknown, so `$(R[9])` is no site, as MSBuild, skipping the group,
+/// finds none (#1153).
+#[test]
+fn a_skipped_group_the_walk_doubts_adds_no_second_walk_site() {
+    let body = "<PropertyGroup><P>@(J)</P><P>z</P><R>a</R></PropertyGroup>\
+                <PropertyGroup Condition=\"'$(P)' == 'off'\">\
+                <R Condition=\"'$(P)' == 'off'\">abcdefghijkl</R><T>$(R[9])</T></PropertyGroup>";
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_eq!(parsed.rejection, None, "{:#?}", parsed.diagnostics);
+    }
+}
+
+/// Which of a text's throws a walk names is the judgement's to decide: the
+/// first walk names `$(S[9])`, certain, and the second `$(P[9])`, the one
+/// MSBuild reports, holding the refused `P` at `z`; both are noted (#1153).
+#[test]
+fn the_second_walk_names_the_throw_its_reading_reaches_first() {
+    let body = "<PropertyGroup><P>@(J)</P><P>z</P><S>a</S><T>$(P[9])$(S[9])</T></PropertyGroup>";
+    let throw = |expression: &str| RejectionCause::ThrowingExpression {
+        expression: expression.to_owned(),
+    };
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_rejected(&parsed, &["Before", "After"]);
+        assert_eq!(
+            parsed.rejection.as_ref().map(|r| &r.cause),
+            Some(&throw("$(S[9])"))
+        );
+        assert!(
+            parsed.diagnostics.iter().any(|d| matches!(
+                &d.kind,
+                DiagnosticKind::MayBeRejected { cause } if *cause == throw("$(P[9])")
+            )),
+            "{:#?}",
+            parsed.diagnostics
+        );
+    }
+}
+
+/// Nor where the throw that reads the rewritten name is reached only
+/// perhaps: then either walk names the first throw it holds, whatever its
+/// reading, so the evaluation is walked once (#1153).
+#[test]
+fn no_second_walk_for_a_throw_reached_perhaps() {
+    let body = format!(
+        "<PropertyGroup><P>@(J)</P><P>z</P></PropertyGroup>\
+         <PropertyGroup Condition=\"{UNDECIDED_TRUE}\"><T>$(P[9])</T></PropertyGroup>"
+    );
+    let (parsed, costs) =
+        crate::test_support::count_walk_costs(|| both_walkers(&format!("  {body}")));
+    assert_eq!(costs.second_walks, 0, "{costs:?}");
+    for parsed in parsed {
+        assert_withdrawn(&parsed, &["Before", "After"]);
+    }
+}
+
+/// Nor where the second walk would name the throw the first does: one held
+/// throw on the rewritten name, reached for certain, is the pick of either
+/// walk, and only its certainty, which adoption discards, could differ
+/// (#1153).
+#[test]
+fn no_second_walk_where_it_names_the_same_throw() {
+    let body = "<PropertyGroup><P>@(J)</P><P>z</P><T>$(P[9])</T></PropertyGroup>";
+    let (parsed, costs) =
+        crate::test_support::count_walk_costs(|| both_walkers(&format!("  {body}")));
+    assert_eq!(costs.second_walks, 0, "{costs:?}");
+    for parsed in parsed {
+        assert_withdrawn(&parsed, &["Before", "After"]);
+    }
+}
+
+/// Adopting the second walk's sites is linear in the sites: one count for
+/// each of the first walk's, one lookup for each of the second's (#1153).
+#[test]
+fn adopting_a_second_walks_sites_is_linear_in_them() {
+    let items: String = (0..600)
+        .map(|_| "<I Include=\"$(Short[9])\" /><I Include=\"$(P[9])\" />")
+        .collect();
+    let body = format!(
+        "<PropertyGroup><P>abc</P><Short>a</Short></PropertyGroup>\
+         <Choose><When Condition=\"{UNDECIDED_TRUE}\">\
+         <PropertyGroup><P>abcdefghijkl</P></PropertyGroup>\
+         <ItemGroup>{items}</ItemGroup>\
+         </When></Choose>\
+         <PropertyGroup><P>@(J)</P><P>z</P></PropertyGroup>"
+    );
+    let tmp = TempDir::new().unwrap();
+    let project_path = project(&tmp, &format!("  {body}"), &[]);
+    let text = host_fs::read_to_string(&project_path).unwrap();
+    let (parsed, costs) = crate::test_support::count_walk_costs(|| {
+        parse_fsproj(
+            &crate::ProjectFile::buffer(&project_path, &text)
+                .expect("a project path spelt as its full path"),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .unwrap()
+    });
+    let sites = parsed
+        .diagnostics
+        .iter()
+        .filter(|d| matches!(d.kind, DiagnosticKind::MayBeRejected { .. }))
+        .count() as u64;
+    assert_eq!(sites, 1200, "{:#?}", parsed.rejection);
+    assert_eq!(costs.second_walks, 1);
+    // Each of the first walk's 600 sites counted, each of the second's 1200
+    // looked up.
+    let bound = 600 + 1200;
+    assert!(
+        costs.site_merge_probes <= bound,
+        "{} probes, over {bound}",
+        costs.site_merge_probes
+    );
+}
+
 /// A write whose gate is certainly false on the path writes nothing there:
 /// `P` is still `a`, which has no index 9.
 #[test]

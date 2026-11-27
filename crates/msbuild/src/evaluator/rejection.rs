@@ -113,6 +113,31 @@
 //! reader but the import points and the Compile items does (#792). Nor is an
 //! SDK the walk cannot resolve: its resolver may decline one MSBuild resolves.
 //! The pure walker follows no import and judges none; it judges conditions.
+//!
+//! **The second walk.** A write the walk refuses to compute (an item
+//! reference, a property function it does not model) unbinds its name and
+//! leaves a mark on it ([`super::Trust::refused`]) that a later clean write
+//! keeps, for the import points. The judgement reads that mark as doubt too
+//! ([`directory_build::is_certain`]), and its doubt is not monotone in what it
+//! holds: settling the item pass's view of a path the walk did not take
+//! (`State::judge_from_path`) leaves a name the path writes unheld, and a
+//! throw on its final value is then no site, though the build holds that
+//! value (#1153). So wherever the first walk's judgement read a name it
+//! doubts only for such a mark, the project having written it again after
+//! the refusal ([`State::rewritten_after_refusal`], [`State::second_walk_needed`]),
+//! the evaluation is walked a second time,
+//! its judgement holding such a bound name certain where it decides whether
+//! what it reaches is a site ([`judged_certain`]), and every site the second
+//! walk notes that the first did not is adopted as a Possible one, after the
+//! first walk's ([`State::adopt_second_walk`]). It reaches what the first
+//! walk reaches, so it can only add sites. The
+//! walks name a site by its construct in the source, not by where their
+//! courses took them, which may part: a site one notes may leave a
+//! `<Choose>` undecided that the other decides. Each walk decides its own
+//! course and reach with the walk's own code, so the second claims nothing:
+//! it only declines more. The two readings bracket the judgement's doubt about
+//! a refused-then-rebound name; a name neither reading settles (the #1051
+//! class, #1164) is not this walk's to find.
 
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
@@ -145,6 +170,18 @@ impl State<'_> {
         cause: RejectionCause,
         span: Range<usize>,
     ) {
+        self.note_rejection_at(certainty, cause, span, 0);
+    }
+
+    /// [`Self::note_rejection`] of a site in the text of its element at
+    /// `text` ([`text_at`]).
+    fn note_rejection_at(
+        &mut self,
+        certainty: RejectionCertainty,
+        cause: RejectionCause,
+        span: Range<usize>,
+        text: u32,
+    ) {
         let replaces = match &self.rejection {
             None => true,
             Some(held) => {
@@ -159,10 +196,114 @@ impl State<'_> {
             origin: self.current_origin(),
         };
         let kind = rejection.diagnostic_kind();
+        self.noted_sites.push(NotedSite {
+            key: SiteKey {
+                construct: SiteConstruct {
+                    file: self.site_file.clone(),
+                    start: span.start,
+                    end: span.end,
+                    text,
+                },
+                cause: rejection.cause.clone(),
+            },
+            rejection: rejection.clone(),
+        });
         if replaces {
             self.rejection = Some(rejection);
         }
         self.push(kind, span);
+    }
+
+    /// Adopt `second`'s sites that this walk did not note, each as a
+    /// [`RejectionCertainty::Possible`] one (see the module docs, "The second
+    /// walk"): `second` is this evaluation walked again, its rejection
+    /// judgement holding a name refused then rebound certain.
+    ///
+    /// A site is the same in both walks where its construct ([`SiteConstruct`])
+    /// and cause are ([`SiteKey`]), however the walks' courses part (a site one notes may
+    /// leave a `<Choose>` undecided that the other decides), and a construct
+    /// the second walk notes more than once is adopted once. The adopted ones
+    /// follow this walk's
+    /// diagnostics, in the order the second walk noted them, and the first of
+    /// them is the evaluation's [`Rejection`] where this walk noted none. The
+    /// order claims nothing about MSBuild's: a possible site is one that may
+    /// make it reject the project, not the one it would report. A site
+    /// adopted so is pushed as it stands: the effects [`Self::push`] has
+    /// besides concern values the rejection withdraws.
+    pub(super) fn adopt_second_walk(&mut self, second: State<'_>) {
+        assert!(
+            !self.second_walk && second.second_walk,
+            "a second walk is adopted into the first"
+        );
+        crate::cost::count(|costs| costs.second_walks += 1);
+        let mut probes = 0u64;
+        let mut noted: HashSet<&SiteKey> = HashSet::new();
+        for site in &self.noted_sites {
+            probes += 1;
+            noted.insert(&site.key);
+        }
+        let mut adopted: Vec<NotedSite> = Vec::new();
+        for site in &second.noted_sites {
+            probes += 1;
+            // Inserted as it is adopted: a construct the second walk notes
+            // twice (a file two undecided import points both walk) is one
+            // site.
+            if noted.insert(&site.key) {
+                adopted.push(site.clone());
+            }
+        }
+        drop(noted);
+        crate::cost::count(|costs| costs.site_merge_probes += probes);
+        for site in adopted {
+            let rejection = Rejection {
+                certainty: RejectionCertainty::Possible,
+                ..site.rejection
+            };
+            if self.rejection.is_none() {
+                self.rejection = Some(rejection.clone());
+            }
+            self.push_adopted(rejection.clone());
+            self.noted_sites.push(NotedSite {
+                key: site.key,
+                rejection,
+            });
+        }
+    }
+
+    /// Each site the evaluation publishes, by construct and cause, where
+    /// `test_support::published_sites` collects: what a sweep counts
+    /// repetitions by, before spans are remapped.
+    #[cfg(feature = "test-support")]
+    pub(super) fn record_published_sites(&self) {
+        crate::test_support::record_published_sites(|| {
+            self.noted_sites
+                .iter()
+                .map(|site| {
+                    let SiteKey {
+                        construct:
+                            SiteConstruct {
+                                file,
+                                start,
+                                end,
+                                text,
+                            },
+                        cause,
+                    } = &site.key;
+                    format!("{file:?}:{start}..{end}#{text} {cause:?}")
+                })
+                .collect()
+        });
+    }
+
+    /// [`Self::adopt_second_walk`]'s diagnostic for `site`.
+    fn push_adopted(&mut self, site: Rejection) {
+        #[cfg(feature = "test-support")]
+        crate::test_support::record_second_walk_site(&site.cause);
+        self.diagnostics.push(crate::Diagnostic {
+            kind: site.diagnostic_kind(),
+            span: site.span,
+            origin: site.origin,
+        });
     }
 
     /// [`Self::note_rejection`] of a [`RejectionCertainty::Possible`] site.
@@ -193,6 +334,54 @@ impl State<'_> {
     }
 }
 
+/// A site the rejection judgement noted ([`State::note_rejection`]), and
+/// what names it in both walks.
+#[derive(Debug, Clone)]
+pub(super) struct NotedSite {
+    key: SiteKey,
+    rejection: Rejection,
+}
+
+/// What names a site in both walks: its construct and its cause.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct SiteKey {
+    construct: SiteConstruct,
+    cause: RejectionCause,
+}
+
+/// The construct a site is about, named by the source alone: the entry
+/// project's buffer or the imported file it is in ([`State::site_file`]), its
+/// element's span there (not the import site a
+/// published span names, which every construct of an imported file shares),
+/// and which of the element's texts it is ([`text_at`]).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct SiteConstruct {
+    file: Option<std::rc::Rc<Path>>,
+    start: usize,
+    end: usize,
+    text: u32,
+}
+
+/// Which of `node`'s texts MSBuild expands a site is in, for its
+/// [`SiteConstruct`]: its `attribute`'s place among the attributes, or, for
+/// the element's contents (`None`), after them all.
+pub(super) fn text_at(node: Node<'_, '_>, attribute: Option<&str>) -> u32 {
+    text_place(
+        attribute
+            .and_then(|name| {
+                node.attributes()
+                    .position(|a| a.namespace().is_none() && a.name() == name)
+            })
+            .unwrap_or_else(|| node.attributes().count()),
+    )
+}
+
+/// [`text_at`] of the attribute at `place` among its element's: for a caller
+/// already visiting them in order.
+fn text_place(place: usize) -> u32 {
+    u32::try_from(place).unwrap_or(u32::MAX)
+}
+
 fn certain_if(certain: bool) -> RejectionCertainty {
     if certain {
         RejectionCertainty::Certain
@@ -215,6 +404,37 @@ pub(super) fn reach_is_certain(state: &State<'_>) -> bool {
 /// trust channel clean, staleness included ([`directory_build::is_certain`]).
 pub(super) fn operands_are_certain(state: &State<'_>, text: &str) -> bool {
     properties::property_references(text).all(|name| directory_build::is_certain(state, name))
+}
+
+/// Whether the rejection judgement holds `name` read now as the build reads
+/// it: [`directory_build::is_certain`], but that in the second walk
+/// ([`State::second_walk`]) a bound name's refusal mark is no doubt
+/// ([`directory_build::is_certain_setting_aside_refusal`]). It is read only
+/// where the judgement settles which names a path it did not take leaves
+/// unknown, and which of a text's throws it names: there holding a name
+/// certain can only add a site. Wherever a reading decides what MSBuild
+/// reaches (the walk's course, what it judges, the gates it judges, the
+/// operands of a condition it reaches) and a site's certainty, it is
+/// [`directory_build::is_certain`], in either walk:
+/// a reach the second walk narrowed by holding a name certain would hide a
+/// site wherever the name's value is not the build's (a toolset seed in the
+/// slot a refusal emptied, a rewrite the build may not make). So the second
+/// walk reaches what the first does, and may judge content its own reading
+/// would rule out, which costs a decline and never a site MSBuild meets
+/// (#1183).
+///
+/// In the first walk it records whether the second walk's answer would differ
+/// ([`State::second_walk_needed`]): the second walk is run only then, or where
+/// [`judge_throwing_expression`] would name another throw.
+pub(super) fn judged_certain(state: &State<'_>, name: &str) -> bool {
+    if state.second_walk {
+        return directory_build::is_certain_setting_aside_refusal(state, name);
+    }
+    let certain = directory_build::is_certain(state, name);
+    if !certain && directory_build::is_certain_setting_aside_refusal(state, name) {
+        state.second_walk_needed.set(true);
+    }
+    certain
 }
 
 /// Whether the walk holds a value of `name` MSBuild may hold, as a Possible
@@ -353,11 +573,31 @@ impl State<'_> {
                 .keys()
                 .filter(|name| {
                     crate::cost::count(|costs| costs.path_writes_examined += 1);
-                    !directory_build::is_certain(self, name)
+                    !judged_certain(self, name)
                 })
                 .cloned()
                 .collect();
+            #[cfg(any(test, feature = "test-support"))]
+            if crate::cost::census_requested() {
+                written.writes.borrow_mut().refusal_only = names
+                    .iter()
+                    .filter(|name| directory_build::is_certain_setting_aside_refusal(self, name))
+                    .cloned()
+                    .collect();
+            }
             written.writes.borrow_mut().settled = Some(std::rc::Rc::new(names));
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        if !self.second_walk
+            && crate::cost::census_requested()
+            && written
+                .writes
+                .borrow()
+                .refusal_only
+                .iter()
+                .any(|name| written.reaches_uncounted(name))
+        {
+            crate::cost::count(|costs| costs.refusal_paths += 1);
         }
         let saved = self.speculation.replace(Speculation {
             unheld: HashSet::new(),
@@ -416,7 +656,7 @@ pub(super) fn import_failure_certainty(
 /// A condition that throws on the values the walk holds
 /// ([`condition::Outcome::Illegal`]) may make MSBuild reject the project. The
 /// rejection is certain where MSBuild throws whatever the names the walk is
-/// not certain of hold ([`directory_build::is_certain`], the stale channel
+/// not certain of hold ([`judged_certain`], the stale channel
 /// included): MSBuild evaluates the condition left to right and stops at the
 /// operand that decides it ([`condition::throws_whatever`]), so a throw on certain
 /// values that MSBuild reaches through operands of certain value is certain,
@@ -446,6 +686,7 @@ pub(super) fn judge_condition_rejection(
     exists_dir: &Path,
     reached: bool,
     span: Range<usize>,
+    text: u32,
 ) {
     let observer = state.observer;
     let exists = |path: &str| condition_exists(observer, path, exists_dir);
@@ -454,6 +695,9 @@ pub(super) fn judge_condition_rejection(
         observer,
     });
     let doubted = |name: &str| !holds_a_value_msbuild_may(state, name);
+    // Which operands MSBuild reaches is main's to decide, in either walk: a
+    // name the second walk holds certain may be one whose value is not the
+    // build's (#1153). What the second walk holds is the path's settlement.
     let uncertain = |name: &str| !directory_build::is_certain(state, name);
     if matches!(
         outcome,
@@ -488,12 +732,13 @@ pub(super) fn judge_condition_rejection(
             &doubted,
         )
     {
-        state.note_rejection(
+        state.note_rejection_at(
             certain_if(certainly),
             RejectionCause::IllegalCondition {
                 condition: condition.to_owned(),
             },
             span,
+            text,
         );
     }
 }
@@ -558,21 +803,37 @@ pub(super) fn judge_throwing_expression(
     thrown: Vec<Thrown>,
     reached: bool,
     span: Range<usize>,
+    text: u32,
 ) {
     let unheld = |name: &str| !holds_a_value_msbuild_may(state, name);
     let (held, on_unheld): (Vec<Thrown>, Vec<Thrown>) = thrown
         .into_iter()
         .partition(|thrown| !thrown.reads.iter().any(|name| unheld(name)));
-    let certain = held
-        .iter()
-        .find(|thrown| {
-            thrown
-                .reads
-                .iter()
-                .all(|name| directory_build::is_certain(state, name))
-        })
-        .filter(|_| reached)
-        .cloned();
+    // The first held throw on names read certain, as each walk reads them:
+    // the second walk sets a rewritten name's refusal aside. Which throw is
+    // named is all that can differ (a second walk's certainty is discarded),
+    // so the first walk schedules the second only where the pick would move.
+    let certain = if reached {
+        let first_certain = |certain_of: &dyn Fn(&str) -> bool| {
+            held.iter()
+                .position(|thrown| thrown.reads.iter().all(|name| certain_of(name)))
+        };
+        let relaxed = || {
+            first_certain(&|name| directory_build::is_certain_setting_aside_refusal(state, name))
+        };
+        let pick = if state.second_walk {
+            relaxed()
+        } else {
+            let main = first_certain(&|name| directory_build::is_certain(state, name));
+            if relaxed().unwrap_or(0) != main.unwrap_or(0) {
+                state.second_walk_needed.set(true);
+            }
+            main
+        };
+        pick.map(|index| held[index].clone())
+    } else {
+        None
+    };
     // One that read a name the walk holds none of throws whatever that
     // name's expressions return, perhaps: on each value tried, it throws on
     // the rest.
@@ -596,21 +857,28 @@ pub(super) fn judge_throwing_expression(
             None => return,
         },
     };
-    state.note_rejection(
+    state.note_rejection_at(
         certainty,
         RejectionCause::ThrowingExpression {
             expression: thrown.expression,
         },
         span,
+        text,
     );
 }
 
 /// Judge `text`, at `span`, which MSBuild evaluates as `reached` says and the
 /// walk does not, for an expression MSBuild throws on.
-fn judge_unwalked_text(state: &mut State<'_>, text: &str, reached: bool, span: Range<usize>) {
+fn judge_unwalked_text(
+    state: &mut State<'_>,
+    text: &str,
+    reached: bool,
+    span: Range<usize>,
+    at: u32,
+) {
     let expressions = throwing_expressions(text, state);
     if !expressions.is_empty() {
-        judge_throwing_expression(state, expressions, reached, span);
+        judge_throwing_expression(state, expressions, reached, span, at);
     }
 }
 
@@ -735,7 +1003,15 @@ fn judge_text(
     } else {
         condition::evaluate_at(text, &state.lookup, None, state.condition_site()).outcome
     };
-    judge_condition_rejection(state, text, outcome, exists_dir, reached, node.range());
+    judge_condition_rejection(
+        state,
+        text,
+        outcome,
+        exists_dir,
+        reached,
+        node.range(),
+        text_at(node, Some("Condition")),
+    );
     outcome
 }
 
@@ -1228,13 +1504,14 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
     let step = |state: &mut State<'_>,
                 raw: &str,
                 span: Range<usize>,
+                place: u32,
                 attribute_name: &str,
                 rule: Option<&dyn Fn(&str) -> Registered>|
      -> Option<String> {
         let (expanded, issues) = registration_expansion(raw, state);
         let thrown = throws_in(&issues);
         if !thrown.is_empty() {
-            judge_throwing_expression(state, thrown, reached, span.clone());
+            judge_throwing_expression(state, thrown, reached, span.clone(), place);
         }
         // An attribute no rule judges is read for its throws alone.
         rule?;
@@ -1319,6 +1596,7 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
             state,
             &raw,
             node.range(),
+            text_at(node, Some("TaskName")),
             "TaskName",
             written(&raw).then_some(&non_empty as &dyn Fn(&str) -> Registered),
         );
@@ -1328,6 +1606,7 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
             state,
             &raw,
             node.range(),
+            text_at(node, Some("TaskFactory")),
             "TaskFactory",
             (written(&raw) && (!children.is_empty() || others))
                 .then_some(&factory as &dyn Fn(&str) -> Registered),
@@ -1342,6 +1621,7 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
                 state,
                 &assembly_file_text(&raw),
                 node.range(),
+                text_at(node, Some("AssemblyFile")),
                 "AssemblyFile",
                 Some(&non_empty),
             );
@@ -1351,6 +1631,7 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
                 state,
                 &raw,
                 node.range(),
+                text_at(node, Some("AssemblyName")),
                 "AssemblyName",
                 written(&raw).then_some(&non_empty as &dyn Fn(&str) -> Registered),
             );
@@ -1367,6 +1648,7 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
                     state,
                     &evaluate,
                     body.range(),
+                    text_at(*body, Some("Evaluate")),
                     "Evaluate",
                     (!evaluate.is_empty()).then_some(&boolean as &dyn Fn(&str) -> Registered),
                 );
@@ -1421,6 +1703,7 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
                         state,
                         &raw,
                         parameter.range(),
+                        text_at(parameter, Some(name)),
                         name,
                         (!raw.is_empty()).then_some(rule),
                     );
@@ -1449,7 +1732,14 @@ fn judge_using_task(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
     }
     for name in ["Runtime", "Architecture", "Override"] {
         if let Some(raw) = attribute(node, name) {
-            step(state, &raw, node.range(), name, None);
+            step(
+                state,
+                &raw,
+                node.range(),
+                text_at(node, Some(name)),
+                name,
+                None,
+            );
         }
     }
 }
@@ -1554,14 +1844,17 @@ fn judge_element_contents(
     reached: bool,
     contents: Contents,
 ) {
+    let at = text_at(element, None);
     match (element_inner_contents(element), contents) {
         (Some(text), Contents::Text) => {
-            judge_unwalked_text(state, &text, reached, element.range());
+            judge_unwalked_text(state, &text, reached, element.range(), at);
         }
         (Some(text), Contents::Metadata) => {
-            judge_metadata_text(state, &text, reached, element.range());
+            judge_metadata_text(state, &text, reached, element.range(), at);
         }
-        (None, _) => note_unread_contents(state, element_content_source(element), element.range()),
+        (None, _) => {
+            note_unread_contents(state, element_content_source(element), element.range(), at);
+        }
     }
 }
 
@@ -1599,7 +1892,7 @@ fn element_content_source<'input>(element: Node<'_, 'input>) -> &'input str {
 /// serialized XML keeps, or may form across the markup an inner text drops,
 /// and across the whitespace nodes it drops with it: any of those in the
 /// source is a possible rejection.
-fn note_unread_contents(state: &mut State<'_>, source: &str, span: Range<usize>) {
+fn note_unread_contents(state: &mut State<'_>, source: &str, span: Range<usize>, at: u32) {
     let joined: String = without_markup(source)
         .chars()
         .filter(|c| !matches!(c, ' ' | '\t' | '\n' | '\r'))
@@ -1609,7 +1902,12 @@ fn note_unread_contents(state: &mut State<'_>, source: &str, span: Range<usize>)
             .next()
             .unwrap_or(source)
             .to_owned();
-        state.note_possible_rejection(RejectionCause::ThrowingExpression { expression }, span);
+        state.note_rejection_at(
+            RejectionCertainty::Possible,
+            RejectionCause::ThrowingExpression { expression },
+            span,
+            at,
+        );
     }
 }
 
@@ -1886,16 +2184,17 @@ fn serialize_inner_xml(
 /// an attribute, read as MSBuild reads one (`item_pass::metadata_attribute`),
 /// which MSBuild expands as `reached` says.
 fn judge_metadata_attributes(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
-    for attr in node.attributes() {
+    for (place, attr) in node.attributes().enumerate() {
         if attr.namespace().is_none()
             && item_attribute(node, attr.name()) == ItemAttribute::Metadata
         {
+            let at = text_place(place);
             match metadata_attribute(node, &attr) {
-                Some(text) => judge_metadata_text(state, &text, reached, node.range()),
+                Some(text) => judge_metadata_text(state, &text, reached, node.range(), at),
                 // An XML fragment the walk does not read as MSBuild does.
                 None => {
                     let value = crate::document::attribute(node, attr.name()).unwrap_or_default();
-                    note_unread_contents(state, &value, node.range());
+                    note_unread_contents(state, &value, node.range(), at);
                 }
             }
         }
@@ -1960,7 +2259,13 @@ fn item_attribute(node: Node<'_, '_>, name: &str) -> ItemAttribute {
 /// reads it as written, as the walk does (`<M>$([MSBuild]::VersionEquals('@(J)',
 /// '1.0'))</M>` throws whatever `J` holds; probed, `msbuild-condition-oracle`,
 /// SDK 10.0.401).
-fn judge_metadata_text(state: &mut State<'_>, text: &str, reached: bool, span: Range<usize>) {
+fn judge_metadata_text(
+    state: &mut State<'_>,
+    text: &str,
+    reached: bool,
+    span: Range<usize>,
+    at: u32,
+) {
     let expressions: Vec<Thrown> = throwing_expressions(text, state)
         .into_iter()
         .filter(|thrown| !thrown.expression.contains("%("))
@@ -1970,7 +2275,7 @@ fn judge_metadata_text(state: &mut State<'_>, text: &str, reached: bool, span: R
     // finds in such text is MSBuild's perhaps.
     let reached = reached && !text.contains("%(");
     if !expressions.is_empty() {
-        judge_throwing_expression(state, expressions, reached, span);
+        judge_throwing_expression(state, expressions, reached, span, at);
     }
 }
 
@@ -1996,14 +2301,14 @@ fn judge_item_group(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
         judge_condition(item, &entry_dir, reached, state);
         // Design-time evaluation expands the operation whatever the group's
         // or the item's condition holds.
-        for attr in item.attributes() {
+        for (place, attr) in item.attributes().enumerate() {
             if attr.namespace().is_none()
                 && item_attribute(item, attr.name()) == ItemAttribute::Operation
                 && let Some(text) = attribute(item, attr.name())
             {
                 // MSBuild reads a metadata reference in an operation as
                 // written, as the walk does (`expand_metadata`).
-                judge_unwalked_text(state, &text, reached, item.range());
+                judge_unwalked_text(state, &text, reached, item.range(), text_place(place));
             }
         }
         if let Some(sure) = loader::remove_matching_more_than_items(item) {

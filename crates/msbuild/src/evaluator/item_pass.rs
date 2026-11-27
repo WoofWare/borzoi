@@ -161,6 +161,9 @@ pub(super) struct DeferredItemGroup {
     /// cannot take (`Speculation::dead_arms`): it holds no reference the
     /// build makes.
     in_dead_arm: bool,
+    /// The group's file, as a site's construct names it
+    /// ([`State::site_file`]).
+    site_file: Option<std::rc::Rc<Path>>,
 }
 
 impl<'r> State<'r> {
@@ -259,6 +262,7 @@ impl<'r> State<'r> {
             judge_only,
             written,
             in_dead_arm,
+            site_file: self.site_file.clone(),
         });
     }
 }
@@ -282,6 +286,7 @@ pub(super) fn replay_deferred_item_groups(entry_doc: &Document<'_>, state: &mut 
         .iter()
         .filter(|group| group.kind == DeferredGroupKind::UsingTask);
     for group in definition_groups.chain(item_groups).chain(using_tasks) {
+        state.site_file = group.site_file.clone();
         state.item_pass = Some(group.kind);
         // Reinstate the positional context the group was recorded under, so
         // diagnostics/origins/SDK tolerance match inline evaluation.

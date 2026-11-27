@@ -25,6 +25,123 @@ pub fn count_walk_costs<T>(walk: impl FnOnce() -> T) -> (T, WalkCosts) {
     (value, crate::cost::take())
 }
 
+/// Run `walk` and the causes of the sites its evaluations adopted from a
+/// second walk (`evaluator::rejection`'s module docs, "The second walk"): each
+/// a site found only by holding a name refused then rebound certain (#1153).
+///
+/// Collection is per thread, and only inside `walk`: a panic out of it leaves
+/// the collector idle, and a walk outside it records nothing.
+pub fn second_walk_sites<T>(walk: impl FnOnce() -> T) -> (T, Vec<crate::RejectionCause>) {
+    struct Collecting;
+    impl Drop for Collecting {
+        fn drop(&mut self) {
+            SECOND_WALK_SITES.with(|sites| sites.borrow_mut().take());
+        }
+    }
+    SECOND_WALK_SITES.with(|sites| {
+        let mut sites = sites.borrow_mut();
+        assert!(sites.is_none(), "second-walk site collection does not nest");
+        *sites = Some(Vec::new());
+    });
+    let collecting = Collecting;
+    let value = walk();
+    let sites = SECOND_WALK_SITES
+        .with(|sites| sites.borrow_mut().take())
+        .expect("collection lasts until the walk returns");
+    drop(collecting);
+    (value, sites)
+}
+
+/// Run `walk` with any [`second_walk_sites`] and [`published_sites`]
+/// collection on this thread set aside, so that an evaluation run only to
+/// check another (a reference one) adds nothing to them.
+pub fn outside_second_walk_sites<T>(walk: impl FnOnce() -> T) -> T {
+    struct Restore(Option<Vec<crate::RejectionCause>>, Option<Vec<Vec<String>>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let (second, published) = (self.0.take(), self.1.take());
+            SECOND_WALK_SITES.with(|sites| *sites.borrow_mut() = second);
+            PUBLISHED_SITES.with(|sites| *sites.borrow_mut() = published);
+        }
+    }
+    let _restore = Restore(
+        SECOND_WALK_SITES.with(|sites| sites.borrow_mut().take()),
+        PUBLISHED_SITES.with(|sites| sites.borrow_mut().take()),
+    );
+    walk()
+}
+
+/// Run `walk` counting `WalkCosts::refusal_paths`, the census of a
+/// narrower trigger for the second walk, which no other evaluation pays for.
+pub fn with_refusal_census<T>(walk: impl FnOnce() -> T) -> T {
+    crate::cost::with_census(walk)
+}
+
+/// Run `walk` and, for each evaluation it ran, the sites the evaluation
+/// published, each spelt by its construct (file, span and text, before the
+/// span is remapped to an import site) and cause: so that a sweep counts a
+/// construct's repetitions where published spans cannot tell two constructs
+/// apart.
+pub fn published_sites<T>(walk: impl FnOnce() -> T) -> (T, Vec<Vec<String>>) {
+    struct Collecting;
+    impl Drop for Collecting {
+        fn drop(&mut self) {
+            PUBLISHED_SITES.with(|sites| sites.borrow_mut().take());
+        }
+    }
+    PUBLISHED_SITES.with(|sites| {
+        let mut sites = sites.borrow_mut();
+        assert!(sites.is_none(), "published-site collection does not nest");
+        *sites = Some(Vec::new());
+    });
+    let collecting = Collecting;
+    let value = walk();
+    let sites = PUBLISHED_SITES
+        .with(|sites| sites.borrow_mut().take())
+        .expect("collection lasts until the walk returns");
+    drop(collecting);
+    (value, sites)
+}
+
+thread_local! {
+    /// The evaluations' sites [`published_sites`] is collecting on this
+    /// thread, while it is.
+    static PUBLISHED_SITES: std::cell::RefCell<Option<Vec<Vec<String>>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Record an evaluation's published sites, spelt by `sites` only where
+/// [`published_sites`] is collecting.
+pub(crate) fn record_published_sites(sites: impl FnOnce() -> Vec<String>) {
+    PUBLISHED_SITES.with(|collected| {
+        if let Some(collected) = collected.borrow_mut().as_mut() {
+            collected.push(sites());
+        }
+    });
+}
+
+/// Whether no [`second_walk_sites`] is collecting on this thread.
+pub fn second_walk_collector_idle() -> bool {
+    SECOND_WALK_SITES.with(|sites| sites.borrow().is_none())
+}
+
+thread_local! {
+    /// The causes [`second_walk_sites`] is collecting on this thread, while it
+    /// is.
+    static SECOND_WALK_SITES: std::cell::RefCell<Option<Vec<crate::RejectionCause>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Record a site an evaluation adopted from its second walk, where
+/// [`second_walk_sites`] is collecting.
+pub(crate) fn record_second_walk_site(cause: &crate::RejectionCause) {
+    SECOND_WALK_SITES.with(|sites| {
+        if let Some(sites) = sites.borrow_mut().as_mut() {
+            sites.push(cause.clone());
+        }
+    });
+}
+
 /// The condition module's `judge` with no file system: what MSBuild makes of
 /// `condition` without the values of the properties `uncertain` names.
 pub fn judge(condition: &str, props: &PropertyMap, uncertain: &dyn Fn(&str) -> bool) -> Judgement {
