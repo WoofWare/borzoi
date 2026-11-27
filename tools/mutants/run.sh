@@ -13,7 +13,10 @@
 # refuses a tree with uncommitted changes to tracked files, and writes the
 # manifest only if the checkout is still that commit, clean, when the run ends.
 #
-# The sandbox, in containers on one image (nixos/nix, pinned by digest):
+# The sandbox contains the damage a mutated program can do by accident (a
+# mutated path computation that deletes the wrong directory, a loop that never
+# ends); it is not built against a mutant written to escape it. It runs in
+# containers on one image (nixos/nix, pinned by digest):
 #
 #   provision  networked, with the Linux Nix store volume (`borzoi-mutants-nix`,
 #              seeded once from the image's /nix) writable. It realises the
@@ -27,8 +30,8 @@
 #              every build and cargo-mutants' output; an unprivileged user
 #              (uid 1000), so file permissions bind the tests as they do on a
 #              developer's machine and in CI; and the canary (`canary.sh`) at
-#              /run/borzoi-mutants, read-only. It can write no host path.
-#              Memory and CPUs are capped by the VM's size.
+#              /run/borzoi-mutants, read-only. It mounts no host path it
+#              could write. Memory and CPUs are capped by the VM's size.
 #   export     no network, no mutant: copies the run's three artifacts out of
 #              the scratch volume to the host, each only if it is a regular
 #              file under the size `mutants-manifest` accepts.

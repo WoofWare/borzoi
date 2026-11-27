@@ -4,10 +4,10 @@
 # cargo `target.runner` every test binary runs through under cargo-mutants;
 # see `.cargo/mutants.toml`) and by `inner.sh` before it starts a run.
 #
-# A mutant is arbitrary code: a mutated path computation can delete or rewrite
-# whatever the test process can reach. So mutated tests run only where the
-# damage is contained, and this file decides whether the current process is
-# such a place. It allows a run only when all three hold:
+# A mutated program can do damage by accident: a mutated path computation can
+# delete or rewrite whatever the test process can reach. So mutated tests run
+# only where that damage is contained, and this file decides whether the
+# current process is such a place. It allows a run only when all three hold:
 #
 #   - the kernel is Linux;
 #   - `/nix/store` is not writable by this process;

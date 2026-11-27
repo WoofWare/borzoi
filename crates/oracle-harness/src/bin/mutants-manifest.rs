@@ -14,11 +14,10 @@
 //! from the repository, the manifest a check compares with included, it reads
 //! as that commit holds it, never from the working tree.
 //!
-//! It runs outside the sandbox, after it, on files the sandboxed run could
-//! write: everything under `OUT_DIR`, which the launcher made and the sandbox
-//! could not replace. So it reads each of them only as a regular file of
-//! bounded size, reached from `OUT_DIR` through real directories: never
-//! through a symbolic link, and never a FIFO or device that could block it.
+//! It runs outside the sandbox, after it, on the run's output under
+//! `OUT_DIR`. It reads each artifact only as a regular file of bounded size,
+//! reached from `OUT_DIR` through real directories, so a run that went wrong
+//! is refused cleanly rather than read in part.
 //!
 //! Exits 0 when the manifest matches (or was rewritten), 1 when it moved, and
 //! 2 when the run cannot be a manifest: a failed or missing baseline, a vacuous

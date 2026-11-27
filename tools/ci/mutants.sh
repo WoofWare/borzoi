@@ -17,8 +17,8 @@
 # `BORZOI_MUTANTS_TIMEOUT` (default 5h) bounds the cargo-mutants run, and
 # `BORZOI_MUTANTS_JOBS` (default 2) is its `--jobs`.
 #
-# The run writes under `$RUNNER_TEMP/mutants-work/SET`, where mutant code can
-# leave anything. What the manifest step reads is staged out of it into
+# The run writes under `$RUNNER_TEMP/mutants-work/SET`. What the manifest step
+# reads is staged out of it into
 # `$RUNNER_TEMP/mutants/SET`, made fresh after the run: the run's three
 # artifacts, each copied whole only if it is a regular file inside the work
 # directory of at most 64 MiB. The job uploads nothing the run wrote; a
@@ -69,8 +69,8 @@ status=0
 BORZOI_MUTANTS_COMMIT="$commit" timeout --kill-after=60 "${BORZOI_MUTANTS_TIMEOUT:-5h}" \
   nix develop --command bash tools/mutants/inner.sh "$set_name" "$work/run" || status=$?
 
-# The upload directory is made only now the run is over, and fresh: anything a
-# mutant left at its path is gone, and only staged files go in.
+# The staged directory is made only now the run is over, and fresh, so it
+# holds only staged files.
 rm -rf "$out"
 mkdir -p "$out/run/mutants.out"
 

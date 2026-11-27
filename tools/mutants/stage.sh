@@ -1,8 +1,9 @@
 # shellcheck shell=bash
 #
-# Copies what a mutation run left out of the directory it wrote, where mutant
-# code could leave anything (links, FIFOs, huge files), into a directory that
-# holds only bounded regular files. Sourced by `tools/ci/mutants.sh`.
+# Copies the artifacts a mutation run left out of the directory it wrote into
+# a directory that holds only bounded regular files, so a run that went wrong
+# (left an artifact missing, truncated or huge) is refused cleanly. Sourced by
+# `tools/ci/mutants.sh`.
 
 # mutants_stage WORK SRC DEST LIMIT [whole]
 #
