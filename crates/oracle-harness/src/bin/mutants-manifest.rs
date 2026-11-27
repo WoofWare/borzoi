@@ -7,10 +7,12 @@
 //! (`listed.txt`), and the run's `run-info.tsv`. This reads them, with
 //! `tools/mutants/sets.tsv` and `tools/mutants/equivalent.tsv`, into the set's
 //! manifest ([`borzoi_oracle_harness::mutants`]) and compares it with
-//! `REPO/tools/mutants/manifests/SET.txt`, or rewrites that file under
+//! `tools/mutants/manifests/SET.txt`, or rewrites `REPO`'s copy under
 //! `BORZOI_UPDATE_MANIFESTS`. The run must be of the commit checked out now,
 //! with no uncommitted change to a tracked file, and of the set `sets.tsv`
-//! declares now, scope and all, or it is no pin of either.
+//! declares, scope and all, or it is no pin of either. Every file it reads
+//! from the repository, the manifest a check compares with included, it reads
+//! as that commit holds it, never from the working tree.
 //!
 //! It runs outside the sandbox, after it, on files the sandboxed run could
 //! write: everything under `OUT_DIR`, which the launcher made and the sandbox
@@ -58,10 +60,6 @@ fn repo_root(repo: &Path) -> Result<PathBuf, String> {
         ));
     }
     Ok(root)
-}
-
-fn read(path: &Path) -> Result<String, String> {
-    std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))
 }
 
 /// Reads `base/rel` as UTF-8, where the sandboxed run could have written it:
@@ -190,13 +188,21 @@ struct RunInfo {
 fn parse_run_info(text: &str) -> Result<RunInfo, String> {
     let (mut set, mut commit, mut package, mut files) = (None, None, None, None);
     let mut skips = Vec::new();
+    // Each field but `skip` comes once: a second, perhaps different, value
+    // would leave the run's identity ambiguous.
+    let once = |slot: &mut Option<String>, key: &str, v: &str| -> Result<(), String> {
+        if slot.replace(v.to_string()).is_some() {
+            return Err(format!("run-info.tsv: {key} appears twice"));
+        }
+        Ok(())
+    };
     for line in text.lines() {
         let fields: Vec<&str> = line.split('\t').collect();
         match fields.as_slice() {
-            ["set", v] => set = Some(v.to_string()),
-            ["commit", v] => commit = Some(v.to_string()),
-            ["package", v] => package = Some(v.to_string()),
-            ["files", v] => files = Some(v.to_string()),
+            ["set", v] => once(&mut set, "set", v)?,
+            ["commit", v] => once(&mut commit, "commit", v)?,
+            ["package", v] => once(&mut package, "package", v)?,
+            ["files", v] => once(&mut files, "files", v)?,
             ["skip", filter, reason] => skips.push((filter.to_string(), reason.to_string())),
             _ => return Err(format!("run-info.tsv: unexpected line {line:?}")),
         }
@@ -236,7 +242,19 @@ fn run(set: &str, out_dir: &Path, repo: &Path) -> Result<Result<(), String>, Str
     }
     let root = repo_root(repo)?;
     checkout_is(&root, &info.commit)?;
-    let sets_tsv = read(&root.join("tools/mutants/sets.tsv"))?;
+    // Every input from the repository is read as the graded commit holds it,
+    // not from the working tree, whose bytes Git can be told to ignore
+    // (`--assume-unchanged`): the set table, the equivalence table, the sources
+    // its rows fingerprint, and, for a check, the manifest.
+    let committed = |rel: &str| -> Result<String, String> {
+        read_committed(&root, &info.commit, rel)?.ok_or_else(|| {
+            format!(
+                "commit {} has no regular file {rel} of at most {ARTIFACT_LIMIT} bytes",
+                info.commit
+            )
+        })
+    };
+    let sets_tsv = committed("tools/mutants/sets.tsv")?;
     let scope = scope_of(&info.package, &info.files, &info.skips);
     match set_scope(&sets_tsv, set) {
         None => return Err(format!("sets.tsv declares no set {set:?}")),
@@ -249,15 +267,13 @@ fn run(set: &str, out_dir: &Path, repo: &Path) -> Result<Result<(), String>, Str
         Some(_) => {}
     }
     let mut outcomes = parse_outcomes(&read_artifact(out_dir, "run/mutants.out/outcomes.json")?)?;
-    let equivalents = parse_equivalents(&read(&root.join("tools/mutants/equivalent.tsv"))?)?;
+    let equivalents = parse_equivalents(&committed("tools/mutants/equivalent.tsv")?)?;
     // A site matters only to an equivalence row, so only the files the set's
-    // rows name are read, each once, from the checkout `checkout_is` has held
-    // to the graded commit; and each line's site is made once and shared. The
-    // files are named by the repository's own `equivalent.tsv`, but read as an
-    // artifact is (a plain relative path to a bounded regular file).
+    // rows name are read, each once; and each span's site is made once and
+    // shared.
     let mut sources = std::collections::BTreeMap::new();
     for file in equivalence_files(set, &equivalents) {
-        sources.insert(file, read_artifact(&root, file)?);
+        sources.insert(file, committed(file)?);
     }
     attach_sites(&mut outcomes.mutants, &sources);
     let listed: Vec<String> = read_artifact(out_dir, "run/listed.txt")?
@@ -297,7 +313,7 @@ fn run(set: &str, out_dir: &Path, repo: &Path) -> Result<Result<(), String>, Str
         // that path (an untracked file, a link, or bytes Git was told to
         // ignore).
         let origin = format!("{rel} at {}", info.commit);
-        return Ok(match committed_manifest(&root, &info.commit, &rel)? {
+        return Ok(match read_committed(&root, &info.commit, &rel)? {
             Some(text) => compare_text(&text, &origin, &manifest, &regenerate),
             None => Err(format!(
                 "commit {} has no regular file {rel}, so no manifest for {set}; commit \
@@ -317,13 +333,20 @@ fn run(set: &str, out_dir: &Path, repo: &Path) -> Result<Result<(), String>, Str
 }
 
 /// `Ok` when a regeneration may write `path`: it is absent (a new set's
-/// manifest) or a regular file, never a link, FIFO, device or directory, which
-/// the write would follow, block on or fail at.
+/// manifest) or a regular file with no other name, never a link, FIFO,
+/// device or directory, which the write would follow, block on or fail at,
+/// nor a hard link, whose truncation would rewrite another file too.
 fn regeneration_destination(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
     match std::fs::symlink_metadata(path) {
         Ok(meta) if !meta.file_type().is_file() => Err(format!(
             "{} exists and is not a regular file",
             path.display()
+        )),
+        Ok(meta) if meta.nlink() > 1 => Err(format!(
+            "{} has {} names; a regeneration would rewrite them all",
+            path.display(),
+            meta.nlink()
         )),
         Ok(_) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -334,7 +357,7 @@ fn regeneration_destination(path: &Path) -> Result<(), String> {
 /// The text of `rel` as commit `commit` of the checkout at `root` holds it,
 /// if the commit has it as a regular file (mode `100644` or `100755`, not a
 /// link or a submodule) of at most [`ARTIFACT_LIMIT`] bytes of UTF-8.
-fn committed_manifest(root: &Path, commit: &str, rel: &str) -> Result<Option<String>, String> {
+fn read_committed(root: &Path, commit: &str, rel: &str) -> Result<Option<String>, String> {
     let git = |args: &[&str]| -> Result<(bool, Vec<u8>), String> {
         let mut cmd = git_in(root)?;
         cmd.args(args);
@@ -464,6 +487,9 @@ mod tests {
         assert!(regeneration_destination(&fifo).is_err());
         std::fs::create_dir(base.join("dir.txt")).unwrap();
         assert!(regeneration_destination(&base.join("dir.txt")).is_err());
+        std::fs::write(base.join("other.txt"), "y").unwrap();
+        std::fs::hard_link(base.join("other.txt"), base.join("hard.txt")).unwrap();
+        assert!(regeneration_destination(&base.join("hard.txt")).is_err());
     }
 
     #[test]
@@ -474,6 +500,20 @@ mod tests {
         for bad in ["", "../a", "a/b", ".", "..", "-a", "A", "a b", "a.b"] {
             assert!(!set_name_ok(bad), "{bad}");
         }
+    }
+
+    #[test]
+    fn a_field_given_twice_is_ambiguous() {
+        for key in ["set", "commit", "package", "files"] {
+            let text = format!("set\ts\ncommit\tabc\npackage\tp\nfiles\ta.rs\n{key}\tother\n");
+            assert!(
+                parse_run_info(&text).err().unwrap().contains("twice"),
+                "{key}"
+            );
+        }
+        let skips = "set\ts\ncommit\tabc\npackage\tp\nfiles\ta.rs\n\
+                     skip\tx\twhy\nskip\ty\twhy\n";
+        assert_eq!(parse_run_info(skips).unwrap().skips.len(), 2);
     }
 
     #[test]
@@ -526,20 +566,20 @@ mod tests {
         assert_eq!(checkout_is(repo, &second), Ok(()));
         // And it is no manifest a check can pin to; a committed regular file
         // is, as the commit holds it, and a committed link is not.
-        assert_eq!(committed_manifest(repo, &second, "untracked"), Ok(None));
-        assert_eq!(committed_manifest(repo, &second, "f"), Ok(Some("2".into())));
-        assert_eq!(committed_manifest(repo, &first, "f"), Ok(Some("1".into())));
+        assert_eq!(read_committed(repo, &second, "untracked"), Ok(None));
+        assert_eq!(read_committed(repo, &second, "f"), Ok(Some("2".into())));
+        assert_eq!(read_committed(repo, &first, "f"), Ok(Some("1".into())));
         std::os::unix::fs::symlink("untracked", repo.join("link")).unwrap();
         git(&["add", "link"]);
         git(&["commit", "-q", "-m", "link"]);
         let third = git(&["rev-parse", "HEAD"]);
-        assert_eq!(committed_manifest(repo, &third, "link"), Ok(None));
-        assert_eq!(committed_manifest(repo, &third, "absent"), Ok(None));
+        assert_eq!(read_committed(repo, &third, "link"), Ok(None));
+        assert_eq!(read_committed(repo, &third, "absent"), Ok(None));
         // Bytes Git was told not to look at are not the commit's.
         git(&["update-index", "--assume-unchanged", "f"]);
         std::fs::write(repo.join("f"), "edited").unwrap();
         assert_eq!(checkout_is(repo, &third), Ok(()));
-        assert_eq!(committed_manifest(repo, &third, "f"), Ok(Some("2".into())));
+        assert_eq!(read_committed(repo, &third, "f"), Ok(Some("2".into())));
     }
 
     #[test]
