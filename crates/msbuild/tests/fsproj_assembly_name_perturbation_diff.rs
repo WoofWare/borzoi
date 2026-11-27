@@ -1574,6 +1574,21 @@ fn grade_unbudgeted(case: &Case) -> Result<Outcome, String> {
     if !extra.is_empty() {
         // An evaluator-only case ends here, so the shared fixture is never
         // built.
+        let plain = plain_case().must_commit;
+        if case
+            .variables
+            .iter()
+            .all(|(name, value)| held_fixed(name, value))
+            && plain.as_ref() != Some(&name)
+        {
+            // Every variable held fixed: the case is the plain fixture's
+            // under them, so its name is the plain fixture's.
+            return Err(format!(
+                "{}: committed {name:?}, though every variable is held fixed and the plain \
+                 fixture's name is {plain:?}",
+                case.label()
+            ));
+        }
         return if extra.iter().all(|(name, value)| held_fixed(name, value)) {
             Ok(Outcome::HeldFixed)
         } else {
