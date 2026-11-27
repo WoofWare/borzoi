@@ -33,8 +33,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use borzoi_msbuild::fsc::{
     ALLOWED_ENVIRONMENT, ALLOWED_ITEM_TYPES, ALLOWED_METADATA, ALLOWED_PROPERTIES,
     CompiledAssemblyName, FSC_OPTIONS, Grammar, NameDecline, RESTORE_ITEM_TYPES, RESTORE_METADATA,
-    RESTORE_PROPERTIES, RESTORE_PROPERTY_PREFIX, resolved_sdk_version, toolchain_variable,
-    verified_manifests, verified_sdks,
+    RESTORE_PROPERTIES, RESTORE_PROPERTY_PREFIX, ToolchainValue, resolved_sdk_version,
+    toolchain_variable, verified_manifests, verified_sdks,
 };
 use borzoi_msbuild::observed::host_fs;
 use borzoi_msbuild::test_support::unescape;
@@ -293,32 +293,66 @@ fn held_to_plain_arguments(case: &Case) -> bool {
         })
 }
 
-/// The toolchain's own variables, by exact name, which the grading holds
-/// fixed: its builds run in its own environment, so it cannot build under
-/// another value of one. Pinned here, apart from the derivation's
-/// `TOOLCHAIN_VARIABLES`, so a variable the derivation comes to admit as the
-/// toolchain's by mistake fails rather than is excused.
-const HELD_FIXED: &[&str] = &[
-    "DOTNET_CLI_HOME",
-    "DOTNET_CLI_TELEMETRY_OPTOUT",
-    "DOTNET_NOLOGO",
-    "DOTNET_NUGET_SIGNATURE_VERIFICATION",
-    "DOTNET_SKIP_FIRST_TIME_EXPERIENCE",
-    "DOTNET_SKIP_WORKLOAD_INTEGRITY_CHECK",
-    "DOTNET_ROOT",
-    "HOME",
-    "MSBuildUserExtensionsPath",
-    "NUGET_PACKAGES",
-    "PATH",
-    "RestoreSources",
-    "TMPDIR",
+/// The toolchain's own variables, by exact name, with the shape each value
+/// must have, which the grading holds fixed: its builds run in its own
+/// environment, so it cannot build under another value of one. Pinned here,
+/// apart from the derivation's `TOOLCHAIN_VARIABLES`, so a variable the
+/// derivation comes to admit as the toolchain's by mistake, or at a shape it
+/// should not, fails rather than is excused.
+const HELD_FIXED: &[(&str, ToolchainValue)] = &[
+    ("DOTNET_CLI_HOME", ToolchainValue::Path),
+    ("DOTNET_CLI_TELEMETRY_OPTOUT", ToolchainValue::Switch),
+    ("DOTNET_NOLOGO", ToolchainValue::Switch),
+    (
+        "DOTNET_NUGET_SIGNATURE_VERIFICATION",
+        ToolchainValue::Switch,
+    ),
+    ("DOTNET_SKIP_FIRST_TIME_EXPERIENCE", ToolchainValue::Switch),
+    (
+        "DOTNET_SKIP_WORKLOAD_INTEGRITY_CHECK",
+        ToolchainValue::Switch,
+    ),
+    ("DOTNET_ROOT", ToolchainValue::Path),
+    ("HOME", ToolchainValue::Path),
+    ("MSBuildUserExtensionsPath", ToolchainValue::Path),
+    ("NUGET_PACKAGES", ToolchainValue::Path),
+    ("PATH", ToolchainValue::SearchPath),
+    ("RestoreSources", ToolchainValue::Sources),
+    ("TMPDIR", ToolchainValue::Path),
 ];
 
-/// Whether the grading holds the variable `name` fixed ([`HELD_FIXED`]), so a
-/// commit under a value of it the oracle cannot build is counted
-/// ([`Outcome::HeldFixed`]) rather than failed.
-fn held_fixed(name: &str) -> bool {
-    HELD_FIXED.contains(&name)
+/// Whether the grading holds the variable `name` at `value` fixed
+/// ([`HELD_FIXED`]): a toolchain variable at a value of its shape, which the
+/// oracle cannot build under, so a commit is counted
+/// ([`Outcome::HeldFixed`]). A commit under a value of another shape is one
+/// the derivation must not make, so it fails.
+fn held_fixed(name: &str, value: &str) -> bool {
+    HELD_FIXED
+        .iter()
+        .any(|(held, shape)| *held == name && shape.admits(value))
+}
+
+/// A commit is excused only for a toolchain variable at a value of its own
+/// shape: the hostile toolchain values off their shape, and every name off
+/// the list, are not.
+#[test]
+fn only_a_value_of_its_shape_is_held_fixed() {
+    assert!(held_fixed("NUGET_PACKAGES", "/nonexistent/borzoi/packages"));
+    assert!(held_fixed("DOTNET_NOLOGO", "true"));
+    for (name, value) in [
+        ("NUGET_PACKAGES", "relative/packages"),
+        ("NUGET_PACKAGES", ""),
+        ("DOTNET_ROOT", ""),
+        ("DOTNET_NOLOGO", "yes"),
+        (
+            "RestoreSources",
+            "https://private.example.org/v3/index.json",
+        ),
+        ("PATH", ".:bin"),
+        ("NUGET_FALLBACK_PACKAGES", "/nonexistent"),
+    ] {
+        assert!(!held_fixed(name, value), "{name}={value:?}");
+    }
 }
 
 /// The source of a [`Place::Variables`] case's project: it compiles, with
@@ -381,7 +415,7 @@ fn environment_declines() -> Vec<Case> {
         ALLOWED_PROPERTIES
             .iter()
             .any(|(allowed, _)| allowed.eq_ignore_ascii_case(name))
-            || HELD_FIXED.iter().any(|t| t.eq_ignore_ascii_case(name))
+            || HELD_FIXED.iter().any(|(t, _)| t.eq_ignore_ascii_case(name))
             || ALLOWED_ENVIRONMENT
                 .iter()
                 .any(|graded| graded.eq_ignore_ascii_case(name))
@@ -1523,7 +1557,7 @@ fn grade_unbudgeted(case: &Case) -> Result<Outcome, String> {
     if !extra.is_empty() {
         // An evaluator-only case ends here, so the shared fixture is never
         // built.
-        return if extra.iter().all(|(name, _)| held_fixed(name)) {
+        return if extra.iter().all(|(name, value)| held_fixed(name, value)) {
             Ok(Outcome::HeldFixed)
         } else {
             Err(format!(
@@ -2318,7 +2352,7 @@ fn no_oracle_input_is_a_toolchain_variable() {
         assert!(
             !HELD_FIXED
                 .iter()
-                .any(|held| held.eq_ignore_ascii_case(name)),
+                .any(|(held, _)| held.eq_ignore_ascii_case(name)),
             "{name} is held fixed, and an oracle input"
         );
     }
