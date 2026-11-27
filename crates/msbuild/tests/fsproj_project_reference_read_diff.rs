@@ -52,6 +52,25 @@ fn lexical(path: &str) -> PathBuf {
     out
 }
 
+/// A path the walker published, as the LSP reads it: lexically normalised
+/// (`.` and `..` folded, which `workspace::lexically_normalize` does too) and
+/// nothing else. A backslash stays, so a walker that publishes one where
+/// MSBuild's `FullPath` has a separator fails the comparison rather than
+/// being repaired by it.
+fn published(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 /// A project directory under `root`, beside a referenced project, returning
 /// the project's path.
 fn layout(root: &Path) -> PathBuf {
@@ -436,7 +455,7 @@ fn grade_read_document(oracle: &mut Oracle, document: &ReadDocument) -> (ReadOut
             .project_references
             .iter()
             .filter(|item| starts.iter().position(|s| *s == item.span.start) == Some(i))
-            .map(|item| lexical(&item.include.to_string_lossy()))
+            .map(|item| published(&item.include))
             .collect()
     };
     let doubted = |name: &str| {
@@ -484,7 +503,7 @@ fn grade_read_document(oracle: &mut Oracle, document: &ReadDocument) -> (ReadOut
     let all_ours: Vec<PathBuf> = parsed
         .project_references
         .iter()
-        .map(|item| lexical(&item.include.to_string_lossy()))
+        .map(|item| published(&item.include))
         .collect();
     let all_theirs: Vec<PathBuf> = theirs
         .iter()
@@ -879,7 +898,7 @@ fn an_implicit_read_leaves_no_certain_list_short() {
     let ours: Vec<PathBuf> = parsed
         .project_references
         .iter()
-        .map(|item| lexical(&item.include.to_string_lossy()))
+        .map(|item| published(&item.include))
         .collect();
     if let Err(failure) =
         common::check_reference_claim(common::reference_claim(&parsed), &ours, &theirs)
@@ -1054,7 +1073,7 @@ fn dead_reference_row(oracle: &mut Oracle, expected: DeadRow, row: &str) {
     let ours: Vec<PathBuf> = parsed
         .project_references
         .iter()
-        .map(|item| lexical(&item.include.to_string_lossy()))
+        .map(|item| published(&item.include))
         .collect();
     assert!(!parsed.project_references_uncertain, "{xml}");
     let got = if parsed.project_references_incomplete {
@@ -1120,7 +1139,7 @@ fn a_doubted_metadatum_leaves_the_list_certain() {
             let ours: Vec<PathBuf> = parsed
                 .project_references
                 .iter()
-                .map(|item| lexical(&item.include.to_string_lossy()))
+                .map(|item| published(&item.include))
                 .collect();
             assert_eq!(
                 common::reference_claim(&parsed),
@@ -1174,7 +1193,7 @@ fn a_live_reference_in_an_undecided_group_leaves_the_list_incomplete() {
     let ours: Vec<PathBuf> = parsed
         .project_references
         .iter()
-        .map(|item| lexical(&item.include.to_string_lossy()))
+        .map(|item| published(&item.include))
         .collect();
     assert!(!ours.is_empty(), "A is held: {xml}");
     if let Err(failure) =

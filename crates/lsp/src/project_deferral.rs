@@ -121,6 +121,11 @@ impl ProjectEvaluation<'_> {
     ///
     /// Shared rather than restated, for the reason
     /// [`Self::drops_reference_edges`] is.
+    ///
+    /// Not claimed: that a missing reference could contribute to the compile
+    /// closure. An omitted `<ProjectReference>` whose own metadata makes it
+    /// build-order-only (`ReferenceOutputAssembly="false"`) marks the env
+    /// incomplete too (#1184).
     pub fn may_lack_reference_edges(&self) -> bool {
         match self {
             ProjectEvaluation::Failed => false,

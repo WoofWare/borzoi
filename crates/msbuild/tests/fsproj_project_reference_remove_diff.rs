@@ -414,6 +414,25 @@ fn lexical(path: &str) -> PathBuf {
     out
 }
 
+/// A path the walker published, as the LSP reads it: lexically normalised
+/// (`.` and `..` folded, which `workspace::lexically_normalize` does too) and
+/// nothing else. A backslash stays, so a walker that publishes one where
+/// MSBuild's `FullPath` has a separator fails the comparison rather than
+/// being repaired by it.
+fn published(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 struct Outcome {
     committed: bool,
     /// The claim the list made ([`common::reference_claim`]).
@@ -470,7 +489,7 @@ fn check(oracle: &mut Oracle, blocks: &[Block], with_resolver: bool) -> Outcome 
     let ours: Vec<PathBuf> = parsed
         .project_references
         .iter()
-        .map(|item| lexical(&item.include.to_string_lossy()))
+        .map(|item| published(&item.include))
         .collect();
     let claim = common::reference_claim(&parsed);
     if let Err(failure) = common::check_reference_claim(claim, &ours, &theirs) {
@@ -890,7 +909,7 @@ fn the_non_existent_idiom_commits_on_the_real_sdk() {
     let ours: Vec<PathBuf> = parsed
         .project_references
         .iter()
-        .map(|item| lexical(&item.include.to_string_lossy()))
+        .map(|item| published(&item.include))
         .collect();
     assert_eq!(ours, theirs);
 }
