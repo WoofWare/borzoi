@@ -42,6 +42,7 @@ pub mod hostile;
 pub mod manifest;
 pub mod module_tree;
 pub mod msbuild_oracle;
+pub mod mutants;
 pub mod nuget_oracle;
 pub mod panic_silence;
 pub mod par_map;

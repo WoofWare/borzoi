@@ -1,0 +1,48 @@
+# cargo-mutants' configuration, read by every `cargo mutants` in this workspace.
+# Mutation runs go through `tools/mutants/run.sh` (a Linux container) or
+# `tools/ci/mutants.sh` (a CI job); `tools/mutants/inner.sh` documents the rest.
+
+# The sandbox canary (`tools/mutants/canary-runner.sh`) guards every mutation
+# run twice: off the container and CI runners it refuses, so the unmutated
+# baseline fails and no mutant runs. The paths are relative to the cargo
+# invocation's directory, the root of cargo-mutants' copy of the tree.
+#
+# - As the workspace's rustc wrapper, it refuses before a workspace crate is
+#   compiled, whatever the target. Only the `RUSTC_WORKSPACE_WRAPPER`
+#   environment variable outranks this `--config`.
+# - As the runner of every test binary. Cargo prefers a target triple's runner
+#   to a `cfg()` one, from any source, and a `--config` on the command line to
+#   the environment (`CARGO_TARGET_<TRIPLE>_RUNNER`, which CI sets) and to
+#   config files. So it is installed under each triple the workspace is built
+#   for, where nothing outranks it, and under `cfg(all())` for any other.
+#
+# `tools/mutants/canary.test.sh` builds a probe crate under these arguments,
+# with a competing runner for the host's triple, and checks each guard refuses
+# on its own.
+#
+# Doctests do not go through a runner (rustdoc runs them), but cargo runs them
+# after the unit and integration tests, and stops at the first binary that
+# fails, so a refused baseline never reaches them; `tools/mutants/inner.sh`
+# leaves them out of its runs with `--tests`.
+additional_cargo_args = [
+  "--config", "build.rustc-workspace-wrapper = 'tools/mutants/canary-runner.sh'",
+  "--config", "target.x86_64-unknown-linux-gnu.runner = 'tools/mutants/canary-runner.sh'",
+  "--config", "target.aarch64-unknown-linux-gnu.runner = 'tools/mutants/canary-runner.sh'",
+  "--config", "target.aarch64-apple-darwin.runner = 'tools/mutants/canary-runner.sh'",
+  "--config", "target.x86_64-apple-darwin.runner = 'tools/mutants/canary-runner.sh'",
+  "--config", "target.'cfg(all())'.runner = 'tools/mutants/canary-runner.sh'",
+]
+
+# Only the mutated package's tests face its mutants.
+test_workspace = false
+
+# A mutant that trips a lint the workspace denies is still a mutant to test,
+# not an unviable one.
+cap_lints = true
+
+# A floor under cargo-mutants' per-mutant test timeout, which it otherwise
+# derives from the baseline's speed. Some tests catch a mutant only at their
+# own deadline (`regular_file`'s FIFO test waits 120 s), so a fast baseline
+# would turn the same mutant from `caught` into `timeout`; the floor keeps the
+# verdict off the machine's speed.
+minimum_test_timeout = 300

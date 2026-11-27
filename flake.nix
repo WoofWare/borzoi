@@ -335,6 +335,9 @@
             # we don't want to take a dependency on.
             dotnet-sdk
             pkgs.cargo-audit
+            # Mutation testing. Runs only in a sandbox: `tools/mutants/run.sh`
+            # (a Linux container) or `tools/ci/mutants.sh` (a CI job).
+            pkgs.cargo-mutants
           ];
 
           # Make every `dotnet` invocation under `cargo test` resolve packages

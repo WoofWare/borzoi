@@ -353,10 +353,29 @@ pub fn compare_with(
     regenerate: &str,
     update: bool,
 ) -> Result<(), String> {
-    let header = format!(
+    compare_described(path, actual, "", regenerate, update)
+}
+
+/// [`compare_with`], with `description` written into the regenerated file's
+/// header above the usual lines. Comparison ignores the header, so a
+/// description that names the run (its source commit, its counts) moves
+/// nothing a check sees.
+pub fn compare_described(
+    path: &Path,
+    actual: &Manifest,
+    description: &str,
+    regenerate: &str,
+    update: bool,
+) -> Result<(), String> {
+    let mut header = String::new();
+    if !description.is_empty() {
+        header.push_str(description);
+        header.push_str("\n\n");
+    }
+    header.push_str(&format!(
         "Generated; do not edit by hand. One line per graded item, sorted.\n\
          Regenerate with:\n  {regenerate}"
-    );
+    ));
     let existing = std::fs::read_to_string(path).ok();
     if update {
         if let Some(Ok(old)) = existing.as_deref().map(Manifest::parse) {
@@ -383,10 +402,21 @@ pub fn compare_with(
             path.display()
         ));
     };
-    let expected = Manifest::parse(&text).map_err(|(line, e)| {
+    compare_text(&text, &path.display().to_string(), actual, regenerate)
+}
+
+/// The check half of [`compare_described`], against a manifest's text read
+/// from wherever the caller pins it (a file, or a blob of a commit), which
+/// `origin` names in the messages.
+pub fn compare_text(
+    text: &str,
+    origin: &str,
+    actual: &Manifest,
+    regenerate: &str,
+) -> Result<(), String> {
+    let expected = Manifest::parse(text).map_err(|(line, e)| {
         format!(
-            "manifest {} is malformed at line {line}: {e}. Regenerate it with:\n  {regenerate}",
-            path.display()
+            "manifest {origin} is malformed at line {line}: {e}. Regenerate it with:\n  {regenerate}"
         )
     })?;
     let d = expected.diff(actual);
@@ -394,11 +424,10 @@ pub fn compare_with(
         return Ok(());
     }
     Err(format!(
-        "the run does not match the checked-in manifest {}.\n{}\n\
+        "the run does not match the checked-in manifest {origin}.\n{}\n\
          Every movement is signal: a lost entry may be a regression, and a gained \
          one an improvement to acknowledge. If every moved line is intended, \
          regenerate the manifest and commit the diff:\n  {regenerate}",
-        path.display(),
         d.render(DIFF_LIMIT),
     ))
 }
