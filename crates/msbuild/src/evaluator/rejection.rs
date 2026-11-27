@@ -148,7 +148,7 @@ use roxmltree::Node;
 use crate::diagnostic::ImportFailReason;
 use crate::document::attribute;
 use crate::imports::normalise;
-use crate::{Rejection, RejectionCause, RejectionCertainty, UnloadableImport};
+use crate::{DiagnosticKind, Rejection, RejectionCause, RejectionCertainty, UnloadableImport};
 
 use super::item_pass::{DeferredGroupKind, expand_silent, metadata_attribute};
 use super::observed::{self, EntryKind};
@@ -196,17 +196,16 @@ impl State<'_> {
             origin: self.current_origin(),
         };
         let kind = rejection.diagnostic_kind();
+        // `push` records the diagnostic first, at this index, whatever it
+        // pushes after it.
         self.noted_sites.push(NotedSite {
-            key: SiteKey {
-                construct: SiteConstruct {
-                    file: self.site_file.clone(),
-                    start: span.start,
-                    end: span.end,
-                    text,
-                },
-                cause: rejection.cause.clone(),
+            construct: SiteConstruct {
+                file: self.site_file.clone(),
+                start: span.start,
+                end: span.end,
+                text,
             },
-            rejection: rejection.clone(),
+            diagnostic: self.diagnostics.len(),
         });
         if replaces {
             self.rejection = Some(rejection);
@@ -220,7 +219,7 @@ impl State<'_> {
     /// judgement holding a name refused then rebound certain.
     ///
     /// A site is the same in both walks where its construct ([`SiteConstruct`])
-    /// and cause are ([`SiteKey`]), however the walks' courses part (a site one notes may
+    /// and cause are, however the walks' courses part (a site one notes may
     /// leave a `<Choose>` undecided that the other decides), and a construct
     /// the second walk notes more than once is adopted once. The adopted ones
     /// follow this walk's
@@ -237,36 +236,52 @@ impl State<'_> {
         );
         crate::cost::count(|costs| costs.second_walks += 1);
         let mut probes = 0u64;
-        let mut noted: HashSet<&SiteKey> = HashSet::new();
+        let mut noted: HashSet<(&SiteConstruct, &RejectionCause)> = HashSet::new();
         for site in &self.noted_sites {
             probes += 1;
-            noted.insert(&site.key);
+            noted.insert((&site.construct, site.cause(&self.diagnostics)));
         }
-        let mut adopted: Vec<NotedSite> = Vec::new();
+        let mut adopted: Vec<(SiteConstruct, crate::Diagnostic)> = Vec::new();
         for site in &second.noted_sites {
             probes += 1;
             // Inserted as it is adopted: a construct the second walk notes
             // twice (a file two undecided import points both walk) is one
             // site.
-            if noted.insert(&site.key) {
-                adopted.push(site.clone());
+            if noted.insert((&site.construct, site.cause(&second.diagnostics))) {
+                adopted.push((
+                    site.construct.clone(),
+                    second.diagnostics[site.diagnostic].clone(),
+                ));
             }
         }
         drop(noted);
         crate::cost::count(|costs| costs.site_merge_probes += probes);
-        for site in adopted {
+        for (construct, diagnostic) in adopted {
+            let (DiagnosticKind::Rejected { cause } | DiagnosticKind::MayBeRejected { cause }) =
+                diagnostic.kind
+            else {
+                unreachable!("a noted site's diagnostic is a rejection's")
+            };
             let rejection = Rejection {
                 certainty: RejectionCertainty::Possible,
-                ..site.rejection
+                cause,
+                span: diagnostic.span,
+                origin: diagnostic.origin,
             };
-            if self.rejection.is_none() {
-                self.rejection = Some(rejection.clone());
-            }
-            self.push_adopted(rejection.clone());
+            #[cfg(feature = "test-support")]
+            crate::test_support::record_second_walk_site(&rejection.span, &rejection.cause);
             self.noted_sites.push(NotedSite {
-                key: site.key,
-                rejection,
+                construct,
+                diagnostic: self.diagnostics.len(),
             });
+            self.diagnostics.push(crate::Diagnostic {
+                kind: rejection.diagnostic_kind(),
+                span: rejection.span.clone(),
+                origin: rejection.origin.clone(),
+            });
+            if self.rejection.is_none() {
+                self.rejection = Some(rejection);
+            }
         }
     }
 
@@ -279,30 +294,16 @@ impl State<'_> {
             self.noted_sites
                 .iter()
                 .map(|site| {
-                    let SiteKey {
-                        construct:
-                            SiteConstruct {
-                                file,
-                                start,
-                                end,
-                                text,
-                            },
-                        cause,
-                    } = &site.key;
+                    let SiteConstruct {
+                        file,
+                        start,
+                        end,
+                        text,
+                    } = &site.construct;
+                    let cause = site.cause(&self.diagnostics);
                     format!("{file:?}:{start}..{end}#{text} {cause:?}")
                 })
                 .collect()
-        });
-    }
-
-    /// [`Self::adopt_second_walk`]'s diagnostic for `site`.
-    fn push_adopted(&mut self, site: Rejection) {
-        #[cfg(feature = "test-support")]
-        crate::test_support::record_second_walk_site(&site.cause);
-        self.diagnostics.push(crate::Diagnostic {
-            kind: site.diagnostic_kind(),
-            span: site.span,
-            origin: site.origin,
         });
     }
 
@@ -334,19 +335,23 @@ impl State<'_> {
     }
 }
 
-/// A site the rejection judgement noted ([`State::note_rejection`]), and
-/// what names it in both walks.
+/// A site the rejection judgement noted ([`State::note_rejection`]): the
+/// construct it is about and the index of its diagnostic among the walk's,
+/// which holds its cause. Its construct and cause name it in both walks.
 #[derive(Debug, Clone)]
 pub(super) struct NotedSite {
-    key: SiteKey,
-    rejection: Rejection,
+    construct: SiteConstruct,
+    diagnostic: usize,
 }
 
-/// What names a site in both walks: its construct and its cause.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct SiteKey {
-    construct: SiteConstruct,
-    cause: RejectionCause,
+impl NotedSite {
+    /// The site's cause, from its diagnostic in `diagnostics`, the walk's.
+    fn cause<'d>(&self, diagnostics: &'d [crate::Diagnostic]) -> &'d RejectionCause {
+        match &diagnostics[self.diagnostic].kind {
+            DiagnosticKind::Rejected { cause } | DiagnosticKind::MayBeRejected { cause } => cause,
+            other => unreachable!("a noted site's diagnostic is a rejection's, not {other:?}"),
+        }
+    }
 }
 
 /// The construct a site is about, named by the source alone: the entry

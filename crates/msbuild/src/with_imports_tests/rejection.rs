@@ -1811,7 +1811,7 @@ fn an_uncollected_walk_keeps_no_second_walk_site() {
         expression: "$(P[9])".to_string(),
     };
     assert!(
-        !collected.is_empty() && collected.iter().all(|cause| *cause == index),
+        !collected.is_empty() && collected.iter().all(|site| site.cause == index),
         "{collected:?}"
     );
 }

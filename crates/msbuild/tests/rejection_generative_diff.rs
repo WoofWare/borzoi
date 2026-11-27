@@ -1654,9 +1654,12 @@ struct HistoryCensus {
     withdrawn: usize,
     committed: usize,
     /// Sites a twin's walk adopted from its second walk, and of them those
-    /// the project's walk does not find.
+    /// whose cause the project's walk does not note anywhere: the two
+    /// documents' spans differ by the refused write, so causes are what the
+    /// census compares, and a cause the project notes at another construct
+    /// counts as found.
     second_walk_sites: usize,
-    second_walk_sites_beyond_project: usize,
+    second_walk_causes_beyond_project: usize,
 }
 
 /// [`RefusedBefore`]'s claim, held to the walk alone. A refused write just
@@ -1790,8 +1793,8 @@ fn refused_history_sweep(rng: &mut SplitMix64, cases: usize) -> HistoryCensus {
             }
             for site in &second_sites {
                 tally.second_walk_sites += 1;
-                if !project_sites.contains(&site) {
-                    tally.second_walk_sites_beyond_project += 1;
+                if !project_sites.contains(&&site.cause) {
+                    tally.second_walk_causes_beyond_project += 1;
                 }
             }
             assert!(
@@ -2089,10 +2092,12 @@ const REACH_GRID_KNOWN_WRONG: &[(&str, &str, &str)] = &[
 ///   [`REACH_GRID_KNOWN_WRONG`], which pins which walk is wrong and how, and
 ///   nowhere else;
 /// - per cell, `manifests/rejection_reach_grid_declines.txt` pins whether the
-///   twin's walk adopts a site from its second walk that the project's walk
-///   does not find, and whether, where MSBuild evaluates the twin and the
+///   twin's walk adopts a site from its second walk whose cause the project's
+///   walk notes nowhere (the documents' spans differ, so causes are
+///   compared), and whether, where MSBuild evaluates the twin and the
 ///   project's walk commits, the twin's walk is withdrawn by its second walk's
-///   sites alone. Each walk decides reach with the walk's own code, which
+///   sites alone (every site it publishes adopted). Each walk decides reach
+///   with the walk's own code, which
 ///   doubts a refused name in the arm's gate, so the second walk may find a
 ///   site in an arm MSBuild does not take. Such a site is Possible, a decline,
 ///   and the manifest is its cost. A site the first walk notes is the
@@ -2193,13 +2198,15 @@ fn refused_history_reach_grid() {
                             second += second_sites.len();
                             let label = format!("{at:?} / {arm} / {site} / {last}");
                             let plain_sites = sites_of(&plain);
+                            // The two documents' spans differ by the refused
+                            // write, so the comparison is by cause.
                             if second_sites
                                 .iter()
-                                .any(|found| !plain_sites.contains(found))
+                                .any(|found| !plain_sites.contains(&found.cause))
                             {
                                 declines.push((
                                     label.clone(),
-                                    "adopts a site the project's walk does not find".to_owned(),
+                                    "adopts a cause the project's walk does not note".to_owned(),
                                 ));
                             }
                             std::fs::write(&project_path, &twin_xml).unwrap();
@@ -2226,9 +2233,11 @@ fn refused_history_reach_grid() {
                             }
                             if theirs.is_some() && plain.rejection.is_none() {
                                 must_commit += 1;
-                                let twin_sites = sites_of(&twin);
+                                // Every site the twin publishes is one it
+                                // adopted: within one evaluation, adoption is
+                                // recorded per diagnostic.
                                 if twin.rejection.is_some()
-                                    && twin_sites.iter().all(|site| second_sites.contains(site))
+                                    && sites_of(&twin).len() == second_sites.len()
                                 {
                                     declines.push((
                                         label.clone(),
@@ -2280,8 +2289,8 @@ fn refused_history_reach_grid() {
         &manifest,
         "BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-msbuild --test \
          rejection_generative_diff refused_history_reach_grid\n\
-         Each entry is a grid cell where the twin's second walk finds a site the project's walk \
-         does not, or where MSBuild evaluates the twin, the project's walk commits, and the \
+         Each entry is a grid cell where the twin's second walk adopts a cause the project's \
+         walk does not note, or where MSBuild evaluates the twin, the project's walk commits, and the \
          twin's second walk alone withdraws it: a decline, the second walk's cost.",
     );
     assert!(second > 0 && must_commit > 0, "the grid exercises nothing");
@@ -2346,7 +2355,7 @@ fn refused_history_sweep_fixed_seed() {
         "{census:?}"
     );
     assert!(census.second_walk_sites > 0, "{census:?}");
-    assert_eq!(census.second_walk_sites_beyond_project, 0, "{census:?}");
+    assert_eq!(census.second_walk_causes_beyond_project, 0, "{census:?}");
     assert!(census.withdrawn > 0 && census.committed > 0, "{census:?}");
 }
 

@@ -25,13 +25,21 @@ pub fn count_walk_costs<T>(walk: impl FnOnce() -> T) -> (T, WalkCosts) {
     (value, crate::cost::take())
 }
 
-/// Run `walk` and the causes of the sites its evaluations adopted from a
-/// second walk (`evaluator::rejection`'s module docs, "The second walk"): each
-/// a site found only by holding a name refused then rebound certain (#1153).
+/// A site an evaluation adopted from its second walk: its published span and
+/// cause ([`second_walk_sites`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecondWalkSite {
+    pub span: std::ops::Range<usize>,
+    pub cause: crate::RejectionCause,
+}
+
+/// Run `walk` and the sites its evaluations adopted from a second walk
+/// (`evaluator::rejection`'s module docs, "The second walk"): each a site
+/// found only by holding a name refused then rebound certain (#1153).
 ///
 /// Collection is per thread, and only inside `walk`: a panic out of it leaves
 /// the collector idle, and a walk outside it records nothing.
-pub fn second_walk_sites<T>(walk: impl FnOnce() -> T) -> (T, Vec<crate::RejectionCause>) {
+pub fn second_walk_sites<T>(walk: impl FnOnce() -> T) -> (T, Vec<SecondWalkSite>) {
     struct Collecting;
     impl Drop for Collecting {
         fn drop(&mut self) {
@@ -56,7 +64,7 @@ pub fn second_walk_sites<T>(walk: impl FnOnce() -> T) -> (T, Vec<crate::Rejectio
 /// collection on this thread set aside, so that an evaluation run only to
 /// check another (a reference one) adds nothing to them.
 pub fn outside_second_walk_sites<T>(walk: impl FnOnce() -> T) -> T {
-    struct Restore(Option<Vec<crate::RejectionCause>>, Option<Vec<Vec<String>>>);
+    struct Restore(Option<Vec<SecondWalkSite>>, Option<Vec<Vec<String>>>);
     impl Drop for Restore {
         fn drop(&mut self) {
             let (second, published) = (self.0.take(), self.1.take());
@@ -128,16 +136,22 @@ pub fn second_walk_collector_idle() -> bool {
 thread_local! {
     /// The causes [`second_walk_sites`] is collecting on this thread, while it
     /// is.
-    static SECOND_WALK_SITES: std::cell::RefCell<Option<Vec<crate::RejectionCause>>> =
+    static SECOND_WALK_SITES: std::cell::RefCell<Option<Vec<SecondWalkSite>>> =
         const { std::cell::RefCell::new(None) };
 }
 
 /// Record a site an evaluation adopted from its second walk, where
 /// [`second_walk_sites`] is collecting.
-pub(crate) fn record_second_walk_site(cause: &crate::RejectionCause) {
+pub(crate) fn record_second_walk_site(
+    span: &std::ops::Range<usize>,
+    cause: &crate::RejectionCause,
+) {
     SECOND_WALK_SITES.with(|sites| {
         if let Some(sites) = sites.borrow_mut().as_mut() {
-            sites.push(cause.clone());
+            sites.push(SecondWalkSite {
+                span: span.clone(),
+                cause: cause.clone(),
+            });
         }
     });
 }
