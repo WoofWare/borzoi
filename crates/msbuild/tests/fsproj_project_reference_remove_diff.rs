@@ -678,37 +678,54 @@ fn an_incomplete_list_still_applies_its_removes() {
     }
 }
 
-/// A `Remove="@(ProjectReference)"` that runs empties MSBuild's list whatever
-/// it holds, the `Include`s the walk could not see among them: a list after it
-/// that the walk captures exactly is certain (#1184). One that may not run is
-/// no such proof.
+/// A `Remove="@(ProjectReference)"` empties MSBuild's list whatever it holds,
+/// but the walk marks an undecided `<Choose>` branch's hidden `Include`s in
+/// the property pass, ahead of the item replay: a removal *before* such a
+/// `<Choose>` must not end its doubt. Both document orders are held to the
+/// claim the list makes; one after the hidden `Include` leaves the list
+/// incomplete, though it could be certain (#1184).
 #[test]
-fn a_whole_list_removal_ends_the_doubt_of_the_includes_before_it() {
+fn a_whole_list_removal_ends_no_doubt_in_either_order() {
     let mut oracle = Oracle::spawn();
-    let blocks = |remove_gate: &'static str| {
-        [Block::Group {
-            gate: "",
-            ops: vec![
-                Op::Include {
-                    spec: "../A/A.fsproj",
-                    gate: UNSUPPORTED_TRUE,
-                },
-                Op::Remove {
-                    spec: "@(ProjectReference)",
-                    gate: remove_gate,
-                },
-                Op::Include {
-                    spec: "../B/B.fsproj",
-                    gate: "",
-                },
-            ],
-        }]
+    let remove = || Op::Remove {
+        spec: "@(ProjectReference)",
+        gate: "",
     };
+    let live = || Op::Include {
+        spec: "../B/B.fsproj",
+        gate: "",
+    };
+    let hidden_then_remove = vec![
+        Block::UndecidedChoose {
+            runs: true,
+            ops: vec![Op::Include {
+                spec: "../A/A.fsproj",
+                gate: "",
+            }],
+        },
+        Block::Group {
+            gate: "",
+            ops: vec![remove(), live()],
+        },
+    ];
+    let remove_then_hidden = vec![
+        Block::Group {
+            gate: "",
+            ops: vec![remove(), live()],
+        },
+        Block::UndecidedChoose {
+            runs: true,
+            ops: vec![Op::Include {
+                spec: "../A/A.fsproj",
+                gate: "",
+            }],
+        },
+    ];
     for with_resolver in [false, true] {
-        let outcome = check(&mut oracle, &blocks(""), with_resolver);
-        assert_eq!(outcome.claim, common::ReferenceClaim::Exact);
-        let outcome = check(&mut oracle, &blocks(UNSUPPORTED_TRUE), with_resolver);
-        assert_ne!(outcome.claim, common::ReferenceClaim::Exact);
+        let outcome = check(&mut oracle, &hidden_then_remove, with_resolver);
+        assert_eq!(outcome.claim, common::ReferenceClaim::Within);
+        let outcome = check(&mut oracle, &remove_then_hidden, with_resolver);
+        assert_eq!(outcome.claim, common::ReferenceClaim::Within);
     }
 }
 

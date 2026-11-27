@@ -1827,12 +1827,10 @@ fn apply_project_reference_remove(node: Node<'_, '_>, state: &mut State<'_>) -> 
         remove,
         state,
     ) {
+        // The doubt of an `Include` hidden before it stays: the undecided
+        // `<Choose>` branches mark theirs in the property pass, ahead of this
+        // replay, so the mark carries no position to clear it by (#1184).
         state.project_references.clear();
-        // MSBuild's list is empty too, the `Include`s the walk could not see
-        // among it: none can be missing any more. (This runs only for a
-        // `Remove` the walk takes; one under a gate it doubts has left the
-        // list uncertain already.)
-        state.project_reference_includes_hidden = false;
         return true;
     }
     let Some(spec) = resolve_item_spec(remove, state) else {

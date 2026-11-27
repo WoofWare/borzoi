@@ -530,10 +530,6 @@ pub struct ParsedProject {
     /// - whose value it could not expand (an unevaluable expression, a
     ///   wildcard or item reference it cannot resolve).
     ///
-    /// A `Remove="@(ProjectReference)"` the walk takes after such a drop
-    /// empties MSBuild's list as well as ours, so it ends the doubt; an
-    /// `Include` dropped after it raises the flag again.
-    ///
     /// The Compile items and the defines doubt the same gates in both
     /// directions ([`Self::items_uncertain`], [`Self::define_constants_uncertain`]),
     /// and so does the reference list, through this flag: a reference missing
