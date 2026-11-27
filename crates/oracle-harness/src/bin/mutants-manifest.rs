@@ -28,7 +28,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use borzoi_oracle_harness::manifest::{compare_described, update_requested};
+use borzoi_oracle_harness::manifest::{compare_described, compare_text, update_requested};
 use borzoi_oracle_harness::mutants::{
     attach_sites, declared_sets, equivalence_files, manifest_items, parse_equivalents,
     parse_outcomes, scope_of, set_scope, tally,
@@ -291,58 +291,96 @@ fn run(set: &str, out_dir: &Path, repo: &Path) -> Result<Result<(), String>, Str
     let rel = format!("tools/mutants/manifests/{set}.txt");
     let path = root.join(&rel);
     let regenerate = format!("BORZOI_UPDATE_MANIFESTS=1 tools/mutants/run.sh {set}");
-    let update = update_requested();
-    // A check pins the set to the manifest the graded commit holds. The
-    // checkout is that commit with no tracked file changed (`checkout_is`), so
-    // a manifest tracked as a regular file is the commit's. An untracked one,
-    // as a regeneration leaves a new set's, is in no commit; a tracked link
-    // holds no verdicts of its own; a fresh checkout would have neither.
-    if !update && !tracked_regular_file(&root, &rel)? {
-        return Ok(Err(format!(
-            "{rel} is not a regular file tracked by commit {}, so the commit has no \
-             manifest for {set}; commit it, or regenerate with:\n  {regenerate}",
-            info.commit
-        )));
+    if !update_requested() {
+        // A check pins the set to the manifest the graded commit holds: its
+        // blob, read from the commit, not whatever the working tree has at
+        // that path (an untracked file, a link, or bytes Git was told to
+        // ignore).
+        let origin = format!("{rel} at {}", info.commit);
+        return Ok(match committed_manifest(&root, &info.commit, &rel)? {
+            Some(text) => compare_text(&text, &origin, &manifest, &regenerate),
+            None => Err(format!(
+                "commit {} has no regular file {rel}, so no manifest for {set}; commit \
+                 one, or regenerate with:\n  {regenerate}",
+                info.commit
+            )),
+        });
     }
-    // A regeneration writes the file itself, never through a link to another.
-    if update && std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
-        return Err(format!(
-            "{rel} is a symbolic link; it must be the manifest itself"
-        ));
-    }
+    regeneration_destination(&path)?;
     Ok(compare_described(
         &path,
         &manifest,
         &description,
         &regenerate,
-        update,
+        true,
     ))
 }
 
-/// Whether Git tracks `rel` in the checkout at `root` as a regular file (mode
-/// `100644` or `100755`), not a link or a submodule.
-fn tracked_regular_file(root: &Path, rel: &str) -> Result<bool, String> {
-    let mut cmd = git_in(root)?;
-    cmd.args(["ls-files", "--stage", "--", rel]);
-    let out = borzoi_spawn::BoundedCommand::new(cmd)
-        .run()
-        .map_err(|e| format!("git ls-files: {e}"))?;
-    if !out.status.success() {
-        return Err(format!(
-            "git ls-files: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
+/// `Ok` when a regeneration may write `path`: it is absent (a new set's
+/// manifest) or a regular file, never a link, FIFO, device or directory, which
+/// the write would follow, block on or fail at.
+fn regeneration_destination(path: &Path) -> Result<(), String> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if !meta.file_type().is_file() => Err(format!(
+            "{} exists and is not a regular file",
+            path.display()
+        )),
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("{}: {e}", path.display())),
     }
-    let listing = String::from_utf8_lossy(&out.stdout);
-    let mut entries = listing.lines();
-    // `<mode> <object> <stage>\t<path>`: exactly one entry, for exactly `rel`.
-    let regular = match (entries.next(), entries.next()) {
-        (Some(entry), None) => entry.split_once('\t').is_some_and(|(meta, path)| {
-            path == rel && (meta.starts_with("100644 ") || meta.starts_with("100755 "))
-        }),
-        _ => false,
+}
+
+/// The text of `rel` as commit `commit` of the checkout at `root` holds it,
+/// if the commit has it as a regular file (mode `100644` or `100755`, not a
+/// link or a submodule) of at most [`ARTIFACT_LIMIT`] bytes of UTF-8.
+fn committed_manifest(root: &Path, commit: &str, rel: &str) -> Result<Option<String>, String> {
+    let git = |args: &[&str]| -> Result<(bool, Vec<u8>), String> {
+        let mut cmd = git_in(root)?;
+        cmd.args(args);
+        let out = borzoi_spawn::BoundedCommand::new(cmd)
+            .run()
+            .map_err(|e| format!("git {}: {e}", args.join(" ")))?;
+        Ok((out.status.success(), out.stdout))
     };
-    Ok(regular)
+    let (ok, listing) = git(&["ls-tree", "-z", commit, "--", rel])?;
+    if !ok {
+        return Err(format!("git ls-tree {commit}: failed"));
+    }
+    // `<mode> <type> <object>\t<path>\0`: exactly one entry, for exactly `rel`.
+    let entries: Vec<&[u8]> = listing
+        .split(|b| *b == 0)
+        .filter(|e| !e.is_empty())
+        .collect();
+    let [entry] = entries.as_slice() else {
+        return Ok(None);
+    };
+    let entry = String::from_utf8_lossy(entry);
+    let Some((meta, path)) = entry.split_once('\t') else {
+        return Ok(None);
+    };
+    let fields: Vec<&str> = meta.split(' ').collect();
+    let [mode, "blob", object] = fields.as_slice() else {
+        return Ok(None);
+    };
+    if path != rel || !matches!(*mode, "100644" | "100755") {
+        return Ok(None);
+    }
+    let (ok, size) = git(&["cat-file", "-s", object])?;
+    let size: u64 = String::from_utf8_lossy(&size)
+        .trim()
+        .parse()
+        .unwrap_or(u64::MAX);
+    if !ok || size > ARTIFACT_LIMIT {
+        return Err(format!("{rel} at {commit} is over {ARTIFACT_LIMIT} bytes"));
+    }
+    let (ok, bytes) = git(&["cat-file", "blob", object])?;
+    if !ok {
+        return Err(format!("git cat-file blob {object}: failed"));
+    }
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|_| format!("{rel} at {commit} is not UTF-8"))
 }
 
 fn main() -> ExitCode {
@@ -412,6 +450,23 @@ mod tests {
     }
 
     #[test]
+    fn a_regeneration_writes_only_a_new_or_regular_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        assert!(regeneration_destination(&base.join("new.txt")).is_ok());
+        std::fs::write(base.join("regular.txt"), "x").unwrap();
+        assert!(regeneration_destination(&base.join("regular.txt")).is_ok());
+        std::os::unix::fs::symlink(base.join("regular.txt"), base.join("link.txt")).unwrap();
+        assert!(regeneration_destination(&base.join("link.txt")).is_err());
+        let fifo = base.join("fifo.txt");
+        let c = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        assert!(regeneration_destination(&fifo).is_err());
+        std::fs::create_dir(base.join("dir.txt")).unwrap();
+        assert!(regeneration_destination(&base.join("dir.txt")).is_err());
+    }
+
+    #[test]
     fn set_names_are_one_plain_path_component() {
         for ok in ["a", "nuget-regular-file", "0x"] {
             assert!(set_name_ok(ok), "{ok}");
@@ -469,15 +524,22 @@ mod tests {
         let second = git(&["rev-parse", "HEAD"]);
         std::fs::write(repo.join("untracked"), "").unwrap();
         assert_eq!(checkout_is(repo, &second), Ok(()));
-        // And it is no manifest a check can pin to; a committed file is, and a
-        // committed link is not.
-        assert_eq!(tracked_regular_file(repo, "untracked"), Ok(false));
-        assert_eq!(tracked_regular_file(repo, "f"), Ok(true));
+        // And it is no manifest a check can pin to; a committed regular file
+        // is, as the commit holds it, and a committed link is not.
+        assert_eq!(committed_manifest(repo, &second, "untracked"), Ok(None));
+        assert_eq!(committed_manifest(repo, &second, "f"), Ok(Some("2".into())));
+        assert_eq!(committed_manifest(repo, &first, "f"), Ok(Some("1".into())));
         std::os::unix::fs::symlink("untracked", repo.join("link")).unwrap();
         git(&["add", "link"]);
         git(&["commit", "-q", "-m", "link"]);
-        assert_eq!(tracked_regular_file(repo, "link"), Ok(false));
-        assert_eq!(tracked_regular_file(repo, "absent"), Ok(false));
+        let third = git(&["rev-parse", "HEAD"]);
+        assert_eq!(committed_manifest(repo, &third, "link"), Ok(None));
+        assert_eq!(committed_manifest(repo, &third, "absent"), Ok(None));
+        // Bytes Git was told not to look at are not the commit's.
+        git(&["update-index", "--assume-unchanged", "f"]);
+        std::fs::write(repo.join("f"), "edited").unwrap();
+        assert_eq!(checkout_is(repo, &third), Ok(()));
+        assert_eq!(committed_manifest(repo, &third, "f"), Ok(Some("2".into())));
     }
 
     #[test]

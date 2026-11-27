@@ -247,13 +247,15 @@ bounded container run --rm --name "$container_name-seed" \
   --mount "type=volume,source=$NIX_VOLUME,target=/nix-volume" \
   "$IMAGE" "$BASH_IN_IMAGE" -c '
     set -eu
-    # The marker is written only once the copy is whole, so a copy cut short
-    # is redone rather than taken for a store.
-    if [ ! -e /nix-volume/.borzoi-mutants-seeded ]; then
+    # The marker holds the image the store was seeded from, and is written
+    # only once the copy is whole: a copy cut short, or one from another
+    # image, is redone rather than taken for the store of this one.
+    marker=/nix-volume/.borzoi-mutants-seeded
+    if [ ! -f "$marker" ] || [ "$(cat "$marker")" != "$0" ]; then
       find /nix-volume -mindepth 1 -maxdepth 1 ! -name lost+found -exec rm -rf {} +
       cp -a /nix/. /nix-volume/
-      touch /nix-volume/.borzoi-mutants-seeded
-    fi'
+      printf "%s" "$0" >"$marker"
+    fi' "$IMAGE"
 bounded container run --rm --name "$container_name-provision" \
   --memory 8G --cpus 4 \
   --mount "type=volume,source=$NIX_VOLUME,target=/nix" \

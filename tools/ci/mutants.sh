@@ -20,10 +20,9 @@
 # The run writes under `$RUNNER_TEMP/mutants-work/SET`, where mutant code can
 # leave anything. What the manifest step reads is staged out of it into
 # `$RUNNER_TEMP/mutants/SET`, made fresh after the run: the run's three
-# artifacts and cargo-mutants' logs, each copied only if it is a regular file
-# inside the work directory, the artifacts whole up to 64 MiB and each log's
-# first MiB. The job uploads nothing the run wrote; a failure is reproduced
-# with `tools/mutants/run.sh SET`.
+# artifacts, each copied whole only if it is a regular file inside the work
+# directory of at most 64 MiB. The job uploads nothing the run wrote; a
+# failure is reproduced with `tools/mutants/run.sh SET`.
 set -euo pipefail
 unset CDPATH
 # Git's repository-local variables would point `git rev-parse HEAD` below at
@@ -73,18 +72,13 @@ BORZOI_MUTANTS_COMMIT="$commit" timeout --kill-after=60 "${BORZOI_MUTANTS_TIMEOU
 # The upload directory is made only now the run is over, and fresh: anything a
 # mutant left at its path is gone, and only staged files go in.
 rm -rf "$out"
-mkdir -p "$out/run/mutants.out/log"
+mkdir -p "$out/run/mutants.out"
 
 # shellcheck source=tools/mutants/stage.sh
 source tools/mutants/stage.sh
 for rel in run-info.tsv listed.txt mutants.out/outcomes.json; do
   mutants_stage "$work" "$work/run/$rel" "$out/run/$rel" $((64 << 20)) whole
 done
-shopt -s nullglob
-for log in "$work"/run/mutants.out/log/*.log; do
-  mutants_stage "$work" "$log" "$out/run/mutants.out/log/$(basename "$log")" $((1 << 20))
-done
-shopt -u nullglob
 
 if [[ $status -ne 0 ]]; then
   echo "tools/ci/mutants.sh: the run exited $status" >&2

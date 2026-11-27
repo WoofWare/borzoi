@@ -402,10 +402,21 @@ pub fn compare_described(
             path.display()
         ));
     };
-    let expected = Manifest::parse(&text).map_err(|(line, e)| {
+    compare_text(&text, &path.display().to_string(), actual, regenerate)
+}
+
+/// The check half of [`compare_described`], against a manifest's text read
+/// from wherever the caller pins it (a file, or a blob of a commit), which
+/// `origin` names in the messages.
+pub fn compare_text(
+    text: &str,
+    origin: &str,
+    actual: &Manifest,
+    regenerate: &str,
+) -> Result<(), String> {
+    let expected = Manifest::parse(text).map_err(|(line, e)| {
         format!(
-            "manifest {} is malformed at line {line}: {e}. Regenerate it with:\n  {regenerate}",
-            path.display()
+            "manifest {origin} is malformed at line {line}: {e}. Regenerate it with:\n  {regenerate}"
         )
     })?;
     let d = expected.diff(actual);
@@ -413,11 +424,10 @@ pub fn compare_described(
         return Ok(());
     }
     Err(format!(
-        "the run does not match the checked-in manifest {}.\n{}\n\
+        "the run does not match the checked-in manifest {origin}.\n{}\n\
          Every movement is signal: a lost entry may be a regression, and a gained \
          one an improvement to acknowledge. If every moved line is intended, \
          regenerate the manifest and commit the diff:\n  {regenerate}",
-        path.display(),
         d.render(DIFF_LIMIT),
     ))
 }
