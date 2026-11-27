@@ -116,8 +116,8 @@ impl ProjectEvaluation<'_> {
     /// from them is incomplete: the list may lack references the build has
     /// ([`ParsedProject::project_references_incomplete`]), or a reference's
     /// compile contribution turns on metadata the walk could not resolve
-    /// ([`crate::workspace::CompileContribution::exact`]), read for an entry
-    /// edge or not as `is_entry` says. The predicate
+    /// (`workspace::CompileContribution::exact`), read for an entry edge or
+    /// not as `is_entry` says. The predicate
     /// `workspace::references_incomplete` applies (modulo the same walk-purpose
     /// gate). Never together with [`Self::drops_reference_edges`]: a dropped
     /// list says more.
