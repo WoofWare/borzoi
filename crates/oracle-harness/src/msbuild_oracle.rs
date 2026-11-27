@@ -1008,34 +1008,49 @@ mod tests {
     }
 
     /// The probe answers one absolute path under this process's environment,
-    /// and each environment its own answer, from its own host, however the
-    /// probes interleave: two fake hosts, each answering a path of its own,
-    /// and the first asked again after the second.
+    /// and each environment its own answer, from the environment it was
+    /// handed, however the probes interleave: one fake host that answers the
+    /// `HOME` it was launched with, under two environments that differ only
+    /// in `HOME`, and the first asked again after the second; then two fake
+    /// hosts under environments that differ only in `DOTNET_ROOT`.
     #[test]
     fn the_probe_answers_per_environment() {
         let real = super::msbuild_user_extensions_path(&inherited());
         assert!(std::path::Path::new(real).is_absolute(), "{real:?}");
-        let fake = |answer: &str| {
+        let host = |script: &str| {
             let root = tempfile::TempDir::new().unwrap();
             let host = root.path().join("dotnet");
-            std::fs::write(&host, format!("#!/bin/sh\necho {answer}\n")).unwrap();
+            std::fs::write(&host, format!("#!/bin/sh\n{script}\n")).unwrap();
             #[cfg(unix)]
             std::fs::set_permissions(&host, std::os::unix::fs::PermissionsExt::from_mode(0o755))
                 .unwrap();
-            let environment = BuildEnvironment::inherited([(
-                "DOTNET_ROOT".to_string(),
-                root.path().display().to_string(),
-            )]);
-            (root, environment)
+            root
         };
-        let (_a, first) = fake("/probe/first");
-        let (_b, second) = fake("/probe/second");
+        let under = |root: &tempfile::TempDir, home: &str| {
+            BuildEnvironment::inherited([
+                ("DOTNET_ROOT".to_string(), root.path().display().to_string()),
+                ("HOME".to_string(), home.to_string()),
+            ])
+        };
+        let echo_home = host("echo \"$HOME\"");
+        let first = under(&echo_home, "/probe/first");
+        let second = under(&echo_home, "/probe/second");
         assert_eq!(super::msbuild_user_extensions_path(&first), "/probe/first");
         assert_eq!(
             super::msbuild_user_extensions_path(&second),
             "/probe/second"
         );
         assert_eq!(super::msbuild_user_extensions_path(&first), "/probe/first");
+        let a = host("echo /probe/a");
+        let b = host("echo /probe/b");
+        assert_eq!(
+            super::msbuild_user_extensions_path(&under(&a, "/probe/home")),
+            "/probe/a"
+        );
+        assert_eq!(
+            super::msbuild_user_extensions_path(&under(&b, "/probe/home")),
+            "/probe/b"
+        );
         assert_eq!(super::msbuild_user_extensions_path(&inherited()), real);
     }
 
