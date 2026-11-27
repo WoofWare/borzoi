@@ -57,15 +57,16 @@ filter_prefixes() {
     stats)     echo "tools/stats" ;;
     fcs)       echo "tools/fcs-dump tools/fcs-dump-legacy" ;;
     sidecar)   echo "tools/csharp-sidecar tools/csharp-sidecar.tests" ;;
-    # crates/spawn (every test harness shells out through it) and
-    # crates/oracle-harness (drives every resident oracle) underpin the whole
-    # suite, so — like the build-config entries — a change to either runs
+    # crates/spawn (every test harness shells out through it),
+    # crates/oracle-harness (drives every resident oracle) and crates/verdict
+    # (the answer types the evaluating crates publish) underpin the whole
+    # suite, so — like the build-config entries — a change to any of them runs
     # everything. Each still has its own test job, gated on `workspace`.
     # The mutation-testing sandbox's scripts and configuration are held to their
     # refusal tests by crates/oracle-harness's suite, so a change to one runs
     # that job too. A set's manifest or `equivalent.tsv` is read by no test;
     # `test-mutants`, which runs on every change, checks those.
-    workspace) echo "Cargo.toml Cargo.lock flake.nix flake.lock nix rust-toolchain.toml .github/workflows tools/ci crates/spawn crates/oracle-harness .cargo/mutants.toml tools/mutants/canary.sh tools/mutants/canary-runner.sh tools/mutants/canary.test.sh tools/mutants/inner.sh tools/mutants/run.sh tools/mutants/sets.sh tools/mutants/sets.test.sh tools/mutants/sets.tsv tools/mutants/stage.sh tools/mutants/stage.test.sh" ;;
+    workspace) echo "Cargo.toml Cargo.lock flake.nix flake.lock nix rust-toolchain.toml .github/workflows tools/ci crates/spawn crates/oracle-harness crates/verdict .cargo/mutants.toml tools/mutants/canary.sh tools/mutants/canary-runner.sh tools/mutants/canary.test.sh tools/mutants/inner.sh tools/mutants/run.sh tools/mutants/sets.sh tools/mutants/sets.test.sh tools/mutants/sets.tsv tools/mutants/stage.sh tools/mutants/stage.test.sh" ;;
     *)         echo "filter_prefixes: unknown filter '$1'" >&2; exit 2 ;;
   esac
 }

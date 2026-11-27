@@ -1,0 +1,10 @@
+[package]
+name = "borzoi-verdict"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+
+# Test-only: `tests/pin.rs` hashes each file under `src` to hold it to its pin.
+# The crate itself has no dependencies.
+[dev-dependencies]
+sha1.workspace = true

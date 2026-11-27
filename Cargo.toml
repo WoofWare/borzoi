@@ -11,6 +11,7 @@ members = [
     "crates/print",
     "crates/sema",
     "crates/spawn",
+    "crates/verdict",
     "tools/astgen",
     "tools/stats",
 ]
