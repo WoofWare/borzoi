@@ -214,6 +214,10 @@ struct Case {
     must_commit: Option<String>,
     /// The derivation must decline, whatever the build does.
     must_decline: bool,
+    /// The variable whose value the decline must name ([`declines_for`]), for
+    /// a case whose subject is that variable: so a decline the fixture
+    /// itself causes (an unrestored project) grades nothing.
+    decline_for: Option<String>,
     /// For [`Place::Variables`], the variables, by name and value.
     variables: Vec<(String, String)>,
 }
@@ -227,8 +231,21 @@ impl Default for Case {
             reset: "",
             must_commit: None,
             must_decline: false,
+            decline_for: None,
             variables: Vec::new(),
         }
+    }
+}
+
+/// Whether `why` is a decline the variable `name` causes: off every list,
+/// a toolchain value off its shape, or an allowed property's value outside
+/// its grammar.
+fn declines_for(why: &borzoi_msbuild::fsc::NameDecline, name: &str) -> bool {
+    use borzoi_msbuild::fsc::NameDecline;
+    match why {
+        NameDecline::Environment(n) | NameDecline::ToolchainValue(n, _) => n == name,
+        NameDecline::Value(n, _) => n.eq_ignore_ascii_case(name),
+        _ => false,
     }
 }
 
@@ -357,6 +374,7 @@ fn environment_declines() -> Vec<Case> {
     use borzoi_msbuild::fsc::{FSC_PARAMETERS, Feed};
     let must_decline = |name: &str, value: &str| Case {
         must_decline: true,
+        decline_for: Some(name.to_string()),
         ..Case::variables(&[(name, value)])
     };
     let admitted = |name: &str| {
@@ -1468,6 +1486,14 @@ fn grade_unbudgeted(case: &Case) -> Result<Outcome, String> {
     let name = match ours(&project, &inputs, &extra) {
         CompiledAssemblyName::Known(name) => name,
         CompiledAssemblyName::Unknown(why) => {
+            if let Some(name) = &case.decline_for
+                && !declines_for(&why, name)
+            {
+                return Err(format!(
+                    "{}: declined ({why:?}), but not for {name}",
+                    case.label()
+                ));
+            }
             return match &case.must_commit {
                 Some(_) => Err(format!("{}: declined ({why:?}), must commit", case.label())),
                 None => {
@@ -2129,13 +2155,25 @@ fn builds_compared_with_the_oracle_start_as_it_does() {
 }
 
 /// Whatever `PATH` the developer's shell holds, the one the grading's builds
-/// run under is one the derivation admits, or none at all: every list of up to
-/// three entries drawn from each kind of entry (absolute, relative, holding an
-/// escape, holding a control character, empty), exhaustively.
+/// run under is exactly its plain entries, in order, or none at all when it
+/// has none, and so one the derivation admits: every list of up to three
+/// entries drawn from each kind of entry (two plain directories, relative,
+/// holding an escape, holding a control character, empty), exhaustively.
 #[test]
 fn the_grading_s_path_is_always_admitted() {
     use borzoi_msbuild::fsc::ToolchainValue;
-    let kinds = ["/usr/bin", "bin", ".", "/opt/SDK%20Tools/bin", "/a\tb", ""];
+    // Each kind of entry, and whether the cut keeps it.
+    let labelled = [
+        ("/usr/bin", true),
+        ("/opt/bin", true),
+        ("bin", false),
+        (".", false),
+        ("/opt/SDK%20Tools/bin", false),
+        ("/a\tb", false),
+        ("", false),
+    ];
+    let kinds: Vec<&str> = labelled.iter().map(|(kind, _)| *kind).collect();
+    let kept = |kind: &str| labelled.iter().any(|(k, keep)| *k == kind && *keep);
     let mut lists: Vec<Vec<&str>> = vec![vec![]];
     for _ in 0..3 {
         let longer: Vec<Vec<&str>> = lists
@@ -2154,15 +2192,15 @@ fn the_grading_s_path_is_always_admitted() {
     lists.dedup();
     for list in &lists {
         let path = list.join(":");
-        match graded_path(&path) {
-            Some(graded) => assert!(
+        let plain: Vec<&str> = list.iter().copied().filter(|e| kept(e)).collect();
+        let expected = (!plain.is_empty()).then(|| plain.join(":"));
+        let graded = graded_path(&path);
+        assert_eq!(graded, expected, "{path:?}");
+        if let Some(graded) = graded {
+            assert!(
                 ToolchainValue::SearchPath.admits(&graded),
                 "{path:?} graded as {graded:?}, which the derivation declines"
-            ),
-            None => assert!(
-                !list.contains(&"/usr/bin"),
-                "{path:?} lost its one plain entry"
-            ),
+            );
         }
     }
 }

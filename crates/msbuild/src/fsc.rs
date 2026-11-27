@@ -2388,11 +2388,6 @@ mod tests {
         !toolchain && !graded && !property
     }
 
-    /// The toolchain's own names, as the allow-list states them, with the
-    /// shape each value must have: spelled here apart from
-    /// `TOOLCHAIN_VARIABLES`. What each shape admits is `ToolchainValue`'s,
-    /// graded by its own example table
-    /// ([`toolchain_values_are_held_to_their_shape`]).
     /// Production's toolchain table is exactly the pinned one, name for name
     /// and shape for shape: a name added to `TOOLCHAIN_VARIABLES` alone is a
     /// widening the movement properties would never draw.
@@ -2406,6 +2401,81 @@ mod tests {
         assert_eq!(super::TOOLCHAIN_VARIABLES.len(), TOOLCHAIN.len());
     }
 
+    /// Whether `value` has the shape `shape`, as the claim states it, spelled
+    /// apart from `ToolchainValue::admits`: no control character (Unicode's
+    /// `Cc`: U+0000–U+001F, U+007F–U+009F) and no `%` anywhere; a path starts
+    /// with `/`; a search path is `:`-separated paths, none empty; sources are
+    /// `;`-separated, trimmed, the empty ones dropped, at least one, each a
+    /// path; a switch is `1`, `0`, `true` or `false` in any case.
+    fn shaped(shape: ToolchainValue, value: &str) -> bool {
+        let control = |c: char| matches!(c as u32, 0..=0x1F | 0x7F..=0x9F);
+        if value.chars().any(|c| control(c) || c == '%') {
+            return false;
+        }
+        let path = |p: &str| p.starts_with('/');
+        match shape {
+            ToolchainValue::Path => path(value),
+            ToolchainValue::SearchPath => !value.is_empty() && value.split(':').all(path),
+            ToolchainValue::Sources => {
+                let entries: Vec<&str> = value
+                    .split(';')
+                    .map(str::trim)
+                    .filter(|e| !e.is_empty())
+                    .collect();
+                !entries.is_empty() && entries.iter().all(|e| path(e))
+            }
+            ToolchainValue::Switch => ["1", "0", "true", "false"]
+                .iter()
+                .any(|s| s.eq_ignore_ascii_case(value)),
+        }
+    }
+
+    /// The spec of the shapes and `ToolchainValue::admits` agree on a value
+    /// holding each control character of every range, and on the shapes'
+    /// own examples.
+    #[test]
+    fn the_shape_spec_is_the_rule() {
+        let shapes = [
+            ToolchainValue::Path,
+            ToolchainValue::SearchPath,
+            ToolchainValue::Sources,
+            ToolchainValue::Switch,
+        ];
+        let mut values: Vec<String> = [
+            "/opt/dotnet",
+            "relative",
+            "",
+            "/a:/b",
+            "/a::/b",
+            "/feed; /other",
+            " ; ",
+            "1",
+            "TRUE",
+            "yes",
+            "/opt/SDK%20Tools",
+            "https://example.org/v3/index.json",
+        ]
+        .iter()
+        .map(|v| v.to_string())
+        .collect();
+        for code in (0u32..0x20).chain(0x7F..0xA0).chain([0xA0, 0x2028, 0xFEFF]) {
+            let c = char::from_u32(code).unwrap();
+            values.push(format!("/opt/a{c}b"));
+        }
+        for shape in shapes {
+            for value in &values {
+                assert_eq!(
+                    shape.admits(value),
+                    shaped(shape, value),
+                    "{shape:?} {value:?}"
+                );
+            }
+        }
+    }
+
+    /// The toolchain's own names, as the allow-list states them, with the
+    /// shape each value must have: spelled here apart from
+    /// `TOOLCHAIN_VARIABLES`. What each shape admits is [`shaped`]'s.
     const TOOLCHAIN: &[(&str, ToolchainValue)] = &[
         ("DOTNET_CLI_HOME", ToolchainValue::Path),
         ("DOTNET_CLI_TELEMETRY_OPTOUT", ToolchainValue::Switch),
@@ -2438,7 +2508,7 @@ mod tests {
             return false;
         }
         if let Some((_, shape)) = TOOLCHAIN.iter().find(|(t, _)| *t == name) {
-            return !shape.admits(value);
+            return !shaped(*shape, value);
         }
         let by_prefix = name.starts_with("DOTNET_") || name.starts_with("NUGET_");
         let graded = OLD_GRADED
@@ -2465,7 +2535,7 @@ mod tests {
         for name in names {
             let value = &environment[name];
             if let Some((_, shape)) = TOOLCHAIN.iter().find(|(t, _)| t == name) {
-                if !shape.admits(value) {
+                if !shaped(*shape, value) {
                     out.push(NameDecline::ToolchainValue(name.clone(), *shape));
                 }
             } else if (declined_before(name) && !widened(name)) || moved(name, value) {
