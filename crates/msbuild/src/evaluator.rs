@@ -3495,23 +3495,20 @@ impl<'r> State<'r> {
     /// write. The real build may hold a value there, and the gate may go the
     /// other way (#1181).
     ///
+    /// Every name above is one [`Self::condition_is_decided_exactly`] counts
+    /// unknown (an untrusted reference, or an unbound name whose undefined
+    /// read is not exact), so the predicate is that decision's negation: a
+    /// condition leans on such a value exactly when the values the walk holds
+    /// exactly do not decide it.
+    ///
     /// `exists_dir` is the directory the gate's own evaluation resolves
     /// `Exists('…')` against (the project's for an item, the containing
     /// file's for an import), so a probe that settles the gate whatever the
     /// doubted names hold settles it here too.
     fn condition_reads_untrusted_value(&self, node: Node<'_, '_>, exists_dir: &Path) -> bool {
         attribute(node, "Condition").as_deref().is_some_and(|cond| {
-            if self
-                .condition_trust(cond, Some(exists_dir))
-                .reference_is_untrusted()
-            {
-                return true;
-            }
             !self.condition_is_decided_exactly(cond, Some(exists_dir), &|name| {
                 self.undefined_read_is_exact(name)
-            }) && properties::property_references(cond).any(|name| {
-                !self.lookup.is_bound(name)
-                    && (self.trust_of(name).refused() || !self.undefined_read_is_exact(name))
             })
         })
     }

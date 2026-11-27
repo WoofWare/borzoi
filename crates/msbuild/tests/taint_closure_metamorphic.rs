@@ -16,9 +16,12 @@
 //! every fact `D′` publishes as certain (a property read as a value or as
 //! unset, the Compile items while `items_uncertain` is clear,
 //! `define_constants` while `define_constants_uncertain` is clear, the
-//! `ProjectReference` list while `project_references_uncertain` is clear, a
-//! known `target_name`), **every world must publish the same fact, certain,
-//! with the same value**. A world that differs means `D′` committed a value it
+//! `ProjectReference` list while neither `project_references_uncertain` nor
+//! `project_references_incomplete` is set, a known `target_name`), **every
+//! world must publish the same fact, certain, with the same value**. An
+//! incomplete reference list's edges (#1181) are held as
+//! `common::check_reference_claim` holds them: an ordered subsequence of each
+//! world's certain list, witnessed by some world. A world that differs means `D′` committed a value it
 //! could not know; a world that declines means `D′` claimed more than a
 //! document strictly easier to evaluate.
 //!

@@ -13,9 +13,10 @@
 //! pass, before the write, stays exact; and a gate another operand decides
 //! stays decided.
 //!
-//! The reference list's contract tolerates a missing edge behind a gate the
-//! walk cannot decide (`ParsedProject::project_references_uncertain`), so a
-//! certain list is held to no phantom edge only. What tells an empty list the
+//! The reference list is graded by the claim it makes
+//! (`common::reference_claim`, `common::check_reference_claim`; #1181): a
+//! certain list is MSBuild's exactly, an incomplete one holds only MSBuild's
+//! references, in order, and an uncertain one makes no claim. What tells an empty list the
 //! walk mistook for exact from a decline is the walk's own read of the list,
 //! the one an `@(ProjectReference)` in it takes (`ItemRead::exact`): an exact
 //! one must hold MSBuild's references, so a walk that took the opened gate for

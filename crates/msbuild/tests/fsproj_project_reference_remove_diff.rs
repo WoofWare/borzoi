@@ -16,11 +16,12 @@
 //!
 //! ## The asserted property
 //!
-//! The reference list's contract (`ParsedProject::project_references_uncertain`)
-//! is *no phantom edges*: when the flag is clear, every reference we report is
-//! one MSBuild reports, as a multiset of full paths. When, in addition, the
-//! parse raised no diagnostic, the lists must be equal, order included. A
-//! decline makes no claim, so the harness also counts the cases that committed
+//! Each list is graded by the claim it makes (`common::reference_claim`,
+//! `common::check_reference_claim`; #1181): a certain list (neither
+//! `project_references_uncertain` nor `project_references_incomplete`) is
+//! MSBuild's list of full paths exactly, order included; an incomplete one
+//! holds only MSBuild's references, as an ordered subsequence; an uncertain
+//! one makes no claim. So the harness also counts the cases that committed
 //! *through* a `Remove` that removed something, and floors that count — a model
 //! that declined every `Remove` would otherwise pass vacuously.
 //!
@@ -133,7 +134,7 @@ const EXACT_GATES: &[&str] = &[
 /// constructs the model decides exactly — exact gates, decided groups, and
 /// spellings inside the identity domain — so it must commit; that obligation,
 /// per case, is what keeps the sweep from passing by declining. An `Any` case
-/// may hold anything, and is held only to no phantom edges.
+/// may hold anything, and is held to whatever claim its list makes.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Space {
     Clean,
