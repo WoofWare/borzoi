@@ -33,9 +33,9 @@ use std::path::{Path, PathBuf};
 use borzoi_msbuild::AutoResponseFile;
 use borzoi_msbuild::fsc::{
     ALLOWED_ITEM_TYPES, ALLOWED_METADATA, ALLOWED_PROPERTIES, BUILD_TIME_SITES,
-    CompiledAssemblyName, Gate, RESTORE_ITEM_TYPES, RESTORE_METADATA, RESTORE_PROPERTIES,
-    RESTORE_PROPERTY_PREFIX, classify_variable, resolved_sdk_version, restore_props,
-    verified_manifests, verified_sdks,
+    CompiledAssemblyName, Gate, NameDecline, RESTORE_ITEM_TYPES, RESTORE_METADATA,
+    RESTORE_PROPERTIES, RESTORE_PROPERTY_PREFIX, classify_variable, environment_declines,
+    resolved_sdk_version, restore_props, verified_manifests, verified_sdks,
 };
 use borzoi_msbuild::observed::host_fs::{self, HostPath};
 use borzoi_msbuild::{ParsedProject, PropertyRead};
@@ -87,14 +87,45 @@ fn on_list<'a>(list: impl IntoIterator<Item = &'a str>, name: &str) -> bool {
     list.into_iter().any(|n| n.eq_ignore_ascii_case(name))
 }
 
-/// Every domain rule the evaluation `parsed` of `project`, under
-/// `environment`, breaks: `(rule, detail)`, the detail a name off a list or
-/// empty.
-fn blocking_facts(
-    project: &Path,
-    parsed: &ParsedProject,
-    environment: &HashMap<String, String>,
-) -> BTreeSet<(String, String)> {
+/// Every domain rule the environment `environment` breaks, as
+/// [`blocking_facts`] gives them. They need no evaluation, so they count
+/// whether or not the project evaluates.
+fn environment_facts(environment: &HashMap<String, String>) -> BTreeSet<(String, String)> {
+    let mut facts = BTreeSet::new();
+    for name in environment.keys() {
+        if !classify_variable(name).admitted() {
+            facts.insert((
+                "environment variable off the list".to_string(),
+                name.clone(),
+            ));
+        }
+    }
+    // The environment's other rules: a toolchain value off its shape, two
+    // names of one property.
+    for decline in environment_declines(environment) {
+        match decline {
+            NameDecline::ToolchainValue(name, shape) => {
+                facts.insert((
+                    "environment variable value off its shape".to_string(),
+                    format!("{name}: a value not of the shape {shape:?}"),
+                ));
+            }
+            NameDecline::OneProperty(a, b) => {
+                facts.insert((
+                    "environment variables naming one property".to_string(),
+                    format!("{a} and {b} name one property"),
+                ));
+            }
+            _ => {}
+        }
+    }
+    facts
+}
+
+/// Every domain rule the evaluation `parsed` of `project` breaks, beyond
+/// its environment's ([`environment_facts`]): `(rule, detail)`, the detail a
+/// name off a list or empty.
+fn blocking_facts(project: &Path, parsed: &ParsedProject) -> BTreeSet<(String, String)> {
     let mut facts = BTreeSet::new();
     let mut fact = |rule: &str, detail: &str| {
         facts.insert((rule.to_string(), detail.to_string()));
@@ -196,12 +227,7 @@ fn blocking_facts(
             fact("metadata off the list", name);
         }
     }
-    for name in environment.keys() {
-        if !classify_variable(name).admitted() {
-            fact("environment variable off the list", name);
-        }
-    }
-    // A package's own build files: documents outside the install under the
+    // A package's own build files: documents outside the install under the    // A package's own build files: documents outside the install under the
     // restore's package folder.
     if let PropertyRead::Value(root) = parsed.property("NuGetPackageRoot") {
         let root = PathBuf::from(root);
@@ -288,7 +314,7 @@ fn census() {
             let (verdict, facts) = match evaluate(project, &globals, environment, &dotnet_root) {
                 Ok(parsed) => (
                     derive_from(project, &parsed, &globals, environment, Sdks::Verified),
-                    blocking_facts(project, &parsed, environment),
+                    blocking_facts(project, &parsed),
                 ),
                 Err(e) => (
                     CompiledAssemblyName::Unknown(borzoi_msbuild::fsc::NameDecline::Property(
@@ -297,11 +323,12 @@ fn census() {
                     BTreeSet::from([("evaluation failed".to_string(), String::new())]),
                 ),
             };
+            let mut facts = facts;
+            facts.extend(environment_facts(environment));
             line.push_str(&format!("\t{column}: {verdict:?}"));
             // The derivation's own first cause is a fact too, so a gate the
             // fact scan cannot see (a response file, a value outside its
             // grammar) still shows.
-            let mut facts = facts;
             if let CompiledAssemblyName::Unknown(_) = &verdict {
                 facts.insert((format!("decline: {}", cause(&verdict)), String::new()));
             }

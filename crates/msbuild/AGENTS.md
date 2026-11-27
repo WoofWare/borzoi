@@ -159,6 +159,13 @@ not hold. A finding that names an input reaching fsc other than through a
 registered parameter and its sites means that test is wrong: fix the test
 first, then report. The module documentation tabulates the gates; the
 assets file's freshness is assumed, as the LSP's env assumes it (#1044).
+The environment is a positive list too (`fsc::classify_variable`): the
+toolchain's own variables by exact name (`TOOLCHAIN_VARIABLES`, each value
+of the shape that table gives it, a `ToolchainValue`: an absolute path, a list
+of them, or an on-off switch; the grading holds them fixed, as it cannot build
+under another value), allowed properties, and `ALLOWED_ENVIRONMENT`, graded
+inert by name.
+A name goes on `ALLOWED_ENVIRONMENT` only with its grading.
 `fsc_name_census` (ignored, `BORZOI_FSC_NAME_CENSUS_ROOTS`) reports how much
 of a corpus the derivation commits for and every rule each project breaks.
 The workload locator SDKs (`sdk_resolver/workloads.rs`) have their own
