@@ -26,7 +26,8 @@ each one exhaustively over a finite domain (every value, cause and function
 on it). Collecting is also checked under every way a `FromIterator` target
 can read what it is offered (all of it, none, a prefix, as many as the size
 hint promises, then asking again after the end), checking the size hint it
-is offered at every step, and over a source that is not fused. A new
+is offered at every step and how often the source is polled, over a source
+that is not fused and whose own size hint is exact, loose or unbounded. A new
 operation comes with its laws and their exhaustive check, and a regenerated
 pin. Add an operation only with the consumer that needs it.
 

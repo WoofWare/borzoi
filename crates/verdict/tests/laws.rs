@@ -329,24 +329,54 @@ fn model(discipline: u8, values: &[u8]) -> Vec<u8> {
     }
 }
 
+/// The size hint a [`Source`] reports before its end, holding `left` more
+/// items: each is honest, and they differ in which bound carries the count.
+#[derive(Clone, Copy, Debug)]
+enum Hint {
+    /// `(left, Some(left))`.
+    Exact,
+    /// `(0, Some(left + 1))`: neither bound is the count, and the bounds
+    /// differ.
+    Loose,
+    /// `(left, None)`: no upper bound.
+    Unbounded,
+}
+const HINTS_REPORTED: [Hint; 3] = [Hint::Exact, Hint::Loose, Hint::Unbounded];
+
+impl Hint {
+    fn upper(self, left: usize) -> Option<usize> {
+        match self {
+            Hint::Exact => Some(left),
+            Hint::Loose => Some(left + 1),
+            Hint::Unbounded => None,
+        }
+    }
+}
+
 /// A source yielding `items`, then ending, then yielding `after_end`: an
-/// iterator that is not fused. Counts how many items it hands out.
+/// iterator that is not fused. Counts how many items it hands out, and how
+/// often it is polled (an end counts as a poll, an item handed out does not
+/// count twice).
 struct Source {
     items: Vec<V>,
     after_end: Vec<V>,
+    hint: Hint,
     next: usize,
     ended: bool,
     handed_out: usize,
+    polls: usize,
 }
 
 impl Source {
-    fn new(items: Vec<V>, after_end: Vec<V>) -> Self {
+    fn new(items: Vec<V>, after_end: Vec<V>, hint: Hint) -> Self {
         Source {
             items,
             after_end,
+            hint,
             next: 0,
             ended: false,
             handed_out: 0,
+            polls: 0,
         }
     }
 }
@@ -367,14 +397,19 @@ impl Iterator for Source {
             self.after_end.get(at).copied()
         };
         self.handed_out += usize::from(item.is_some());
+        self.polls += 1;
         item
     }
 
-    /// Exact before the end, which is what a collection would trust.
+    /// As [`Hint`] says before the end.
     fn size_hint(&self) -> (usize, Option<usize>) {
         if self.next < self.items.len() || !self.ended {
             let left = self.items.len().saturating_sub(self.next);
-            (left, Some(left))
+            match self.hint {
+                Hint::Exact => (left, Some(left)),
+                Hint::Loose => (0, Some(left + 1)),
+                Hint::Unbounded => (left, None),
+            }
         } else {
             (0, None)
         }
@@ -401,36 +436,56 @@ fn expected_reads(seq: &[V]) -> usize {
         .map_or(seq.len(), |at| at + 1)
 }
 
+/// The times the source must be polled: through the first `Unknown`, or
+/// through its first end (one poll more than it has items), and never again.
+fn expected_polls(seq: &[V]) -> usize {
+    seq.iter()
+        .position(|v| matches!(v, Verdict::Unknown(_)))
+        .map_or(seq.len() + 1, |at| at + 1)
+}
+
 fn check_discipline<const D: u8>() {
     // Hidden past the end of the source: never read, never decisive.
     let after_end = vec![Verdict::Unknown('b'), Verdict::Certain(1)];
-    for seq in sequences(4) {
-        let mut source = Source::new(seq.clone(), after_end.clone());
-        let collected: Verdict<Collector<D>, char> = (&mut source).collect();
-        assert_eq!(
-            collected,
-            expected_collect::<D>(&seq),
-            "discipline {D}: {seq:?}"
-        );
-        assert_eq!(
-            source.handed_out,
-            expected_reads(&seq),
-            "discipline {D}: {seq:?}"
-        );
-        if D == RECORDS_HINTS {
-            // Before each read, a lower bound of zero and the source's upper
-            // bound (it holds `n - i` more after `i` reads); once the first
-            // `Unknown` or the end is reached, nothing more.
-            let n = seq.len();
-            let certain = expected_reads(&seq)
-                - usize::from(seq.iter().any(|v| matches!(v, Verdict::Unknown(_))));
-            let expected: Vec<(usize, Option<usize>)> = (0..=certain)
-                .map(|i| (0, Some(n - i)))
-                .chain([(0, Some(0))])
-                .collect();
-            let recorded = HINTS.with(|recorded| recorded.borrow().clone());
-            assert_eq!(recorded, expected, "size hints offered: {seq:?}");
+    for hint in HINTS_REPORTED {
+        for seq in sequences(4) {
+            check_discipline_on::<D>(&seq, &after_end, hint);
         }
+    }
+}
+
+fn check_discipline_on<const D: u8>(seq: &[V], after_end: &[V], hint: Hint) {
+    let mut source = Source::new(seq.to_vec(), after_end.to_vec(), hint);
+    let collected: Verdict<Collector<D>, char> = (&mut source).collect();
+    assert_eq!(
+        collected,
+        expected_collect::<D>(seq),
+        "discipline {D}, {hint:?}: {seq:?}"
+    );
+    assert_eq!(
+        source.handed_out,
+        expected_reads(seq),
+        "discipline {D}, {hint:?}: {seq:?}"
+    );
+    assert_eq!(
+        source.polls,
+        expected_polls(seq),
+        "polls, discipline {D}, {hint:?}: {seq:?}"
+    );
+    if D == RECORDS_HINTS {
+        // Before each read, a lower bound of zero and the source's upper
+        // bound (it holds `n - i` more after `i` reads, and reports it as
+        // `hint` says); once the first `Unknown` or the end is reached,
+        // nothing more.
+        let n = seq.len();
+        let certain =
+            expected_reads(seq) - usize::from(seq.iter().any(|v| matches!(v, Verdict::Unknown(_))));
+        let expected: Vec<(usize, Option<usize>)> = (0..=certain)
+            .map(|i| (0, hint.upper(n - i)))
+            .chain([(0, Some(0))])
+            .collect();
+        let recorded = HINTS.with(|recorded| recorded.borrow().clone());
+        assert_eq!(recorded, expected, "size hints offered, {hint:?}: {seq:?}");
     }
 }
 
