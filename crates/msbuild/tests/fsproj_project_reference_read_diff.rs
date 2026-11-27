@@ -1202,3 +1202,54 @@ fn a_live_reference_in_an_undecided_group_leaves_the_list_incomplete() {
         panic!("{failure}\n{xml}");
     }
 }
+
+/// A gate an `Exists` probe decides whatever a refused name beside it holds
+/// is decided (#1181), so the references under it are kept; an item
+/// expression whose separator argument holds a `;` among them makes no edge
+/// MSBuild lacks (#1204), on either glob seam.
+#[test]
+fn a_gate_decided_by_exists_keeps_no_fabricated_edge() {
+    let xml = format!(
+        "<Project><PropertyGroup><Gate>{REFUSED_BODY}</Gate></PropertyGroup>\
+         <ItemGroup><Helper Include=\"A.fsproj\" /></ItemGroup>\
+         <ItemGroup Condition=\"Exists('Demo.fsproj') Or '$(Gate)' == 'x'\">\
+         <ProjectReference Include=\"@(Helper, ';Wrong.fsproj;')\" />\
+         <ProjectReference Include=\"A.fsproj\" /></ItemGroup></Project>"
+    );
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let root = borzoi_msbuild::observed::host_fs::canonicalize(dir.path()).expect("canonicalize");
+    let proj = layout(&root);
+    std::fs::write(&proj, &xml).unwrap();
+    let theirs: Vec<PathBuf> = Oracle::spawn()
+        .items(&xml, &proj, "ProjectReference", &[])
+        .expect("MSBuild evaluates this document")
+        .iter()
+        .map(|p| lexical(p))
+        .collect();
+    let resolver: &borzoi_msbuild::GlobResolver<'_> = &borzoi_msbuild::glob_resolver::resolve;
+    for with_resolver in [false, true] {
+        let parsed = parse_fsproj_with_imports(
+            &borzoi_msbuild::ProjectFile::buffer(&proj, &xml)
+                .expect("a project path spelt as its full path"),
+            &HashMap::new(),
+            &common::oracle_environment(),
+            None,
+            with_resolver.then_some(resolver),
+        )
+        .expect("well-formed XML parses");
+        let ours: Vec<PathBuf> = parsed
+            .project_references
+            .iter()
+            .map(|item| published(&item.include))
+            .collect();
+        assert!(
+            ours.contains(&root.join("proj/A.fsproj")),
+            "the gate is decided, so its literal reference is kept: {ours:?}"
+        );
+        if let Err(failure) =
+            common::check_reference_claim(common::reference_claim(&parsed), &ours, &theirs)
+        {
+            panic!("resolver: {with_resolver}: {failure}\n{xml}");
+        }
+    }
+}

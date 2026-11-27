@@ -1295,7 +1295,10 @@ fn walk_item_child_inner(node: Node<'_, '_>, kind: ItemKind, state: &mut State<'
     match state.glob_resolver {
         None => {
             let Ok(fragments) = spec_fragments(&spelled) else {
-                return decline_spanning_spec(node, spelled.as_escaped(), state);
+                // The declined `Include`'s diagnostic is its own, not its
+                // metadata's: none of it is subtracted.
+                decline_spanning_spec(node, spelled.as_escaped(), state);
+                return 0;
             };
             for entry in fragments {
                 push_include_entry(node, kind, placement, entry, &metadata, state);
