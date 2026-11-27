@@ -1546,14 +1546,10 @@ jobs:
         uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
 
       - name: Run the set and check its manifest
+        # Nothing the run wrote is uploaded: mutant code could have put
+        # anything there. A run to diagnose is reproduced with
+        # `tools/mutants/run.sh SET`, which keeps its scratch volume.
         run: bash tools/ci/mutants.sh "${{ matrix.set }}"
-
-      - name: Upload the run
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: mutants-${{ matrix.set }}
-          path: ${{ runner.temp }}/mutants/${{ matrix.set }}
 
   all-required-checks-complete:
     if: ${{ always() }}
