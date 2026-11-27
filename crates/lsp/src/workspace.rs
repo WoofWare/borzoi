@@ -1069,11 +1069,11 @@ impl Workspace {
     /// `ceiling` followed by plain names (the comparison is by components, not
     /// through the file system): a walk for any other file panics, since it
     /// would otherwise climb past the ceiling unnoticed. It is set before the
-    /// first walk (it panics otherwise), so no remembered owner was found
-    /// under another ceiling.
+    /// first walk lists a directory (it panics otherwise), inside a
+    /// generation or out of one, so no answer was read above it.
     pub fn with_ownership_ceiling(mut self, ceiling: &Path) -> Self {
         assert!(
-            self.owners.is_empty() && self.dir_listings.by_dir.is_empty(),
+            self.dir_listings.next == 0,
             "the ownership ceiling is set before any walk"
         );
         self.ownership_ceiling = Some(ceiling.to_path_buf());
@@ -3556,22 +3556,29 @@ mod tests {
         assert_eq!(heuristic(&file, &root), Some(inner));
     }
 
-    /// The ceiling is set before any walk is remembered: an owner remembered
-    /// from a walk under another ceiling would otherwise go on standing.
+    /// The ceiling is set before any walk lists a directory, whether the walk
+    /// ran inside a generation (and is remembered) or outside one (and is
+    /// not): either may already have read above the ceiling.
     #[test]
-    fn the_ownership_ceiling_is_set_before_any_remembered_walk() {
+    fn the_ownership_ceiling_is_set_before_any_walk() {
         let tmp = TempDir::new().unwrap();
         let file = tmp.path().join("Lib.fs");
         write_file(&file, "let x = 1");
-        let mut ws = walled(Workspace::default(), &tmp);
-        ws.begin_generation(Nanos(i128::MAX / 2));
-        assert_eq!(ws.owning_project(&file), None);
-        ws.end_generation();
-        let ceiling = tmp.path().to_path_buf();
-        let set = borzoi_oracle_harness::panic_silence::catch_unwind_silent(move || {
-            ws.with_ownership_ceiling(&ceiling)
-        });
-        assert!(set.is_err());
+        for in_generation in [true, false] {
+            let mut ws = walled(Workspace::default(), &tmp);
+            if in_generation {
+                ws.begin_generation(Nanos(i128::MAX / 2));
+            }
+            assert_eq!(ws.owning_project(&file), None);
+            if in_generation {
+                ws.end_generation();
+            }
+            let ceiling = tmp.path().to_path_buf();
+            let set = borzoi_oracle_harness::panic_silence::catch_unwind_silent(move || {
+                ws.with_ownership_ceiling(&ceiling)
+            });
+            assert!(set.is_err(), "in a generation: {in_generation}");
+        }
     }
 
     fn write_file(path: &Path, content: &str) {
