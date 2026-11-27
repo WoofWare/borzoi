@@ -306,7 +306,13 @@ type Facts = BTreeMap<Fact, Option<Vec<String>>>;
 enum Fact {
     Property(String),
     CompileItems,
+    /// The `<ProjectReference>` list, published when it is certain: MSBuild's
+    /// list exactly.
     ProjectReferences,
+    /// The edges an incomplete `<ProjectReference>` list keeps (neither
+    /// certain nor uncertain, #1181): every one MSBuild's, in its order, and
+    /// MSBuild may have more. Held to the worlds' certain lists.
+    ProjectReferencesRetained,
     DefineConstants,
     TargetName,
 }
@@ -338,17 +344,22 @@ fn facts(project: &ParsedProject, names: &[&'static str]) -> Facts {
         Fact::CompileItems,
         (!project.items_uncertain).then(|| paths(&project.items)),
     );
+    let references = || -> Vec<String> {
+        project
+            .project_references
+            .iter()
+            .map(|i| i.include.display().to_string())
+            .collect()
+    };
     out.insert(
         Fact::ProjectReferences,
-        (!project.project_references_uncertain && !project.project_references_incomplete).then(
-            || {
-                project
-                    .project_references
-                    .iter()
-                    .map(|i| i.include.display().to_string())
-                    .collect()
-            },
-        ),
+        (!project.project_references_uncertain && !project.project_references_incomplete)
+            .then(references),
+    );
+    out.insert(
+        Fact::ProjectReferencesRetained,
+        (!project.project_references_uncertain && project.project_references_incomplete)
+            .then(references),
     );
     out.insert(
         Fact::DefineConstants,
@@ -366,23 +377,42 @@ fn facts(project: &ParsedProject, names: &[&'static str]) -> Facts {
 }
 
 impl Fact {
-    /// Whether a world publishing `world` agrees with a certain `claim`. Every
-    /// facet is claimed exactly but one: the `ProjectReference` list promises
-    /// no phantom edge and tolerates a missing one (an `Include` behind an
-    /// untrusted gate is left out without declining), so its claim holds when
-    /// every edge it names is one the world has.
+    /// The fact a world must publish for this one's claim to be checked
+    /// against it: an incomplete list's edges are held to a world's certain
+    /// list, every other fact to the same fact.
+    fn graded_against(&self) -> Fact {
+        match self {
+            Fact::ProjectReferencesRetained => Fact::ProjectReferences,
+            other => other.clone(),
+        }
+    }
+
+    /// Whether a world publishing `world` (for [`Self::graded_against`])
+    /// agrees with a `claim`: equal, but for an incomplete reference list,
+    /// whose edges must be an ordered subsequence of the world's list.
     fn claim_holds_in(&self, claim: &[String], world: &[String]) -> bool {
         match self {
-            Fact::ProjectReferences => claim.iter().all(|edge| world.contains(edge)),
+            Fact::ProjectReferencesRetained => {
+                let mut rest = world.iter();
+                claim.iter().all(|edge| rest.any(|w| w == edge))
+            }
             _ => world == claim,
         }
     }
 
-    /// Whether `claim` holds in every world whatever the world publishes: an
-    /// empty `ProjectReference` list names no edge, so it can hold no phantom
-    /// one. Such a claim needs no world to commit it.
+    /// Whether `claim` needs no world to commit it. A reference list that
+    /// holds no edge names nothing a world could lack, and an incomplete
+    /// list's edges are held to every world that publishes a certain list,
+    /// with nothing to hold them to where none does (the worlds keep a gate
+    /// the walk cannot decide). A certain empty list is still held to every
+    /// world that commits one, by equality ([`Self::claim_holds_in`]). Every
+    /// other claim needs a world that commits it.
     fn claim_is_vacuous(&self, claim: &[String]) -> bool {
-        matches!(self, Fact::ProjectReferences) && claim.is_empty()
+        match self {
+            Fact::ProjectReferences => claim.is_empty(),
+            Fact::ProjectReferencesRetained => true,
+            _ => false,
+        }
     }
 }
 
@@ -391,6 +421,7 @@ fn fact_kind(fact: &Fact) -> &'static str {
         Fact::Property(_) => "property",
         Fact::CompileItems => "Compile items",
         Fact::ProjectReferences => "ProjectReference items",
+        Fact::ProjectReferencesRetained => "retained ProjectReference items",
         Fact::DefineConstants => "DefineConstants",
         Fact::TargetName => "target name",
     }
@@ -466,11 +497,12 @@ fn check(
             (fact, undecided_construct),
             (Fact::Property(name), Undecided::Write(wrapped)) if name.eq_ignore_ascii_case(wrapped)
         );
-        let values: Vec<&Option<Vec<String>>> = worlds.iter().map(|(_, w)| &w[fact]).collect();
+        let graded = fact.graded_against();
+        let values: Vec<&Option<Vec<String>>> = worlds.iter().map(|(_, w)| &w[&graded]).collect();
         let world_committed: Vec<&Vec<String>> = values.iter().filter_map(|v| v.as_ref()).collect();
         let owed = world_committed.len() == values.len()
             && world_committed.windows(2).any(|w| w[0] != w[1]);
-        if owed && derived {
+        if owed && derived && graded == *fact {
             *census.owed.entry(fact_kind(fact)).or_default() += 1;
             if claim.is_none() {
                 *census.paid.entry(fact_kind(fact)).or_default() += 1;
@@ -480,11 +512,11 @@ fn check(
         let disagreeing = worlds
             .iter()
             .find(|(_, facts)| {
-                facts[fact]
+                facts[&graded]
                     .as_ref()
                     .is_some_and(|world| !fact.claim_holds_in(claim, world))
             })
-            .map(|(world, facts)| (world.clone(), facts[fact].clone()));
+            .map(|(world, facts)| (world.clone(), facts[&graded].clone()));
         let nobody_commits = world_committed.is_empty() && !fact.claim_is_vacuous(claim);
         if disagreeing.is_none() && !nobody_commits {
             if world_committed.len() < values.len() {
