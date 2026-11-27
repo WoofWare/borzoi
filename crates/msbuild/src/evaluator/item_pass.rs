@@ -52,8 +52,9 @@ fn spec_fragments(spec: &Escaped) -> Result<impl Iterator<Item = &str>, SpansSep
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SpansSeparator;
 
-/// Decline the element at `node`, whose `spec` [`spec_fragments`] refused: it
-/// makes no item, and the diagnostic says why. The diagnostic is what tells
+/// Decline the element at `node`, whose expanded `spec` [`spec_fragments`]
+/// refused: it makes no item, and the diagnostic names the spec as expanded,
+/// where the item expression is. The diagnostic is what tells
 /// the item's list it may lack what MSBuild makes there (a Compile context
 /// marks the Compile set uncertain; a `<ProjectReference>` `Include` marks the
 /// reference list as hiding an `Include`).
@@ -1285,7 +1286,7 @@ fn walk_item_child_inner(node: Node<'_, '_>, kind: ItemKind, state: &mut State<'
     match state.glob_resolver {
         None => {
             let Ok(fragments) = spec_fragments(&spelled) else {
-                return decline_spanning_spec(node, include, state);
+                return decline_spanning_spec(node, spelled.as_escaped(), state);
             };
             for entry in fragments {
                 push_include_entry(node, kind, placement, entry, &metadata, state);
@@ -2035,7 +2036,7 @@ fn resolve_compile_update_targets(
     let mut targets = Vec::new();
     let mut batch = UpdateBatch::default();
     let Ok(fragments) = spec_fragments(expansion.value.ignoring_trust()) else {
-        decline_spanning_spec(node, raw, state);
+        decline_spanning_spec(node, expansion.value.ignoring_trust().as_escaped(), state);
         return None;
     };
     for entry in fragments {
@@ -4253,7 +4254,11 @@ fn route_item_through_resolver(
             return;
         }
         let Ok(fragments) = spec_fragments(expansion.value.ignoring_trust()) else {
-            return decline_spanning_spec(node, raw, state);
+            return decline_spanning_spec(
+                node,
+                expansion.value.ignoring_trust().as_escaped(),
+                state,
+            );
         };
         for entry in fragments {
             if contains_item_reference(entry) {
@@ -5052,6 +5057,10 @@ mod tests {
             let spanning = expected.iter().any(|segment| segment.contains(';'));
             match spec_fragments(&Escaped::from_xml(text.clone())) {
                 Ok(fragments) => {
+                    assert!(
+                        !spanning,
+                        "split {text:?}, which MSBuild keeps whole: {expected:?}"
+                    );
                     let ours: Vec<&str> = fragments.collect();
                     assert_eq!(ours, expected, "{text:?}");
                 }

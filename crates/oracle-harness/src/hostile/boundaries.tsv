@@ -152,6 +152,7 @@ crates/lsp/tests/all/xml_doc_source_diff/signature.rs	pending	3
 crates/lsp/tests/all/xml_doc_type_id_diff.rs	pending	3
 crates/msbuild/src/condition.rs	pending	2
 crates/msbuild/src/document.rs	pending	2
+crates/msbuild/src/evaluator/item_pass.rs	not-applicable	spec_fragments_split_as_msbuild_splits_or_refuse enumerates every string of up to six characters over the closed alphabet the SemiColonTokenizer reads (@ ( ) ' " ; a letter, a space) and holds the splitter to a port of it; the alphabet is the dimension, so no value is drawn from a hostile alphabet
 crates/msbuild/src/fsc.rs	draws	variable_class=env+name
 crates/msbuild/src/glob/file_matcher/tests.rs	pending	2
 crates/msbuild/src/glob_resolver.rs	pending	2

@@ -332,3 +332,38 @@ fn a_literal_after_an_expression_with_a_double_quoted_parenthesis_is_kept() {
         );
     }
 }
+
+/// A refused spec is reported as expanded, where the item expression is,
+/// on both seams: `$(At)(Helper, ';')` with `At` holding `@` names
+/// `@(Helper, ';')`.
+#[test]
+fn a_refused_spec_is_reported_as_expanded() {
+    let dir = tempfile::TempDir::new().expect("a temporary directory");
+    let root = borzoi_msbuild::observed::host_fs::canonicalize(dir.path()).expect("canonicalize");
+    let path = root.join("Demo.fsproj");
+    let xml = "<Project><PropertyGroup><At>@</At></PropertyGroup>\
+               <ItemGroup><Helper Include=\"A.fsproj\" />\
+               <ProjectReference Include=\"$(At)(Helper, ';')\" /></ItemGroup></Project>";
+    let resolver: &GlobResolver<'_> = &glob_resolver::resolve;
+    for with_resolver in [false, true] {
+        let parsed = parse_fsproj_with_imports(
+            &borzoi_msbuild::ProjectFile::buffer(&path, xml).expect("a full path"),
+            &HashMap::new(),
+            &common::oracle_environment(),
+            None,
+            with_resolver.then_some(resolver),
+        )
+        .expect("a well-formed document");
+        let named: Vec<&str> = parsed
+            .diagnostics
+            .iter()
+            .filter_map(|d| match &d.kind {
+                borzoi_msbuild::DiagnosticKind::UnresolvedItemReference { reference } => {
+                    Some(reference.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(named, ["@(Helper, ';')"], "resolver: {with_resolver}");
+    }
+}
