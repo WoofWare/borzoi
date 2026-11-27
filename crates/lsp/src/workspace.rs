@@ -2953,7 +2953,7 @@ fn edges_of(evaluated: &EvaluatedProject, purpose: GraphWalkPurpose, is_entry: b
 ///   transitive subtree" (see `GraphRefTargets::csharp`), which would
 ///   fabricate exactly the references the filter removes. Dropping
 ///   under-resolves only the target's own DLL (D5: under-resolve, never
-///   wrong).
+///   wrong), and the contribution is inexact, since the build references it.
 ///
 /// Metadata whose resolution is [`ItemMetadataValue::Unknown`] is read
 /// conservatively: an unknown `ReferenceOutputAssembly` may be `false` in the
@@ -2961,7 +2961,9 @@ fn edges_of(evaluated: &EvaluatedProject, purpose: GraphWalkPurpose, is_entry: b
 /// filters can only affect what flows *through* the edge, never the entry's
 /// direct output (probed for `none`/`runtime`/`compile` filters), so an
 /// entry edge degrades to [`EdgeKind::OutputOnly`] and a non-entry edge
-/// drops.
+/// drops; either way the contribution is inexact
+/// ([`CompileContribution::exact`]). A `ReferenceOutputAssembly` known not to
+/// compare true decides the edge first, whatever else the reference carries.
 ///
 /// Anything else — including known-absent metadata — is a normal
 /// [`EdgeKind::Full`] compile reference, matching MSBuild's `''!='false'`
@@ -2973,28 +2975,32 @@ fn edges_of(evaluated: &EvaluatedProject, purpose: GraphWalkPurpose, is_entry: b
 /// unset/empty/cleared into [`ItemMetadataValue::Known`]`(None)` is exact
 /// (pinned live by `fsharp_empty_include_assets_matches_msbuild`).
 pub(crate) fn compile_edge_kind(item: &ResolvedItem, is_entry: bool) -> CompileContribution {
+    // `None` while unknowable.
+    let build_only = match &item.reference_output_assembly {
+        ItemMetadataValue::Unknown => None,
+        // Absent/empty: the common targets default it to `true` before the
+        // comparison below.
+        ItemMetadataValue::Known(None) => Some(false),
+        // The output lands on `ReferencePath` only under the common targets'
+        // `'%(ReferenceOutputAssembly)'=='true'` — an MSBuild `==`, decided
+        // through the boolean vocabulary (untrimmed, so `" true "` does NOT
+        // compare true; see [`borzoi_msbuild::msbuild_boolean`]).
+        ItemMetadataValue::Known(Some(v)) => Some(borzoi_msbuild::msbuild_boolean(v) != Some(true)),
+    };
+    // A build-only reference contributes nothing, whatever else it carries:
+    // the metadata below shapes what lands on `ReferencePath`, and nothing
+    // does.
+    if build_only == Some(true) {
+        return CompileContribution::exact(None);
+    }
     // Significant-but-unmodelled P2P metadata makes the edge's contribution
     // unknowable: probed (dotnet 10, 2026-07-10), `BuildReference="false"`
     // and `Targets="Clean"` remove the target from `ReferencePath` even on
     // the entry's own edge with a prebuilt DLL, and the `Set*` /
     // property-list names change which build of the target the real
     // compiler sees. Nothing is safe to fold (D5: drop, under-resolve).
-    if item.unmodelled_reference_metadata {
+    if item.unmodelled_reference_metadata || build_only.is_none() {
         return CompileContribution::UNKNOWN;
-    }
-    let build_only = match &item.reference_output_assembly {
-        ItemMetadataValue::Unknown => return CompileContribution::UNKNOWN,
-        // Absent/empty: the common targets default it to `true` before the
-        // comparison below.
-        ItemMetadataValue::Known(None) => false,
-        // The output lands on `ReferencePath` only under the common targets'
-        // `'%(ReferenceOutputAssembly)'=='true'` — an MSBuild `==`, decided
-        // through the boolean vocabulary (untrimmed, so `" true "` does NOT
-        // compare true; see [`borzoi_msbuild::msbuild_boolean`]).
-        ItemMetadataValue::Known(Some(v)) => borzoi_msbuild::msbuild_boolean(v) != Some(true),
-    };
-    if build_only {
-        return CompileContribution::exact(None);
     }
     // Three-valued (`None` = unknowable): compile flows through the edge iff
     // it is included, not excluded, and (on non-entry edges) not private.
@@ -3019,17 +3025,22 @@ pub(crate) fn compile_edge_kind(item: &ResolvedItem, is_entry: bool) -> CompileC
     };
     // Blocked or unknowable flow: the entry's own edge still references the
     // target's direct output (the build adds it outside the asset flow), so it
-    // degrades to OutputOnly rather than vanishing.
-    let blocked = || {
-        (is_entry && classify(Path::new(&item.include)) == ProjectKind::FSharp)
-            .then_some(EdgeKind::OutputOnly)
+    // degrades to OutputOnly rather than vanishing. A C# target's output is
+    // dropped instead (the sidecar would expand its whole subtree), which
+    // leaves out an assembly the build references.
+    let blocked = if !is_entry {
+        CompileContribution::exact(None)
+    } else if classify(Path::new(&item.include)) == ProjectKind::FSharp {
+        CompileContribution::exact(Some(EdgeKind::OutputOnly))
+    } else {
+        CompileContribution::UNKNOWN
     };
     match flows {
         Some(true) => CompileContribution::exact(Some(EdgeKind::Full)),
-        Some(false) => CompileContribution::exact(blocked()),
+        Some(false) => blocked,
         // What flows through the edge may be more than its output.
         None => CompileContribution {
-            edge: blocked(),
+            edge: blocked.edge,
             exact: false,
         },
     }
@@ -6847,6 +6858,180 @@ mod tests {
             unmodelled_reference_metadata: false,
             span: 0..0,
         }
+    }
+
+    /// What the build references through one `<ProjectReference>`, by
+    /// [`compile_edge_kind`]'s own probed rules, as a reference model:
+    /// nothing, the target's output alone, the output and what flows through,
+    /// or (for unmodelled P2P metadata) a build the walk cannot name.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Reach {
+        Nothing,
+        Output,
+        Full,
+        Unnamed,
+    }
+
+    /// The reference model of one concrete reference (no unknown metadata).
+    fn build_reach(
+        roa: Option<&str>,
+        unmodelled: bool,
+        assets: [Option<&str>; 3],
+        is_entry: bool,
+    ) -> Vec<Reach> {
+        let compares_true = roa.is_none_or(|v| borzoi_msbuild::msbuild_boolean(v) == Some(true));
+        if !compares_true {
+            return vec![Reach::Nothing];
+        }
+        let covers = |v: Option<&str>, absent: bool| v.map_or(absent, asset_list_covers_compile);
+        let [include, exclude, private] = assets;
+        let flows = covers(include, true)
+            && !covers(exclude, false)
+            && (is_entry || !covers(private, false));
+        let normal = match (flows, is_entry) {
+            (true, _) => Reach::Full,
+            (false, true) => Reach::Output,
+            (false, false) => Reach::Nothing,
+        };
+        if unmodelled {
+            // `BuildReference="false"`/`Targets` may take it off
+            // `ReferencePath`; the `Set*` names may build another target.
+            vec![Reach::Nothing, Reach::Unnamed]
+        } else {
+            vec![normal]
+        }
+    }
+
+    /// Every `<ProjectReference>` metadata shape over a small closed domain —
+    /// `ReferenceOutputAssembly` absent/true/false/unknown, each asset filter
+    /// absent/`compile`/`runtime`/unknown, unmodelled metadata or not, entry
+    /// edge or not, F# or C# target — held against [`build_reach`] over every
+    /// concretisation of its unknowns:
+    ///
+    /// - **sound**: the edge followed is never more than any build references;
+    /// - **exact implies equal**: an exact contribution is what every build
+    ///   references;
+    /// - **must-exact**: with no unknown metadata and none unmodelled, or a
+    ///   `ReferenceOutputAssembly` known not to compare true, the contribution
+    ///   is exact exactly when it equals what the build references (#1181).
+    #[test]
+    fn compile_contribution_is_sound_and_exact_against_the_reference_model() {
+        let roas = [
+            ItemMetadataValue::ABSENT,
+            ItemMetadataValue::known("true"),
+            ItemMetadataValue::known("false"),
+            ItemMetadataValue::Unknown,
+        ];
+        let filters = [
+            ItemMetadataValue::ABSENT,
+            ItemMetadataValue::known("compile"),
+            ItemMetadataValue::known("runtime"),
+            ItemMetadataValue::Unknown,
+        ];
+        let concrete = |v: &ItemMetadataValue| -> Vec<Option<String>> {
+            match v {
+                ItemMetadataValue::Known(known) => vec![known.clone()],
+                ItemMetadataValue::Unknown => {
+                    vec![
+                        None,
+                        Some("true".into()),
+                        Some("false".into()),
+                        Some("compile".into()),
+                        Some("runtime".into()),
+                    ]
+                }
+            }
+        };
+        let order = |r: Reach| match r {
+            Reach::Nothing => 0,
+            Reach::Output => 1,
+            Reach::Full => 2,
+            Reach::Unnamed => 3,
+        };
+        let followed = |e: Option<EdgeKind>| match e {
+            None => Reach::Nothing,
+            Some(EdgeKind::OutputOnly) => Reach::Output,
+            Some(EdgeKind::Full) => Reach::Full,
+        };
+        let mut failures = Vec::new();
+        let mut cases = 0;
+        for target in ["/proj/B/B.fsproj", "/proj/C/C.csproj"] {
+            for is_entry in [true, false] {
+                for unmodelled in [false, true] {
+                    for roa in &roas {
+                        for include in &filters {
+                            for exclude in &filters {
+                                for private in &filters {
+                                    cases += 1;
+                                    let item = ResolvedItem {
+                                        include: PathBuf::from(target),
+                                        reference_output_assembly: roa.clone(),
+                                        include_assets: include.clone(),
+                                        exclude_assets: exclude.clone(),
+                                        private_assets: private.clone(),
+                                        unmodelled_reference_metadata: unmodelled,
+                                        ..project_reference_item(None)
+                                    };
+                                    let got = compile_edge_kind(&item, is_entry);
+                                    let ours = followed(got.edge);
+                                    let mut reaches = Vec::new();
+                                    for r in concrete(roa) {
+                                        for i in concrete(include) {
+                                            for x in concrete(exclude) {
+                                                for p in concrete(private) {
+                                                    reaches.extend(build_reach(
+                                                        r.as_deref(),
+                                                        unmodelled,
+                                                        [i.as_deref(), x.as_deref(), p.as_deref()],
+                                                        is_entry,
+                                                    ));
+                                                }
+                                            }
+                                        }
+                                    }
+                                    let case = format!(
+                                        "{target} entry={is_entry} unmodelled={unmodelled} roa={roa:?} \
+                                         include={include:?} exclude={exclude:?} private={private:?}: \
+                                         {got:?}, the build {reaches:?}"
+                                    );
+                                    let sound = reaches.iter().all(|r| {
+                                        ours == Reach::Nothing
+                                            || (*r != Reach::Unnamed && order(ours) <= order(*r))
+                                    });
+                                    if !sound {
+                                        failures.push(format!("unsound: {case}"));
+                                    }
+                                    let equal = reaches.iter().all(|r| *r == ours);
+                                    if got.exact && !equal {
+                                        failures.push(format!("exact but not equal: {case}"));
+                                    }
+                                    let known = |v: &ItemMetadataValue| {
+                                        matches!(v, ItemMetadataValue::Known(_))
+                                    };
+                                    let all_known = !unmodelled
+                                        && [roa, include, exclude, private].into_iter().all(known);
+                                    let build_only = matches!(
+                                        roa,
+                                        ItemMetadataValue::Known(Some(v))
+                                            if borzoi_msbuild::msbuild_boolean(v) != Some(true)
+                                    );
+                                    if (all_known || build_only) && got.exact != equal {
+                                        failures.push(format!("must be exact iff equal: {case}"));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(cases, 2 * 2 * 2 * 4 * 4 * 4 * 4);
+        assert!(
+            failures.is_empty(),
+            "{} of {cases}:\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
     }
 
     /// The P2P protocol admits a reference's output onto `ReferencePath`
