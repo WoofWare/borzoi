@@ -678,6 +678,40 @@ fn an_incomplete_list_still_applies_its_removes() {
     }
 }
 
+/// A `Remove="@(ProjectReference)"` that runs empties MSBuild's list whatever
+/// it holds, the `Include`s the walk could not see among them: a list after it
+/// that the walk captures exactly is certain (#1184). One that may not run is
+/// no such proof.
+#[test]
+fn a_whole_list_removal_ends_the_doubt_of_the_includes_before_it() {
+    let mut oracle = Oracle::spawn();
+    let blocks = |remove_gate: &'static str| {
+        [Block::Group {
+            gate: "",
+            ops: vec![
+                Op::Include {
+                    spec: "../A/A.fsproj",
+                    gate: UNSUPPORTED_TRUE,
+                },
+                Op::Remove {
+                    spec: "@(ProjectReference)",
+                    gate: remove_gate,
+                },
+                Op::Include {
+                    spec: "../B/B.fsproj",
+                    gate: "",
+                },
+            ],
+        }]
+    };
+    for with_resolver in [false, true] {
+        let outcome = check(&mut oracle, &blocks(""), with_resolver);
+        assert_eq!(outcome.claim, common::ReferenceClaim::Exact);
+        let outcome = check(&mut oracle, &blocks(UNSUPPORTED_TRUE), with_resolver);
+        assert_ne!(outcome.claim, common::ReferenceClaim::Exact);
+    }
+}
+
 /// An undecided `<Choose>` whose branch holds only items the idiom never reads
 /// — a helper of another type, whichever way MSBuild decides the branch — must
 /// leave the idiom committing: such a branch can change neither the reference

@@ -712,18 +712,18 @@ fn the_edge_verdict_and_the_reported_capability_are_one_fact() {
                     "{case}"
                 );
                 assert_eq!(
-                    eval.may_lack_reference_edges(true),
+                    eval.may_lack_reference_edges(),
                     reported
                         .iter()
                         .any(|d| d.capability() == DeferredCapability::CompleteReferenceSet),
                     "{case}"
                 );
                 assert!(
-                    !(eval.drops_reference_edges() && eval.may_lack_reference_edges(true)),
+                    !(eval.drops_reference_edges() && eval.may_lack_reference_edges()),
                     "{case}"
                 );
                 assert_eq!(
-                    eval.may_lack_reference_edges(true),
+                    eval.may_lack_reference_edges(),
                     incomplete && !uncertain && !outer,
                     "{case}"
                 );
