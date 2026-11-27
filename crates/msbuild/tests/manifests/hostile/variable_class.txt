@@ -1,0 +1,34 @@
+# Generated; do not edit by hand. One line per graded item, sorted.
+# Regenerate with:
+#   BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-msbuild --lib fsc::tests::the_classifier_agrees_on_every_hostile_environment
+env.build-set-variable	owed
+env.case-variant-name	owed
+env.compiler-selector	owed
+env.empty-value	owed
+env.hostile-value	owed
+env.locale	owed
+env.not-a-property-name	owed
+env.property-name	owed
+env.toolchain-variable	owed
+name.backslash	owed
+name.case-fold	owed
+name.confusable	owed
+name.control-char	owed
+name.dot-name	owed
+name.early-colon	owed
+name.edge-dot-or-space	owed
+name.expansion	owed
+name.glob-char	owed
+name.invisible	owed
+name.kind-by-extension	owed
+name.line-break	owed
+name.list-separator	owed
+name.long	owed
+name.non-utf8	excluded: the derivation takes the environment as UTF-8 text, as its caller reads it
+name.normalisation	owed
+name.percent-escape	owed
+name.quote	owed
+name.switch-shaped	owed
+name.utf16-width	owed
+name.xml-markup	owed
+plain	owed

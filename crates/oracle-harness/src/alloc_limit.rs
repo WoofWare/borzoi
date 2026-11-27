@@ -22,6 +22,7 @@
 //! ```
 
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// The system allocator, counting what it hands out against
@@ -36,6 +37,19 @@ static PEAK: AtomicUsize = AtomicUsize::new(0);
 static LIMIT: AtomicUsize = AtomicUsize::new(usize::MAX);
 /// How many times `alloc` or `alloc_zeroed` has been called.
 static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
+
+thread_local! {
+    /// [`ALLOCATIONS`], this thread's alone. Const-initialised, so counting
+    /// allocates nothing.
+    static THREAD_ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Count one allocation, process-wide and on this thread.
+fn count_allocation() {
+    ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+    // A thread being torn down has no count left to keep.
+    let _ = THREAD_ALLOCATIONS.try_with(|n| n.set(n.get() + 1));
+}
 
 /// Count `bytes` more as live, or refuse if that passes the limit.
 fn reserve(bytes: usize) -> bool {
@@ -56,7 +70,7 @@ fn release(bytes: usize) {
 // only adds bookkeeping; a refusal returns null, which `GlobalAlloc` permits.
 unsafe impl GlobalAlloc for LimitedAlloc {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        count_allocation();
         if !reserve(layout.size()) {
             return std::ptr::null_mut();
         }
@@ -69,7 +83,7 @@ unsafe impl GlobalAlloc for LimitedAlloc {
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        count_allocation();
         if !reserve(layout.size()) {
             return std::ptr::null_mut();
         }
@@ -131,4 +145,10 @@ pub fn reset_peak() {
 /// grow a block in place or move it.
 pub fn allocations() -> usize {
     ALLOCATIONS.load(Ordering::Relaxed)
+}
+
+/// [`allocations`], counted on the calling thread alone: what a measured
+/// call made, whatever the test runner's other threads do meanwhile.
+pub fn thread_allocations() -> usize {
+    THREAD_ALLOCATIONS.with(Cell::get)
 }

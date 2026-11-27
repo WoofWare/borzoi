@@ -1,0 +1,17 @@
+# Mutation set nuget-regular-file: one `caught`, `missed`, `timeout`, `unviable` or
+# `equivalent: <reason>` line per mutant, and the run's `scope:` lines.
+# Tests its mutants never face: doctests (`tools/mutants/inner.sh` passes
+# `--tests`), every #[ignore]d test, and the `scope: skip` filters.
+#
+# Generated; do not edit by hand. One line per graded item, sorted.
+# Regenerate with:
+#   BORZOI_UPDATE_MANIFESTS=1 tools/mutants/run.sh nuget-regular-file
+crates/nuget/src/regular_file.rs: delete ! in read	caught
+crates/nuget/src/regular_file.rs: delete ! in read #2	caught
+crates/nuget/src/regular_file.rs: replace read -> std::io::Result<Vec<u8>> with Ok(vec![0])	caught
+crates/nuget/src/regular_file.rs: replace read -> std::io::Result<Vec<u8>> with Ok(vec![1])	caught
+crates/nuget/src/regular_file.rs: replace read -> std::io::Result<Vec<u8>> with Ok(vec![])	caught
+crates/nuget/src/regular_file.rs: replace read_to_string -> std::io::Result<String> with Ok("xyzzy".into())	caught
+crates/nuget/src/regular_file.rs: replace read_to_string -> std::io::Result<String> with Ok(String::new())	caught
+scope: files	crates/nuget/src/regular_file.rs
+scope: package	borzoi-nuget

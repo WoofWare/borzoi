@@ -1,0 +1,12 @@
+# The mutation sets: each a package and the files of it whose mutants are
+# graded, with its exact manifest at tools/mutants/manifests/<set>.txt.
+# Tab-separated. Two record kinds:
+#
+#   set   <name>  <package>  <file globs, space-separated, relative to the repo root>
+#   skip  <name>  <test name filter>  <why the set's mutants never face it>
+#
+# A `skip` passes `--skip <filter>` to the test binaries (a substring match), so
+# every test whose name contains it is left out of the baseline and of every
+# mutant's run. A mutant only a skipped test could kill comes out `missed`. Each
+# set's manifest header lists its skips.
+set	nuget-regular-file	borzoi-nuget	crates/nuget/src/regular_file.rs

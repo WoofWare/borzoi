@@ -173,7 +173,7 @@ fn orphan_buffer_falls_back_to_single_file_extraction() {
     write(&loose, src);
     let uri = Uri::from_file_path(&loose).unwrap();
 
-    let mut state = State::default();
+    let mut state = State::default().with_ownership_ceiling(tmp.path());
     state.docs.insert(uri.clone(), src.to_string());
 
     let symbols = run(&mut state, "orphan");
@@ -336,7 +336,7 @@ fn query_matches_non_ascii_identifiers_case_insensitively() {
     write(&loose, src);
     let uri = Uri::from_file_path(&loose).unwrap();
 
-    let mut state = State::default();
+    let mut state = State::default().with_ownership_ceiling(tmp.path());
     state.docs.insert(uri, src.to_string());
 
     let symbols = run(&mut state, "CAFÉ");
@@ -372,7 +372,7 @@ fn open_linked_file_is_not_reparsed_under_wrong_defines() {
     // Open App.fs (folds the App project) and the shared Lib.fs itself.
     let app_uri = Uri::from_file_path(&app_own).unwrap();
     let lib_uri = Uri::from_file_path(&shared).unwrap();
-    let mut state = State::default();
+    let mut state = State::default().with_ownership_ceiling(tmp.path());
     state.docs.insert(app_uri, "let appSym = 1\n".to_string());
     state.docs.insert(lib_uri, lib_src.to_string());
 

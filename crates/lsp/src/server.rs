@@ -650,6 +650,18 @@ impl Default for State {
     }
 }
 
+impl State {
+    /// This state, its workspace's ownership walks climbing no higher than
+    /// `ceiling` ([`Workspace::with_ownership_ceiling`], whose conditions
+    /// hold here too): for a test whose tree sits in a directory it does not
+    /// own, such as the shared temporary directory.
+    pub fn with_ownership_ceiling(mut self, ceiling: &Path) -> Self {
+        let workspace = std::mem::take(&mut self.workspace);
+        self.workspace = workspace.with_ownership_ceiling(ceiling);
+        self
+    }
+}
+
 /// The stack the request loop ([`run`]) runs on, which `main` spawns its
 /// thread with: [`borzoi_sema::WALK_STACK_BYTES`], the stack resolution and
 /// inference need for any tree the parser returns. A platform's main thread
@@ -2772,7 +2784,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let proj_path = tmp.path().join("App.fsproj");
         std::fs::write(&proj_path, "<Project/>").unwrap();
-        let mut state = State::default();
+        let mut state = State::default().with_ownership_ceiling(tmp.path());
         let project_uri = Uri::from_file_path(&proj_path).unwrap();
         state.note_source_sync(&project_uri);
         // Inspect the workspace's project cache via a real test path. The

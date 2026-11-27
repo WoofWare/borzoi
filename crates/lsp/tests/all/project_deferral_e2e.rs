@@ -13,7 +13,7 @@
 
 use crate::common::host_fs::HostPath as _;
 use borzoi::uri::UriExt as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
@@ -55,10 +55,14 @@ struct Server {
 }
 
 impl Server {
-    fn start() -> Self {
+    /// A server whose ownership walks stop at `root` (the tests' tree, spelt
+    /// as their URIs spell it): the shared temporary directory above may hold
+    /// any process's `.fsproj`.
+    fn start(root: &Path) -> Self {
         let (server, client) = Connection::memory();
+        let root = root.to_path_buf();
         let thread = thread::spawn(move || {
-            let mut state = State::default();
+            let mut state = State::default().with_ownership_ceiling(&root);
             state.set_client_capabilities(pull_caps());
             run(server, state).expect("server::run terminated cleanly");
         });
@@ -307,7 +311,7 @@ fn source_uri(tmp: &TempDir, name: &str) -> Uri {
 fn opening_a_source_file_reports_its_project_s_deferral() {
     let (tmp, _proj) = project_dir(UNCERTAIN_PROJECT);
     let a = source_uri(&tmp, "A.fs");
-    let mut server = Server::start();
+    let mut server = Server::start(&real_path(&tmp));
     server.open(&a, "module A\nlet a = 1\n", "fsharp");
     let messages = server.deferral_messages(&a);
     assert_eq!(messages.len(), 1, "{messages:?}");
@@ -326,7 +330,7 @@ fn opening_a_source_file_reports_its_project_s_deferral() {
 fn a_trustworthy_project_produces_no_message() {
     let (tmp, _proj) = project_dir(CERTAIN_PROJECT);
     let a = source_uri(&tmp, "A.fs");
-    let mut server = Server::start();
+    let mut server = Server::start(&real_path(&tmp));
     server.open(&a, "module A\nlet a = 1\n", "fsharp");
     assert_eq!(server.deferral_messages(&a), Vec::<String>::new());
 }
@@ -347,7 +351,7 @@ fn a_trustworthy_project_produces_no_message() {
 #[test]
 fn an_fsproj_buffer_alone_produces_no_toast() {
     let (_tmp, proj) = project_dir(UNCERTAIN_PROJECT);
-    let mut server = Server::start();
+    let mut server = Server::start(&real_path(&_tmp));
     server.open(&proj, UNCERTAIN_PROJECT, "xml");
     assert_eq!(server.deferral_messages(&proj), Vec::<String>::new());
 }
@@ -378,12 +382,12 @@ fn a_standalone_script_is_not_told_a_neighbouring_projects_problems() {
     let a = source_uri(&tmp, "A.fs");
     let script = source_uri(&tmp, "Script.fsx");
 
-    let mut server = Server::start();
+    let mut server = Server::start(&real_path(&tmp));
     // The project genuinely declines — a source file it *does* compile hears so.
     server.open(&a, "module A\nlet a = 1\n", "fsharp");
     assert_eq!(server.deferral_messages(&a).len(), 1);
 
-    let mut server = Server::start();
+    let mut server = Server::start(&real_path(&tmp));
     server.open(&script, "let x = 1\n", "fsharp");
     assert_eq!(
         server.deferral_messages(&script),
@@ -404,7 +408,7 @@ fn a_script_under_an_uncertain_project_is_told_its_problems() {
     std::fs::write(real_path(&tmp).join("Script.fsx"), "let x = 1\n").unwrap();
     let script = source_uri(&tmp, "Script.fsx");
 
-    let mut server = Server::start();
+    let mut server = Server::start(&real_path(&tmp));
     server.open(&script, "let x = 1\n", "fsharp");
     let messages = server.deferral_messages(&script);
     assert_eq!(messages.len(), 1, "{messages:?}");
@@ -430,7 +434,7 @@ fn a_compile_listed_script_is_told_its_projects_problems() {
     std::fs::write(tmp.path().join("Script.fsx"), "let x = 1\nlet y = x\n").unwrap();
     let script = source_uri(&tmp, "Script.fsx");
 
-    let mut server = Server::start();
+    let mut server = Server::start(&real_path(&tmp));
     server.open(&script, "let x = 1\nlet y = x\n", "fsharp");
     let messages = server.deferral_messages_after_fold(&script);
     assert_eq!(messages.len(), 1, "{messages:?}");
@@ -442,7 +446,7 @@ fn the_message_fires_once_per_project_not_once_per_file() {
     let (tmp, _proj) = project_dir(UNCERTAIN_PROJECT);
     let a = source_uri(&tmp, "A.fs");
     let b = source_uri(&tmp, "B.fs");
-    let mut server = Server::start();
+    let mut server = Server::start(&real_path(&tmp));
     server.open(&a, "module A\nlet a = 1\n", "fsharp");
     assert_eq!(server.deferral_messages(&a).len(), 1);
     server.open(&b, "module B\nlet b = 2\n", "fsharp");
@@ -461,7 +465,7 @@ fn the_message_fires_once_per_project_not_once_per_file() {
 fn editing_the_project_lets_a_new_reason_be_reported() {
     let (tmp, proj) = project_dir(UNCERTAIN_PROJECT);
     let a = source_uri(&tmp, "A.fs");
-    let mut server = Server::start();
+    let mut server = Server::start(&real_path(&tmp));
     server.open(&a, "module A\nlet a = 1\n", "fsharp");
     let first = server.deferral_messages(&a);
     assert_eq!(first.len(), 1, "{first:?}");
@@ -501,7 +505,7 @@ fn editing_the_project_lets_a_new_reason_be_reported() {
 fn fixing_the_project_stops_the_message() {
     let (tmp, proj) = project_dir(UNCERTAIN_PROJECT);
     let a = source_uri(&tmp, "A.fs");
-    let mut server = Server::start();
+    let mut server = Server::start(&real_path(&tmp));
     server.open(&a, "module A\nlet a = 1\n", "fsharp");
     assert_eq!(server.deferral_messages(&a).len(), 1);
 
@@ -537,7 +541,7 @@ fn a_missing_compile_item_is_reported_even_though_the_project_evaluates_cleanly(
     std::fs::write(tmp.path().join("A.fs"), "module A\nlet a = 1\n").unwrap();
     let a = source_uri(&tmp, "A.fs");
 
-    let mut server = Server::start();
+    let mut server = Server::start(&real_path(&tmp));
     server.open(&a, "module A\nlet a = 1\n", "fsharp");
     // Reported on the first request that needs the Compile order, not on open:
     // the fold is never provoked speculatively, so restoring N editor tabs from
@@ -572,7 +576,7 @@ fn the_same_project_is_quiet_once_the_compile_item_exists() {
     std::fs::write(tmp.path().join("Missing.fs"), "module M\nlet m = 1\n").unwrap();
     let a = source_uri(&tmp, "A.fs");
 
-    let mut server = Server::start();
+    let mut server = Server::start(&real_path(&tmp));
     server.open(&a, "module A\nlet a = 1\n", "fsharp");
     assert_eq!(server.deferral_messages(&a), Vec::<String>::new());
 }
@@ -603,7 +607,7 @@ fn a_refusal_introduced_by_a_later_change_is_still_reported() {
     std::fs::write(tmp.path().join("B.fs"), "module B\nlet b = 2\n").unwrap();
     let a = source_uri(&tmp, "A.fs");
 
-    let mut server = Server::start();
+    let mut server = Server::start(&real_path(&tmp));
     server.open(&a, "module A\nlet a = 1\n", "fsharp");
     assert_eq!(
         server.deferral_messages(&a),
@@ -640,7 +644,7 @@ fn a_persisting_reason_is_reported_only_once() {
     std::fs::write(tmp.path().join("A.fs"), "module A\nlet a = 1\n").unwrap();
     let a = source_uri(&tmp, "A.fs");
 
-    let mut server = Server::start();
+    let mut server = Server::start(&real_path(&tmp));
     server.open(&a, "module A\nlet a = 1\n", "fsharp");
     assert_eq!(server.deferral_messages_after_fold(&a).len(), 1);
     for i in 0..3 {
@@ -684,7 +688,7 @@ fn a_recovered_fold_reports_again_when_it_breaks_the_same_way() {
         });
     };
 
-    let mut server = Server::start();
+    let mut server = Server::start(&real_path(&tmp));
     server.open(&a, "module A\nlet a = 1\n", "fsharp");
     assert_eq!(
         server.deferral_messages_after_fold(&a),
@@ -730,7 +734,7 @@ fn an_open_fsproj_does_not_suppress_its_project_s_fold_refusal() {
     let proj = Uri::from_file_path(real_path(&tmp).join("Demo.fsproj")).unwrap();
     let a = source_uri(&tmp, "A.fs");
 
-    let mut server = Server::start();
+    let mut server = Server::start(&real_path(&tmp));
     // The project file is opened *first* — the ordering that hid the refusal.
     server.open(&proj, fsproj, "xml");
     let _ = server.deferral_messages(&proj);
@@ -772,7 +776,7 @@ fn a_fold_refusal_does_not_outlive_the_project_that_caused_it() {
         });
     };
 
-    let mut server = Server::start();
+    let mut server = Server::start(&real_path(&tmp));
     server.open(&a, "module A\nlet a = 1\n", "fsharp");
     assert_eq!(server.deferral_messages(&a), Vec::<String>::new());
 
@@ -835,7 +839,7 @@ fn a_reference_edge_loss_is_reported_without_waiting_for_a_fold() {
     std::fs::write(real_path(&tmp).join("A.fs"), "module A\nlet a = 1\n").unwrap();
     let a = source_uri(&tmp, "A.fs");
 
-    let mut server = Server::start();
+    let mut server = Server::start(&real_path(&tmp));
     server.open(&a, "module A\nlet a = 1\n", "fsharp");
     // A plain (non-folding) request suffices: nothing here needs the fold.
     let messages = server.deferral_messages(&a);
@@ -868,7 +872,7 @@ fn an_evaluation_problem_reintroduced_without_a_fold_is_reported_again() {
         });
     };
 
-    let mut server = Server::start();
+    let mut server = Server::start(&real_path(&tmp));
     server.open(&a, "module A\nlet a = 1\n", "fsharp");
     let first = server.deferral_messages(&a);
     assert_eq!(first.len(), 1, "{first:?}");
@@ -908,7 +912,7 @@ fn a_carried_fold_verdict_is_never_restated() {
     let proj = Uri::from_file_path(&proj_path).unwrap();
     let a = source_uri(&tmp, "A.fs");
 
-    let mut server = Server::start();
+    let mut server = Server::start(&real_path(&tmp));
     server.open(&a, "module A\nlet a = 1\n", "fsharp");
     let first = server.deferral_messages_after_fold(&a);
     assert_eq!(first.len(), 1, "{first:?}");
@@ -968,7 +972,7 @@ fn a_record_only_change_does_not_re_toast() {
     let proj = Uri::from_file_path(&proj_path).unwrap();
     let a = source_uri(&tmp, "A.fs");
 
-    let mut server = Server::start();
+    let mut server = Server::start(&real_path(&tmp));
     server.open(&a, "module A\nlet a = 1\n", "fsharp");
     // Two distinct messages, legitimately: the reference loss is known from the
     // evaluation immediately, the fold refusal only once something folds.
@@ -1015,7 +1019,7 @@ fn a_record_only_change_does_not_re_toast() {
 fn closing_the_last_buffer_forgets_the_project() {
     let (tmp, _proj) = project_dir(UNCERTAIN_PROJECT);
     let a = source_uri(&tmp, "A.fs");
-    let mut server = Server::start();
+    let mut server = Server::start(&real_path(&tmp));
 
     server.open(&a, "module A\nlet a = 1\n", "fsharp");
     assert_eq!(server.deferral_messages(&a).len(), 1);
@@ -1049,7 +1053,7 @@ fn each_spelling_of_a_symlinked_project_is_reported_once() {
     let link = root.join("link");
     std::os::unix::fs::symlink(&real, &link).unwrap();
 
-    let mut server = Server::start();
+    let mut server = Server::start(&root);
     let direct = Uri::from_file_path(real.join("A.fs")).unwrap();
     let aliased = Uri::from_file_path(link.join("B.fs")).unwrap();
     server.open(&direct, "module A\nlet a = 1\n", "fsharp");
@@ -1106,7 +1110,7 @@ fn a_recovered_capability_is_forgotten_while_another_stays_unknown() {
     const CLEAN: &str = r#"<Project><ItemGroup><Compile Include="A.fs" /></ItemGroup></Project>"#;
 
     std::fs::write(&proj_path, MISSING_ITEM).unwrap();
-    let mut server = Server::start();
+    let mut server = Server::start(&real_path(&tmp));
     server.open(&a, "module A\nlet a = 1\n", "fsharp");
     let fold_refusal = server.deferral_messages_after_fold(&a);
     assert_eq!(fold_refusal.len(), 1, "{fold_refusal:?}");

@@ -1714,10 +1714,13 @@ impl Client {
             // host's `dotnet` must not leak into either session. `$DOTNET_ROOT`
             // is the stub framework pack inside the world, so a restored
             // project's assembly env is a function of files the model controls.
+            // Its ownership walks stop at `root`: the directory above may hold any
+            // process's `.fsproj`.
             state.workspace = crate::common::workspace(SdkDiscoveryEnv {
                 dotnet_root: Some(root.join("dotnet")),
                 ..SdkDiscoveryEnv::default()
-            });
+            })
+            .with_ownership_ceiling(&root);
             state.set_client_capabilities(mode.caps());
             state.set_workspace_roots(vec![root]);
             // A session with no instrument installs no subscriber, so the
