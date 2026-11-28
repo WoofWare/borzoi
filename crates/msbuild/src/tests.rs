@@ -1646,6 +1646,30 @@ fn an_include_with_no_batch_pending_is_not_judged_for_the_batch() {
     assert_eq!(costs.batch_gates_judged, 0, "gates judged for the batch");
 }
 
+/// The read scan asks whether a text may read an item list, not what MSBuild
+/// computes from it, so it probes no file: a pending batch leaves in the read
+/// set nothing of an operand MSBuild may never evaluate (codex found, round
+/// 38). A text whose expansion needs the file system may read a list.
+#[test]
+fn the_read_scan_probes_no_file() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    let condition = "false And '$([MSBuild]::GetDirectoryNameOfFileAbove($(MSBuildProjectDirectory), not-reached))' == ''";
+    let source = format!(
+        r#"<Project><ItemGroup><Compile Update="Z.fs" Link="z" /><Other Include="x" Condition="{condition}" /></ItemGroup></Project>"#
+    );
+    let p = crate::parse_fsproj_with_imports(
+        &crate::ProjectFile::buffer(&root.join("Demo.fsproj"), &source).unwrap(),
+        &HashMap::new(),
+        &HashMap::new(),
+        None,
+        None,
+    )
+    .unwrap();
+    let read = format!("{:?}", p.read_set);
+    assert!(!read.contains("not-reached"), "{read}");
+}
+
 /// A followed `Update`'s gate is decided once, for whether MSBuild runs it
 /// and whether it certainly never does (codex found, round 37).
 #[test]

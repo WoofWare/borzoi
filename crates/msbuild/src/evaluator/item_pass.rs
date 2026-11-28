@@ -3439,8 +3439,12 @@ fn text_may_read_item_lists(text: Option<&str>, state: &State<'_>) -> bool {
     let Some(text) = text else {
         return true;
     };
-    text_reads_unexpanded(text)
-        .unwrap_or_else(|| expansion_may_read_item_lists(text, &expand_silent(text, state), state))
+    // MSBuild may evaluate the text not at all (a short-circuited operand),
+    // so the scan probes no file: an expansion that would is an uncertain
+    // one, which may read.
+    text_reads_unexpanded(text).unwrap_or_else(|| {
+        expansion_may_read_item_lists(text, &expand_silent_probing(text, state, false), state)
+    })
 }
 
 /// What [`text_may_read_item_lists`] says of `text` with no expansion: that
@@ -5311,8 +5315,15 @@ fn expand_metadata_silent(raw: &str, state: &State<'_>) -> Expansion {
 }
 
 pub(super) fn expand_silent(raw: &str, state: &State<'_>) -> Expansion {
+    expand_silent_probing(raw, state, state.follow_imports)
+}
+
+/// [`expand_silent`], with the file system's functions evaluated only where
+/// `file_system` says; without it they are unsupported, and the expansion
+/// has an issue.
+fn expand_silent_probing(raw: &str, state: &State<'_>, file_system: bool) -> Expansion {
     crate::cost::count(|costs| costs.silent_expansions += 1);
-    let (value, issues) = if state.follow_imports {
+    let (value, issues) = if file_system {
         properties::substitute_with_fs(raw, &state.lookup, state.observer)
     } else {
         properties::substitute(raw, &state.lookup)
