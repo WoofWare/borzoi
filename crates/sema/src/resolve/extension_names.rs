@@ -594,9 +594,9 @@ fn head_name(l: &borzoi_cst::syntax::LongIdentPat) -> MemberHead {
             LongIdentPatChild::TyparDecls(_) => typar_lists += 1,
             LongIdentPatChild::Arg(_) => {}
             // A zero-width `ERROR` is the lex filter's layout virtual (before
-            // an adjacent argument, `this.M(x)`), or a recovery placeholder in
-            // a file the pass declares unknowable whole
-            // (`NamesUnknowable::Recovered`); one with text is debris.
+            // an adjacent argument, `this.M(x)`) or a recovery placeholder:
+            // it spells nothing, and the head identifier stays the only name.
+            // One with text is debris the parser could not place.
             LongIdentPatChild::Token(LongIdentPatToken::Error, t) => {
                 if !t.text().is_empty() {
                     return MemberHead::Unnamed;
