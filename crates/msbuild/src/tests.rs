@@ -1518,6 +1518,94 @@ fn a_plain_metadatum_is_read_once() {
     assert_eq!(with - without, N as u64 + 1, "texts the read scan expanded");
 }
 
+/// The operations of a `<Choose>` arm the walk cannot decide may run, so they
+/// feed the batch as operations that may (codex found, round 37). Taken, the
+/// arm's `Update="Z.fs"` leaves a batch pending, and neither later `Update`
+/// strands (probed by codex, SDK 10.0.401); the walk declines, and names no
+/// certain strand.
+#[test]
+#[cfg(not(windows))]
+fn an_undecided_choose_arm_feeds_the_batch() {
+    let arm = r#"<Choose><When Condition="'É' == 'é'"><ItemGroup><Compile Update="Z.fs" Link="z" /></ItemGroup></When></Choose>"#;
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    std::fs::write(root.join("arm.props"), format!("<Project>{arm}</Project>")).unwrap();
+    // In the project, and in a file it imports.
+    for before in [arm, r#"<Import Project="arm.props" />"#] {
+        let source = format!(
+            r#"<Project>
+  {before}
+  <ItemGroup>
+    <Compile Update="A.fs;A.fs" Link="a" />
+    <Compile Update="B.fs;A.fs" CompileOrder="CompileFirst" />
+    <Compile Include="A.fs;B.fs" />
+  </ItemGroup></Project>"#
+        );
+        let p = crate::parse_fsproj_with_imports(
+            &crate::ProjectFile::buffer(&root.join("Demo.fsproj"), &source).unwrap(),
+            &HashMap::new(),
+            &HashMap::new(),
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(p.items_uncertain, "{before}");
+        assert!(
+            !p.diagnostics
+                .iter()
+                .any(|d| matches!(d.kind, DiagnosticKind::StrandedUpdatePrefix { .. })),
+            "{before}: {:?}",
+            p.diagnostics
+        );
+    }
+}
+
+/// An arm MSBuild cannot take, a `<When>` whose gate is false inside an
+/// undecided one, runs nothing, so it feeds the batch nothing: the strand
+/// after it is certain, and named so.
+#[test]
+#[cfg(not(windows))]
+fn a_dead_choose_arm_feeds_the_batch_nothing() {
+    let p = parse(
+        r#"<Project>
+  <Choose><When Condition="'É' == 'é'"><Choose><When Condition="false"><ItemGroup><Compile Update="Z.fs" Link="z" /></ItemGroup></When></Choose></When></Choose>
+  <ItemGroup>
+    <Compile Update="A.fs;A.fs" Link="a" />
+    <Compile Include="A.fs" />
+  </ItemGroup></Project>"#,
+    );
+    assert!(
+        p.diagnostics.iter().any(|d| matches!(
+            &d.kind,
+            DiagnosticKind::StrandedUpdatePrefix { update, .. } if update == "A.fs;A.fs"
+        )),
+        "{:?}",
+        p.diagnostics
+    );
+}
+
+/// An undecided `<Choose>` arm's items are read once for the restart they may
+/// cause, as they are fed (codex round 37's fix, held to it).
+#[test]
+fn an_undecided_choose_arm_is_read_once() {
+    const N: usize = 50;
+    let items: String = (0..N)
+        .map(|i| format!("<Other Include=\"o{i}\" Link=\"$(P)/A{i}.fs\" />"))
+        .collect();
+    let silent = |pending: &str| {
+        let src = format!(
+            r#"<Project><PropertyGroup><P>pfx</P></PropertyGroup><ItemGroup>{pending}</ItemGroup><Choose><When Condition="'É' == 'é'"><ItemGroup>{items}</ItemGroup></When></Choose></Project>"#
+        );
+        crate::test_support::count_walk_costs(|| parse(&src))
+            .1
+            .silent_expansions
+    };
+    let without = silent("");
+    let with = silent(r#"<Compile Update="A.fs;B.fs" Link="a" />"#);
+    // The one more is the batch's expansion of the pending `Update`'s spec.
+    assert_eq!(with - without, N as u64 + 1, "texts the read scan expanded");
+}
+
 /// An operation other than an `Update` that runs flushes a pending batch, so
 /// the outcomes `Update`s MSBuild may not run fork into collapse at each
 /// `Include` between them, and the order after them stands. Unflushed, they
@@ -1556,6 +1644,26 @@ fn an_include_with_no_batch_pending_is_not_judged_for_the_batch() {
     );
     let (_, costs) = crate::test_support::count_walk_costs(|| parse(&src));
     assert_eq!(costs.batch_gates_judged, 0, "gates judged for the batch");
+}
+
+/// A followed `Update`'s gate is decided once, for whether MSBuild runs it
+/// and whether it certainly never does (codex found, round 37).
+#[test]
+fn a_followed_update_decides_its_gate_once() {
+    const N: usize = 50;
+    let src = format!(
+        "<Project><ItemGroup>{}</ItemGroup></Project>",
+        (0..N)
+            .map(|i| format!(
+                "<Compile Update=\"F{i}.fs\" Link=\"f\" Condition=\"'$(X)' == ''\" />"
+            ))
+            .collect::<String>()
+    );
+    let (_, costs) = crate::test_support::count_walk_costs(|| parse(&src));
+    assert_eq!(
+        costs.batch_gates_judged, N as u64,
+        "gates decided for the batch"
+    );
 }
 
 /// A restart adds the empty outcome to each batch the walk follows, so where
@@ -1897,6 +2005,26 @@ fn an_opaque_batch_keeps_an_outcome_a_known_collision_rules_out() {
   </ItemGroup></Project>"#,
     );
     assert!(p.items_uncertain, "{:?}", file_names(&p.items));
+}
+
+/// An over-decline, pinned and not fixed here (#1209): on Unix
+/// `$(MSBuildThisFileDirectory)/A.fs` expands to a rooted path holding `//`,
+/// which the batch keys as one `MaybeAdjustFilePath` may respell, though with
+/// no `\` anywhere in the spec it does not (codex round 37).
+#[test]
+#[cfg(not(windows))]
+fn a_doubled_separator_in_a_rooted_spec_declines_the_batch() {
+    let p = parse(
+        r#"<Project><ItemGroup><Compile Include="C.fs;A.fs;B.fs" /><Compile Update="$(MSBuildThisFileDirectory)/A.fs;$(MSBuildThisFileDirectory)/B.fs" CompileOrder="CompileFirst" /></ItemGroup></Project>"#,
+    );
+    assert!(p.items_uncertain, "{:?}", file_names(&p.items));
+    assert!(
+        p.diagnostics
+            .iter()
+            .any(|d| matches!(d.kind, DiagnosticKind::UnmodelledUpdateBatch { .. })),
+        "{:?}",
+        p.diagnostics
+    );
 }
 
 /// An over-decline, pinned and not fixed here (#1203): a Compile `Update`

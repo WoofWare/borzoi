@@ -435,10 +435,15 @@ pub(super) fn replay_deferred_item_groups(entry_doc: &Document<'_>, state: &mut 
                 taint_group_references_on_doubted_reads(node, state);
             }
         };
-        // The children of an `<ItemGroup>` the pass evaluates are reached one
-        // by one, walked or fed ([`note_element_reads`]).
+        // An `<ItemGroup>` in a `<Choose>` arm the walk could not decide, and
+        // MSBuild may take, is not evaluated, but its operations may run:
+        // they feed the batch as operations that may ([`feed_unwalked_group`]).
+        let fed_unwalked =
+            group.kind == DeferredGroupKind::ItemGroup && group.judge_only && !group.in_dead_arm;
+        // The children of an `<ItemGroup>` the pass evaluates or feeds are
+        // reached one by one, walked or fed ([`note_element_reads`]).
         let walked_element_by_element =
-            group.kind == DeferredGroupKind::ItemGroup && !group.judge_only;
+            group.kind == DeferredGroupKind::ItemGroup && (!group.judge_only || fed_unwalked);
         // Every `UsingTask` is registered after every `ItemGroup`, so a list
         // read there restarts no batch a later `Update` sees.
         let reads_may_restart = group.kind != DeferredGroupKind::UsingTask;
@@ -454,6 +459,8 @@ pub(super) fn replay_deferred_item_groups(entry_doc: &Document<'_>, state: &mut 
                 judge(node, &dir, state);
                 if !group.judge_only {
                     evaluate(node, state);
+                } else if fed_unwalked {
+                    feed_unwalked_group(node, state);
                 }
             }
             DeferredFileKey::Imported(index) => {
@@ -476,6 +483,8 @@ pub(super) fn replay_deferred_item_groups(entry_doc: &Document<'_>, state: &mut 
                 judge(node, &dir, state);
                 if !group.judge_only {
                     evaluate(node, state);
+                } else if fed_unwalked {
+                    feed_unwalked_group(node, state);
                 }
                 state.exit_this_file(frame);
             }
@@ -3042,10 +3051,20 @@ fn batched_item_type(node: Node<'_, '_>) -> Option<&'static str> {
 /// Whether `node`'s own gate is false whatever the names the walk is not
 /// certain of hold: MSBuild never runs it.
 fn certainly_skipped(node: Node<'_, '_>, state: &State<'_>) -> bool {
-    attribute(node, "Condition").is_some_and(|condition| {
-        directory_build::decision_from_certain_inputs(state, &condition, &state.entry_project_dir)
-            == Some(false)
-    })
+    gate_decision(node, state) == Some(Some(false))
+}
+
+/// `node`'s own gate decided from certain inputs
+/// ([`directory_build::decision_from_certain_inputs`]), or `None` where it
+/// has none, each decision counted.
+fn gate_decision(node: Node<'_, '_>, state: &State<'_>) -> Option<Option<bool>> {
+    let condition = attribute(node, "Condition")?;
+    crate::cost::count(|costs| costs.batch_gates_judged += 1);
+    Some(directory_build::decision_from_certain_inputs(
+        state,
+        &condition,
+        &state.entry_project_dir,
+    ))
 }
 
 /// Feed every child of an `<ItemGroup>` the walk does not walk to the batch
@@ -3325,15 +3344,14 @@ fn feed_update_batch(
             BatchVerdict::HoldsUnfollowed
         };
     }
-    let runs = operation_runs(node, state);
+    let (runs, never_runs) = operation_gate(node, state);
     let exact = rejection::operands_are_certain(state, raw);
     let Some(expansion) = update.expansion(state) else {
         unreachable!("an element with an `Update` spec has its expansion")
     };
     let project_dir = state.entry_project_dir.clone();
     // A metadatum of an `Update` MSBuild never runs never applies, stranded or
-    // not ([`feed_update_batch`]'s design-time outcome).
-    let never_runs = certainly_skipped(node, state);
+    // not ([`feed_update_batch`]'s design-time outcome): `never_runs`.
     let spec = expansion.value.ignoring_trust();
     // A spec in which an item expression holds a `;` is one the walk names
     // no fragments of ([`spec_fragments`]), so the batch is not followed past
@@ -3923,16 +3941,20 @@ enum OperationRuns {
 
 /// Whether MSBuild runs the item operation `node` ([`OperationRuns`]).
 fn operation_runs(node: Node<'_, '_>, state: &State<'_>) -> OperationRuns {
-    crate::cost::count(|costs| costs.batch_gates_judged += 1);
-    let decided_true = attribute(node, "Condition").is_none_or(|condition| {
-        directory_build::decision_from_certain_inputs(state, &condition, &state.entry_project_dir)
-            == Some(true)
-    });
-    if decided_true && state.reach_doubted == 0 {
+    operation_gate(node, state).0
+}
+
+/// [`operation_runs`], and whether MSBuild certainly never runs `node`
+/// ([`certainly_skipped`]), from one decision of its gate.
+fn operation_gate(node: Node<'_, '_>, state: &State<'_>) -> (OperationRuns, bool) {
+    let decision = gate_decision(node, state);
+    let decided_true = matches!(decision, None | Some(Some(true)));
+    let runs = if decided_true && state.reach_doubted == 0 {
         OperationRuns::Always
     } else {
         OperationRuns::Maybe
-    }
+    };
+    (runs, decision == Some(Some(false)))
 }
 
 /// Whether `id` has NuGet's package-id shape: ASCII `[A-Za-z0-9._-]`, non-empty,
