@@ -872,6 +872,12 @@ fn parse_inner_stopping_at(
     };
     errors.sort_by(&span_order);
     warnings.sort_by(&span_order);
+    #[cfg(feature = "view-reference")]
+    assert_views_agree_with_the_tree(
+        &root,
+        source,
+        errors.iter().all(|e| e.class != DiagnosticClass::Recovery),
+    );
     Parse {
         root,
         errors,
@@ -950,6 +956,54 @@ fn assert_glued_stars_are_the_lexer_s(root: &SyntaxNode, glued_stars: &[Range<us
             !inside.contains(&SyntaxKind::LPAREN_TOK) && !inside.contains(&SyntaxKind::IDENT_TOK),
             "the glued `(*)` at {span:?} is spelled {inside:?}, which is not widened"
         );
+    }
+}
+
+/// The exhaustive child views (`tools/astgen/src/views.rs`) agree with the
+/// tree. For every viewed node, its `view()` fails exactly when the node holds
+/// a non-trivia child whose kind the view does not declare, so the generated
+/// classifier and the table it was generated from say the same thing; and
+/// when the parse recovered from nothing (`clean`), no viewed node holds such
+/// a child, so the table covers what the parser emits.
+#[cfg(feature = "view-reference")]
+fn assert_views_agree_with_the_tree(root: &SyntaxNode, source: &str, clean: bool) {
+    use crate::syntax::{VIEWED, view_of};
+    for node in root.descendants() {
+        let Some(verdict) = view_of(&node) else {
+            continue;
+        };
+        let declared = VIEWED
+            .iter()
+            .find(|(kind, _)| *kind == node.kind())
+            .map(|(_, declared)| *declared)
+            .expect("every node with a view is in `VIEWED`");
+        let undeclared = node
+            .children_with_tokens()
+            .find(|el| !el.kind().is_trivia() && !declared.contains(&el.kind()));
+        let at = |range: crate::syntax::TextRange| {
+            let (start, end) = (usize::from(range.start()), usize::from(range.end()));
+            format!("{start}..{end} ({:?})", &source[start..end])
+        };
+        assert_eq!(
+            verdict.is_ok(),
+            undeclared.is_none(),
+            "the `{:?}` at {}: its view says {verdict:?}, but the first child its view does \
+             not declare is {:?}",
+            node.kind(),
+            at(node.text_range()),
+            undeclared.as_ref().map(|el| el.kind()),
+        );
+        if clean && let Some(el) = undeclared {
+            panic!(
+                "a parse that recovered from nothing holds a `{:?}` child at {} under the \
+                 `{:?}` at {}, which its view does not declare: declare it in \
+                 `tools/astgen/src/views.rs` and regenerate",
+                el.kind(),
+                at(el.text_range()),
+                node.kind(),
+                at(node.text_range()),
+            );
+        }
     }
 }
 

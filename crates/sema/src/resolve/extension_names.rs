@@ -570,16 +570,61 @@ fn member_head(m: &MemberDefn) -> MemberHead {
 
 /// The name a member's head pattern (`this.Name args`, `x.Prop`) spells: the
 /// last segment of its long identifier, when the pattern's children are
-/// exactly that identifier, any explicit type parameters and argument
-/// patterns, none of which changes the name. Any other child (an active
-/// pattern's name, a named-field group) leaves the head unnamed.
+/// exactly that identifier, at most one explicit type-parameter list and
+/// argument patterns, and the identifier's are names, dots and an operator's
+/// parentheses, none of which changes the name. Any other child (an active
+/// pattern's name, a named-field group, a child kind no view declares)
+/// leaves the head unnamed.
+///
+/// Both nodes are read through their exhaustive views, matched without a
+/// wildcard: a child kind a view comes to declare is a compile error here
+/// until this function decides it, and one no view declares is unnamed.
+#[deny(clippy::wildcard_enum_match_arm)]
 fn head_name(l: &borzoi_cst::syntax::LongIdentPat) -> MemberHead {
-    let Some(head) = l.head() else {
+    use borzoi_cst::syntax::{
+        LongIdentChild, LongIdentPatChild, LongIdentPatToken, LongIdentToken,
+    };
+    let Ok(children) = l.view() else {
         return MemberHead::Unnamed;
     };
-    let accounted = 1 + usize::from(l.typar_decls().is_some()) + l.args().count();
-    if l.syntax().children().count() != accounted {
+    let (mut heads, mut typar_lists) = (Vec::new(), 0);
+    for child in children {
+        match child {
+            LongIdentPatChild::LongIdent(head) => heads.push(head),
+            LongIdentPatChild::TyparDecls(_) => typar_lists += 1,
+            LongIdentPatChild::Arg(_) => {}
+            // A zero-width `ERROR` is the lex filter's layout virtual (before
+            // an adjacent argument, `this.M(x)`), or a recovery placeholder in
+            // a file the pass declares unknowable whole
+            // (`NamesUnknowable::Recovered`); one with text is debris.
+            LongIdentPatChild::Token(LongIdentPatToken::Error, t) => {
+                if !t.text().is_empty() {
+                    return MemberHead::Unnamed;
+                }
+            }
+            LongIdentPatChild::ActivePatName(_) | LongIdentPatChild::NamePatPairs(_) => {
+                return MemberHead::Unnamed;
+            }
+        }
+    }
+    let ([head], 0 | 1) = (heads.as_slice(), typar_lists) else {
         return MemberHead::Unnamed;
+    };
+    let Ok(segments) = head.view() else {
+        return MemberHead::Unnamed;
+    };
+    for segment in segments {
+        match segment {
+            LongIdentChild::Token(
+                LongIdentToken::Ident
+                | LongIdentToken::Dot
+                | LongIdentToken::New
+                | LongIdentToken::LParen
+                | LongIdentToken::RParen,
+                _,
+            ) => {}
+            LongIdentChild::ActivePatName(_) => return MemberHead::Unnamed,
+        }
     }
     match head.idents().last() {
         Some(t) => MemberHead::Named(id_text(&t).to_string()),
@@ -691,6 +736,23 @@ type T with
             all
         };
         assert_eq!(known(&n), (spellings(&["A", "C"]), spellings(&["B"])));
+    }
+
+    /// A member head is named through its exhaustive views: type parameters,
+    /// argument patterns, the lex filter's zero-width layout virtual before
+    /// an adjacent argument (`this.N(x)`), an operator's parentheses and a
+    /// quoted name all leave the name readable.
+    #[test]
+    fn member_heads_are_named_through_their_views() {
+        let n = names(
+            "module M\ntype System.String with\n    member s.G<'a> (x: 'a) = 1\n    member this.N(x) = x\n    member s.``Q R`` = 1\n    static member (+) (a: string, b: int) = 0\n",
+            false,
+        );
+        let (instance, statics) = known(&n);
+        for name in ["G", "N", "Q R"] {
+            assert!(instance.contains(&name.to_owned()), "{name}: {n:?}");
+        }
+        assert!(statics.contains(&"op_Addition".to_owned()), "{n:?}");
     }
 
     #[test]

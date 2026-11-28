@@ -10,6 +10,11 @@
 //! `ParsedInput` root enum, and the value enums the accessors return. The
 //! accessors stay hand-written in `crate::syntax`'s `union` module.
 //!
+//! [`union_views`] holds the exhaustive child views (`tools/astgen/src/views.rs`):
+//! for each node type a walk must read whole, a closed enum of its children
+//! and a `view()` over them. They are outside the union's lock and every
+//! facade.
+//!
 //! `facades` holds the per-version facades, each generated from its lock
 //! (`crates/cst/facades/<module>.lock`) and the union's.
 
@@ -18,6 +23,7 @@ pub mod union_exprs;
 pub mod union_pats;
 pub mod union_standalone;
 pub mod union_types;
+pub mod union_views;
 
 pub mod facades;
 

@@ -32,6 +32,15 @@ token-reference = []
 # on) find what a walk over every element of the tree finds.
 # Test-only, on for this crate's own tests through the self-reference below.
 walk-reference = []
+# Asserts on every parse that the exhaustive child views
+# (`syntax::generated::union_views`, generated from `tools/astgen/src/views.rs`)
+# agree with the tree: a viewed node's `view()` fails exactly when it holds a
+# child its view does not declare, and a parse that recovered from nothing
+# holds none. So a parser change that emits a new child under a viewed node
+# fails this crate's tests until the view declares it, and declaring it is a
+# compile error in every walk that matches the view.
+# Test-only, on for this crate's own tests through the self-reference below.
+view-reference = []
 # Exports the union typed facade (`syntax::{ImplFile, Expr, Pat, Type,
 # ModuleDecl, …}`) and each facade's `to_union` escape back to it. The union is the maximal, every-version surface and gains a variant
 # whenever a construct is modelled, so it carries no stability promise; without
@@ -69,6 +78,7 @@ borzoi-cst = { path = ".", features = [
     "rowan-reference",
     "token-reference",
     "walk-reference",
+    "view-reference",
     "unstable-union",
     "v4_6",
     "v4_7",

@@ -10,6 +10,7 @@
 mod common;
 
 mod accessor_coverage;
+mod child_views;
 mod corpus;
 mod corpus_walk;
 mod diagnostic_classes;
