@@ -20,9 +20,11 @@
 //!
 //! and holds, at every point, what the walk commits to against MSBuild: a
 //! certain Compile list or package set is MSBuild's exactly, and a
-//! `<ProjectReference>` list not flagged uncertain holds no item MSBuild lacks.
-//! The literal control in the item's own `Include` must commit on every item
-//! type and both seams, so the grid cannot pass by declining everything.
+//! `<ProjectReference>` list is held to the claim it makes
+//! (`common::check_reference_claim`: certain is MSBuild's exactly, incomplete
+//! holds only MSBuild's references in order). The literal control in the
+//! item's own `Include` must commit on every item type and both seams, a
+//! reference list certainly, so the grid cannot pass by declining everything.
 
 mod common;
 
@@ -134,8 +136,10 @@ fn ours(kind: Kind, parsed: &borzoi_msbuild::ParsedProject) -> (bool, Vec<String
                 .map(|item| normalised(&item.include))
                 .collect(),
         ),
+        // Any claim but uncertain is a commitment (#1181): an incomplete
+        // list's edges are still followed.
         Kind::ProjectReference => (
-            !parsed.project_references_uncertain,
+            common::reference_claim(parsed) != common::ReferenceClaim::Nothing,
             parsed
                 .project_references
                 .iter()
@@ -213,10 +217,17 @@ fn an_item_expression_holding_a_separator_makes_no_item_msbuild_lacks() {
                         // The control's list is MSBuild's exactly, references
                         // included, so a walk that dropped every reference on
                         // one seam fails here.
+                        // A reference list is graded by the claim it makes
+                        // (`common::check_reference_claim`); the control's
+                        // must be certain, so a walk that dropped every
+                        // reference on one seam fails here.
                         let holds = match kind {
                             Kind::Compile | Kind::PackageReference => ours == theirs,
-                            Kind::ProjectReference if control => ours == theirs,
-                            Kind::ProjectReference => ours.iter().all(|p| theirs.contains(p)),
+                            Kind::ProjectReference => {
+                                let claim = common::reference_claim(&parsed);
+                                (!control || claim == common::ReferenceClaim::Exact)
+                                    && common::check_reference_claim(claim, &ours, &theirs).is_ok()
+                            }
                         };
                         if !holds {
                             failures.push(format!(
@@ -320,16 +331,17 @@ fn a_literal_after_an_expression_with_a_double_quoted_parenthesis_is_kept() {
             with_resolver.then_some(resolver),
         )
         .expect("a well-formed document");
-        let (committed, ours) = ours(Kind::ProjectReference, &parsed);
+        let (_, ours) = ours(Kind::ProjectReference, &parsed);
         assert!(
             ours.contains(&explicit),
             "resolver: {with_resolver}: {ours:?} {:#?}",
             parsed.diagnostics
         );
-        assert!(
-            !committed || ours.iter().all(|p| theirs.contains(p)),
-            "resolver: {with_resolver}: {ours:?} {theirs:?}"
-        );
+        if let Err(failure) =
+            common::check_reference_claim(common::reference_claim(&parsed), &ours, &theirs)
+        {
+            panic!("resolver: {with_resolver}: {failure}");
+        }
     }
 }
 

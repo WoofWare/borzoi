@@ -700,16 +700,20 @@ fn compare_project_references(parsed: &ParsedProject, msbuild: &MsbuildOutput) -
         )
         .classed("decline(project_references_uncertain)".to_string());
     }
+    // Lexically normalised and nothing else, as the LSP reads a published
+    // path: a symlink resolved or a backslash turned into a separator would
+    // let an edge the LSP follows elsewhere pass as MSBuild's.
+    let published = |path: &Path| normalize_lexical(path).to_string_lossy().into_owned();
     let ours: Vec<String> = parsed
         .project_references
         .iter()
-        .map(|item| path_key(&item.include))
+        .map(|item| published(&item.include))
         .collect();
     let theirs: Vec<String> = msbuild
         .items
         .project_reference
         .iter()
-        .map(|item| path_key(Path::new(&item.full_path)))
+        .map(|item| published(Path::new(&item.full_path)))
         .collect();
     if claim == common::ReferenceClaim::Within {
         // The edges an incomplete list holds are still followed: each must be
