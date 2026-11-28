@@ -2608,9 +2608,10 @@ fn arm_history_cells() -> Vec<GridCell> {
         }
     };
     let mut cells = Vec::new();
-    // (Include text, condition) pairs, each calling on `U`, the last beside
-    // `X`, a write the walk refuses, so holds no value of, and MSBuild holds
-    // `Debug` of.
+    // (Include text, condition) pairs, each calling on `U`, the last two
+    // beside `X`, a write the walk refuses, so holds no value of, and MSBuild
+    // holds `Debug` of: the last reads `U` only past a step that throws on
+    // the values held, which a value tried for `X` gets past.
     let calls: &[(&str, &str)] = &[
         (
             "$([MSBuild]::VersionLessThan('$(B)$(A)','$(U)'))",
@@ -2625,6 +2626,10 @@ fn arm_history_cells() -> Vec<GridCell> {
             "$([MSBuild]::VersionLessThan('$(U)v$(X)','1.0'))",
             "$([MSBuild]::VersionLessThan('$(U)v$(X)','1.0'))",
         ),
+        (
+            "$(Q.Split('q$(X)')[1].Split('q$(U)')[1])",
+            "'$(Q.Split(`q$(X)`)[1].Split(`q$(U)`)[1])' == ''",
+        ),
     ];
     for arm in [UNDECIDED_TRUE, UNDECIDED_FALSE] {
         for (text, condition) in calls {
@@ -2635,7 +2640,7 @@ fn arm_history_cells() -> Vec<GridCell> {
                     xml_attribute(condition)
                 ),
             ] {
-                for before in ["", "bad", "2.0", "abcd"] {
+                for before in ["", "1", "bad", "2.0", "abcd"] {
                     for written in ["nope", "3.0"] {
                         for a in ["v1.0", "abc"] {
                             for b in ["", "1"] {
@@ -2643,7 +2648,7 @@ fn arm_history_cells() -> Vec<GridCell> {
                                 let document = move |arm_write: &str, history: &[bool]| {
                                     let site = &site_text;
                                     format!(
-                                        "<Project>\n  <PropertyGroup><U>{before}</U><X>{REFUSED}</X></PropertyGroup>\n  \
+                                        "<Project>\n  <PropertyGroup><U>{before}</U><X>{REFUSED}</X><Q>axc1d</Q></PropertyGroup>\n  \
                                          <Choose><When Condition=\"{}\">\
                                          <PropertyGroup><A>abc</A><B>abc</B>{arm_write}</PropertyGroup>\
                                          <ItemGroup>{site}</ItemGroup></When></Choose>\n  \

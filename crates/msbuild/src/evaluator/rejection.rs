@@ -458,6 +458,18 @@ pub(super) fn judged_certain(state: &State<'_>, name: &str) -> bool {
     certain
 }
 
+/// Whether the walk holds a value of `name` that content the walk does not
+/// take may have replaced on the path being judged
+/// ([`State::speculatively_unheld`]): a value from before that content, which
+/// MSBuild may hold there or not. Values tried for a name the walk holds none
+/// of prove nothing beside such a name, which sits at a value that need not be
+/// MSBuild's on that path, so a judgement reading one is made on the values
+/// held throughout (#1164). A name the walk holds no value of at all is no
+/// such name: the values tried for it stand for the content's write too.
+pub(super) fn holds_a_stale_value(state: &State<'_>, name: &str) -> bool {
+    state.lookup.is_bound(name) && state.speculatively_unheld(name)
+}
+
 /// Whether the walk holds a value of `name` MSBuild may hold, as a Possible
 /// site asks: one it computed (bound), however it doubts it, or an undefined
 /// read it shows exact. A value the walk doubts is one MSBuild may hold among
@@ -731,7 +743,7 @@ pub(super) fn judge_condition_rejection(
     // knows ([`judge_throwing_expression`], #1164). Asked of the leaves the
     // judgement reaches, not of every name the condition spells.
     let doubted = |name: &str| !holds_a_value_msbuild_may(state, name);
-    let unsettled = |name: &str| state.speculatively_unheld(name);
+    let unsettled = |name: &str| holds_a_stale_value(state, name);
     // Which operands MSBuild reaches is main's to decide, in either walk: a
     // name the second walk holds certain may be one whose value is not the
     // build's (#1153). What the second walk holds is the path's settlement.
@@ -851,12 +863,13 @@ pub(super) fn judge_throwing_expression(
     text: u32,
 ) {
     let unheld = |name: &str| !holds_a_value_msbuild_may(state, name);
+    // Every name the expression spells, not only those it read before it
+    // threw on the values held: values tried past the throw read on.
     let (held, on_unheld): (Vec<Thrown>, Vec<Thrown>) = thrown.into_iter().partition(|thrown| {
         !thrown.reads.iter().any(|name| unheld(name))
-            || thrown
-                .reads
+            || condition::expression_names(&thrown.expression)
                 .iter()
-                .any(|name| state.speculatively_unheld(name))
+                .any(|name| holds_a_stale_value(state, name))
     });
     // The first held throw on names read certain, as each walk reads them:
     // the second walk sets a rewritten name's refusal aside. Which throw is

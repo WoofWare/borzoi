@@ -584,8 +584,10 @@ struct OnHeld<'a> {
     /// The names whose value held MSBuild need not hold at all, for which
     /// values are tried ([`throws_whatever_they_return`]).
     doubted: &'a dyn Fn(&str) -> bool,
-    /// The names content the walk does not take writes, whose value held is
-    /// one MSBuild may hold, but whose value on that path it does not know.
+    /// The names whose value held content the walk does not take may have
+    /// replaced on the path being judged (`rejection::holds_a_stale_value`):
+    /// one MSBuild may hold, but whose value on that path the walk does not
+    /// know.
     /// A leaf reading one is judged on the values held by its kind, and one
     /// whose boolean is unknown there may throw: a value tried for a doubted
     /// name beside it proves nothing, and trying values there is not
@@ -1374,6 +1376,15 @@ fn scalar_reads_toolset_version(scalar: &ScalarExpr) -> bool {
 }
 
 /// The properties `raw` names in `$(…)` references.
+/// Every name `raw` reads, by reference or through an intrinsic it calls
+/// ([`implicit_references`]), whatever its evaluation reaches.
+pub(crate) fn expression_names(raw: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    explicit_references(raw, &mut names);
+    implicit_references(raw, &mut names);
+    names
+}
+
 fn explicit_references(raw: &str, out: &mut Vec<String>) {
     out.extend(super::properties::property_references(raw).map(str::to_string));
 }

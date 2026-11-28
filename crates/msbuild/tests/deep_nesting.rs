@@ -611,18 +611,26 @@ fn harmless_reads_beside_writes(width: usize) -> String {
     )
 }
 
-/// A group's judgement asks the path of a name only where a failure or an
-/// unknown boolean needs it (`PathOf::reaches`): [`short_circuited_reads`]'
-/// gates read `P` past `false And`, and [`harmless_reads_beside_writes`]'
-/// evaluate without failing, so however many groups and writes, the walk
-/// examines `P`'s writes only to settle it, once. Asking of every name a
-/// condition reads costs a write per group per write. Counted, so no load on
-/// the machine moves it.
+/// [`harmless_reads_beside_writes`], the groups' gates a comparison whose
+/// boolean the walk cannot compute (`'$(P)É' == 'é'`).
+fn undecided_reads_beside_writes(width: usize) -> String {
+    harmless_reads_beside_writes(width).replace("'$(P)' == 'z'", "'$(P)É' == 'é'")
+}
+
+/// A group's judgement asks the path of a name only where it holds a value
+/// the path may have replaced and a failure or an unknown boolean needs it
+/// (`PathOf::reaches`): [`short_circuited_reads`]' gates read `P` past
+/// `false And`, [`harmless_reads_beside_writes`]' evaluate without failing,
+/// and in [`undecided_reads_beside_writes`] `P` holds no value outside the
+/// arms, so however many groups and writes, the walk examines `P`'s writes
+/// only to settle it, once. Asking of every name a condition reads costs a
+/// write per group per write. Counted, so no load on the machine moves it.
 #[test]
 fn a_leaf_that_needs_no_path_asks_none() {
     for shape in [
         short_circuited_reads as fn(usize) -> String,
         harmless_reads_beside_writes,
+        undecided_reads_beside_writes,
     ] {
         for width in [1, 2, 200] {
             let examined = walk_costs(shape(width)).path_writes_examined;
