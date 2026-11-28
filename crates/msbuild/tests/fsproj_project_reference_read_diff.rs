@@ -972,3 +972,183 @@ fn dead_reference_row(oracle: &mut Oracle, row: &str) {
         "{ours:?} {theirs:?}"
     );
 }
+
+/// A `<ProjectReference>` metadatum's own gate on a name the walk holds no
+/// exact value of (a toolset name such as `MSBuildStartupDirectory`) is a gate
+/// it cannot decide: MSBuild may take it either way. So the metadatum it
+/// guards resolves `Unknown` where it is read by value, and counts as possibly
+/// present where it is read by its presence (the significant P2P names), in
+/// both polarities. The same child under a literal gate resolves as written,
+/// the control.
+#[test]
+fn a_metadatum_gate_the_walk_cannot_decide_leaves_the_metadatum_unknown() {
+    const BY_VALUE: [&str; 4] = [
+        "ReferenceOutputAssembly",
+        "IncludeAssets",
+        "ExcludeAssets",
+        "PrivateAssets",
+    ];
+    const BY_PRESENCE: [&str; 9] = [
+        "BuildReference",
+        "Targets",
+        "SetConfiguration",
+        "SetPlatform",
+        "SetTargetFramework",
+        "AdditionalProperties",
+        "UndefineProperties",
+        "GlobalPropertiesToRemove",
+        "SkipGetTargetFrameworkProperties",
+    ];
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let root = borzoi_msbuild::observed::host_fs::canonicalize(dir.path()).expect("canonicalize");
+    let proj = layout(&root);
+    let item = |condition: &str, name: &str| {
+        let xml = format!(
+            "<Project><ItemGroup><ProjectReference Include=\"A.fsproj\">\
+             <{name} Condition=\"{condition}\">false</{name}>\
+             </ProjectReference></ItemGroup></Project>"
+        );
+        let parsed = parse_fsproj_with_imports(
+            &borzoi_msbuild::ProjectFile::buffer(&proj, &xml)
+                .expect("a project path spelt as its full path"),
+            &HashMap::new(),
+            &common::oracle_environment(),
+            None,
+            None,
+        )
+        .expect("well-formed XML parses");
+        parsed
+            .project_references
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| panic!("the reference is captured: {xml}"))
+    };
+    let value_of = |item: &borzoi_msbuild::ResolvedItem, name: &str| match name {
+        "ReferenceOutputAssembly" => item.reference_output_assembly.clone(),
+        "IncludeAssets" => item.include_assets.clone(),
+        "ExcludeAssets" => item.exclude_assets.clone(),
+        "PrivateAssets" => item.private_assets.clone(),
+        other => unreachable!("{other}"),
+    };
+    let undecided = [
+        "'$(MSBuildStartupDirectory)' != ''",
+        "'$(MSBuildStartupDirectory)' == ''",
+    ];
+    for name in BY_VALUE {
+        for gate in undecided {
+            assert_eq!(
+                value_of(&item(gate, name), name),
+                borzoi_msbuild::ItemMetadataValue::Unknown,
+                "{name} under `{gate}`"
+            );
+        }
+        assert_eq!(
+            value_of(&item("true", name), name),
+            borzoi_msbuild::ItemMetadataValue::known("false"),
+            "{name} under a literal true gate"
+        );
+        assert_eq!(
+            value_of(&item("false", name), name),
+            borzoi_msbuild::ItemMetadataValue::ABSENT,
+            "{name} under a literal false gate"
+        );
+    }
+    for name in BY_PRESENCE {
+        for gate in undecided {
+            assert!(
+                item(gate, name).unmodelled_reference_metadata,
+                "{name} under `{gate}`"
+            );
+        }
+        assert!(item("true", name).unmodelled_reference_metadata, "{name}");
+        assert!(!item("false", name).unmodelled_reference_metadata, "{name}");
+    }
+}
+
+/// A `ReferenceOutputAssembly` write under a gate the walk cannot settle (on
+/// a toolset name, on a refused write, or one it does not model), held to
+/// MSBuild in both worlds: the same document with the gate written `true`,
+/// and written `false`. Wherever the walk resolves the metadatum to a value,
+/// MSBuild holds that value in both, so it is the build's whichever way the
+/// gate goes. Not claimed: that a write leaving the value as it stands (an
+/// empty write, one expanding to exactly nothing, the standing value again)
+/// is resolved; it is declined (#1213), and this grid holds the soundness
+/// half only.
+#[test]
+fn a_write_under_an_unsettled_gate_resolves_only_where_both_worlds_agree() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let root = borzoi_msbuild::observed::host_fs::canonicalize(dir.path()).expect("canonicalize");
+    let proj = layout(&root);
+    let mut oracle = Oracle::spawn();
+    let normalized = |value: Option<&String>| value.filter(|v| !v.is_empty()).cloned();
+    let msbuild = |oracle: &mut Oracle, xml: &str| -> Option<String> {
+        std::fs::write(&proj, xml).unwrap();
+        let items = oracle
+            .items_meta(xml, &proj, "ProjectReference", &["ReferenceOutputAssembly"])
+            .unwrap_or_else(|| panic!("MSBuild evaluates the document:\n{xml}"));
+        assert_eq!(items.len(), 1, "{xml}");
+        normalized(items[0].1.get("ReferenceOutputAssembly"))
+    };
+    let gates = [
+        "'$(MSBuildStartupDirectory)' != ''",
+        "'$(Gate)' == 'w'",
+        "'\u{c9}' == '\u{e9}'",
+    ];
+    let mut failures = Vec::new();
+    // A standing value from an attribute, or from a taken child write, one
+    // of significant whitespace alone among them.
+    for (prior, prior_child) in [
+        ("", ""),
+        (" ReferenceOutputAssembly=\"false\"", ""),
+        (" ReferenceOutputAssembly=\"true\"", ""),
+        (
+            "",
+            "<ReferenceOutputAssembly>&#32;</ReferenceOutputAssembly>",
+        ),
+    ] {
+        for gate in gates {
+            for write in ["", "&#32;", "false", "true", "$(NoSuchProp)", "$(Gate)"] {
+                let document = |condition: &str| {
+                    format!(
+                        "<Project><PropertyGroup><Gate>{REFUSED_BODY}</Gate></PropertyGroup>\
+                         <ItemGroup><ProjectReference Include=\"A.fsproj\"{prior}>{prior_child}\
+                         <ReferenceOutputAssembly Condition=\"{condition}\">{write}</ReferenceOutputAssembly>\
+                         </ProjectReference></ItemGroup></Project>"
+                    )
+                };
+                let xml = document(gate);
+                let taken = msbuild(&mut oracle, &document("true"));
+                let skipped = msbuild(&mut oracle, &document("false"));
+                let parsed = parse_fsproj_with_imports(
+                    &borzoi_msbuild::ProjectFile::buffer(&proj, &xml)
+                        .expect("a project path spelt as its full path"),
+                    &HashMap::new(),
+                    &common::oracle_environment(),
+                    None,
+                    None,
+                )
+                .expect("well-formed XML parses");
+                let ours = parsed.project_references[0]
+                    .reference_output_assembly
+                    .clone();
+                let cell = format!(
+                    "prior `{prior}{prior_child}`, gate `{gate}`, write `{write}`: ours {ours:?}, MSBuild {taken:?} / {skipped:?}"
+                );
+                match &ours {
+                    borzoi_msbuild::ItemMetadataValue::Known(value) => {
+                        if value.as_ref() != taken.as_ref() || taken != skipped {
+                            failures.push(format!("resolved where a world differs: {cell}"));
+                        }
+                    }
+                    borzoi_msbuild::ItemMetadataValue::Unknown => {}
+                }
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{}:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
