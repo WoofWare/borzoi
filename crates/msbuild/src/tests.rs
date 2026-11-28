@@ -1518,11 +1518,11 @@ fn a_plain_metadatum_is_read_once() {
     assert_eq!(with - without, N as u64 + 1, "texts the read scan expanded");
 }
 
-/// The operations of a `<Choose>` arm the walk cannot decide may run, so they
-/// feed the batch as operations that may (codex found, round 37). Taken, the
-/// arm's `Update="Z.fs"` leaves a batch pending, and neither later `Update`
-/// strands (probed by codex, SDK 10.0.401); the walk declines, and names no
-/// certain strand.
+/// The operations of a `<Choose>` arm the walk cannot decide may run, so the
+/// batch of each type they touch is followed no further (codex found, round
+/// 37). Taken, the arm's `Update="Z.fs"` leaves a batch pending, and neither
+/// later `Update` strands (probed by codex, SDK 10.0.401); the walk declines,
+/// and names no certain strand.
 #[test]
 #[cfg(not(windows))]
 fn an_undecided_choose_arm_feeds_the_batch() {

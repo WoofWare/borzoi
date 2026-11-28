@@ -436,14 +436,14 @@ pub(super) fn replay_deferred_item_groups(entry_doc: &Document<'_>, state: &mut 
             }
         };
         // An `<ItemGroup>` in a `<Choose>` arm the walk could not decide, and
-        // MSBuild may take, is not evaluated, but its operations may run:
-        // they feed the batch as operations that may ([`feed_unwalked_group`]).
-        let fed_unwalked =
+        // MSBuild may take, is not evaluated, but its operations may run
+        // ([`forget_batches_of`]).
+        let may_run_unwalked =
             group.kind == DeferredGroupKind::ItemGroup && group.judge_only && !group.in_dead_arm;
-        // The children of an `<ItemGroup>` the pass evaluates or feeds are
-        // reached one by one, walked or fed ([`note_element_reads`]).
+        // The children of an `<ItemGroup>` the pass evaluates are reached one
+        // by one, walked or fed ([`note_element_reads`]).
         let walked_element_by_element =
-            group.kind == DeferredGroupKind::ItemGroup && (!group.judge_only || fed_unwalked);
+            group.kind == DeferredGroupKind::ItemGroup && !group.judge_only;
         // Every `UsingTask` is registered after every `ItemGroup`, so a list
         // read there restarts no batch a later `Update` sees.
         let reads_may_restart = group.kind != DeferredGroupKind::UsingTask;
@@ -459,8 +459,8 @@ pub(super) fn replay_deferred_item_groups(entry_doc: &Document<'_>, state: &mut 
                 judge(node, &dir, state);
                 if !group.judge_only {
                     evaluate(node, state);
-                } else if fed_unwalked {
-                    feed_unwalked_group(node, state);
+                } else if may_run_unwalked {
+                    forget_batches_of(node, state);
                 }
             }
             DeferredFileKey::Imported(index) => {
@@ -483,8 +483,8 @@ pub(super) fn replay_deferred_item_groups(entry_doc: &Document<'_>, state: &mut 
                 judge(node, &dir, state);
                 if !group.judge_only {
                     evaluate(node, state);
-                } else if fed_unwalked {
-                    feed_unwalked_group(node, state);
+                } else if may_run_unwalked {
+                    forget_batches_of(node, state);
                 }
                 state.exit_this_file(frame);
             }
@@ -3065,6 +3065,22 @@ fn gate_decision(node: Node<'_, '_>, state: &State<'_>) -> Option<Option<bool>> 
         &condition,
         &state.entry_project_dir,
     ))
+}
+
+/// Follow no further the batch of each item type the `<ItemGroup>` at `node`
+/// has an operation of: a group in a `<Choose>` arm the walk could not
+/// decide, whose operations may run. Fed as operations that may run
+/// ([`feed_unwalked_group`]), its gates would be decided, and deciding them
+/// probes files MSBuild, which may evaluate no gate there, never consults;
+/// a batch the walk does not follow decides nothing.
+fn forget_batches_of(node: Node<'_, '_>, state: &mut State<'_>) {
+    for child in node.children().filter(Node::is_element) {
+        if let Some(item_type) = batched_item_type(child) {
+            state
+                .update_batches
+                .insert(item_key(item_type), BatchState::Unknown);
+        }
+    }
 }
 
 /// Feed every child of an `<ItemGroup>` the walk does not walk to the batch
