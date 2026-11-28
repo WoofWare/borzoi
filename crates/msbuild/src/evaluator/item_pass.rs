@@ -1163,7 +1163,11 @@ fn walk_item_child_inner(node: Node<'_, '_>, kind: ItemKind, state: &mut State<'
         && modelled_item_list_operation_may_change_list(node, kind)
         && state.condition_reads_untrusted_value(node);
     let is_mutation = node.has_attribute("Update") || node.has_attribute("Remove");
-    match evaluate_item_condition(node, state) {
+    let gate = evaluate_item_condition(node, state);
+    if kind == ItemKind::Compile && !matches!(gate, CondGate::Skip) {
+        note_throwing_update_key(node, state);
+    }
+    match gate {
         CondGate::Run => {
             // Kept only on an untrusted true: an Include the real build may
             // not make would be a phantom edge. (A mutation that runs is
@@ -2118,6 +2122,31 @@ fn resolve_compile_update_targets(
     Some(targets)
 }
 
+/// Note that MSBuild may reject the project where the Compile `Update` at
+/// `node`, which may run, keys the list over a NUL: an item included before
+/// it, or a fragment of its own (`item_spec::key_may_throw`). Whatever
+/// metadata it writes: SDK 8.0.428 keys the list before it applies any.
+fn note_throwing_update_key(node: Node<'_, '_>, state: &mut State<'_>) {
+    let Some(raw) = attribute(node, "Update").filter(|_| !node.has_attribute("Include")) else {
+        return;
+    };
+    let throws = state.throwing_compile_key_included || {
+        let expansion = expand_silent(&raw, state);
+        spec_fragments(expansion.value.ignoring_trust()).is_ok_and(|mut fragments| {
+            fragments.any(|f| item_spec::key_may_throw(&fragment_identity(f)))
+        })
+    };
+    if throws {
+        state.note_rejection(
+            crate::RejectionCertainty::Possible,
+            crate::RejectionCause::ThrowingItemKey {
+                item: "Compile".to_string(),
+            },
+            node.range(),
+        );
+    }
+}
+
 /// Decline the Compile `Update` at `node`, spelt `raw`, whose match rests on
 /// a spelling MSBuild's versions key differently
 /// (`item_spec::key_is_version_dependent`).
@@ -2125,7 +2154,7 @@ fn note_version_dependent_update(node: Node<'_, '_>, raw: &str, state: &mut Stat
     state.push(
         DiagnosticKind::UnsupportedItemOperation {
             operation: format!(
-                "Compile Update=\"{raw}\" whose match rests on a spelling with a trailing separator or a NUL, which MSBuild's versions key differently"
+                "Compile Update=\"{raw}\" whose match rests on a spelling with a trailing separator, which MSBuild's versions key differently"
             ),
         },
         node.range(),
@@ -4497,10 +4526,10 @@ fn push_resolved_item(
     item: ResolvedItem,
     identity: Option<String>,
 ) {
-    if item.kind == ItemKind::Compile
-        && item_spec::key_is_version_dependent(&item.include.to_string_lossy())
-    {
-        state.version_dependent_compile_included = true;
+    if item.kind == ItemKind::Compile {
+        let identity = item.include.to_string_lossy();
+        state.version_dependent_compile_included |= item_spec::key_is_version_dependent(&identity);
+        state.throwing_compile_key_included |= item_spec::key_may_throw(&identity);
     }
     let order = state.next_item_order;
     state.next_item_order += 1;

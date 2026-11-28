@@ -981,6 +981,10 @@ struct State<'r> {
     /// differently (`item_spec::key_is_version_dependent`) has been included:
     /// a Compile `Update` after it declines.
     version_dependent_compile_included: bool,
+    /// Whether a Compile item whose identity keying may throw on
+    /// (`item_spec::key_may_throw`) has been included: a Compile `Update`
+    /// after it that may run may have the project rejected.
+    throwing_compile_key_included: bool,
     /// `<PackageReference>` / `<FrameworkReference>` items — the NuGet
     /// dependency set. Separate buckets from Compile/ProjectReference: a
     /// package reference is neither a source input nor an inter-project
@@ -1891,6 +1895,7 @@ impl<'r> State<'r> {
             project_references: Vec::new(),
             captured_package_references: Vec::new(),
             version_dependent_compile_included: false,
+            throwing_compile_key_included: false,
             package_references: Vec::new(),
             #[cfg(any(test, feature = "test-support"))]
             package_reference_rows: Vec::new(),
@@ -2386,6 +2391,7 @@ impl<'r> State<'r> {
             // `finalize_package_references`.
             captured_package_references: _,
             version_dependent_compile_included: _,
+            throwing_compile_key_included: _,
             package_references,
             #[cfg(any(test, feature = "test-support"))]
                 package_reference_rows: _,

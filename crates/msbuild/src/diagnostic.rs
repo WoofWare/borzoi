@@ -302,6 +302,11 @@ pub enum RejectionCause {
     /// holds: a `Remove` with `MatchOnMetadata` that names more than item
     /// types. `item` is the item's type.
     IllegalItemOperation { item: String },
+    /// An `Update` of `item`'s type that may run keys the list while an item
+    /// of that type, or a fragment of the `Update`, holds a NUL: SDK 8.0.428's
+    /// `GetFullPath` throws on it, where SDK 10.0.401's
+    /// `NormalizePathForComparisonNoThrow` does not (#1195).
+    ThrowingItemKey { item: String },
     /// A property expression MSBuild evaluates and throws on (MSB4184): an
     /// indexer out of range, a malformed `[MSBuild]::Version*` operand.
     /// `expression` is the `$(…)` text.

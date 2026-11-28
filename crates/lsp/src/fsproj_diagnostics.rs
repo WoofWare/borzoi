@@ -1039,6 +1039,14 @@ fn rejection_message(cause: &RejectionCause, certain: bool) -> String {
                  `MatchOnMetadata` by more than item types — no evaluated value is trusted"
             )
         }
+        RejectionCause::ThrowingItemKey { item } => {
+            let rejects = if certain { "rejects" } else { "may reject" };
+            format!(
+                "MSBuild {rejects} this project: a `<{item}>` `Update` keys an item whose \
+                 identity holds a NUL, which some MSBuild versions throw on — no evaluated \
+                 value is trusted"
+            )
+        }
         RejectionCause::ThrowingExpression { expression } if certain => format!(
             "MSBuild rejects this project: it cannot evaluate the property function \
              `{expression}` — no evaluated value is trusted"

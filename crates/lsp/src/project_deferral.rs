@@ -1149,6 +1149,10 @@ fn render_rejection_cause(cause: &RejectionCause, certain: bool) -> String {
             "a `<{item}>` item removing with `MatchOnMetadata` by more than item types, so \
              MSBuild {rejects} the whole project"
         ),
+        RejectionCause::ThrowingItemKey { item } => format!(
+            "a `<{item}>` `Update` keying an item whose identity holds a NUL, which some \
+             MSBuild versions throw on, so MSBuild {rejects} the whole project"
+        ),
         RejectionCause::ThrowingExpression { expression } if certain => format!(
             "the property function `{expression}`, which MSBuild cannot evaluate, so MSBuild \
              {rejects} the whole project"

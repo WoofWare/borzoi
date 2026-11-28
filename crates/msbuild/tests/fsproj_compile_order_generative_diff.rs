@@ -1427,11 +1427,18 @@ const CORNERS: &[(&str, bool)] = &[
     ),
     // An included identity holding a NUL: SDK 8's `GetFullPath` throws on it
     // when an `Update` keys the list, so SDK 8 rejects the project, though
-    // the item is excluded from the order. It declines.
+    // the item is excluded from the order, and whatever metadata the
+    // `Update` writes. Both decline.
     (
         r#"    <Compile Include="C.fs;A.fs" />
     <Compile Include="Bad%00.fs" CompileOrder="Excluded" />
     <Compile Update="A.fs" CompileOrder="CompileFirst" />"#,
+        false,
+    ),
+    (
+        r#"    <Compile Include="C.fs;A.fs" />
+    <Compile Include="Bad%00.fs" CompileOrder="Excluded" />
+    <Compile Update="A.fs" Visible="false" />"#,
         false,
     ),
 ];

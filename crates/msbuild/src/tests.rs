@@ -495,12 +495,10 @@ fn compile_update_compile_order_scales_with_a_long_update_spec() {
     );
 }
 
-/// MSBuild's versions key a spelling with a trailing separator or a NUL
-/// differently (#1195): SDK 10.0.401 trims the separator and never throws,
-/// SDK 8.0.425 keeps it, and its `GetFullPath` throws on a NUL while an
-/// `Update` keys the list. So a Compile `Update` declines where its own
-/// fragment spells one, or where an item included before it does; an
-/// `Update` matching neither stands.
+/// MSBuild's versions key a spelling with a trailing separator differently
+/// (#1195): SDK 10.0.401 trims the separator, and SDK 8.0.425 keeps it. So a
+/// Compile `Update` declines where its own fragment spells one, or where an
+/// item included before it does; an `Update` matching neither stands.
 #[test]
 #[cfg(not(windows))]
 fn a_compile_update_declines_on_a_spelling_msbuild_versions_key_differently() {
@@ -509,7 +507,7 @@ fn a_compile_update_declines_on_a_spelling_msbuild_versions_key_differently() {
             matches!(
                 &d.kind,
                 DiagnosticKind::UnsupportedItemOperation { operation }
-                    if operation.contains("trailing separator or a NUL")
+                    if operation.contains("trailing separator")
             )
         })
     };
@@ -520,8 +518,6 @@ fn a_compile_update_declines_on_a_spelling_msbuild_versions_key_differently() {
         r#"<Compile Include="C.fs;A.fs" /><Compile Update="A.fs/" CompileOrder="CompileFirst" />"#,
         // Separators alone.
         r#"<Compile Include="A.fs;$(MSBuildProjectDirectory)" /><Compile Update="//" CompileOrder="CompileFirst" />"#,
-        // An included NUL, though the item is excluded from the order.
-        r#"<Compile Include="C.fs;A.fs" /><Compile Include="Bad%00.fs" CompileOrder="Excluded" /><Compile Update="A.fs" CompileOrder="CompileFirst" />"#,
     ] {
         let p = parse(&format!(
             "<Project><ItemGroup>{items}</ItemGroup></Project>"
@@ -546,6 +542,50 @@ fn a_compile_update_declines_on_a_spelling_msbuild_versions_key_differently() {
         ));
         assert!(!p.items_uncertain, "{items}: {:?}", p.diagnostics);
         assert_eq!(file_names(&p.items), order, "{items}");
+    }
+}
+
+/// SDK 8.0.425's `GetFullPath` throws on a NUL while an `Update` keys the
+/// list, where SDK 10.0.401 does not, so SDK 8 rejects the project (codex
+/// probed SDK 8.0.428 on the fix of #1195). So a Compile `Update` that may run
+/// over an included NUL, or holding one, may have the project rejected,
+/// whatever metadata it writes: every answer is withdrawn, the properties
+/// with the Compile order. One MSBuild certainly skips keys nothing.
+#[test]
+#[cfg(not(windows))]
+fn a_compile_update_keying_a_nul_may_have_the_project_rejected() {
+    let rejected = |p: &ParsedProject| {
+        p.rejection.as_ref().is_some_and(|rejection| {
+            rejection.certainty == crate::RejectionCertainty::Possible
+                && matches!(&rejection.cause, crate::RejectionCause::ThrowingItemKey { item } if item == "Compile")
+        })
+    };
+    for items in [
+        // Excluded from the order, then an `Update` writing it.
+        r#"<Compile Include="C.fs;A.fs" /><Compile Include="Bad%00.fs" CompileOrder="Excluded" /><Compile Update="A.fs" CompileOrder="CompileFirst" />"#,
+        // An `Update` writing other metadata.
+        r#"<Compile Include="C.fs;A.fs" /><Compile Include="Bad%00.fs" CompileOrder="Excluded" /><Compile Update="A.fs" Visible="false" />"#,
+        // The `Update`'s own fragment.
+        r#"<Compile Include="C.fs;A.fs" /><Compile Update="Bad%00.fs" Visible="false" />"#,
+        // An `Update` under a gate the walk cannot decide.
+        r#"<Compile Include="C.fs;Bad%00.fs" /><Compile Update="A.fs" Visible="false" Condition="'É' == 'é'" />"#,
+    ] {
+        let p = parse(&format!(
+            "<Project><PropertyGroup><P>v</P></PropertyGroup><ItemGroup>{items}</ItemGroup></Project>"
+        ));
+        assert!(rejected(&p), "{items}: {:?}", p.rejection);
+        assert!(p.items_uncertain, "{items}");
+    }
+    // With no `Update` that may run after it, the NUL is MSBuild's to keep.
+    for items in [
+        r#"<Compile Include="C.fs;Bad%00.fs" />"#,
+        r#"<Compile Include="C.fs;Bad%00.fs" /><Compile Update="A.fs" Visible="false" Condition="false" />"#,
+        r#"<Compile Update="A.fs" Visible="false" /><Compile Include="C.fs;Bad%00.fs" />"#,
+    ] {
+        let p = parse(&format!(
+            "<Project><ItemGroup>{items}</ItemGroup></Project>"
+        ));
+        assert!(!rejected(&p), "{items}: {:?}", p.rejection);
     }
 }
 
