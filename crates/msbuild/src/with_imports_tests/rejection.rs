@@ -2176,6 +2176,24 @@ fn one_cause_in_two_texts_of_an_element_is_two_sites() {
     }
 }
 
+/// A condition leaf reading a name content the walk does not take writes,
+/// whose boolean is unknown on the values held, may throw: `'$(B)' == 'é'`
+/// compares by a case folding the walk does not model, on `B`'s `É` from
+/// before the group. Neither operand can throw, so MSBuild evaluates the
+/// project, and the walk withdraws: a decline, the cost of keeping a leaf
+/// beside such a name from losing a site the values tried for another name
+/// would have shown (#1164, #1208).
+#[test]
+fn an_unknown_boolean_beside_a_name_untaken_content_writes_may_throw() {
+    let body = format!(
+        "<PropertyGroup><B>É</B></PropertyGroup><PropertyGroup Condition=\"{UNDECIDED_TRUE}\">\
+         <B>abc</B><R Condition=\"'$(B)' == 'é'\">r</R></PropertyGroup>"
+    );
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_withdrawn(&parsed, &["Before", "After"]);
+    }
+}
+
 /// A construct noted twice is one site: two undecided
 /// `Directory.Build.props` points walk the file twice, and its `$(P[9])`,
 /// a throw on the final value of a name its arm writes, is noted once

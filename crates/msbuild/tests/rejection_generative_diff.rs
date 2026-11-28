@@ -2754,7 +2754,9 @@ fn arm_history_grid() {
     let tmp = TempDir::new().unwrap();
     let dir = borzoi_msbuild::observed::host_fs::canonicalize(tmp.path()).unwrap();
     let project_path = dir.join("Demo.fsproj");
-    let oracle_names = vec!["After".to_owned()];
+    // `After`, the sentinel of a withdrawal, and every name the cells write.
+    const GRADED: [&str; 6] = ["After", "A", "B", "U", "X", "R"];
+    let oracle_names: Vec<String> = GRADED.map(String::from).to_vec();
     let walk = |xml: &str| {
         parse_fsproj_with_imports(
             &borzoi_msbuild::ProjectFile::buffer(&project_path, xml).unwrap(),
@@ -2767,6 +2769,12 @@ fn arm_history_grid() {
     };
     let certainty =
         |parsed: &borzoi_msbuild::ParsedProject| parsed.rejection.as_ref().map(|r| r.certainty);
+    // A name's read as a claim: its value, an exact absence as the empty
+    // value MSBuild reports, or none.
+    let claim = |parsed: &borzoi_msbuild::ParsedProject, name: &str| match parsed.property(name) {
+        PropertyRead::Unset => Some(String::new()),
+        read => read.value().map(str::to_owned),
+    };
     let (mut cases, mut must_commit, mut rejected) = (0usize, 0usize, 0usize);
     let mut failures = Vec::new();
     let mut pinned = Vec::new();
@@ -2786,20 +2794,19 @@ fn arm_history_grid() {
         let mut verdicts: Vec<&str> = Vec::new();
         for (history, xml, parsed) in &walked {
             cases += 1;
-            // An exact `Unset` claims the empty value, as MSBuild reports an
-            // undefined property.
-            let committed = match parsed.property("After") {
-                PropertyRead::Unset => Some(String::new()),
-                read => read.value().map(str::to_owned),
-            };
+            let committed = claim(parsed, "After");
+            let claims: Vec<(&str, String)> = GRADED
+                .iter()
+                .filter_map(|name| claim(parsed, name).map(|value| (*name, value)))
+                .collect();
             let mut verdict = "-";
             match &theirs {
-                None if committed.is_some() => {
+                None if !claims.is_empty() => {
                     if held_evaluates {
                         verdict = "commits on a rejection resting on a value the walk does not hold (#1051)";
                     } else {
                         failures.push(format!(
-                            "{} / {history:?}: MSBuild rejects, and the walk commits {committed:?}\n{xml}",
+                            "{} / {history:?}: MSBuild rejects, and the walk commits {claims:?}\n{xml}",
                             cell.label
                         ));
                     }
@@ -2812,14 +2819,14 @@ fn arm_history_grid() {
                             cell.label, parsed.rejection
                         ));
                     }
-                    if let Some(value) = &committed
-                        && values.get("After") != Some(value)
-                    {
-                        failures.push(format!(
-                            "{} / {history:?}: the walk commits {value:?}, MSBuild {:?}\n{xml}",
-                            cell.label,
-                            values.get("After")
-                        ));
+                    for (name, value) in &claims {
+                        if values.get(*name) != Some(value) {
+                            failures.push(format!(
+                                "{} / {history:?}: the walk commits {name}={value:?}, MSBuild {:?}\n{xml}",
+                                cell.label,
+                                values.get(*name)
+                            ));
+                        }
                     }
                     if parsed.rejection.is_some() {
                         verdict = "withdraws a project MSBuild evaluates";
@@ -2845,10 +2852,12 @@ fn arm_history_grid() {
                     && (!twin_verdict_claims_no_more(
                         certainty(fewer_parsed),
                         certainty(more_parsed),
-                    ) || !twin_claims_no_more(
-                        &fewer_parsed.property("After"),
-                        &more_parsed.property("After"),
-                    ))
+                    ) || GRADED.iter().any(|name| {
+                        !twin_claims_no_more(
+                            &fewer_parsed.property(name),
+                            &more_parsed.property(name),
+                        )
+                    }))
                 {
                     failures.push(format!(
                         "{}: history {fewer:?} judged {:?}, history {more:?} {:?}\n{fewer_xml}",

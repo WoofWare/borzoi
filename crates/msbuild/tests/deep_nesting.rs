@@ -514,9 +514,7 @@ fn many_groups_on_one_path(width: usize) -> String {
 /// A `<When>` the walk cannot decide holding `width` sibling `<Choose>`s,
 /// each with a write and an item group reading a name, so that every group
 /// stands in arms of its own and every sibling's write may reach it. `P0`
-/// holds a value the walk doubts in the final table, so each group's
-/// judgement asks whether the walk's write of it reaches the group
-/// (`PathOf::reaches`).
+/// holds a value the walk doubts in the final table.
 fn many_groups_on_sibling_paths(width: usize) -> String {
     let chooses: String = (0..width)
         .map(|i| {
@@ -534,8 +532,7 @@ fn many_groups_on_sibling_paths(width: usize) -> String {
 
 /// A `<When>` the walk cannot decide writing `P0` `width` times, and one item
 /// group after it whose condition reads `P0`, which holds a value the walk
-/// doubts in the final table: the group asks whether a write of `P0` reaches
-/// it, and the first does.
+/// doubts in the final table.
 fn many_writes_of_one_name(width: usize) -> String {
     let writes: String = (0..width)
         .map(|i| format!("<PropertyGroup><P0>x{i}</P0></PropertyGroup>"))
@@ -547,24 +544,25 @@ fn many_writes_of_one_name(width: usize) -> String {
     )
 }
 
-/// The groups of [`many_groups_on_one_path`] and of
-/// [`many_groups_on_sibling_paths`] ask only of the names they read whether a
-/// write reaches them (`PathOf::reaches`), and which names written on the
-/// path are not certain is settled once for the walk. With `n` writes and `n`
-/// groups, the walk examines each written name once to settle it, and each
-/// sibling group examines the one write of the one name it reads (`P0`): `n`
-/// writes examined on one path, `2n` on sibling paths. Gathering every write
-/// that reaches each group, or settling the names again for each, costs `n²`.
-/// And a group stops at the first write that reaches it
-/// ([`many_writes_of_one_name`]: one name settled, one write examined, however
-/// many there are). Counted, so no load on the machine moves it: what is
-/// counted is the writes `PathOf::reaches` and the settling examine, not how
-/// it finds a name's writes (`cost`'s module docs).
+/// Which names written on a path are not certain is settled once for the
+/// walk, however many groups of [`many_groups_on_one_path`] and of
+/// [`many_groups_on_sibling_paths`] are judged from it: with `n` writes and
+/// `n` groups, the walk examines each written name once, `n` writes in all.
+/// Settling the names again for each group costs `n²`. A name the walk
+/// doubts in the final table (`P0`) is uncertain to the groups by its trust
+/// alone, and a group whose gate evaluates without failing on the values held
+/// asks nothing of the path ([`a_leaf_that_needs_no_path_asks_none`], #1164),
+/// so no group asks whether a write of it reaches the group
+/// (`PathOf::reaches`), however many there are ([`many_writes_of_one_name`]:
+/// one name settled). Counted,
+/// so no load on the machine moves it: what is counted is the writes
+/// `PathOf::reaches` and the settling examine, not how it finds a name's
+/// writes (`cost`'s module docs).
 #[test]
-fn groups_ask_only_of_the_writes_they_read() {
+fn groups_settle_each_written_name_once() {
     for (shape, per_group) in [
         (many_groups_on_one_path as fn(usize) -> String, 1),
-        (many_groups_on_sibling_paths, 2),
+        (many_groups_on_sibling_paths, 1),
     ] {
         for width in [1, 2, 100, 400] {
             let examined = walk_costs(shape(width)).path_writes_examined;
@@ -578,7 +576,7 @@ fn groups_ask_only_of_the_writes_they_read() {
     for width in [1, 2, 100, 400] {
         let examined = walk_costs(many_writes_of_one_name(width)).path_writes_examined;
         assert_eq!(
-            examined, 2,
+            examined, 1,
             "{width} writes of one name: {examined} examined"
         );
     }
@@ -597,20 +595,42 @@ fn short_circuited_reads(width: usize) -> String {
     format!("<Choose><When Condition=\"'É' == 'é'\">{writes}{groups}</When></Choose>")
 }
 
-/// A group's judgement asks the path only of the names in operands it
-/// reaches (`PathOf::reaches`): [`short_circuited_reads`]' gates read `P`
-/// past `false And`, so however many groups and writes, the walk examines
-/// `P`'s writes only to settle it, once. Asking of every name a condition
-/// spells costs a write per group per write. Counted, so no load on the
-/// machine moves it.
+/// A `<When>` the walk cannot decide holding a `<Choose>` one arm of which
+/// writes `P` `width` times and the other holds `width` groups gated on
+/// `'$(P)' == 'z'`, which the walk reaches and evaluates without failing.
+fn harmless_reads_beside_writes(width: usize) -> String {
+    let writes: String = (0..width)
+        .map(|i| format!("<PropertyGroup><P>x{i}</P></PropertyGroup>"))
+        .collect();
+    let groups: String = (0..width)
+        .map(|_| "<ItemGroup Condition=\"'$(P)' == 'z'\"><I Include=\"a\" /></ItemGroup>")
+        .collect();
+    format!(
+        "<Choose><When Condition=\"'É' == 'é'\"><Choose><When Condition=\"'É' == 'Ê'\">{writes}</When>\
+         <Otherwise>{groups}</Otherwise></Choose></When></Choose>"
+    )
+}
+
+/// A group's judgement asks the path of a name only where a failure or an
+/// unknown boolean needs it (`PathOf::reaches`): [`short_circuited_reads`]'
+/// gates read `P` past `false And`, and [`harmless_reads_beside_writes`]'
+/// evaluate without failing, so however many groups and writes, the walk
+/// examines `P`'s writes only to settle it, once. Asking of every name a
+/// condition reads costs a write per group per write. Counted, so no load on
+/// the machine moves it.
 #[test]
-fn a_short_circuited_operand_asks_no_path() {
-    for width in [1, 2, 200] {
-        let examined = walk_costs(short_circuited_reads(width)).path_writes_examined;
-        assert!(
-            examined <= 1,
-            "{width} groups and writes examined {examined} writes"
-        );
+fn a_leaf_that_needs_no_path_asks_none() {
+    for shape in [
+        short_circuited_reads as fn(usize) -> String,
+        harmless_reads_beside_writes,
+    ] {
+        for width in [1, 2, 200] {
+            let examined = walk_costs(shape(width)).path_writes_examined;
+            assert!(
+                examined <= 1,
+                "{width} groups and writes examined {examined} writes"
+            );
+        }
     }
 }
 

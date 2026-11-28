@@ -767,18 +767,25 @@ fn judge_expr(
             // On held values, the names whose value held MSBuild need not
             // hold at all; a failure resting on one is judged apart, unless
             // the leaf reads a name whose value on the path it does not hold.
-            let reads_unsettled = on_held.is_some_and(|on_held| {
-                references
-                    .iter()
-                    .chain(&implicit)
-                    .any(|name| (on_held.unsettled)(name))
-            });
+            // Asked only where a failure or an unknown boolean needs it: a
+            // leaf that evaluates cleanly asks nothing of the path.
+            let unsettled = std::cell::OnceCell::new();
+            let reads_unsettled = || {
+                *unsettled.get_or_init(|| {
+                    on_held.is_some_and(|on_held| {
+                        references
+                            .iter()
+                            .chain(&implicit)
+                            .any(|name| (on_held.unsettled)(name))
+                    })
+                })
+            };
             let doubted_name: &dyn Fn(&str) -> bool = match on_held {
                 Some(on_held) => on_held.doubted,
                 None => uncertain,
             };
-            let doubted = |name: &str| !reads_unsettled && doubted_name(name);
-            let reads_doubted = references.iter().chain(&implicit).any(|name| doubted(name));
+            let doubted = |name: &str| doubted_name(name) && !reads_unsettled();
+            let reads_doubted = || references.iter().chain(&implicit).any(|name| doubted(name));
             match eval_bool(expr, props, fs, &mut undefined) {
                 // On a value held of a name the caller is not certain of, the
                 // boolean is none of MSBuild's: what comes after the leaf is
@@ -800,11 +807,12 @@ fn judge_expr(
                 Ok(value) => Judgement::of(Some(value), Throws::Never, false),
                 // A boolean unknown on held values beside a name whose value
                 // on the path the walk does not hold may be a throw on that
-                // value.
-                Err(Reject::Undecided) if reads_unsettled => {
+                // value. Where no operand can throw this declines (#1208).
+                Err(Reject::Undecided) if reads_unsettled() => {
                     Judgement::of(None, Throws::Maybe, true)
                 }
-                Err(reject) if reads_doubted => match doubted_failures(expr, props, fs, &doubted) {
+                Err(reject) if reads_doubted() => match doubted_failures(expr, props, fs, &doubted)
+                {
                     None => reject.judged(),
                     Some(_) if throws_whatever_they_return(expr, props, fs, &doubted) => {
                         Judgement::of(None, Throws::Maybe, true)
