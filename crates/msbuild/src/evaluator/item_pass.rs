@@ -25,11 +25,65 @@ use crate::properties::path_fixup;
 /// are decided on escaped text, which is why `%2a` is a literal star rather
 /// than a wildcard. Fragments therefore come back **still escaped**; each one
 /// leaves the domain at its own point of use, below.
-fn spec_fragments(spec: &Escaped) -> impl Iterator<Item = &str> {
-    spec.as_escaped()
-        .split(';')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
+///
+/// MSBuild splits only at the `;` outside item expressions: the separator and
+/// transform arguments of `@(Helper, ';x;')` or `@(Helper->'%(Identity);x')`
+/// belong to the one expression. A spec in which an item expression holds a
+/// `;` ([`item_expression_span`]) is refused, rather than cut into fragments
+/// that name items MSBuild never makes, and every caller declines it.
+///
+/// Not claimed: that only the expression is declined. The literal fragments
+/// beside it (`Explicit.fsproj;@(H, ';')`) are MSBuild's whatever the
+/// expression holds, and the refusal declines them with it (#1198).
+fn spec_fragments(spec: &Escaped) -> Result<impl Iterator<Item = &str>, SpansSeparator> {
+    let text = spec.as_escaped();
+    let mut from = 0;
+    while let Some(span) = item_expression_span(text, from) {
+        if text[span.clone()].contains(';') {
+            return Err(SpansSeparator);
+        }
+        from = span.end;
+    }
+    Ok(text.split(';').map(str::trim).filter(|s| !s.is_empty()))
+}
+
+/// [`spec_fragments`]' refusal: an item expression in the spec holds a `;`,
+/// so the spec has no fragments the walk can name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SpansSeparator;
+
+/// Decline the element at `node`, whose expanded `spec` [`spec_fragments`]
+/// refused: it makes no item, and the diagnostic names the spec as expanded,
+/// where the item expression is. The diagnostic is what tells
+/// the item's list it may lack what MSBuild makes there (a Compile context
+/// marks the Compile set uncertain; a `<ProjectReference>` `Include` marks the
+/// reference list as hiding an `Include`).
+fn decline_spanning_spec(node: Node<'_, '_>, spec: &str, state: &mut State<'_>) {
+    state.push(
+        DiagnosticKind::UnresolvedItemReference {
+            reference: spec.to_string(),
+        },
+        node.range(),
+    );
+}
+
+/// The byte range of the first item expression in `text` at or after `from`,
+/// as MSBuild's `SemiColonTokenizer` reads one: from its `@(` through the
+/// first `)` outside `'…'` quotes, or to the end of `text` when no such `)`
+/// follows. The tokenizer counts no nesting and toggles on `'` alone, so a
+/// `(` or `"` inside the expression opens nothing. `None` when `text` holds
+/// no `@(` at or after `from`.
+pub(crate) fn item_expression_span(text: &str, from: usize) -> Option<std::ops::Range<usize>> {
+    let start = from + text.get(from..)?.find("@(")?;
+    let mut quoted = false;
+    for (offset, c) in text[start + 2..].char_indices() {
+        match c {
+            '\'' => quoted = !quoted,
+            ')' if !quoted => return Some(start..start + 2 + offset + 1),
+            _ => {}
+        }
+    }
+    Some(start..text.len())
 }
 
 /// An expanded `Include` as MSBuild spells it before splitting it into items
@@ -1231,7 +1285,10 @@ fn walk_item_child_inner(node: Node<'_, '_>, kind: ItemKind, state: &mut State<'
     let spelled = msbuild_spelling(include, expansion.value.ignoring_trust());
     match state.glob_resolver {
         None => {
-            for entry in spec_fragments(&spelled) {
+            let Ok(fragments) = spec_fragments(&spelled) else {
+                return decline_spanning_spec(node, spelled.as_escaped(), state);
+            };
+            for entry in fragments {
                 push_include_entry(node, kind, placement, entry, &metadata, state);
             }
         }
@@ -1360,7 +1417,11 @@ fn walk_generic_item_child(node: Node<'_, '_>, state: &mut State<'_>) {
     let metadata = read_generic_item_metadata(node, state);
     let spelled = msbuild_spelling(include, expansion.value.ignoring_trust());
     let mut captured: Vec<EvaluatedItem> = Vec::new();
-    for fragment in spec_fragments(&spelled) {
+    let Ok(fragments) = spec_fragments(&spelled) else {
+        state.taint_item_list(item_type);
+        return;
+    };
+    for fragment in fragments {
         // `@(Type)` / `@(Type->Exists())` copies the referenced items, metadata
         // and all, with this element's own metadata applied on top.
         if let Some(expression) = parse_item_expression(fragment) {
@@ -1558,7 +1619,7 @@ fn resolve_item_spec(raw: &str, state: &State<'_>) -> Option<ItemSpec> {
         return None;
     }
     let mut identities = Vec::new();
-    for fragment in spec_fragments(expansion.value.ignoring_trust()) {
+    for fragment in spec_fragments(expansion.value.ignoring_trust()).ok()? {
         if let Some(expression) = parse_item_expression(fragment) {
             let items = evaluate_item_expression(expression, state)?;
             identities.extend(items.into_iter().map(|item| item.identity));
@@ -1589,7 +1650,9 @@ fn remove_clears_its_own_list(item_type: &str, remove: &str, state: &State<'_>) 
     if expansion.had_issue() {
         return false;
     }
-    let mut fragments = spec_fragments(expansion.value.ignoring_trust());
+    let Ok(mut fragments) = spec_fragments(expansion.value.ignoring_trust()) else {
+        return false;
+    };
     match (fragments.next(), fragments.next()) {
         (Some(only), None) => exact_item_list_reference(only)
             .is_some_and(|referenced| referenced.eq_ignore_ascii_case(item_type)),
@@ -1972,7 +2035,11 @@ fn resolve_compile_update_targets(
     }
     let mut targets = Vec::new();
     let mut batch = UpdateBatch::default();
-    for entry in spec_fragments(expansion.value.ignoring_trust()) {
+    let Ok(fragments) = spec_fragments(expansion.value.ignoring_trust()) else {
+        decline_spanning_spec(node, expansion.value.ignoring_trust().as_escaped(), state);
+        return None;
+    };
+    for entry in fragments {
         if contains_glob(entry) {
             state.push(
                 DiagnosticKind::UnsupportedGlob {
@@ -2604,7 +2671,19 @@ fn update_may_strand(node: Node<'_, '_>, state: &State<'_>) -> bool {
     if expansion.had_issue() {
         return true;
     }
-    let mut fragments = spec_fragments(expansion.value.ignoring_trust());
+    // The question reads only the first fragment and whether a second follows,
+    // and an item expression holding a `;` moves neither answer: in the first
+    // fragment its `@(` falls before its first `;`, so the plain split's first
+    // fragment holds it too; in a later one there is a second fragment either
+    // way. So this split is exact here though [`spec_fragments`] refuses the
+    // spec.
+    let mut fragments = expansion
+        .value
+        .ignoring_trust()
+        .as_escaped()
+        .split(';')
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
     let Some(first) = fragments.next() else {
         return false;
     };
@@ -3170,13 +3249,21 @@ fn resolve_exclude_set(node: Node<'_, '_>, state: &mut State<'_>) -> ExcludeSet 
     };
     state.note_package_uncertain_from_sdk_property_taint(raw);
     let expansion = state.expand(raw, node.range());
-    let parts: Vec<String> = spec_fragments(expansion.value.ignoring_trust())
-        .map(str::to_owned)
-        .collect();
-    if expansion.had_issue()
-        || parts.iter().any(|s| {
-            contains_glob(s) || contains_item_reference(s) || contains_metadata_reference(s)
-        })
+    let parts: Option<Vec<String>> = spec_fragments(expansion.value.ignoring_trust())
+        .ok()
+        .map(|fragments| fragments.map(str::to_owned).collect());
+    let Some(parts) = parts.filter(|_| !expansion.had_issue()) else {
+        state.note_package_uncertain(
+            PackageReferenceUncertaintyCauseKind::UnsupportedExclude {
+                value: raw.to_string(),
+            },
+            node.range(),
+        );
+        return ExcludeSet(HashSet::new());
+    };
+    if parts
+        .iter()
+        .any(|s| contains_glob(s) || contains_item_reference(s) || contains_metadata_reference(s))
     {
         state.note_package_uncertain(
             PackageReferenceUncertaintyCauseKind::UnsupportedExclude {
@@ -3488,7 +3575,16 @@ fn resolve_dependency_identity_sources(
     }
 
     let mut resolved = Vec::new();
-    for entry in spec_fragments(expansion.value.ignoring_trust()) {
+    let Ok(fragments) = spec_fragments(expansion.value.ignoring_trust()) else {
+        state.note_package_uncertain(
+            PackageReferenceUncertaintyCauseKind::UnevaluableIdentity {
+                value: raw.to_string(),
+            },
+            node.range(),
+        );
+        return Vec::new();
+    };
+    for entry in fragments {
         if let Some(item_type) = exact_item_list_reference(entry) {
             let key = item_key(item_type);
             // A type this crate captures in its own bucket has no item table
@@ -4112,7 +4208,10 @@ fn route_item_through_resolver(
     state: &mut State<'_>,
 ) {
     let mut include_specs: Vec<&str> = Vec::new();
-    for entry in spec_fragments(include_value) {
+    let Ok(fragments) = spec_fragments(include_value) else {
+        return decline_spanning_spec(node, include_value.as_escaped(), state);
+    };
+    for entry in fragments {
         if contains_item_reference(entry) {
             state.push(
                 DiagnosticKind::UnresolvedItemReference {
@@ -4154,7 +4253,14 @@ fn route_item_through_resolver(
         if expansion.had_issue() {
             return;
         }
-        for entry in spec_fragments(expansion.value.ignoring_trust()) {
+        let Ok(fragments) = spec_fragments(expansion.value.ignoring_trust()) else {
+            return decline_spanning_spec(
+                node,
+                expansion.value.ignoring_trust().as_escaped(),
+                state,
+            );
+        };
+        for entry in fragments {
             if contains_item_reference(entry) {
                 state.push(
                     DiagnosticKind::UnresolvedItemReference {
@@ -4898,4 +5004,89 @@ fn finalize_metadata_value(
         return None;
     }
     Some(value.unescape())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// MSBuild's `SemiColonTokenizer` (`src/Build/Evaluation/SemiColonTokenizer.cs`),
+    /// ported as the reference: a `;` separates only outside an item list,
+    /// which opens at `@(` and closes at the first `)` outside `'…'` quotes;
+    /// each segment is trimmed, and an empty one dropped.
+    fn reference_segments(text: &str) -> Vec<&str> {
+        let mut segments = Vec::new();
+        let mut start = 0;
+        let mut inside_item_list = false;
+        let mut quoted = false;
+        let bytes = text.as_bytes();
+        for (index, &byte) in bytes.iter().enumerate() {
+            match byte {
+                b';' if !inside_item_list => {
+                    segments.push(&text[start..index]);
+                    start = index + 1;
+                    quoted = false;
+                }
+                b'@' if bytes.get(index + 1) == Some(&b'(') => inside_item_list = true,
+                b')' if inside_item_list && !quoted => inside_item_list = false,
+                b'\'' if inside_item_list => quoted = !quoted,
+                _ => {}
+            }
+        }
+        segments.push(&text[start..]);
+        segments
+            .into_iter()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect()
+    }
+
+    /// Every string up to six characters over the characters the tokenizer
+    /// reads (and a letter and a space): where [`spec_fragments`] splits a
+    /// spec, it splits it as MSBuild does, and it refuses exactly the specs
+    /// whose MSBuild segments hold a `;`.
+    #[test]
+    fn spec_fragments_split_as_msbuild_splits_or_refuse() {
+        const ALPHABET: [char; 8] = ['@', '(', ')', '\'', '"', ';', 'a', ' '];
+        let mut checked = 0usize;
+        let mut refused = 0usize;
+        let mut text = String::new();
+        // Depth-first over every string of length 0..=6.
+        fn walk(text: &mut String, depth: usize, checked: &mut usize, refused: &mut usize) {
+            let expected = reference_segments(text);
+            let spanning = expected.iter().any(|segment| segment.contains(';'));
+            match spec_fragments(&Escaped::from_xml(text.clone())) {
+                Ok(fragments) => {
+                    assert!(
+                        !spanning,
+                        "split {text:?}, which MSBuild keeps whole: {expected:?}"
+                    );
+                    let ours: Vec<&str> = fragments.collect();
+                    assert_eq!(ours, expected, "{text:?}");
+                }
+                Err(SpansSeparator) => {
+                    *refused += 1;
+                    assert!(
+                        spanning,
+                        "refused {text:?}, which MSBuild splits as {expected:?}"
+                    );
+                }
+            }
+            *checked += 1;
+            if depth == 6 {
+                return;
+            }
+            for c in ALPHABET {
+                text.push(c);
+                walk(text, depth + 1, checked, refused);
+                text.pop();
+            }
+        }
+        walk(&mut text, 0, &mut checked, &mut refused);
+        assert_eq!(
+            checked,
+            (0..=6).map(|n| ALPHABET.len().pow(n)).sum::<usize>()
+        );
+        assert!(refused > 0, "the alphabet reaches the refusal");
+    }
 }
