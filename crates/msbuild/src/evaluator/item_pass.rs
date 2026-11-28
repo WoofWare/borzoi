@@ -4992,7 +4992,7 @@ fn literal_metadata_write(child: Node<'_, '_>) -> Option<ItemMetadataValue> {
     if raw.trim().is_empty() {
         return Some(ItemMetadataValue::Known(None));
     }
-    (!raw.contains(['$', '@', '%', '\\'])).then(|| ItemMetadataValue::Known(Some(raw)))
+    (!raw.contains(['$', '@', '%', '\\'])).then_some(ItemMetadataValue::Known(Some(raw)))
 }
 
 /// A metadatum value with an empty value read as absent, as the caller of
