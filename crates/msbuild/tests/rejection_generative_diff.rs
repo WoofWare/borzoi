@@ -2596,6 +2596,10 @@ struct GridCell {
     /// The site's text, and the names it reads whose values the walk holds.
     call: String,
     held_names: &'static [&'static str],
+    /// The graded names MSBuild defines where it evaluates the cell, empty
+    /// or not: the oracle reports an undefined name as `""`, so whether an
+    /// exact absence or an exact `""` is MSBuild's is read from the document.
+    defined: Vec<&'static str>,
 }
 
 /// The hostile values [`arm_history_grid`] does not draw.
@@ -2752,6 +2756,7 @@ fn arm_history_cells() -> Vec<GridCell> {
                                     hostile: a_hostile,
                                     call: (*call).to_owned(),
                                     held_names: &["U", "A", "B", "Q"],
+                                    defined: vec!["After", "A", "B", "U", "X", "Q"],
                                 });
                             }
                         }
@@ -2817,6 +2822,12 @@ fn arm_history_cells() -> Vec<GridCell> {
                             hostile: before_hostile,
                             call: text.to_owned(),
                             held_names: &["A", "B"],
+                            // `R` is written in the body only, under the arm.
+                            defined: if kind == "body" && arm == UNDECIDED_TRUE {
+                                vec!["After", "A", "B", "R"]
+                            } else {
+                                vec!["After", "A", "B"]
+                            },
                         });
                     }
                 }
@@ -2970,7 +2981,12 @@ fn arm_history_grid() {
                         ));
                     }
                     for (name, value) in &claims {
-                        if values.get(*name) != Some(value) {
+                        // An exact absence of a name MSBuild defines, or a
+                        // value of one it does not, is wrong whatever the
+                        // oracle's flattening says.
+                        let exact_absence = matches!(parsed.property(name), PropertyRead::Unset);
+                        let defined = cell.defined.contains(name);
+                        if exact_absence == defined || values.get(*name) != Some(value) {
                             failures.push(format!(
                                 "{} / {history:?}: the walk commits {name}={value:?}, MSBuild {:?}\n{xml}",
                                 cell.label,
