@@ -930,6 +930,10 @@ fn render_diagnostic_kind(kind: &DiagnosticKind) -> String {
             "a `<Compile Update=\"{update}\">` that MSBuild applies out of order (it stops \
              batching at `{fragment}`)"
         ),
+        DiagnosticKind::MayStrandUpdatePrefix { update, fragment } => format!(
+            "a `<Compile Update=\"{update}\">` that MSBuild may apply out of order (in some \
+             evaluation it stops batching at `{fragment}`)"
+        ),
         DiagnosticKind::UnmodelledUpdateBatch { update } => format!(
             "a `<Compile Update=\"{update}\">` that MSBuild may apply out of order (I don't \
              follow how it batches `Update`s)"

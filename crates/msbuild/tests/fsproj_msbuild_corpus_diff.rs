@@ -1378,6 +1378,18 @@ fn render_package_reference_uncertainty_cause(cause: &PackageReferenceUncertaint
                  an update position-independently"
             )
         }
+        PackageReferenceUncertaintyCauseKind::StrandedUpdate { update, fragment } => {
+            format!(
+                "<PackageReference Update={update:?}> leaves MSBuild's batch of Updates at \
+                 {fragment:?}, stranding the fragments before it"
+            )
+        }
+        PackageReferenceUncertaintyCauseKind::MayStrandUpdate { update, fragment } => {
+            format!(
+                "<PackageReference Update={update:?}> may leave MSBuild's batch of Updates at \
+                 {fragment:?}, stranding the fragments before it"
+            )
+        }
         PackageReferenceUncertaintyCauseKind::UnmodelledUpdateBatch { update } => {
             format!(
                 "<PackageReference Update={update:?}> may strand fragments in MSBuild's batch \

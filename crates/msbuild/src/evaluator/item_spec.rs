@@ -69,16 +69,82 @@ fn in_domain(identity: &str) -> bool {
 }
 
 /// The key two identities are compared by when a `Remove` or `Exclude`
-/// matches: `NormalizePathForComparisonNoThrow(identity, project_dir)`,
-/// case-folded. Two identities match exactly when their keys are equal.
+/// matches, and the key MSBuild's batch of `Update`s holds a fragment by:
+/// `NormalizePathForComparisonNoThrow(identity, project_dir)`, case-folded.
+/// Two identities match exactly when their keys are equal.
 ///
 /// `None` outside the domain.
 pub(super) fn comparison_key(identity: &str, project_dir: &Path) -> Option<String> {
     if !in_domain(identity) {
         return None;
     }
+    // A spelling with a character `FileUtilities.PathIsInvalid` names (a
+    // `:`, a `|`, a quote, … in its file name) has no key: MSBuild's versions
+    // compare it differently. SDK 10.0.401's `NormalizePathForComparisonNoThrow`
+    // returns it unchanged, so `a:b` and `./a:b` differ; SDK 8.0.428's
+    // normalises it, so they are one.
+    if crate::glob::compares_unnormalised(identity) {
+        return None;
+    }
     let spelled = identity.replace('\\', "/");
     let mut key = full_path(spelled.trim_end_matches('/'), project_dir)?;
+    key.make_ascii_lowercase();
+    Some(key)
+}
+
+/// Whether MSBuild's versions may key `identity` differently: whether SDK
+/// 10.0.401's key (`NormalizePathForComparisonNoThrow`: the full path with a
+/// trailing separator trimmed, nothing escaped, never throwing) loses
+/// anything of SDK 8.0.428's (the full path escaped by
+/// `EscapingUtilities.Escape`, untrimmed, from a `GetFullPath` that throws
+/// on a NUL). That is a spelling with a trailing separator, with a character
+/// `Escape` escapes, or with a NUL. A property of the spelling alone,
+/// whatever the project directory and whether a key can be computed there:
+/// every caller of this declines it.
+pub(super) fn key_is_lossy(identity: &str) -> bool {
+    identity.ends_with(['/', '\\']) || identity.contains(MSBUILD_ESCAPED) || identity.contains('\0')
+}
+
+/// The characters `EscapingUtilities.Escape` escapes.
+const MSBUILD_ESCAPED: [char; 9] = ['%', '*', '?', '@', '$', '(', ')', ';', '\''];
+
+/// The key a batch of `Update`s holds a fragment by, comparing it with the
+/// other fragments and with the keys earlier `Update`s left
+/// (`item_pass::update_strands_late`): [`comparison_key`], and, under a
+/// project directory that is not ASCII, which .NET folds by a table of its
+/// own, a key for a relative identity that stays inside the directory: its
+/// normalised path behind the directory as written. Every such key shares
+/// that prefix, so two of them are equal exactly when MSBuild's are. An
+/// absolute identity there, one climbing out of the directory, or one
+/// [`comparison_key`] gives none for its characters, has none.
+pub(super) fn batch_key(identity: &str, project_dir: &Path) -> Option<String> {
+    // A key MSBuild's versions may not share has none here
+    // ([`key_is_lossy`]), so the walk follows no batch past it.
+    if key_is_lossy(identity) {
+        return None;
+    }
+    let dir = project_dir.to_str()?;
+    if dir.is_ascii() {
+        return comparison_key(identity, project_dir);
+    }
+    if !dir.starts_with('/') || !in_domain(identity) || identity.starts_with(['/', '\\']) {
+        return None;
+    }
+    if crate::glob::compares_unnormalised(identity) {
+        return None;
+    }
+    let spelled = identity.replace('\\', "/");
+    let mut segments: Vec<&str> = Vec::new();
+    for segment in spelled.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                segments.pop()?;
+            }
+            other => segments.push(other),
+        }
+    }
+    let mut key = format!("{}/{}", dir.trim_end_matches('/'), segments.join("/"));
     key.make_ascii_lowercase();
     Some(key)
 }
@@ -211,6 +277,66 @@ mod tests {
     fn climbing_past_the_root_stays_at_the_root() {
         assert_eq!(key("../../../../x"), Some("/x".to_string()));
         assert_eq!(key("../../.."), Some("/".to_string()));
+    }
+
+    /// A spelling with a character invalid in a file name has no key, under
+    /// any directory: MSBuild's versions compare it differently.
+    #[test]
+    fn a_spelling_msbuild_versions_compare_differently_has_no_key() {
+        for identity in [
+            "/tmp/A:b", "a:b", "./a:b", "seg\\a:b", "src//a:b", "a|b", "a\"b",
+        ] {
+            assert_eq!(key(identity), None, "{identity:?}");
+            assert_eq!(
+                batch_key(identity, Path::new("/r\u{f6}\u{f6}t")),
+                None,
+                "{identity:?}"
+            );
+        }
+    }
+
+    /// Under a non-ASCII project directory, relative identities that stay
+    /// inside it are keyed against each other; absolute ones and climbing
+    /// ones are not. Under an ASCII one, the batch key is the comparison key.
+    #[test]
+    fn batch_keys_compare_relative_identities_under_any_directory() {
+        let dir = Path::new("/r\u{f6}\u{f6}t");
+        let batch = |identity| batch_key(identity, dir);
+        assert_eq!(batch("a.fs"), batch("./sub/../A.fs"));
+        assert_eq!(batch("sub\\a.fs"), batch("sub/a.fs"));
+        assert_ne!(batch("a.fs"), batch("b.fs"));
+        assert!(batch("a.fs").is_some());
+        for identity in [
+            "/r\u{f6}\u{f6}t/a.fs",
+            "\\x",
+            "../r\u{f6}\u{f6}t/a.fs",
+            "a/../../b",
+        ] {
+            assert_eq!(batch(identity), None, "{identity:?}");
+        }
+        for identity in ["a.fs", "/x/a.fs", "../a.fs", "a:b"] {
+            assert_eq!(
+                batch_key(identity, Path::new("/root/Proj")),
+                key(identity),
+                "{identity:?}"
+            );
+        }
+    }
+
+    /// A trailing separator has no batch key under any directory: MSBuild's
+    /// versions key it differently.
+    #[test]
+    fn a_trailing_separator_has_no_batch_key() {
+        for dir in ["/root/Proj", "/r\u{f6}\u{f6}t"] {
+            for identity in ["A.fs/", "sub\\", "A.fs//"] {
+                assert_eq!(
+                    batch_key(identity, Path::new(dir)),
+                    None,
+                    "{identity:?} under {dir}"
+                );
+            }
+            assert!(batch_key("A.fs", Path::new(dir)).is_some());
+        }
     }
 
     #[test]

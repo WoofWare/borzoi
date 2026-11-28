@@ -87,7 +87,13 @@ pub fn attribute<'a>(node: Node<'a, '_>, name: &str) -> Option<Cow<'a, str>> {
     let attr = node
         .attributes()
         .find(|a| a.namespace().is_none() && a.name() == name)?;
-    Some(read_attribute(attribute_source(node, &attr), attr.value()))
+    Some(attribute_value(node, &attr))
+}
+
+/// [`attribute`] for `attr`, an attribute of `node` already in hand: no
+/// search of `node`'s attributes by name.
+pub(crate) fn attribute_value<'a>(node: Node<'a, '_>, attr: &Attribute<'a, '_>) -> Cow<'a, str> {
+    read_attribute(attribute_source(node, attr), attr.value())
 }
 
 /// MSBuild's reading of an attribute whose source text is `raw` and whose
