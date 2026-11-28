@@ -200,15 +200,24 @@ impl State<'_> {
             origin: self.current_origin(),
         };
         let kind = rejection.diagnostic_kind();
+        let construct = SiteConstruct {
+            file: self.site_file.clone(),
+            start: span.start,
+            end: span.end,
+            text,
+        };
+        // A construct this walk noted with this cause and certainty already
+        // (a file two undecided import points both walk) is one site.
+        if !self
+            .noted_keys
+            .insert((construct.clone(), rejection.cause.clone(), certainty))
+        {
+            return;
+        }
         // `push` records the diagnostic first, at this index, whatever it
         // pushes after it.
         self.noted_sites.push(NotedSite {
-            construct: SiteConstruct {
-                file: self.site_file.clone(),
-                start: span.start,
-                end: span.end,
-                text,
-            },
+            construct,
             diagnostic: self.diagnostics.len(),
         });
         if replaces {
@@ -358,13 +367,16 @@ impl NotedSite {
     }
 }
 
+/// A site's construct, cause and certainty: what one walk notes once.
+pub(super) type SiteKey = (SiteConstruct, RejectionCause, RejectionCertainty);
+
 /// The construct a site is about, named by the source alone: the entry
 /// project's buffer or the imported file it is in ([`State::site_file`]), its
 /// element's span there (not the import site a
 /// published span names, which every construct of an imported file shares),
 /// and which of the element's texts it is ([`text_at`]).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct SiteConstruct {
+pub(super) struct SiteConstruct {
     file: Option<std::rc::Rc<Path>>,
     start: usize,
     end: usize,
@@ -713,13 +725,13 @@ pub(super) fn judge_condition_rejection(
         exists: &exists,
         observer,
     });
-    // A condition reading a name untaken content writes is judged on the
-    // values held throughout: values are tried for a name the walk holds none
-    // of only beside names holding MSBuild's values as far as the walk knows
-    // ([`judge_throwing_expression`], #1164).
-    let reads_unsettled =
-        properties::property_references(condition).any(|name| state.speculatively_unheld(name));
-    let doubted = |name: &str| !reads_unsettled && !holds_a_value_msbuild_may(state, name);
+    // A leaf reading a name untaken content writes is judged on the values
+    // held throughout, by its kind: values are tried for a name the walk holds
+    // none of only beside names holding MSBuild's values as far as the walk
+    // knows ([`judge_throwing_expression`], #1164). Asked of the leaves the
+    // judgement reaches, not of every name the condition spells.
+    let doubted = |name: &str| !holds_a_value_msbuild_may(state, name);
+    let unsettled = |name: &str| state.speculatively_unheld(name);
     // Which operands MSBuild reaches is main's to decide, in either walk: a
     // name the second walk holds certain may be one whose value is not the
     // build's (#1153). What the second walk holds is the path's settlement.
@@ -755,6 +767,7 @@ pub(super) fn judge_condition_rejection(
             state.condition_site(),
             &uncertain,
             &doubted,
+            &unsettled,
         )
     {
         state.note_rejection_at(

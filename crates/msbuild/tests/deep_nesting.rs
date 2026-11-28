@@ -584,6 +584,36 @@ fn groups_ask_only_of_the_writes_they_read() {
     }
 }
 
+/// A `<When>` the walk cannot decide writing `P` `width` times, then
+/// `width` sibling groups whose gates read `P` only past `false And`, which
+/// MSBuild never evaluates.
+fn short_circuited_reads(width: usize) -> String {
+    let writes: String = (0..width)
+        .map(|i| format!("<PropertyGroup><P>x{i}</P></PropertyGroup>"))
+        .collect();
+    let groups: String = (0..width)
+        .map(|_| "<ItemGroup Condition=\"false And '$(P)' == 'z'\"><I Include=\"a\" /></ItemGroup>")
+        .collect();
+    format!("<Choose><When Condition=\"'É' == 'é'\">{writes}{groups}</When></Choose>")
+}
+
+/// A group's judgement asks the path only of the names in operands it
+/// reaches (`PathOf::reaches`): [`short_circuited_reads`]' gates read `P`
+/// past `false And`, so however many groups and writes, the walk examines
+/// `P`'s writes only to settle it, once. Asking of every name a condition
+/// spells costs a write per group per write. Counted, so no load on the
+/// machine moves it.
+#[test]
+fn a_short_circuited_operand_asks_no_path() {
+    for width in [1, 2, 200] {
+        let examined = walk_costs(short_circuited_reads(width)).path_writes_examined;
+        assert!(
+            examined <= 1,
+            "{width} groups and writes examined {examined} writes"
+        );
+    }
+}
+
 /// A `<Choose>` of `width` `<When>`s the walk cannot decide, each holding a
 /// write and a `<ProjectReference>`, which `rejection::arm_is_dead` asks of
 /// every arm.

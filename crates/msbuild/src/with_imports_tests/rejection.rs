@@ -2176,6 +2176,59 @@ fn one_cause_in_two_texts_of_an_element_is_two_sites() {
     }
 }
 
+/// A construct noted twice is one site: two undecided
+/// `Directory.Build.props` points walk the file twice, and its `$(P[9])`,
+/// a throw on the final value of a name its arm writes, is noted once
+/// (#1153, #1164).
+#[test]
+fn a_construct_noted_twice_is_one_site() {
+    let tmp = TempDir::new().unwrap();
+    let block = COMMON_PROPS_BLOCK.replace(
+        "exists('$(DirectoryBuildPropsPath)')\"/>",
+        &format!("({UNDECIDED_TRUE} Or exists('$(DirectoryBuildPropsPath)'))\"/>"),
+    );
+    let (sdk_dir, props, targets) = write_synthetic_sdk(
+        tmp.path(),
+        "S",
+        &format!("<Project>\n{block}{block}</Project>\n"),
+        "<Project />",
+    );
+    write_at(
+        tmp.path(),
+        "Directory.Build.props",
+        &format!(
+            "<Project><Choose><When Condition=\"{UNDECIDED_TRUE}\">\
+             <PropertyGroup><P>abcdefghijkl</P></PropertyGroup>\
+             <ItemGroup><I Include=\"$(P[9])\" /></ItemGroup></When></Choose></Project>"
+        ),
+    );
+    let project_path = write_at(
+        tmp.path(),
+        "proj/p.fsproj",
+        "<Project Sdk=\"S\"><PropertyGroup><P>@(J)</P><P>z</P></PropertyGroup></Project>\n",
+    );
+    let parsed = parse_file_with_sdk(&project_path, |name| {
+        if name == "S" {
+            Ok(SdkPaths {
+                root: sdk_dir.clone(),
+                props: props.clone(),
+                targets: targets.clone(),
+            })
+        } else {
+            Err(SdkResolveError::NotFound)
+        }
+    });
+    let item = RejectionCause::ThrowingExpression {
+        expression: "$(P[9])".to_owned(),
+    };
+    let noted = parsed
+        .diagnostics
+        .iter()
+        .filter(|d| matches!(&d.kind, DiagnosticKind::MayBeRejected { cause } if *cause == item))
+        .count();
+    assert_eq!(noted, 1, "{:#?}", parsed.diagnostics);
+}
+
 /// The entry project's buffer and a document opened from its file are two
 /// files to a site: `link.props`, a link to the project's own file, holds the
 /// project's text, and its item's `$(P[9])$(Short[9])`, which only the second

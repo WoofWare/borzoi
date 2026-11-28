@@ -2700,9 +2700,10 @@ fn arm_history_cells() -> Vec<GridCell> {
                         let document = move |gated: &str, history: &[bool]| {
                             let site = &site_text;
                             format!(
-                                "<Project>\n  <PropertyGroup>{}<A>{a}</A><B>{before}</B></PropertyGroup>\n  \
+                                "<Project>\n  <PropertyGroup>{}<A>{a}</A>{}<B>{before}</B></PropertyGroup>\n  \
                                  {}\n  <PropertyGroup><After>ok</After></PropertyGroup>\n</Project>\n",
                                 refused(history[0], "A"),
+                                refused(history[1], "B"),
                                 site.replace("{gated}", gated),
                             )
                         };
@@ -2889,6 +2890,85 @@ fn arm_history_grid() {
          evaluates: the decline's cost. Its value is each history's verdict, in HISTORIES' order \
          (`-` for none).",
     );
+}
+
+/// #1164's review: a condition reading a name the walk holds no value of
+/// (`X`, a refused write MSBuild computes to `Debug`) beside one an
+/// undecided group may write (`B`, under a gate on `A`). Values tried for
+/// `X` with `B` at the value the walk holds prove nothing of the build, so
+/// the leaf is judged on the values held, and a boolean unknown there may be
+/// a throw: MSBuild rejects each row (MSB4184) whether or not a refused write
+/// precedes `A`'s, and the walk commits no row's `After`. And a leaf the
+/// judgement never reaches decides nothing: `'$(X[0])' == 'D' Or (false And
+/// '$(B)' == 'a')` reads `B` only in an operand MSBuild skips, so the walk
+/// judges `X`'s leaf as it would alone, and commits what MSBuild evaluates.
+#[test]
+fn a_leaf_beside_a_name_untaken_content_writes_keeps_its_site() {
+    let mut oracle = Oracle::spawn();
+    let tmp = TempDir::new().unwrap();
+    let dir = borzoi_msbuild::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    let project_path = dir.join("Demo.fsproj");
+    let names = vec!["After".to_owned()];
+    let document = |refused: bool, condition: &str| {
+        let refused = if refused {
+            format!("<A>{REFUSED}</A>")
+        } else {
+            String::new()
+        };
+        format!(
+            "<Project>\n  <PropertyGroup><B></B><X>{REFUSED}</X>{refused}<A>z</A></PropertyGroup>\n  \
+             <PropertyGroup Condition=\"{}\"><B Condition=\"{}\">bad</B>\
+             <R Condition=\"{}\">r</R></PropertyGroup>\n  \
+             <PropertyGroup><After>ok</After></PropertyGroup>\n</Project>\n",
+            xml_attribute(UNDECIDED_TRUE),
+            xml_attribute("'$(A)' == 'off'"),
+            xml_attribute(condition),
+        )
+    };
+    let walk = |xml: &str| {
+        parse_fsproj_with_imports(
+            &borzoi_msbuild::ProjectFile::buffer(&project_path, xml).unwrap(),
+            &HashMap::new(),
+            &HashMap::new(),
+            None,
+            None,
+        )
+        .unwrap()
+    };
+    for refused in [false, true] {
+        let rejected = document(
+            refused,
+            "'$([MSBuild]::VersionLessThan(`$(B)$(X)v1.0`,`$(X.Length).0`))É' == 'Trueé'",
+        );
+        assert_eq!(
+            oracle.project_design_time(&rejected, &names, Some(&project_path), &[]),
+            None,
+            "MSBuild rejects the row:\n{rejected}"
+        );
+        let parsed = walk(&rejected);
+        assert!(
+            !parsed.property("After").is_exact(),
+            "MSBuild rejects the project, but we commit {:?}:\n{rejected}",
+            parsed.property("After")
+        );
+        let skipped = document(refused, "'$(X[0])' == 'D' Or (false And '$(B)' == 'a')");
+        let theirs = oracle
+            .project_design_time(&skipped, &names, Some(&project_path), &[])
+            .expect("MSBuild evaluates the row");
+        assert_eq!(
+            parsed_after(&walk(&skipped)),
+            theirs.get("After").cloned(),
+            "MSBuild evaluates the project, and so must we:\n{skipped}"
+        );
+    }
+}
+
+/// `After` as `parsed` commits it, an exact absence as the empty value.
+fn parsed_after(parsed: &borzoi_msbuild::ParsedProject) -> Option<String> {
+    match parsed.property("After") {
+        PropertyRead::Unset => Some(String::new()),
+        read => read.value().map(str::to_owned),
+    }
 }
 
 /// Fresh-seed twin of [`refused_history_sweep_fixed_seed`].

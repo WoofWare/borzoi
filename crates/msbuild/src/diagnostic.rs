@@ -260,7 +260,7 @@ impl Rejection {
 }
 
 /// How sure the walk is that MSBuild rejects the project.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RejectionCertainty {
     /// MSBuild may reject it: the walk cannot rule the rejection out, and
     /// claims nothing about it. What is graded is the withdrawal alone: no
