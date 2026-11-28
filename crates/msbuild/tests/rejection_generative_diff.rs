@@ -1110,11 +1110,13 @@ impl Witness {
     }
 }
 
-/// One witness per gap, each a project an earlier fixed seed drew.
+/// One witness per gap, each a project an earlier fixed seed drew (the first
+/// moved out of the untaken `<Choose>` it was drawn in, where no value is
+/// tried for `X` and the walk now withdraws it, #1164).
 const WITNESSES: &[Witness] = &[
     Witness {
         values: ["1.2.3", "true @evil.rsp", "1", "1.2.3"],
-        template: "<Choose><When Condition=\"UNDECIDED_TRUE\"><Choose><When Condition=\"UNDECIDED_FALSE\"><PropertyGroup><B>abcdefghijklmnop</B></PropertyGroup></When><Otherwise><ItemGroup Condition=\"{c}\"><I Include=\"x\" /></ItemGroup></Otherwise></Choose></When></Choose>",
+        template: "<ItemGroup><I Include=\"x\" Condition=\"{c}\" /></ItemGroup>",
         body: "",
         gate: "!(Exists('$([MSBuild]::VersionLessThan(`$(X)`, `2.0`))'))",
         gap: "uncertain-value",
@@ -2760,7 +2762,7 @@ fn arm_history_grid() {
     let dir = borzoi_msbuild::observed::host_fs::canonicalize(tmp.path()).unwrap();
     let project_path = dir.join("Demo.fsproj");
     // `After`, the sentinel of a withdrawal, and every name the cells write.
-    const GRADED: [&str; 6] = ["After", "A", "B", "U", "X", "R"];
+    const GRADED: [&str; 7] = ["After", "A", "B", "U", "X", "R", "Q"];
     let oracle_names: Vec<String> = GRADED.map(String::from).to_vec();
     let walk = |xml: &str| {
         parse_fsproj_with_imports(
@@ -2906,18 +2908,20 @@ fn arm_history_grid() {
     );
 }
 
-/// #1164's review: a condition reading a name the walk holds no value of
-/// (`X`, a refused write MSBuild computes to `Debug`) beside one an
-/// undecided group may write (`B`, under a gate on `A`). Values tried for
-/// `X` with `B` at the value the walk holds prove nothing of the build, so
-/// the leaf is judged on the values held, and a boolean unknown there may be
-/// a throw: MSBuild rejects each row (MSB4184) whether or not a refused write
-/// precedes `A`'s, and the walk commits no row's `After`. And a leaf the
-/// judgement never reaches decides nothing: `'$(X[0])' == 'D' Or (false And
-/// '$(B)' == 'a')` reads `B` only in an operand MSBuild skips, so the walk
-/// judges `X`'s leaf as it would alone, and commits what MSBuild evaluates.
+/// #1164's review: in content the walk does not take, no value is tried for
+/// a name the walk holds no value of (`X`, a refused write MSBuild computes to
+/// `Debug`). Beside one the content may write (`B`, under a gate on `A`, or
+/// before the read, `B` absent before the content), held at its value from
+/// before the content, what a value tried for `X` does proves nothing of the
+/// build. So a condition there is judged on the values held, and a boolean
+/// unknown there may be a throw, and a text that throws there is a site:
+/// MSBuild rejects each row (MSB4184) whether or not a refused write
+/// precedes `A`'s, and the walk commits no row's `After`. The cost is that a
+/// throw there on the value held of `X` is a site though MSBuild's value does
+/// not throw (`'$(X[0])' == 'D'`, `Debug`'s `D`): a decline, never a claim
+/// (#1200).
 #[test]
-fn a_leaf_beside_a_name_untaken_content_writes_keeps_its_site() {
+fn untaken_content_tries_no_value_for_a_name() {
     let mut oracle = Oracle::spawn();
     let tmp = TempDir::new().unwrap();
     let dir = borzoi_msbuild::observed::host_fs::canonicalize(tmp.path()).unwrap();
@@ -2965,24 +2969,41 @@ fn a_leaf_beside_a_name_untaken_content_writes_keeps_its_site() {
             "MSBuild rejects the project, but we commit {:?}:\n{rejected}",
             parsed.property("After")
         );
-        let skipped = document(refused, "'$(X[0])' == 'D' Or (false And '$(B)' == 'a')");
-        let theirs = oracle
-            .project_design_time(&skipped, &names, Some(&project_path), &[])
-            .expect("MSBuild evaluates the row");
-        assert_eq!(
-            parsed_after(&walk(&skipped)),
-            theirs.get("After").cloned(),
-            "MSBuild evaluates the project, and so must we:\n{skipped}"
+        let declined = document(refused, "'$(X[0])' == 'D'");
+        assert!(
+            oracle
+                .project_design_time(&declined, &names, Some(&project_path), &[])
+                .is_some(),
+            "MSBuild evaluates the row:\n{declined}"
         );
+        let parsed = walk(&declined);
+        assert_eq!(
+            parsed.rejection.as_ref().map(|r| r.certainty),
+            Some(RejectionCertainty::Possible),
+            "{declined}"
+        );
+        assert!(!parsed.property("After").is_exact(), "{declined}");
     }
-}
-
-/// `After` as `parsed` commits it, an exact absence as the empty value.
-fn parsed_after(parsed: &borzoi_msbuild::ParsedProject) -> Option<String> {
-    match parsed.property("After") {
-        PropertyRead::Unset => Some(String::new()),
-        read => read.value().map(str::to_owned),
-    }
+    // A text in a `<When>` the walk cannot decide, `B` absent before it.
+    let text = format!(
+        "<Project>\n  <PropertyGroup><X>{REFUSED}</X></PropertyGroup>\n  \
+         <Choose><When Condition=\"{}\"><PropertyGroup><B>bad</B>\
+         <R>{}</R></PropertyGroup></When></Choose>\n  \
+         <PropertyGroup><After>ok</After></PropertyGroup>\n</Project>\n",
+        xml_attribute(UNDECIDED_TRUE),
+        xml_text("$([MSBuild]::VersionLessThan('$(B)v$(X)','1.0'))"),
+    );
+    assert_eq!(
+        oracle.project_design_time(&text, &names, Some(&project_path), &[]),
+        None,
+        "MSBuild rejects the row:\n{text}"
+    );
+    let parsed = walk(&text);
+    assert!(
+        !parsed.property("After").is_exact(),
+        "MSBuild rejects the project, but we commit {:?}:\n{text}",
+        parsed.property("After")
+    );
 }
 
 /// Fresh-seed twin of [`refused_history_sweep_fixed_seed`].

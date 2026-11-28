@@ -550,8 +550,8 @@ fn many_writes_of_one_name(width: usize) -> String {
 /// `n` groups, the walk examines each written name once, `n` writes in all.
 /// Settling the names again for each group costs `n²`. A name the walk
 /// doubts in the final table (`P0`) is uncertain to the groups by its trust
-/// alone, and a group whose gate evaluates without failing on the values held
-/// asks nothing of the path ([`a_leaf_that_needs_no_path_asks_none`], #1164),
+/// alone, and a group judged from the path asks nothing of it
+/// ([`a_leaf_that_needs_no_path_asks_none`], #1164),
 /// so no group asks whether a write of it reaches the group
 /// (`PathOf::reaches`), however many there are ([`many_writes_of_one_name`]:
 /// one name settled). Counted,
@@ -617,14 +617,15 @@ fn undecided_reads_beside_writes(width: usize) -> String {
     harmless_reads_beside_writes(width).replace("'$(P)' == 'z'", "'$(P)É' == 'é'")
 }
 
-/// A group's judgement asks the path of a name only where it holds a value
-/// the path may have replaced and a failure or an unknown boolean needs it
-/// (`PathOf::reaches`): [`short_circuited_reads`]' gates read `P` past
-/// `false And`, [`harmless_reads_beside_writes`]' evaluate without failing,
-/// and in [`undecided_reads_beside_writes`] `P` holds no value outside the
-/// arms, so however many groups and writes, the walk examines `P`'s writes
-/// only to settle it, once. Asking of every name a condition reads costs a
-/// write per group per write. Counted, so no load on the machine moves it.
+/// A group judged from a path the walk did not take asks the path of no
+/// name it reads (`PathOf::reaches`): there the judgement tries no value for
+/// any name and doubts none (#1164), whether its gate reads `P` past `false
+/// And` ([`short_circuited_reads`]), evaluates without failing
+/// ([`harmless_reads_beside_writes`]) or has a boolean the walk cannot
+/// compute ([`undecided_reads_beside_writes`]). So however many groups and
+/// writes, the walk examines `P`'s writes only to settle it, once. Asking of
+/// every name a condition reads costs a write per group per write. Counted,
+/// so no load on the machine moves it.
 #[test]
 fn a_leaf_that_needs_no_path_asks_none() {
     for shape in [

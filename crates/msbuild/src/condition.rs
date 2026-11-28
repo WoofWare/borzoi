@@ -565,34 +565,18 @@ enum Walk<'a> {
     /// whether it may throw (`may_throw`, [`may_throw_on_held`]) need go no
     /// further. Nor need it evaluate an operand that cannot throw and gates no
     /// later one that can (`later` says whether any operand after this
-    /// subtree, in the chains around it, can throw). `on_held`
-    /// ([`OnHeld`]): a leaf that reads a name the caller is not certain of is
-    /// evaluated on the values held, its failure judged as
-    /// [`Reject::judged_on_doubted_values`] says where it rests on a name
-    /// whose value held MSBuild need not hold at all, rather than by its kind,
-    /// and its boolean is none of MSBuild's.
+    /// subtree, in the chains around it, can throw). `on_held`, the names
+    /// whose value held MSBuild need not hold at all: a leaf that reads a name
+    /// the caller is not certain of is evaluated on the values held, its
+    /// failure judged as [`Reject::judged_on_doubted_values`] says where it
+    /// rests on such a name, rather than by its kind, and its boolean is none
+    /// of MSBuild's. `speculating`: the condition stands in content the walk
+    /// does not take ([`may_throw_on_held`]).
     Possibility {
         later: bool,
-        on_held: Option<OnHeld<'a>>,
+        on_held: Option<&'a dyn Fn(&str) -> bool>,
+        speculating: bool,
     },
-}
-
-/// What [`may_throw_on_held`] knows of the names a leaf reads, beyond which
-/// it is not certain of.
-#[derive(Clone, Copy)]
-struct OnHeld<'a> {
-    /// The names whose value held MSBuild need not hold at all, for which
-    /// values are tried ([`throws_whatever_they_return`]).
-    doubted: &'a dyn Fn(&str) -> bool,
-    /// The names whose value held content the walk does not take may have
-    /// replaced on the path being judged (`rejection::holds_a_stale_value`):
-    /// one MSBuild may hold, but whose value on that path the walk does not
-    /// know.
-    /// A leaf reading one is judged on the values held by its kind, and one
-    /// whose boolean is unknown there may throw: a value tried for a doubted
-    /// name beside it proves nothing, and trying values there is not
-    /// monotone in which names such content leaves unknown (#1164).
-    unsettled: &'a dyn Fn(&str) -> bool,
 }
 
 /// Whether MSBuild throws evaluating `source` whatever the properties
@@ -631,13 +615,12 @@ pub fn may_throw(
     uncertain: &dyn Fn(&str) -> bool,
 ) -> bool {
     let fs = Ctx { probes, site };
-    may_throw_walked(source, props, fs, uncertain, None)
+    may_throw_walked(source, props, fs, uncertain, None, false)
 }
 
 /// Whether MSBuild may throw evaluating `source` on the values `props`
 /// holds, where `doubted` names the names whose value held MSBuild need not
-/// hold at all, and `unsettled` those whose value on the path being judged
-/// it does not hold ([`OnHeld`]): the rejection judgement's Possible site. MSBuild may hold
+/// hold at all: the rejection judgement's Possible site. MSBuild may hold
 /// every other value held, so a leaf that throws on those, or that calls what
 /// we do not model on them, may throw. A leaf whose failing operand reads a
 /// doubted name throws on what it holds only by type
@@ -645,6 +628,15 @@ pub fn may_throw(
 /// whether a function it calls throws on MSBuild's value is the judgement
 /// over the values a name may hold (#1009's second stage). A condition wholly
 /// outside the grammar we parse claims nothing (#1095).
+///
+/// `speculating`: the condition stands in content the walk does not take,
+/// where a name that content writes holds a value from before it, which may
+/// not be MSBuild's on that path. There the caller doubts no name, and a leaf
+/// whose boolean is unknown on the values held, beside a name it is not
+/// certain of, may throw: what a value tried for one name does beside another
+/// that sits at a value the path may have replaced proves nothing, and trying
+/// values there is not monotone in which names such content leaves unknown
+/// (#1164). Where no operand of such a leaf can throw, this declines (#1208).
 pub fn may_throw_on_held(
     source: &str,
     props: &PropertyMap,
@@ -652,16 +644,10 @@ pub fn may_throw_on_held(
     site: Site,
     unsure: &dyn Fn(&str) -> bool,
     doubted: &dyn Fn(&str) -> bool,
-    unsettled: &dyn Fn(&str) -> bool,
+    speculating: bool,
 ) -> bool {
     let fs = Ctx { probes, site };
-    may_throw_walked(
-        source,
-        props,
-        fs,
-        unsure,
-        Some(OnHeld { doubted, unsettled }),
-    )
+    may_throw_walked(source, props, fs, unsure, Some(doubted), speculating)
 }
 
 /// `may_throw` or [`may_throw_on_held`], as `on_held` says.
@@ -670,7 +656,8 @@ fn may_throw_walked(
     props: &PropertyMap,
     fs: Ctx<'_>,
     uncertain: &dyn Fn(&str) -> bool,
-    on_held: Option<OnHeld<'_>>,
+    on_held: Option<&dyn Fn(&str) -> bool>,
+    speculating: bool,
 ) -> bool {
     match parse_condition(source) {
         Ok(Some(expr)) => {
@@ -682,6 +669,7 @@ fn may_throw_walked(
                 Walk::Possibility {
                     later: false,
                     on_held,
+                    speculating,
                 },
             )
             .throws
@@ -732,11 +720,21 @@ fn judge_expr(
             leaf_implicit_references(expr, &mut implicit);
             let explicit_doubt = references.iter().any(|name| uncertain(name));
             let implicit_doubt = implicit.iter().any(|name| uncertain(name));
-            let on_held = match walk {
-                Walk::Possibility { on_held, .. } => on_held,
+            let doubted = match walk {
+                Walk::Possibility {
+                    on_held: Some(doubted),
+                    ..
+                } => Some(doubted),
                 _ => None,
             };
-            if on_held.is_none() {
+            let speculating = matches!(
+                walk,
+                Walk::Possibility {
+                    speculating: true,
+                    ..
+                }
+            );
+            if doubted.is_none() {
                 if explicit_doubt {
                     // A certain value that may complete an item or metadata
                     // expression beside an uncertain one (`$(U)$(V)` with
@@ -767,27 +765,9 @@ fn judge_expr(
             // `evaluate`; this evaluation only judges.
             let mut undefined = Vec::new();
             // On held values, the names whose value held MSBuild need not
-            // hold at all; a failure resting on one is judged apart, unless
-            // the leaf reads a name whose value on the path it does not hold.
-            // Asked only where a failure or an unknown boolean needs it: a
-            // leaf that evaluates cleanly asks nothing of the path.
-            let unsettled = std::cell::OnceCell::new();
-            let reads_unsettled = || {
-                *unsettled.get_or_init(|| {
-                    on_held.is_some_and(|on_held| {
-                        references
-                            .iter()
-                            .chain(&implicit)
-                            .any(|name| (on_held.unsettled)(name))
-                    })
-                })
-            };
-            let doubted_name: &dyn Fn(&str) -> bool = match on_held {
-                Some(on_held) => on_held.doubted,
-                None => uncertain,
-            };
-            let doubted = |name: &str| doubted_name(name) && !reads_unsettled();
-            let reads_doubted = || references.iter().chain(&implicit).any(|name| doubted(name));
+            // hold at all; a failure resting on one is judged apart.
+            let doubted: &dyn Fn(&str) -> bool = doubted.unwrap_or(uncertain);
+            let reads_doubted = references.iter().chain(&implicit).any(|name| doubted(name));
             match eval_bool(expr, props, fs, &mut undefined) {
                 // On a value held of a name the caller is not certain of, the
                 // boolean is none of MSBuild's: what comes after the leaf is
@@ -798,7 +778,7 @@ fn judge_expr(
                 // values MSBuild holds as held may throw.
                 Ok(_) if explicit_doubt || implicit_doubt => {
                     let skipped_may_fail = leaf_texts(expr)
-                        .is_some_and(|texts| fails_on_held(&texts, props, fs, &doubted));
+                        .is_some_and(|texts| fails_on_held(&texts, props, fs, doubted));
                     let throws = if skipped_may_fail {
                         Throws::Maybe
                     } else {
@@ -807,16 +787,15 @@ fn judge_expr(
                     Judgement::of(None, throws, false)
                 }
                 Ok(value) => Judgement::of(Some(value), Throws::Never, false),
-                // A boolean unknown on held values beside a name whose value
-                // on the path the walk does not hold may be a throw on that
-                // value. Where no operand can throw this declines (#1208).
-                Err(Reject::Undecided) if reads_unsettled() => {
+                // In content the walk does not take, a boolean unknown on the
+                // values held beside a name the caller is not certain of may
+                // be a throw on MSBuild's value ([`may_throw_on_held`]).
+                Err(Reject::Undecided) if speculating && (explicit_doubt || implicit_doubt) => {
                     Judgement::of(None, Throws::Maybe, true)
                 }
-                Err(reject) if reads_doubted() => match doubted_failures(expr, props, fs, &doubted)
-                {
+                Err(reject) if reads_doubted => match doubted_failures(expr, props, fs, doubted) {
                     None => reject.judged(),
-                    Some(_) if throws_whatever_they_return(expr, props, fs, &doubted) => {
+                    Some(_) if throws_whatever_they_return(expr, props, fs, doubted) => {
                         Judgement::of(None, Throws::Maybe, true)
                     }
                     Some(_) => reject.judged_on_doubted_values(),
@@ -1117,14 +1096,22 @@ fn judge_chain(
     };
     for (index, operand) in operands.iter().enumerate() {
         let walk = match walk {
-            Walk::Possibility { later, on_held } => {
+            Walk::Possibility {
+                later,
+                on_held,
+                speculating,
+            } => {
                 let later = later || last_throwing.is_some_and(|last| last > index);
                 if !later && last_throwing != Some(index) {
                     // Nothing from here on can throw, nor be reached by
                     // anything that can.
                     return Judgement::of(None, throws, unevaluated);
                 }
-                Walk::Possibility { later, on_held }
+                Walk::Possibility {
+                    later,
+                    on_held,
+                    speculating,
+                }
             }
             other => other,
         };
@@ -1376,15 +1363,6 @@ fn scalar_reads_toolset_version(scalar: &ScalarExpr) -> bool {
 }
 
 /// The properties `raw` names in `$(…)` references.
-/// Every name `raw` reads, by reference or through an intrinsic it calls
-/// ([`implicit_references`]), whatever its evaluation reaches.
-pub(crate) fn expression_names(raw: &str) -> Vec<String> {
-    let mut names = Vec::new();
-    explicit_references(raw, &mut names);
-    implicit_references(raw, &mut names);
-    names
-}
-
 fn explicit_references(raw: &str, out: &mut Vec<String>) {
     out.extend(super::properties::property_references(raw).map(str::to_string));
 }
