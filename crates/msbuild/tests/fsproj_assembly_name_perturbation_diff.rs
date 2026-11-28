@@ -33,8 +33,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use borzoi_msbuild::fsc::{
     ALLOWED_ENVIRONMENT, ALLOWED_ITEM_TYPES, ALLOWED_METADATA, ALLOWED_PROPERTIES,
     CompiledAssemblyName, FSC_OPTIONS, Grammar, NameDecline, RESTORE_ITEM_TYPES, RESTORE_METADATA,
-    RESTORE_PROPERTIES, RESTORE_PROPERTY_PREFIX, resolved_sdk_version, toolchain_variable,
-    verified_manifests, verified_sdks,
+    RESTORE_PROPERTIES, RESTORE_PROPERTY_PREFIX, ToolchainValue, resolved_sdk_version,
+    toolchain_variable, verified_manifests, verified_sdks,
 };
 use borzoi_msbuild::observed::host_fs;
 use borzoi_msbuild::test_support::unescape;
@@ -214,6 +214,10 @@ struct Case {
     must_commit: Option<String>,
     /// The derivation must decline, whatever the build does.
     must_decline: bool,
+    /// The variable whose value the decline must name ([`declines_for`]), for
+    /// a case whose subject is that variable: so a decline the fixture
+    /// itself causes (an unrestored project) grades nothing.
+    decline_for: Option<String>,
     /// For [`Place::Variables`], the variables, by name and value.
     variables: Vec<(String, String)>,
 }
@@ -227,8 +231,21 @@ impl Default for Case {
             reset: "",
             must_commit: None,
             must_decline: false,
+            decline_for: None,
             variables: Vec::new(),
         }
+    }
+}
+
+/// Whether `why` is a decline the variable `name` causes: off every list,
+/// a toolchain value off its shape, or an allowed property's value outside
+/// its grammar.
+fn declines_for(why: &borzoi_msbuild::fsc::NameDecline, name: &str) -> bool {
+    use borzoi_msbuild::fsc::NameDecline;
+    match why {
+        NameDecline::Environment(n) | NameDecline::ToolchainValue(n, _) => n == name,
+        NameDecline::Value(n, _) => n.eq_ignore_ascii_case(name),
+        _ => false,
     }
 }
 
@@ -276,21 +293,66 @@ fn held_to_plain_arguments(case: &Case) -> bool {
         })
 }
 
-/// Whether the grading holds the variable `name` fixed, so a commit under a
-/// value of it the oracle cannot build is counted ([`Outcome::HeldFixed`])
-/// rather than failed: the build environment's own names
-/// ([`BUILD_ENVIRONMENT_NAMES`]), `MSBuildUserExtensionsPath` (which MSBuild
-/// computes for itself), and the .NET host's and NuGet's `DOTNET_*` and
-/// `NUGET_*` families, which no case here builds under. Pinned here, apart
-/// from the derivation's `toolchain_variable`, so a variable the derivation
-/// comes to admit as the toolchain's by mistake fails rather than is excused.
-/// The families are as wide as the derivation's rule today; #1064 narrows
-/// that rule to exact names, and this list with it.
-fn held_fixed(name: &str) -> bool {
-    BUILD_ENVIRONMENT_NAMES.contains(&name)
-        || name == "MSBuildUserExtensionsPath"
-        || name.starts_with("DOTNET_")
-        || name.starts_with("NUGET_")
+/// The toolchain's own variables, by exact name, with the shape each value
+/// must have, which the grading holds fixed: its builds run in its own
+/// environment, so it cannot build under another value of one. Pinned here,
+/// apart from the derivation's `TOOLCHAIN_VARIABLES`, so a variable the
+/// derivation comes to admit as the toolchain's by mistake, or at a shape it
+/// should not, fails rather than is excused.
+const HELD_FIXED: &[(&str, ToolchainValue)] = &[
+    ("DOTNET_CLI_HOME", ToolchainValue::Path),
+    ("DOTNET_CLI_TELEMETRY_OPTOUT", ToolchainValue::Switch),
+    ("DOTNET_NOLOGO", ToolchainValue::Switch),
+    (
+        "DOTNET_NUGET_SIGNATURE_VERIFICATION",
+        ToolchainValue::Switch,
+    ),
+    ("DOTNET_SKIP_FIRST_TIME_EXPERIENCE", ToolchainValue::Switch),
+    (
+        "DOTNET_SKIP_WORKLOAD_INTEGRITY_CHECK",
+        ToolchainValue::Switch,
+    ),
+    ("DOTNET_ROOT", ToolchainValue::Path),
+    ("HOME", ToolchainValue::Path),
+    ("MSBuildUserExtensionsPath", ToolchainValue::Path),
+    ("NUGET_PACKAGES", ToolchainValue::Path),
+    ("PATH", ToolchainValue::SearchPath),
+    ("RestoreSources", ToolchainValue::Sources),
+    ("TMPDIR", ToolchainValue::Path),
+];
+
+/// Whether the grading holds the variable `name` at `value` fixed
+/// ([`HELD_FIXED`]): a toolchain variable at a value of its shape, which the
+/// oracle cannot build under, so a commit is counted
+/// ([`Outcome::HeldFixed`]). A commit under a value of another shape is one
+/// the derivation must not make, so it fails.
+fn held_fixed(name: &str, value: &str) -> bool {
+    HELD_FIXED
+        .iter()
+        .any(|(held, shape)| *held == name && shape.admits(value))
+}
+
+/// A commit is excused only for a toolchain variable at a value of its own
+/// shape: the hostile toolchain values off their shape, and every name off
+/// the list, are not.
+#[test]
+fn only_a_value_of_its_shape_is_held_fixed() {
+    assert!(held_fixed("NUGET_PACKAGES", "/nonexistent/borzoi/packages"));
+    assert!(held_fixed("DOTNET_NOLOGO", "true"));
+    for (name, value) in [
+        ("NUGET_PACKAGES", "relative/packages"),
+        ("NUGET_PACKAGES", ""),
+        ("DOTNET_ROOT", ""),
+        ("DOTNET_NOLOGO", "yes"),
+        (
+            "RestoreSources",
+            "https://private.example.org/v3/index.json",
+        ),
+        ("PATH", ".:bin"),
+        ("NUGET_FALLBACK_PACKAGES", "/nonexistent"),
+    ] {
+        assert!(!held_fixed(name, value), "{name}={value:?}");
+    }
 }
 
 /// The source of a [`Place::Variables`] case's project: it compiles, with
@@ -328,6 +390,67 @@ fn hostile_environment_cases() -> Vec<(Case, Dimension)> {
         ));
     }
     out
+}
+
+/// The variables that must decline, whatever the build does, graded in every
+/// run:
+///
+/// - each property an `Fsc` parameter is fed from, set as a variable to a
+///   line break and an output switch, which no allowed property's grammar
+///   and no toolchain value's shape admits. They are chosen from the register
+///   (`FSC_PARAMETERS`), unfiltered by the derivation's lists, so a list that
+///   came to admit one as inert fails here;
+/// - the loader's and the launcher's, which act before any of the install's
+///   code runs;
+/// - each `DOTNET_`/`NUGET_` variable of the hostile environments that is no
+///   toolchain variable and not graded: the prefix that once admitted them.
+fn environment_declines() -> Vec<Case> {
+    use borzoi_msbuild::fsc::{FSC_PARAMETERS, Feed};
+    let must_decline = |name: &str, value: &str| Case {
+        must_decline: true,
+        decline_for: Some(name.to_string()),
+        ..Case::variables(&[(name, value)])
+    };
+    let admitted = |name: &str| {
+        ALLOWED_PROPERTIES
+            .iter()
+            .any(|(allowed, _)| allowed.eq_ignore_ascii_case(name))
+            || HELD_FIXED.iter().any(|(t, _)| t.eq_ignore_ascii_case(name))
+            || ALLOWED_ENVIRONMENT
+                .iter()
+                .any(|graded| graded.eq_ignore_ascii_case(name))
+    };
+    let mut cases = Vec::new();
+    let fed: BTreeSet<&str> = FSC_PARAMETERS
+        .iter()
+        .filter_map(|p| match p.feed {
+            Feed::Properties(names) => Some(names.iter().copied()),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    assert!(!fed.is_empty(), "the register feeds fsc from properties");
+    for name in fed {
+        cases.push(must_decline(name, "x\n--out:obj/Evil.dll"));
+    }
+    for (name, value) in [
+        ("LD_PRELOAD", "/nonexistent/borzoi/evil.so"),
+        ("DYLD_INSERT_LIBRARIES", "/nonexistent/borzoi/evil.dylib"),
+        ("BASH_ENV", "/nonexistent/borzoi/evil.sh"),
+        ("BASH_FUNC_dotnet%%", "() { exit 1; }"),
+        ("ENV", "/nonexistent/borzoi/evil.sh"),
+    ] {
+        cases.push(must_decline(name, value));
+    }
+    for entry in hostile_env::alphabet().entries() {
+        for (name, value) in entry.value {
+            let by_prefix = name.starts_with("DOTNET_") || name.starts_with("NUGET_");
+            if by_prefix && !admitted(name) {
+                cases.push(must_decline(name, value));
+            }
+        }
+    }
+    cases
 }
 
 /// The plain SDK project, which must commit to its own name.
@@ -701,6 +824,7 @@ fn cases() -> Vec<Case> {
             rest.push(Case::variables(&[(name, value)]));
         }
     }
+    cases.extend(environment_declines());
     cases.extend(rest);
     cases
 }
@@ -1164,18 +1288,81 @@ thread_local! {
 }
 
 /// The environment the grading's builds inherit, and its evaluations are
-/// handed beneath their own variables: this process's, read once.
+/// handed beneath their own variables: this process's, read once
+/// ([`grading_build_environment`]). Every build, restore and probe the
+/// grading runs takes it, so it is checked at its first use, before any of
+/// them runs.
+///
+/// # Panics
+///
+/// When the derivation declines it: no case could be graded.
 fn inherited_environment() -> &'static BuildEnvironment {
     static ENVIRONMENT: std::sync::OnceLock<BuildEnvironment> = std::sync::OnceLock::new();
-    ENVIRONMENT.get_or_init(|| BuildEnvironment::inherited(std::env::vars()))
+    ENVIRONMENT.get_or_init(|| {
+        grading_build_environment(std::env::vars()).unwrap_or_else(|refusal| panic!("{refusal}"))
+    })
 }
 
-/// [`inherited_environment`]'s variables, as an evaluation is handed them.
-fn inherited_variables() -> HashMap<String, String> {
-    inherited_environment()
+/// The environment the grading's builds run under, given the variables
+/// `inherited`: the oracle's ([`BuildEnvironment::inherited`]), with `PATH`
+/// cut to its plain entries ([`graded_path`]), which changes nothing a build
+/// measures; or, when the derivation declines it, the refusal
+/// ([`refusal`]). The grading holds these variables fixed, so it cannot grade
+/// under another value of one; it refuses rather than grade under a value
+/// every case would decline for.
+fn grading_build_environment(
+    inherited: impl IntoIterator<Item = (String, String)>,
+) -> Result<BuildEnvironment, String> {
+    let environment =
+        BuildEnvironment::inherited(inherited.into_iter().filter_map(|(name, value)| {
+            match name.as_str() {
+                "PATH" => graded_path(&value).map(|path| (name, path)),
+                _ => Some((name, value)),
+            }
+        }));
+    let variables = environment
         .vars()
         .map(|(n, v)| (n.to_string(), v.to_string()))
-        .collect()
+        .collect();
+    refusal(&variables).map_or(Ok(environment), Err)
+}
+
+/// Why the grading refuses to run under `environment`, if the derivation
+/// declines it: a grading under it measures nothing (each case declines for
+/// the environment alone). It names the rule broken (a `NameDecline`, which
+/// names variables and shapes, never a value).
+fn refusal(environment: &HashMap<String, String>) -> Option<String> {
+    borzoi_msbuild::fsc::environment_decline(environment).map(|decline| {
+        format!(
+            "the grading's environment is out of the compiled-name derivation's domain \
+             ({decline:?}), so no case can be graded under it: give the variable a value of \
+             its shape, or unset it"
+        )
+    })
+}
+
+/// The `PATH` the grading's builds run under, given this process's `path`:
+/// its entries that are absolute, without a control character or a `%`
+/// (MSBuild reads the value as escaped text), in order, as the platform
+/// separates them; `None`, so no `PATH` at all, when none is. The derivation
+/// declines a `PATH` holding any other entry, and a build looks up nothing it
+/// measures through `PATH` (the host is launched by its absolute path), so
+/// the grading's builds leave such entries out.
+fn graded_path(path: &str) -> Option<String> {
+    let kept: Vec<std::path::PathBuf> = std::env::split_paths(path)
+        .filter(|entry| {
+            entry.is_absolute()
+                && entry
+                    .to_str()
+                    .is_some_and(|text| !text.chars().any(|c| c.is_control() || c == '%'))
+        })
+        .collect();
+    if kept.is_empty() {
+        return None;
+    }
+    std::env::join_paths(kept)
+        .ok()
+        .map(|joined| joined.to_string_lossy().into_owned())
 }
 
 /// Restore the project at `project` in place, under `inputs`, as the build
@@ -1242,17 +1429,44 @@ fn ours_under(
         .globals()
         .map(|(n, v)| (n.to_string(), v.to_string()))
         .collect();
-    let mut environment = inherited_variables();
-    // What MSBuild computes for itself, as the oracle's other differentials
-    // hand it to our evaluation.
-    environment.insert(
-        "MSBuildUserExtensionsPath".to_string(),
-        msbuild_user_extensions_path(inherited_environment()).to_string(),
-    );
+    let mut environment = grading_environment();
     environment.extend(inputs.env_vars(inherited_environment()));
     environment.extend(extra.iter().cloned());
     // The SDK the evaluation resolved is the one being graded.
     assembly_name::derive(project, &globals, &environment, dotnet_root, Sdks::Resolved)
+}
+
+/// The environment every case's evaluation is handed beneath its own
+/// variables: the grading's builds' own ([`inherited_environment`]), and the
+/// `MSBuildUserExtensionsPath` MSBuild computes for itself, as the oracle's
+/// other differentials hand it to our evaluation
+/// ([`evaluation_environment`]).
+///
+/// # Panics
+///
+/// When the derivation declines it: no case could be graded.
+fn grading_environment() -> HashMap<String, String> {
+    let build = inherited_environment();
+    evaluation_environment(build, msbuild_user_extensions_path(build))
+        .unwrap_or_else(|refusal| panic!("{refusal}"))
+}
+
+/// The environment of [`grading_environment`], given the build's environment
+/// `build` and MSBuild's `MSBuildUserExtensionsPath`; or, when the derivation
+/// declines it, the refusal ([`refusal`]).
+fn evaluation_environment(
+    build: &BuildEnvironment,
+    user_extensions: &str,
+) -> Result<HashMap<String, String>, String> {
+    let mut environment: HashMap<String, String> = build
+        .vars()
+        .map(|(n, v)| (n.to_string(), v.to_string()))
+        .collect();
+    environment.insert(
+        "MSBuildUserExtensionsPath".to_string(),
+        user_extensions.to_string(),
+    );
+    refusal(&environment).map_or(Ok(environment), Err)
 }
 
 /// The directories of the MSBuilds that built the agreed cases: the SDKs the
@@ -1306,6 +1520,31 @@ fn grade_unbudgeted(case: &Case) -> Result<Outcome, String> {
     let name = match ours(&project, &inputs, &extra) {
         CompiledAssemblyName::Known(name) => name,
         CompiledAssemblyName::Unknown(why) => {
+            if let Some(name) = &case.decline_for
+                && !declines_for(&why, name)
+            {
+                return Err(format!(
+                    "{}: declined ({why:?}), but not for {name}",
+                    case.label()
+                ));
+            }
+            // Variables the grading holds fixed, each at a value of its shape,
+            // are admitted and reach no build: the case is the shared
+            // fixture's under them, which must commit. A decline is the
+            // fixture's own failure, or the derivation declining an admitted
+            // environment, and either fails.
+            if case.place == Place::Variables
+                && !case.variables.is_empty()
+                && case
+                    .variables
+                    .iter()
+                    .all(|(name, value)| held_fixed(name, value))
+            {
+                return Err(format!(
+                    "{}: declined ({why:?}), though every variable is held fixed",
+                    case.label()
+                ));
+            }
             return match &case.must_commit {
                 Some(_) => Err(format!("{}: declined ({why:?}), must commit", case.label())),
                 None => {
@@ -1335,7 +1574,22 @@ fn grade_unbudgeted(case: &Case) -> Result<Outcome, String> {
     if !extra.is_empty() {
         // An evaluator-only case ends here, so the shared fixture is never
         // built.
-        return if extra.iter().all(|(name, _)| held_fixed(name)) {
+        let plain = plain_case().must_commit;
+        if case
+            .variables
+            .iter()
+            .all(|(name, value)| held_fixed(name, value))
+            && plain.as_ref() != Some(&name)
+        {
+            // Every variable held fixed: the case is the plain fixture's
+            // under them, so its name is the plain fixture's.
+            return Err(format!(
+                "{}: committed {name:?}, though every variable is held fixed and the plain \
+                 fixture's name is {plain:?}",
+                case.label()
+            ));
+        }
+        return if extra.iter().all(|(name, value)| held_fixed(name, value)) {
             Ok(Outcome::HeldFixed)
         } else {
             Err(format!(
@@ -1966,6 +2220,176 @@ fn builds_compared_with_the_oracle_start_as_it_does() {
     assert!(checked >= 2, "only {checked} files compare with fsc_args");
 }
 
+/// Whatever `PATH` the developer's shell holds, the one the grading's builds
+/// run under is exactly its plain entries, in order, or none at all when it
+/// has none, and so one the derivation admits: every list of up to three
+/// entries drawn from each kind of entry (two plain directories, relative,
+/// holding an escape, holding a control character, empty), exhaustively.
+#[test]
+fn the_grading_s_path_is_always_admitted() {
+    use borzoi_msbuild::fsc::ToolchainValue;
+    // Each kind of entry, and whether the cut keeps it.
+    let labelled = [
+        ("/usr/bin", true),
+        ("/opt/bin", true),
+        ("bin", false),
+        (".", false),
+        ("/opt/SDK%20Tools/bin", false),
+        ("/a\tb", false),
+        ("", false),
+    ];
+    let kinds: Vec<&str> = labelled.iter().map(|(kind, _)| *kind).collect();
+    let kept = |kind: &str| labelled.iter().any(|(k, keep)| *k == kind && *keep);
+    let mut lists: Vec<Vec<&str>> = vec![vec![]];
+    for _ in 0..3 {
+        let longer: Vec<Vec<&str>> = lists
+            .iter()
+            .flat_map(|list| {
+                kinds.iter().map(move |kind| {
+                    let mut list = list.clone();
+                    list.push(kind);
+                    list
+                })
+            })
+            .collect();
+        lists.extend(longer);
+    }
+    lists.sort();
+    lists.dedup();
+    for list in &lists {
+        let path = list.join(":");
+        let plain: Vec<&str> = list.iter().copied().filter(|e| kept(e)).collect();
+        let expected = (!plain.is_empty()).then(|| plain.join(":"));
+        let graded = graded_path(&path);
+        assert_eq!(graded, expected, "{path:?}");
+        if let Some(graded) = graded {
+            assert!(
+                ToolchainValue::SearchPath.admits(&graded),
+                "{path:?} graded as {graded:?}, which the derivation declines"
+            );
+        }
+    }
+}
+
+/// Whatever value the developer's shell gives a variable the grading's builds
+/// inherit, the grading either runs under it as the build does or refuses to
+/// run, naming the variable and never its value; and it refuses exactly when
+/// the derivation declines the value. Every name of `BUILD_ENVIRONMENT_NAMES`
+/// at every kind of value (each shape's good value, empty, relative, a feed's
+/// URL, holding an escape, holding a control character, a word no switch is),
+/// exhaustively; and some value of each name is graded under.
+#[test]
+fn the_grading_s_environment_is_always_admitted() {
+    let values = [
+        "1",
+        "true",
+        "/usr/local",
+        "/usr/bin:/bin",
+        "/feed;/other",
+        "",
+        "relative",
+        "https://private.example.org/v3/index.json",
+        "/opt/SDK%20Tools",
+        "/a\tb",
+        "yes",
+    ];
+    let user_extensions = "/home/u/.local/share/Microsoft/MSBuild";
+    for name in BUILD_ENVIRONMENT_NAMES {
+        let mut graded_one = false;
+        for value in values {
+            // The refusal comes from the build's environment alone, before
+            // any build, restore or probe runs: whatever it admits, the
+            // evaluation admits too.
+            let graded =
+                grading_build_environment([(name.to_string(), value.to_string())]).map(|build| {
+                    let environment = evaluation_environment(&build, user_extensions)
+                        .unwrap_or_else(|refusal| {
+                            panic!("{name}={value:?} passes the build's check: {refusal}")
+                        });
+                    (build, environment)
+                });
+            // `PATH` is cut to what the derivation admits, never refused.
+            assert!(
+                *name != "PATH" || graded.is_ok(),
+                "PATH={value:?} is refused: {graded:?}"
+            );
+            match graded {
+                Ok((build, environment)) => {
+                    assert_eq!(
+                        borzoi_msbuild::fsc::environment_decline(&environment),
+                        None,
+                        "{name}={value:?} is graded under, though the derivation declines it"
+                    );
+                    // The build runs under the value as it was inherited, but
+                    // `PATH` cut to its plain entries.
+                    let kept: Vec<(&str, &str)> = build.vars().collect();
+                    let cut = graded_path(value);
+                    let expected: Vec<(&str, &str)> = match *name {
+                        "PATH" => cut
+                            .as_deref()
+                            .map(|path| (*name, path))
+                            .into_iter()
+                            .collect(),
+                        _ => vec![(*name, value)],
+                    };
+                    assert_eq!(kept, expected, "{name}={value:?}");
+                    // The evaluation sees what the build sees.
+                    let mut seen: HashMap<String, String> = build
+                        .vars()
+                        .map(|(n, v)| (n.to_string(), v.to_string()))
+                        .collect();
+                    seen.insert(
+                        "MSBuildUserExtensionsPath".to_string(),
+                        user_extensions.to_string(),
+                    );
+                    assert_eq!(environment, seen, "{name}={value:?}");
+                    graded_one |= environment.contains_key(*name);
+                }
+                Err(refusal) => {
+                    assert!(refusal.contains(name), "{refusal}");
+                    assert!(
+                        value.len() < 4 || !refusal.contains(value),
+                        "the refusal shows {name}'s value: {refusal}"
+                    );
+                    let environment = HashMap::from([(name.to_string(), value.to_string())]);
+                    assert!(
+                        borzoi_msbuild::fsc::environment_decline(&environment).is_some(),
+                        "{name}={value:?} is refused, though the derivation admits it"
+                    );
+                }
+            }
+        }
+        assert!(graded_one, "no value of {name} is ever graded under");
+    }
+    // The evaluation's own variable, which the probe answers, is held to its
+    // shape too.
+    let build = grading_build_environment([]).unwrap();
+    for user_extensions in ["", "relative", "/opt/SDK%20Tools"] {
+        let refused = evaluation_environment(&build, user_extensions).unwrap_err();
+        assert!(refused.contains("MSBuildUserExtensionsPath"), "{refused}");
+    }
+}
+
+/// A toolchain variable is held fixed: none is an input the oracle can vary,
+/// in any case.
+#[test]
+fn no_oracle_input_is_a_toolchain_variable() {
+    for name in INPUT_NAMES {
+        assert!(
+            !borzoi_msbuild::fsc::TOOLCHAIN_VARIABLES
+                .iter()
+                .any(|(toolchain, _)| toolchain.eq_ignore_ascii_case(name)),
+            "{name} is a toolchain variable, and an oracle input"
+        );
+        assert!(
+            !HELD_FIXED
+                .iter()
+                .any(|(held, _)| held.eq_ignore_ascii_case(name)),
+            "{name} is held fixed, and an oracle input"
+        );
+    }
+}
+
 /// Every variable the grading's own builds run under is one the derivation
 /// admits, so no case declines for the grading's environment alone.
 #[test]
@@ -1976,6 +2400,9 @@ fn the_grading_environment_is_admitted() {
             "the grading's builds run under {name}, which the derivation does not admit"
         );
     }
+    // And as its values stand: every case's evaluation is handed these, and
+    // the grading refuses to run under any the derivation declines.
+    grading_environment();
 }
 
 /// The name `BORZOI_FSC_NAME_ONLY` selects, if any.
@@ -2383,11 +2810,7 @@ fn devshell_sdk() -> (String, std::collections::BTreeSet<String>) {
     let dir = host_fs::canonicalize(tmp.path()).unwrap();
     let (project, _) = lay_out(&plain_case(), &dir).expect("the plain project lays out");
     let globals: HashMap<String, String> = HashMap::new();
-    let mut environment = inherited_variables();
-    environment.insert(
-        "MSBuildUserExtensionsPath".to_string(),
-        msbuild_user_extensions_path(inherited_environment()).to_string(),
-    );
+    let environment = grading_environment();
     let parsed = assembly_name::evaluate(
         &project,
         &globals,

@@ -24,9 +24,27 @@
 //! names in a real build (`borzoi_oracle_harness::msbuild_oracle::fsc_args`).
 //! A name goes on a list only with that grading.
 //!
-//! The build's own environment ([`toolchain_variable`]) is the toolchain's,
-//! which the grading holds fixed rather than perturbs: a variable there that
-//! chooses another compiler is outside what is graded.
+//! **The environment** is a positive list. MSBuild reads every variable as a
+//! property, so a variable keeps the evaluation in the domain only when it is
+//! one of three kinds ([`classify_variable`]):
+//!
+//! - the toolchain's own, by exact name ([`TOOLCHAIN_VARIABLES`]), each value
+//!   held to its shape (an absolute path, a list of them, or an on-off
+//!   switch). The grading
+//!   holds these fixed rather than perturbs them: its builds run in its own
+//!   environment, so it cannot grade another value of one. That is sound
+//!   because what they choose reaches fsc only through what the derivation
+//!   reads and checks itself: the .NET install is the root it is handed
+//!   (`dotnet_root`), whose SDK must be a verified one, and NuGet's settings,
+//!   package folder and feeds act through the restore, whose result it reads
+//!   (`RestoreSuccess`, the assets file);
+//! - an allowed property, held to its grammar;
+//! - one of [`ALLOWED_ENVIRONMENT`], graded inert by name.
+//!
+//! Every other variable declines; so do two whose names differ only by case,
+//! which MSBuild reads as one property by an order the walk does not
+//! reproduce, and the loader's and launcher's ([`launcher_variable`]), which
+//! nothing admits.
 //!
 //! **The register is keyed by what fsc receives.** Everything fsc is handed
 //! arrives through a parameter of the SDK's `<Fsc>` invocation, a finite set
@@ -46,7 +64,7 @@
 //! | The reference set | every path the caller builds its assembly env from ([`ReferencePaths`]) is absolute, without control characters, not option-shaped |
 //! | Package content files | every build action is on [`ADMITTED_CONTENT_ACTIONS`] ([`ContentFiles`]) |
 //! | Documents | no build code outside the install; no condition outside the install but in NuGet's restore files (#993: the walk cannot tell every value a condition compares, MSBuild respelling a backslash by its working directory); no item wildcard outside the install (a glob's match keeps the glob's spelling, which the walk's path does not); no expansion (`$(`, `@(`, `%(`) outside the install but in NuGet's restore files (MSBuild sets properties the walk takes for unset, `_MSBUILDTLENABLED`); no response file beside MSBuild, beside the project or above it ([`crate::AutoResponseFile::Absent`]); no `NotImported` site's file imported; no workload manifest from outside the install, and none a grading run of the SDK did not load ([`verified_manifests`]: manifests change apart from the SDK); the project's path without control characters |
-//! | The environment | each variable as [`classify_variable`] finds it: the toolchain's own ([`toolchain_variable`]) held fixed; others on `ALLOWED_ENVIRONMENT` or `ALLOWED_PROPERTIES` ([`environment_decline`]) |
+//! | The environment | each variable as [`classify_variable`] finds it: the toolchain's own ([`TOOLCHAIN_VARIABLES`], exact names) held fixed, its value of its shape ([`ToolchainValue`]: an absolute path, a list of them, or an on-off switch); `ALLOWED_PROPERTIES` held to their grammars; `ALLOWED_ENVIRONMENT` graded inert; no two variables naming one property ([`environment_decline`]) |
 //! | The SDK | fixed per install; only an SDK a whole sweep has graded commits ([`verified_sdks`]) |
 //!
 //! Assumed rather than checked: that the assets file is the restore of the
@@ -330,31 +348,143 @@ pub const ALLOWED_METADATA: &[&str] = &[
     "Visible",
 ];
 
-/// Environment variables beyond the build's own ([`toolchain_variable`]) and
-/// the [`ALLOWED_PROPERTIES`] that may be set and stay in the domain.
+/// Environment variables beyond the toolchain's own ([`TOOLCHAIN_VARIABLES`])
+/// and the [`ALLOWED_PROPERTIES`] that may be set and stay in the domain,
+/// each graded inert by `fsproj_assembly_name_perturbation_diff` (set to
+/// line-break and option-shaped values, held to fsc's `-o:` and to the plain
+/// project's whole command line).
 pub const ALLOWED_ENVIRONMENT: &[&str] = &[
     "EDITOR", "LANG", "LC_ALL", "LC_CTYPE", "LOGNAME", "OLDPWD", "PAGER", "PWD", "SHELL", "SHLVL",
     "TERM", "TZ", "USER",
 ];
 
-/// Whether `name` is one of the variables the build's own environment holds,
-/// which the grading holds fixed: `PATH`, `HOME`, `TMPDIR`, `RestoreSources`,
-/// the `DOTNET_*` and `NUGET_*` variables, and `MSBuildUserExtensionsPath`,
-/// which MSBuild computes for itself and an evaluation is handed as a
-/// variable (one of that name displaces the computed value).
+/// The shape a toolchain variable's value must have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ToolchainValue {
+    /// One absolute path.
+    Path,
+    /// A list of absolute paths, as the platform separates `PATH`'s.
+    SearchPath,
+    /// A `;`-separated list of package sources, each an absolute path (a
+    /// feed's URL declines: the grading's sources are folders).
+    Sources,
+    /// One of the CLI's on-off switches: `1`, `0`, `true` or `false`, in any
+    /// case.
+    Switch,
+}
+
+impl ToolchainValue {
+    /// Whether `value` has this shape: no control character anywhere, no `%`
+    /// (MSBuild reads the value as escaped text, so `%3B` would separate two
+    /// entries the shape never saw), and every path absolute, so it names one
+    /// place whatever directory reads it.
+    pub fn admits(self, value: &str) -> bool {
+        if value.chars().any(|c| c.is_control() || c == '%') {
+            return false;
+        }
+        let path = |p: &str| !p.is_empty() && std::path::Path::new(p).is_absolute();
+        match self {
+            ToolchainValue::Path => path(value),
+            ToolchainValue::SearchPath => {
+                !value.is_empty()
+                    && std::env::split_paths(value).all(|p| p.to_str().is_some_and(path))
+            }
+            ToolchainValue::Sources => {
+                let entries: Vec<&str> = value
+                    .split(';')
+                    .map(str::trim)
+                    .filter(|e| !e.is_empty())
+                    .collect();
+                !entries.is_empty() && entries.iter().all(|e| path(e))
+            }
+            ToolchainValue::Switch => ["1", "0", "true", "false"]
+                .iter()
+                .any(|switch| switch.eq_ignore_ascii_case(value)),
+        }
+    }
+}
+
+/// The toolchain's own variables, each by its exact name and with the shape
+/// its value must have, which the grading holds fixed rather than perturbs
+/// (see the module documentation for why that is sound): `PATH`,
+/// `DOTNET_ROOT` and `DOTNET_CLI_HOME` choose the .NET install and its CLI's
+/// state, `HOME`, `NUGET_PACKAGES` and `RestoreSources` NuGet's settings,
+/// package folder and feeds, `TMPDIR` the temporary directory, and
+/// `MSBuildUserExtensionsPath` is what MSBuild computes for itself and an
+/// evaluation is handed as a variable. The CLI's switches the grading's own
+/// builds run under are held fixed too, not graded: NuGet reads
+/// `DOTNET_NUGET_SIGNATURE_VERIFICATION` itself while it extracts packages,
+/// which no scan of the SDK's files sees, and what the restore does reaches
+/// fsc only through its result, which the derivation reads.
+pub const TOOLCHAIN_VARIABLES: &[(&str, ToolchainValue)] = &[
+    ("DOTNET_CLI_HOME", ToolchainValue::Path),
+    ("DOTNET_CLI_TELEMETRY_OPTOUT", ToolchainValue::Switch),
+    ("DOTNET_NOLOGO", ToolchainValue::Switch),
+    (
+        "DOTNET_NUGET_SIGNATURE_VERIFICATION",
+        ToolchainValue::Switch,
+    ),
+    ("DOTNET_ROOT", ToolchainValue::Path),
+    ("HOME", ToolchainValue::Path),
+    ("MSBuildUserExtensionsPath", ToolchainValue::Path),
+    ("NUGET_PACKAGES", ToolchainValue::Path),
+    ("PATH", ToolchainValue::SearchPath),
+    ("RestoreSources", ToolchainValue::Sources),
+    ("DOTNET_SKIP_FIRST_TIME_EXPERIENCE", ToolchainValue::Switch),
+    (
+        "DOTNET_SKIP_WORKLOAD_INTEGRITY_CHECK",
+        ToolchainValue::Switch,
+    ),
+    ("TMPDIR", ToolchainValue::Path),
+];
+
+/// Whether `name`, exactly, is one of [`TOOLCHAIN_VARIABLES`]. One differing
+/// from it only by case is not: a tool reading `HOME` does not read `home`,
+/// which MSBuild reads as the property `HOME`.
 pub fn toolchain_variable(name: &str) -> bool {
-    matches!(
-        name,
-        "PATH" | "HOME" | "TMPDIR" | "RestoreSources" | "MSBuildUserExtensionsPath"
-    ) || name.starts_with("DOTNET_")
-        || name.starts_with("NUGET_")
+    toolchain_value(name).is_some()
+}
+
+/// The shape [`TOOLCHAIN_VARIABLES`] gives the variable `name`, exactly.
+fn toolchain_value(name: &str) -> Option<ToolchainValue> {
+    TOOLCHAIN_VARIABLES
+        .iter()
+        .find(|(toolchain, _)| *toolchain == name)
+        .map(|(_, shape)| *shape)
+}
+
+/// The prefixes of the variables read before any code of the install runs,
+/// each compared without case: the dynamic loader's (`LD_`, ld.so(8);
+/// `DYLD_`, dyld(1)), which load other code into every process of the build,
+/// and the functions bash(1) imports from the environment (`BASH_FUNC_`), for
+/// a `dotnet` that is a script (the Nix wrapper is one).
+pub const LAUNCHER_PREFIXES: &[&str] = &["BASH_FUNC_", "DYLD_", "LD_"];
+
+/// The variables read before any code of the install runs, beside
+/// [`LAUNCHER_PREFIXES`]: the files a shell running a script runs first
+/// (bash's `BASH_ENV`, a POSIX shell's `ENV`).
+pub const LAUNCHER_VARIABLES: &[&str] = &["BASH_ENV", "ENV"];
+
+/// Whether `name` is one of the launcher's ([`LAUNCHER_PREFIXES`],
+/// [`LAUNCHER_VARIABLES`]), compared without case. Such a variable declines
+/// before any list is consulted, so no list can come to admit one.
+pub fn launcher_variable(name: &str) -> bool {
+    on_list(LAUNCHER_VARIABLES, name)
+        || LAUNCHER_PREFIXES.iter().any(|prefix| {
+            name.get(..prefix.len())
+                .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+        })
 }
 
 /// What an environment variable is to the derivation ([`classify_variable`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VariableClass {
-    /// One of the build's own ([`toolchain_variable`]), held fixed.
-    Toolchain,
+    /// One of the toolchain's own ([`TOOLCHAIN_VARIABLES`], exact name),
+    /// held fixed, whose value must have this shape.
+    Toolchain(ToolchainValue),
+    /// Read by the loader or the launcher before the install's code runs
+    /// ([`launcher_variable`]): declined.
+    Launcher,
     /// One of [`ALLOWED_PROPERTIES`] (in any case), whose value must match
     /// this grammar.
     AllowedProperty(Grammar),
@@ -369,16 +499,18 @@ impl VariableClass {
     /// (an allowed property's value aside, which the derivation checks with
     /// the rest).
     pub fn admitted(self) -> bool {
-        self != VariableClass::Unlisted
+        !matches!(self, VariableClass::Launcher | VariableClass::Unlisted)
     }
 }
 
-/// What the variable `name` is to the derivation: the toolchain's own, an
-/// allowed property, one of [`ALLOWED_ENVIRONMENT`], or on no list, in that
-/// order.
+/// What the variable `name` is to the derivation: the loader's or the
+/// launcher's, the toolchain's own (exact name), an allowed property, one of
+/// [`ALLOWED_ENVIRONMENT`], or on no list, in that order.
 pub fn classify_variable(name: &str) -> VariableClass {
-    if toolchain_variable(name) {
-        VariableClass::Toolchain
+    if launcher_variable(name) {
+        VariableClass::Launcher
+    } else if let Some(shape) = toolchain_value(name) {
+        VariableClass::Toolchain(shape)
     } else if let Some(grammar) = allowed_property(name) {
         VariableClass::AllowedProperty(grammar)
     } else if on_list(ALLOWED_ENVIRONMENT, name) {
@@ -389,13 +521,53 @@ pub fn classify_variable(name: &str) -> VariableClass {
 }
 
 /// Why the environment `environment` takes an evaluation out of the domain,
-/// or `None` when it does not (an allowed property's value aside): a
-/// variable [`classify_variable`] does not admit.
+/// or `None` when it does not (an allowed property's value aside, which the
+/// derivation checks with the rest): the first of [`environment_declines`].
 pub fn environment_decline(environment: &HashMap<String, String>) -> Option<NameDecline> {
-    environment
-        .keys()
-        .find(|name| !classify_variable(name).admitted())
-        .map(|name| NameDecline::Environment(name.clone()))
+    environment_declines(environment).into_iter().next()
+}
+
+/// Every reason the environment `environment` takes an evaluation out of the
+/// domain, in variable name order (so the same however the map is ordered):
+/// a variable [`classify_variable`] does not admit; a toolchain variable whose
+/// value is not of its shape (named by its shape, never its value, which may
+/// hold a feed's credentials); and two variables whose names differ only by
+/// case, which MSBuild reads as one property by an order the walk does not
+/// reproduce.
+pub fn environment_declines(environment: &HashMap<String, String>) -> Vec<NameDecline> {
+    let mut declines = Vec::new();
+    let mut names: Vec<&String> = environment.keys().collect();
+    names.sort();
+    let mut by_property: HashMap<String, &String> = HashMap::new();
+    for name in names {
+        match classify_variable(name) {
+            class if !class.admitted() => declines.push(NameDecline::Environment(name.clone())),
+            VariableClass::Toolchain(shape) if !shape.admits(&environment[name]) => {
+                declines.push(NameDecline::ToolchainValue(name.clone(), shape));
+            }
+            _ => {}
+        }
+        if property_name(name)
+            && let Some(other) = by_property.insert(name.to_ascii_lowercase(), name)
+        {
+            declines.push(NameDecline::OneProperty(other.clone(), name.clone()));
+        }
+    }
+    declines
+}
+
+/// Whether MSBuild takes a variable of this name for a property: a letter or
+/// `_`, then letters, digits, `_` and `-`, and no name MSBuild reserves for
+/// itself ([`crate::evaluator::is_msbuild_reserved_name`]), which it sets and
+/// the environment cannot. Two spellings of a name MSBuild never promotes are
+/// no one property (each declines as unlisted anyway: every admitted name is
+/// one MSBuild promotes).
+fn property_name(name: &str) -> bool {
+    name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        && !crate::evaluator::is_msbuild_reserved_name(name)
 }
 
 /// The name of the assembly a project compiles to, as FCS names it.
@@ -457,8 +629,15 @@ pub enum NameDecline {
     /// Item metadata not on [`ALLOWED_METADATA`] is set outside the .NET
     /// install.
     Metadata(String),
-    /// An environment variable on no list is set ([`classify_variable`]).
+    /// An environment variable is set that [`classify_variable`] declines:
+    /// which.
     Environment(String),
+    /// A toolchain variable's value is not of its shape: the variable, and
+    /// the shape (never the value, which may hold a feed's credentials).
+    ToolchainValue(String, ToolchainValue),
+    /// Two environment variables whose names differ only by case, which
+    /// MSBuild reads as one property by an order the walk does not reproduce.
+    OneProperty(String, String),
     /// An allowed property held a value outside its grammar, or one the walk
     /// is not certain of, at some point of the evaluation (its final value,
     /// any write a document outside the install made, its global or its
@@ -2156,51 +2335,306 @@ fn sources_read_as_files(project_path: &Path, parsed: &ParsedProject) -> bool {
 mod tests {
     use super::{
         ALLOWED_ENVIRONMENT, ALLOWED_PROPERTIES, DefaultItemFiles, Grammar, NameDecline,
-        VariableClass, classify_variable, default_item_files, environment_decline,
+        ToolchainValue, VariableClass, classify_variable, default_item_files, environment_decline,
         may_read_as_option,
     };
     use crate::observed::Observer;
     use proptest::prelude::*;
     use std::collections::HashMap;
 
-    /// The environment rule as it stood before it was a classifier, kept
-    /// verbatim as the reference the classifier must equal.
+    /// The names of `ALLOWED_PROPERTIES` as they stood before the allow-list
+    /// (#1064 PR 1), frozen beside [`OLD_GRADED`], so the baseline cannot
+    /// move with production's list.
+    const OLD_PROPERTIES: &[&str] = &[
+        "AssemblyName",
+        "Authors",
+        "Configuration",
+        "DebugType",
+        "Description",
+        "Deterministic",
+        "GenerateDocumentationFile",
+        "IsPackable",
+        "IsTestProject",
+        "LangVersion",
+        "NoWarn",
+        "Nullable",
+        "Optimize",
+        "OtherFlags",
+        "OutputType",
+        "Platform",
+        "RootNamespace",
+        "TargetFramework",
+        "TargetFrameworks",
+        "TreatWarningsAsErrors",
+        "Version",
+        "WarnOn",
+        "WarningsAsErrors",
+    ];
+
+    /// The allow-list moves no property: production's allowed property names
+    /// are the baseline's, so a property added or removed is a change this
+    /// claim does not make, and fails here.
+    #[test]
+    fn the_allowed_properties_are_the_baseline_s() {
+        let production: Vec<&str> = ALLOWED_PROPERTIES.iter().map(|(name, _)| *name).collect();
+        assert_eq!(production, OLD_PROPERTIES);
+    }
+
+    /// `ALLOWED_ENVIRONMENT` as it stood before the allow-list (#1064 PR 1),
+    /// frozen, so the rule's movement is measured from a fixed point.
+    const OLD_GRADED: &[&str] = &[
+        "EDITOR", "LANG", "LC_ALL", "LC_CTYPE", "LOGNAME", "OLDPWD", "PAGER", "PWD", "SHELL",
+        "SHLVL", "TERM", "TZ", "USER",
+    ];
+
+    /// The names `ALLOWED_ENVIRONMENT` may hold beyond [`OLD_GRADED`], each a
+    /// widening the environment rule states.
+    const WIDENED: &[&str] = &[];
+
+    /// Whether `name` is one of the stated widenings, compared without case
+    /// (as `ALLOWED_ENVIRONMENT` is): the old rule declined it, and the claim
+    /// admits it.
+    fn widened(name: &str) -> bool {
+        WIDENED.iter().any(|w| w.eq_ignore_ascii_case(name))
+    }
+
+    /// `ALLOWED_ENVIRONMENT` is the frozen list and the stated widenings, so
+    /// a name added without being declared fails here.
+    #[test]
+    fn the_graded_list_widens_only_as_stated() {
+        let now: std::collections::BTreeSet<&str> = ALLOWED_ENVIRONMENT.iter().copied().collect();
+        let stated: std::collections::BTreeSet<&str> =
+            OLD_GRADED.iter().chain(WIDENED).copied().collect();
+        assert_eq!(now, stated);
+    }
+
+    /// The environment rule as it stood before the allow-list (#1064 PR 1),
+    /// kept verbatim with its graded list frozen: the reference the rule's
+    /// movement is measured from.
     fn declined_before(name: &str) -> bool {
         let toolchain = matches!(
             name,
             "PATH" | "HOME" | "TMPDIR" | "RestoreSources" | "MSBuildUserExtensionsPath"
         ) || name.starts_with("DOTNET_")
             || name.starts_with("NUGET_");
-        let graded = ALLOWED_ENVIRONMENT
+        let graded = OLD_GRADED
             .iter()
             .any(|allowed| allowed.eq_ignore_ascii_case(name));
-        let property = ALLOWED_PROPERTIES
+        let property = OLD_PROPERTIES
             .iter()
-            .any(|(allowed, _)| allowed.eq_ignore_ascii_case(name));
+            .any(|allowed| allowed.eq_ignore_ascii_case(name));
         !toolchain && !graded && !property
     }
 
-    /// A name for a variable: each listed name and the toolchain's, in its
-    /// own case, lower case or upper case, with or without a tail; a
-    /// `DOTNET_`/`NUGET_` name in either case; or any short name.
+    /// Production's toolchain table is exactly the pinned one, name for name
+    /// and shape for shape: a name added to `TOOLCHAIN_VARIABLES` alone is a
+    /// widening the movement properties would never draw.
+    #[test]
+    fn the_toolchain_table_is_the_pinned_one() {
+        use std::collections::BTreeSet;
+        let pinned: BTreeSet<(&str, ToolchainValue)> = TOOLCHAIN.iter().copied().collect();
+        let production: BTreeSet<(&str, ToolchainValue)> =
+            super::TOOLCHAIN_VARIABLES.iter().copied().collect();
+        assert_eq!(production, pinned);
+        assert_eq!(super::TOOLCHAIN_VARIABLES.len(), TOOLCHAIN.len());
+    }
+
+    /// Whether `value` has the shape `shape`, as the claim states it, spelled
+    /// apart from `ToolchainValue::admits`: no control character (Unicode's
+    /// `Cc`: U+0000–U+001F, U+007F–U+009F) and no `%` anywhere; a path starts
+    /// with `/`; a search path is `:`-separated paths, none empty; sources are
+    /// `;`-separated, trimmed, the empty ones dropped, at least one, each a
+    /// path; a switch is `1`, `0`, `true` or `false` in any case.
+    fn shaped(shape: ToolchainValue, value: &str) -> bool {
+        let control = |c: char| matches!(c as u32, 0..=0x1F | 0x7F..=0x9F);
+        if value.chars().any(|c| control(c) || c == '%') {
+            return false;
+        }
+        let path = |p: &str| p.starts_with('/');
+        match shape {
+            ToolchainValue::Path => path(value),
+            ToolchainValue::SearchPath => !value.is_empty() && value.split(':').all(path),
+            ToolchainValue::Sources => {
+                let entries: Vec<&str> = value
+                    .split(';')
+                    .map(str::trim)
+                    .filter(|e| !e.is_empty())
+                    .collect();
+                !entries.is_empty() && entries.iter().all(|e| path(e))
+            }
+            ToolchainValue::Switch => ["1", "0", "true", "false"]
+                .iter()
+                .any(|s| s.eq_ignore_ascii_case(value)),
+        }
+    }
+
+    /// The spec of the shapes and `ToolchainValue::admits` agree on a value
+    /// holding each control character of every range, and on the shapes'
+    /// own examples.
+    #[test]
+    fn the_shape_spec_is_the_rule() {
+        let shapes = [
+            ToolchainValue::Path,
+            ToolchainValue::SearchPath,
+            ToolchainValue::Sources,
+            ToolchainValue::Switch,
+        ];
+        let mut values: Vec<String> = [
+            "/opt/dotnet",
+            "relative",
+            "",
+            "/a:/b",
+            "/a::/b",
+            "/feed; /other",
+            " ; ",
+            "1",
+            "TRUE",
+            "yes",
+            "/opt/SDK%20Tools",
+            "https://example.org/v3/index.json",
+        ]
+        .iter()
+        .map(|v| v.to_string())
+        .collect();
+        for code in (0u32..0x20).chain(0x7F..0xA0).chain([0xA0, 0x2028, 0xFEFF]) {
+            let c = char::from_u32(code).unwrap();
+            values.push(format!("/opt/a{c}b"));
+        }
+        for shape in shapes {
+            for value in &values {
+                assert_eq!(
+                    shape.admits(value),
+                    shaped(shape, value),
+                    "{shape:?} {value:?}"
+                );
+            }
+        }
+    }
+
+    /// The toolchain's own names, as the allow-list states them, with the
+    /// shape each value must have: spelled here apart from
+    /// `TOOLCHAIN_VARIABLES`. What each shape admits is [`shaped`]'s.
+    const TOOLCHAIN: &[(&str, ToolchainValue)] = &[
+        ("DOTNET_CLI_HOME", ToolchainValue::Path),
+        ("DOTNET_CLI_TELEMETRY_OPTOUT", ToolchainValue::Switch),
+        ("DOTNET_NOLOGO", ToolchainValue::Switch),
+        (
+            "DOTNET_NUGET_SIGNATURE_VERIFICATION",
+            ToolchainValue::Switch,
+        ),
+        ("DOTNET_SKIP_FIRST_TIME_EXPERIENCE", ToolchainValue::Switch),
+        (
+            "DOTNET_SKIP_WORKLOAD_INTEGRITY_CHECK",
+            ToolchainValue::Switch,
+        ),
+        ("DOTNET_ROOT", ToolchainValue::Path),
+        ("HOME", ToolchainValue::Path),
+        ("MSBuildUserExtensionsPath", ToolchainValue::Path),
+        ("NUGET_PACKAGES", ToolchainValue::Path),
+        ("PATH", ToolchainValue::SearchPath),
+        ("RestoreSources", ToolchainValue::Sources),
+        ("TMPDIR", ToolchainValue::Path),
+    ];
+
+    /// Whether the allow-list moves the variable `name` at `value` from
+    /// admitted to declined, as #1064 PR 2 claims: a `DOTNET_`/`NUGET_` name
+    /// the old rule admitted by prefix alone, neither a toolchain name nor
+    /// graded; a toolchain name whose value is not of its shape; and a
+    /// loader's or launcher's name, which no rule admits.
+    fn moved(name: &str, value: &str) -> bool {
+        if declined_before(name) {
+            return false;
+        }
+        if let Some((_, shape)) = TOOLCHAIN.iter().find(|(t, _)| *t == name) {
+            return !shaped(*shape, value);
+        }
+        let by_prefix = name.starts_with("DOTNET_") || name.starts_with("NUGET_");
+        let graded = OLD_GRADED
+            .iter()
+            .chain(WIDENED)
+            .any(|allowed| allowed.eq_ignore_ascii_case(name));
+        let property = OLD_PROPERTIES
+            .iter()
+            .any(|allowed| allowed.eq_ignore_ascii_case(name));
+        by_prefix && !graded && !property
+    }
+
+    /// The reasons the claim gives for declining `environment`, built from its
+    /// statement rather than the rule's code, in variable name order: each
+    /// name the old rule declined or the claim moves by name, as
+    /// `Environment`; each toolchain name whose value is not of its shape, as
+    /// `ToolchainValue`; and each two spellings of one property, as
+    /// `OneProperty`, a spelling paired with the one before it.
+    fn expected_declines(environment: &HashMap<String, String>) -> Vec<NameDecline> {
+        let mut names: Vec<&String> = environment.keys().collect();
+        names.sort();
+        let mut out = Vec::new();
+        let mut last_of: HashMap<String, &String> = HashMap::new();
+        for name in names {
+            let value = &environment[name];
+            if let Some((_, shape)) = TOOLCHAIN.iter().find(|(t, _)| t == name) {
+                if !shaped(*shape, value) {
+                    out.push(NameDecline::ToolchainValue(name.clone(), *shape));
+                }
+            } else if (declined_before(name) && !widened(name)) || moved(name, value) {
+                out.push(NameDecline::Environment(name.clone()));
+            }
+            let promoted = name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+                && !crate::evaluator::MSBUILD_RESERVED_NAMES
+                    .iter()
+                    .any(|reserved| reserved.eq_ignore_ascii_case(name));
+            if promoted && let Some(before) = last_of.insert(name.to_ascii_lowercase(), name) {
+                out.push(NameDecline::OneProperty(before.clone(), name.clone()));
+            }
+        }
+        out
+    }
+
+    /// Whether the allow-list gives exactly the claim's reasons for
+    /// `environment`, each of the right kind, about the right variable, with
+    /// the right shape ([`expected_declines`]); and declines exactly when there
+    /// is one.
+    fn agrees(environment: &HashMap<String, String>) -> Result<(), String> {
+        let declines = super::environment_declines(environment);
+        let expected = expected_declines(environment);
+        if declines != expected {
+            return Err(format!(
+                "{environment:?}: declines {declines:?}, expected {expected:?}"
+            ));
+        }
+        if environment_decline(environment) != expected.first().cloned() {
+            return Err(format!(
+                "{environment:?}: the first reason is not the verdict"
+            ));
+        }
+        Ok(())
+    }
+
+    /// A name for a variable: each listed name, toolchain name and launcher
+    /// prefix, in its own case, lower case or upper case, with or without a
+    /// tail; a `DOTNET_`/`NUGET_` name; or any short name. (The hostile names
+    /// come in through [`mixed`], once per case.)
     fn variable_name() -> impl Strategy<Value = String> {
         let listed: Vec<&'static str> = ALLOWED_ENVIRONMENT
             .iter()
             .copied()
             .chain(ALLOWED_PROPERTIES.iter().map(|(name, _)| *name))
+            .chain(OLD_PROPERTIES.iter().copied())
+            .chain(TOOLCHAIN.iter().map(|(name, _)| *name))
             .chain([
-                "PATH",
-                "HOME",
-                "TMPDIR",
-                "RestoreSources",
-                "MSBuildUserExtensionsPath",
                 "DOTNET_",
                 "NUGET_",
-                "DOTNET_ROOT",
-                "NUGET_PACKAGES",
+                "LD_",
+                "DYLD_",
+                "BASH_FUNC_",
+                "BASH_ENV",
+                "ENV",
             ])
             .collect();
-        let own = prop_oneof![
+        prop_oneof![
             (prop::sample::select(listed), 0..3usize, "[A-Za-z_]{0,2}").prop_map(
                 |(name, case, tail)| {
                     let name = match case {
@@ -2212,97 +2646,122 @@ mod tests {
                 }
             ),
             "[A-Za-z_][A-Za-z0-9_.()-]{0,12}",
-        ];
-        // A hostile name (`hostile::name`, as a variable's name) in one case
-        // in `hostile::RATE`.
-        let hostile = borzoi_oracle_harness::hostile::name::as_text("BorzoiVar", "");
-        (own, any::<u64>()).prop_map(move |(own, entropy)| {
-            match borzoi_oracle_harness::hostile::sample(&hostile, entropy) {
-                Some(entry) if !entry.value.is_empty() && !entry.value.contains(['=', '\0']) => {
-                    entry.value.clone()
-                }
-                _ => own,
-            }
-        })
+        ]
     }
 
-    /// An environment: generated variables, and in one case in
-    /// `hostile::RATE` a hostile environment's (`hostile::env`) beside them,
-    /// at their own values.
-    fn environment() -> impl Strategy<Value = HashMap<String, String>> {
-        (prop::collection::vec(variable_name(), 0..6), any::<u64>()).prop_map(|(names, entropy)| {
-            let mut environment: HashMap<String, String> = names
-                .into_iter()
-                .map(|name| (name, "v".to_string()))
-                .collect();
-            let entries = borzoi_oracle_harness::hostile::env::alphabet().entries();
-            if let Some(entry) = borzoi_oracle_harness::hostile::sample(entries, entropy) {
-                for (name, value) in entry.value {
-                    environment.insert(name.to_string(), value.to_string());
+    /// A value for a variable: an absolute path, a list of them, a relative
+    /// path, an empty one, a URL, one holding a control character, a switch.
+    fn variable_value() -> impl Strategy<Value = String> {
+        prop_oneof![
+            Just(String::new()),
+            prop::sample::select(vec!["1", "0", "true", "False", "yes"]).prop_map(str::to_string),
+            "https?://[a-z]{0,6}(/[a-z]{0,3})?",
+            "/[a-z]{1,6}(/[a-z]{1,6}){0,2}",
+            "/[a-z]{1,4}:/[a-z]{1,4}",
+            "[a-z]{1,6}(/[a-z]{1,4})?",
+            "/[a-z]{1,4};https://[a-z]{1,6}",
+            "/[a-z]{1,3}\n[a-z]{1,3}",
+            "[ -~]{0,8}",
+        ]
+    }
+
+    /// `variables` as an environment, with hostile values mixed in once for
+    /// the whole case (`hostile::mixes`, one case in `hostile::RATE`): in a
+    /// case that mixes, by what is left of `entropy`, the first variable's
+    /// name becomes a hostile one (`hostile::name`, as a variable's), its
+    /// value a hostile property value (`hostile::value`, rendered on the
+    /// generated one), or a hostile environment (`hostile::env`) joins the
+    /// rest at its own values.
+    fn mixed(variables: Vec<(String, String)>, entropy: u64) -> HashMap<String, String> {
+        use borzoi_oracle_harness::hostile::{self, env, name, value};
+        let mut variables = variables;
+        if hostile::mixes(entropy) {
+            let rest = entropy / hostile::RATE;
+            match rest % 3 {
+                0 => {
+                    let names: Vec<_> = name::as_text("BorzoiVar", "")
+                        .into_iter()
+                        .filter(|e| !e.value.is_empty() && !e.value.contains(['=', '\0']))
+                        .collect();
+                    if let Some(first) = variables.first_mut() {
+                        first.0 = names[(rest / 3) as usize % names.len()].value.clone();
+                    }
+                }
+                1 => {
+                    let values =
+                        value::alphabet().filtered(|e| e.value.write != value::Write::ThenPlain);
+                    if let Some(first) = variables.first_mut() {
+                        first.1 = values[(rest / 3) as usize % values.len()]
+                            .value
+                            .render(&first.1);
+                    }
+                }
+                _ => {
+                    let entries = env::alphabet().entries();
+                    let entry = &entries[(rest / 3) as usize % entries.len()];
+                    for (name, value) in entry.value {
+                        variables.push((name.to_string(), value.to_string()));
+                    }
                 }
             }
-            environment
-        })
+        }
+        variables.into_iter().collect()
     }
 
     proptest! {
-        /// The classifier admits exactly what the rule did before it.
+        /// One variable: the allow-list declines it exactly when the old rule
+        /// did or the claim moves it.
         #[test]
-        fn the_classifier_is_the_rule_it_replaced(name in variable_name()) {
-            prop_assert_eq!(!classify_variable(&name).admitted(), declined_before(&name));
+        fn the_rule_moves_only_what_it_claims(
+            name in variable_name(),
+            value in variable_value(),
+            entropy in any::<u64>(),
+        ) {
+            let environment = mixed(vec![(name, value)], entropy);
+            prop_assert!(agrees(&environment).is_ok(), "{}", agrees(&environment).unwrap_err());
         }
 
-        /// An environment declines exactly when it holds a variable the rule
-        /// declined, and names such a variable.
+        /// A whole environment: declined exactly when one of its variables is,
+        /// or two of its names differ only by case, for a reason it holds.
         #[test]
-        fn the_environment_declines_as_it_did(environment in environment()) {
-            match environment_decline(&environment) {
-                Some(NameDecline::Environment(name)) => {
-                    prop_assert!(environment.contains_key(&name), "{name} is not set");
-                    prop_assert!(declined_before(&name));
-                }
-                Some(other) => prop_assert!(false, "{other:?}"),
-                None => prop_assert!(!environment.keys().any(|name| declined_before(name))),
-            }
+        fn environments_move_only_as_claimed(
+            variables in prop::collection::vec((variable_name(), variable_value()), 0..6),
+            entropy in any::<u64>(),
+        ) {
+            let environment = mixed(variables, entropy);
+            prop_assert!(agrees(&environment).is_ok(), "{}", agrees(&environment).unwrap_err());
         }
     }
 
     /// Every hostile environment (`hostile::env`), its variables at their own
     /// values, and every hostile file-name template rendered as a variable's
-    /// name (`hostile::name`): the classifier and the environment's verdict
-    /// are the rule they replaced, each recorded in the census
-    /// `variable_class`.
+    /// name (`hostile::name`): the rule moves only what it claims, each
+    /// recorded in the census `variable_class`, beside the harness's own
+    /// environments through the same comparison.
     #[test]
-    fn the_classifier_agrees_on_every_hostile_environment() {
-        use borzoi_oracle_harness::hostile::{Dimension, coverage, env, name};
+    fn the_rule_moves_only_what_it_claims_on_every_hostile_environment() {
+        use borzoi_oracle_harness::hostile::{Dimension, coverage, env, name, value};
         use std::collections::BTreeSet;
         let census = coverage::open(
             file!(),
             "variable_class",
-            &[(
-                Dimension::NonUtf8,
-                "the derivation takes the environment as UTF-8 text, as its caller reads it",
-            )],
+            &[
+                (
+                    Dimension::NonUtf8,
+                    "the derivation takes the environment as UTF-8 text, as its caller reads it",
+                ),
+                (
+                    Dimension::OverwrittenLater,
+                    "a variable is set once, before the build: no later write reaches it",
+                ),
+            ],
         );
         let mut failures = Vec::new();
         let mut check = |environment: HashMap<String, String>, dimension: Option<Dimension>| {
-            for name in environment.keys() {
-                if !classify_variable(name).admitted() != declined_before(name) {
-                    failures.push(format!("{name:?}: {:?}", classify_variable(name)));
-                }
+            if let Err(failure) = agrees(&environment) {
+                failures.push(failure);
             }
             let declined = environment_decline(&environment);
-            let declined_name = match &declined {
-                Some(NameDecline::Environment(name)) => Some(name.clone()),
-                _ => None,
-            };
-            let agrees = match &declined_name {
-                Some(name) => environment.contains_key(name) && declined_before(name),
-                None => declined.is_none() && !environment.keys().any(|n| declined_before(n)),
-            };
-            if !agrees {
-                failures.push(format!("{environment:?}: {declined:?}"));
-            }
             census.reached(
                 &dimension.into_iter().collect::<BTreeSet<_>>(),
                 if declined.is_some() {
@@ -2326,9 +2785,34 @@ mod tests {
                 Some(entry.dimension),
             );
         }
-        // The harness's own environments: a graded variable, and one on no
-        // list, through the same comparison.
+        // Every hostile property value (`hostile::value`), as the value of a
+        // toolchain variable of each shape, of a graded one and of an allowed
+        // property, each rendered on a plain value of its own.
+        for entry in value::alphabet().entries() {
+            if entry.value.write == value::Write::ThenPlain {
+                continue;
+            }
+            for (name, plain) in [
+                ("HOME", "/home/borzoi"),
+                ("PATH", "/usr/bin:/bin"),
+                ("RestoreSources", "/feed"),
+                ("DOTNET_NOLOGO", "1"),
+                ("LANG", "C"),
+                ("Configuration", "Debug"),
+            ] {
+                check(
+                    HashMap::from([(name.to_string(), entry.value.render(plain))]),
+                    Some(entry.dimension),
+                );
+            }
+        }
+        // The harness's own environments: a graded variable, a toolchain one
+        // at an absolute path, and one on no list.
         check(HashMap::from([("LANG".to_string(), "C".to_string())]), None);
+        check(
+            HashMap::from([("HOME".to_string(), "/home/borzoi".to_string())]),
+            None,
+        );
         check(
             HashMap::from([("BorzoiVar".to_string(), "v".to_string())]),
             None,
@@ -2336,22 +2820,297 @@ mod tests {
         assert!(failures.is_empty(), "{}", failures.join("\n"));
         census.finish(
             "BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-msbuild --lib \
-             fsc::tests::the_classifier_agrees_on_every_hostile_environment",
+             fsc::tests::the_rule_moves_only_what_it_claims_on_every_hostile_environment",
         );
     }
 
-    /// Each class is reached, so the property above compares every arm.
+    /// What the claim moves of PR 0's hostile census, by name: the
+    /// `DOTNET_`/`NUGET_` names the prefix admitted, and the toolchain's own at
+    /// an empty or relative value, decline; the toolchain's own at an absolute
+    /// path stay admitted (held fixed).
+    #[test]
+    fn the_hostile_census_moves_as_claimed() {
+        let decline = |name: &str, value: &str| {
+            environment_decline(&HashMap::from([(name.to_string(), value.to_string())])).is_some()
+        };
+        for (name, value) in [
+            (
+                "DOTNET_MSBUILD_SDK_RESOLVER_SDKS_DIR",
+                "/nonexistent/borzoi-hostile",
+            ),
+            (
+                "DOTNET_MSBUILD_SDK_RESOLVER_CLI_DIR",
+                "/nonexistent/borzoi-hostile",
+            ),
+            ("NUGET_FALLBACK_PACKAGES", "/nonexistent/borzoi-hostile"),
+            ("DOTNET_HOST_PATH", "/nonexistent/borzoi-hostile/dotnet"),
+            ("DOTNET_SYSTEM_GLOBALIZATION_INVARIANT", "1"),
+            ("DOTNET_CLI_UI_LANGUAGE", "tr"),
+            ("NUGET_PACKAGES", ""),
+            ("DOTNET_ROOT", ""),
+            ("NUGET_PACKAGES", "relative/packages"),
+        ] {
+            assert!(decline(name, value), "{name}={value:?} must decline");
+        }
+        for name in ["DOTNET_ROOT", "NUGET_PACKAGES", "HOME", "DOTNET_CLI_HOME"] {
+            assert!(
+                !decline(name, "/nonexistent/borzoi-hostile"),
+                "{name} at an absolute path is held fixed"
+            );
+        }
+    }
+
+    /// The loader's and the launcher's variables decline in any case, before
+    /// any list is consulted.
+    #[test]
+    fn launcher_variables_decline() {
+        for name in [
+            "LD_PRELOAD",
+            "ld_preload",
+            "LD_LIBRARY_PATH",
+            "DYLD_INSERT_LIBRARIES",
+            "dyld_library_path",
+            "BASH_ENV",
+            "BASH_FUNC_dotnet%%",
+            "ENV",
+            "env",
+        ] {
+            assert_eq!(classify_variable(name), VariableClass::Launcher, "{name}");
+            assert!(
+                matches!(
+                    environment_decline(&HashMap::from([(name.to_string(), "/x".to_string())])),
+                    Some(NameDecline::Environment(_))
+                ),
+                "{name}"
+            );
+        }
+    }
+
+    /// An absolute path made of plain segments, one or more.
+    fn plain_path() -> impl Strategy<Value = String> {
+        prop::collection::vec("[A-Za-z0-9_.-]{1,8}", 1..4)
+            .prop_map(|segments| segments.iter().map(|s| format!("/{s}")).collect::<String>())
+    }
+
+    /// A value made bad by construction: a control character (any of them,
+    /// carriage return and delete among them) or a `%` put into a good one,
+    /// the leading `/` taken off, or nothing at all.
+    fn spoiled(good: String, how: u8, at: usize, control: char) -> String {
+        match how % 4 {
+            0 => {
+                let at = at % (good.len() + 1);
+                format!("{}{control}{}", &good[..at], &good[at..])
+            }
+            1 => {
+                let at = at % (good.len() + 1);
+                format!("{}%3B{}", &good[..at], &good[at..])
+            }
+            2 => good.trim_start_matches('/').to_string(),
+            _ => String::new(),
+        }
+    }
+
+    proptest! {
+        /// Every shape's verdict is known by construction, not by a second
+        /// predicate: plain absolute paths (one, a `:` list, a `;` list) are
+        /// admitted, and the same values spoiled are not.
+        #[test]
+        fn toolchain_values_have_known_verdicts(
+            paths in prop::collection::vec(plain_path(), 1..4),
+            how in any::<u8>(),
+            at in any::<usize>(),
+            control in prop::sample::select(
+                (0u8..0x20).chain([0x7f]).map(char::from).collect::<Vec<_>>()
+            ),
+        ) {
+            let one = paths[0].clone();
+            let search = paths.join(":");
+            let sources = paths.join(";");
+            prop_assert!(ToolchainValue::Path.admits(&one), "{one:?}");
+            prop_assert!(ToolchainValue::SearchPath.admits(&search), "{search:?}");
+            prop_assert!(ToolchainValue::Sources.admits(&sources), "{sources:?}");
+            let bad = spoiled(one, how, at, control);
+            prop_assert!(!ToolchainValue::Path.admits(&bad), "{bad:?}");
+            prop_assert!(!ToolchainValue::SearchPath.admits(&bad), "{bad:?}");
+            prop_assert!(!ToolchainValue::Sources.admits(&bad), "{bad:?}");
+        }
+
+        /// A switch's verdict, known by construction: each of `1`, `0`,
+        /// `true` and `false` in any case is admitted; the same with a
+        /// control character or an escape put in, or a word that is no
+        /// switch, is not.
+        #[test]
+        fn switches_have_known_verdicts(
+            word in prop::sample::select(vec!["1", "0", "true", "false"]),
+            upper in prop::collection::vec(any::<bool>(), 5),
+            how in any::<u8>(),
+            at in any::<usize>(),
+            control in prop::sample::select(
+                (0u8..0x20).chain([0x7f]).map(char::from).collect::<Vec<_>>()
+            ),
+            other in "[a-z2-9]{1,6}",
+        ) {
+            let good: String = word
+                .chars()
+                .zip(&upper)
+                .map(|(c, up)| if *up { c.to_ascii_uppercase() } else { c })
+                .collect();
+            prop_assert!(ToolchainValue::Switch.admits(&good), "{good:?}");
+            let at = at % (good.len() + 1);
+            let bad = match how % 3 {
+                0 => format!("{}{control}{}", &good[..at], &good[at..]),
+                1 => format!("{}%31{}", &good[..at], &good[at..]),
+                _ => other.clone(),
+            };
+            let is_switch_word = ["1", "0", "true", "false"]
+                .iter()
+                .any(|w| w.eq_ignore_ascii_case(&bad));
+            prop_assume!(!is_switch_word);
+            prop_assert!(!ToolchainValue::Switch.admits(&bad), "{bad:?}");
+        }
+    }
+
+    /// Each shape admits what it names and nothing else.
+    #[test]
+    fn toolchain_values_are_held_to_their_shape() {
+        assert!(ToolchainValue::Path.admits("/opt/dotnet"));
+        for value in ["", "relative", "./x", "/a\nb", "/a\0b"] {
+            assert!(!ToolchainValue::Path.admits(value), "{value:?}");
+        }
+        assert!(ToolchainValue::SearchPath.admits("/usr/bin:/bin"));
+        for value in ["", "/usr/bin::/bin", "/usr/bin:bin"] {
+            assert!(!ToolchainValue::SearchPath.admits(value), "{value:?}");
+        }
+        for value in ["/feed", "/feed;/other", " /feed ; /other ;"] {
+            assert!(ToolchainValue::Sources.admits(value), "{value:?}");
+        }
+        for value in ["/local%3Bhttps://example.org", "/a%20b"] {
+            assert!(!ToolchainValue::Sources.admits(value), "{value:?}");
+            assert!(!ToolchainValue::Path.admits(value), "{value:?}");
+        }
+        for value in [
+            "https://api.nuget.org/v3/index.json",
+            "/feed;https://example.org/feed",
+            "HTTPS://example.org/feed",
+        ] {
+            assert!(!ToolchainValue::Sources.admits(value), "{value:?}");
+        }
+        for value in [
+            "",
+            ";",
+            "feed",
+            "/feed;relative",
+            "ftp://x",
+            "https://",
+            "/feed\n",
+            "/feed;\thttps://x",
+        ] {
+            assert!(!ToolchainValue::Sources.admits(value), "{value:?}");
+        }
+        for value in ["1", "0", "TRUE", "false"] {
+            assert!(ToolchainValue::Switch.admits(value), "{value:?}");
+        }
+        for value in ["", "yes", "2", "1\n"] {
+            assert!(!ToolchainValue::Switch.admits(value), "{value:?}");
+        }
+    }
+
+    /// A toolchain value off its shape declines by the variable's name and the
+    /// shape, never its value, which may hold a feed's credentials.
+    #[test]
+    fn a_decline_names_no_value() {
+        let secret = "/feeds/s3cret-token;relative";
+        let environment = HashMap::from([("RestoreSources".to_string(), secret.to_string())]);
+        let declines = super::environment_declines(&environment);
+        assert_eq!(declines.len(), 1, "{declines:?}");
+        let shown = format!("{declines:?}");
+        assert!(
+            shown.contains("RestoreSources") && !shown.contains("s3cret"),
+            "{shown}"
+        );
+    }
+
+    /// Every violation is enumerated, not only the first: an unlisted name, a
+    /// toolchain value off its shape and two spellings of one property.
+    #[test]
+    fn every_violation_is_enumerated() {
+        let environment = HashMap::from([
+            ("BORZOI_X".to_string(), "v".to_string()),
+            ("NUGET_PACKAGES".to_string(), "relative".to_string()),
+            ("LANG".to_string(), "C".to_string()),
+            ("lang".to_string(), "C".to_string()),
+        ]);
+        let declines = super::environment_declines(&environment);
+        assert_eq!(declines.len(), 3, "{declines:?}");
+    }
+
+    /// Two spellings of a name MSBuild never takes for a property are no one
+    /// property: each declines as unlisted, and no pair is reported.
+    #[test]
+    fn unpromotable_names_are_no_one_property() {
+        for (upper, lower) in [
+            ("1FOO", "1foo"),
+            ("MSBuildProjectName", "msbuildprojectname"),
+        ] {
+            let environment = HashMap::from([
+                (upper.to_string(), "v".to_string()),
+                (lower.to_string(), "v".to_string()),
+            ]);
+            assert_eq!(
+                super::environment_declines(&environment),
+                vec![
+                    NameDecline::Environment(upper.to_string()),
+                    NameDecline::Environment(lower.to_string()),
+                ],
+                "{upper}"
+            );
+        }
+    }
+
+    /// Two names differing only by case decline, admitted or not, and the
+    /// reason is the same however the map is ordered.
+    #[test]
+    fn two_spellings_of_one_property_decline() {
+        let environment = HashMap::from([
+            ("LANG".to_string(), "C".to_string()),
+            ("lang".to_string(), "C".to_string()),
+        ]);
+        assert_eq!(
+            environment_decline(&environment),
+            Some(NameDecline::OneProperty(
+                "LANG".to_string(),
+                "lang".to_string()
+            ))
+        );
+    }
+
+    /// Each class is reached, so the properties above compare every arm.
     #[test]
     fn every_class_is_reached() {
-        assert_eq!(classify_variable("PATH"), VariableClass::Toolchain);
-        assert_eq!(classify_variable("DOTNET_ROOT"), VariableClass::Toolchain);
+        assert_eq!(
+            classify_variable("PATH"),
+            VariableClass::Toolchain(ToolchainValue::SearchPath)
+        );
+        assert_eq!(
+            classify_variable("DOTNET_ROOT"),
+            VariableClass::Toolchain(ToolchainValue::Path)
+        );
         assert_eq!(
             classify_variable("assemblyname"),
             VariableClass::AllowedProperty(Grammar::FileName)
         );
         assert_eq!(classify_variable("lang"), VariableClass::Graded);
+        assert_eq!(
+            classify_variable("DOTNET_NOLOGO"),
+            VariableClass::Toolchain(ToolchainValue::Switch)
+        );
+        assert_eq!(classify_variable("LD_PRELOAD"), VariableClass::Launcher);
         assert_eq!(classify_variable("BORZOI_X"), VariableClass::Unlisted);
         assert_eq!(classify_variable("path"), VariableClass::Unlisted);
+        assert_eq!(
+            classify_variable("DOTNET_HOST_PATH"),
+            VariableClass::Unlisted
+        );
     }
     use std::fs::{create_dir_all, write};
     use std::path::Path;

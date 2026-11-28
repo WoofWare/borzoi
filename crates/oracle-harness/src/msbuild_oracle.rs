@@ -373,7 +373,10 @@ pub struct InputName(String);
 
 /// The names a caller may set, compared without case (as MSBuild compares
 /// property names): the project properties and the ordinary shell variables
-/// the differentials vary. A positive list, so no caller can reach the
+/// the differentials vary. None is a build environment name in any case
+/// ([`BUILD_ENVIRONMENT_NAMES`]): a caller's variable of such a name would sit
+/// in the child's environment beside the inherited one, and which one MSBuild
+/// reads is not fixed. A positive list, so no caller can reach the
 /// toolchain, the compiler, the restore or MSBuild's machinery through a name
 /// nobody thought to refuse. `borzoi-msbuild`'s assembly-name grader holds it
 /// to the names that derivation admits.
@@ -986,6 +989,20 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
         assert_eq!(json["Properties"]["LANG"], "Evil");
         assert_eq!(json["Properties"][own], "", "{own} reached the build");
+    }
+
+    /// No input is a build environment name in any case, so a caller's
+    /// variable never sits beside an inherited one of the same property.
+    #[test]
+    fn no_input_names_a_build_environment_variable() {
+        for name in super::INPUT_NAMES {
+            assert!(
+                !BUILD_ENVIRONMENT_NAMES
+                    .iter()
+                    .any(|inherited| inherited.eq_ignore_ascii_case(name)),
+                "{name} is both an input and inherited"
+            );
+        }
     }
 
     /// The build carries the variables a build needs to start where the
