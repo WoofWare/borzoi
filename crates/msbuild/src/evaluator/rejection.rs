@@ -46,11 +46,14 @@
 //! values; nor is one reading item metadata in a metadatum, which MSBuild
 //! hands the metadatum's value ([`judge_metadata_text`]). Nor is a throw on a
 //! value the walk holds none of (a write it refused to compute, a reserved
-//! name it does not seed), in a condition or a text: whether MSBuild's own
-//! value throws is the judgement over the values a name may hold, #1009's
-//! second stage. A leaf of a condition that reads such a name has none of
+//! name it does not seed), in a condition or a text, unless it throws
+//! whatever values are tried for that name: whether MSBuild's own value
+//! throws is the judgement over the values a name may hold, #1009's second
+//! stage (#1201). A leaf of a condition that reads such a name has none of
 //! MSBuild's booleans, so what comes after it is reached perhaps, and judged
-//! on the values held.
+//! on the values held. In content the walk does not take
+//! ([`State::speculating`]) no value is tried for any name: a throw on the
+//! values held is a Possible site there, whatever names it read (#1164).
 //!
 //! So is a `<UsingTask>` MSBuild refuses as it registers the task without an
 //! expression throwing: a name that expands to empty, a flag no boolean, a
@@ -118,16 +121,18 @@
 //! reference, a property function it does not model) unbinds its name and
 //! leaves a mark on it ([`super::Trust::refused`]) that a later clean write
 //! keeps, for the import points. The judgement reads that mark as doubt too
-//! ([`directory_build::is_certain`]), and its doubt is not monotone in what it
-//! holds: settling the item pass's view of a path the walk did not take
-//! (`State::judge_from_path`) leaves a name the path writes unheld, and a
-//! throw on its final value is then no site, though the build holds that
-//! value (#1153). So wherever the first walk's judgement read a name it
+//! ([`directory_build::is_certain`]), and which of a text's throws it names,
+//! and where a site is certain, turn on that doubt: a throw on a name read
+//! certain is the one a walk names, and a refused-then-rebound name is
+//! doubted though the build holds its value (#1153). So wherever the first
+//! walk's judgement read a name it
 //! doubts only for such a mark, the project having written it again after
 //! the refusal ([`State::rewritten_after_refusal`], [`State::second_walk_needed`]),
 //! the evaluation is walked a second time,
-//! its judgement holding such a bound name certain where it decides whether
-//! what it reaches is a site ([`judged_certain`]), and every site the second
+//! its judgement holding such a bound name certain where it names which of a
+//! text's throws reached for certain is the site
+//! ([`directory_build::is_certain_setting_aside_refusal`],
+//! [`judge_throwing_expression`]), and every site the second
 //! walk notes that the first did not is adopted as a Possible one, after the
 //! first walk's ([`State::adopt_second_walk`]). It reaches what the first
 //! walk reaches, so it can only add sites. The
@@ -137,7 +142,7 @@
 //! course and reach with the walk's own code, so the second claims nothing:
 //! it only declines more. The two readings bracket the judgement's doubt about
 //! a refused-then-rebound name; a name neither reading settles (the #1051
-//! class, #1164) is not this walk's to find.
+//! class) is not this walk's to find.
 
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
@@ -285,6 +290,67 @@ impl State<'_> {
         }
     }
 
+    /// Publish each site once: a construct noted again with one cause (a
+    /// file two undecided import points both walk, or one file reached
+    /// through two spellings) keeps one diagnostic, its first certain one if
+    /// any was certain, else its first. Done when the walks are over, so that
+    /// what the walk read of its own diagnostics as it went (whether a gate
+    /// raised doubt) is what it pushed.
+    pub(super) fn publish_each_site_once(&mut self) {
+        let diagnostics = &self.diagnostics;
+        let certain = |site: &NotedSite| {
+            matches!(
+                diagnostics[site.diagnostic].kind,
+                DiagnosticKind::Rejected { .. }
+            )
+        };
+        // The diagnostic each construct and cause keeps.
+        let mut kept: HashMap<(&SiteConstruct, &RejectionCause), usize> = HashMap::new();
+        for site in &self.noted_sites {
+            let key = (&site.construct, site.cause(diagnostics));
+            match kept.get(&key) {
+                Some(&first)
+                    if certain(site)
+                        && !matches!(diagnostics[first].kind, DiagnosticKind::Rejected { .. }) =>
+                {
+                    kept.insert(key, site.diagnostic);
+                }
+                Some(_) => {}
+                None => {
+                    kept.insert(key, site.diagnostic);
+                }
+            }
+        }
+        let keep: HashSet<usize> = kept.into_values().collect();
+        let mut dropped = vec![false; self.diagnostics.len()];
+        self.noted_sites.retain(|site| {
+            let stays = keep.contains(&site.diagnostic);
+            if !stays {
+                dropped[site.diagnostic] = true;
+            }
+            stays
+        });
+        if !dropped.contains(&true) {
+            return;
+        }
+        // Each kept diagnostic moves down by the dropped ones before it.
+        let mut before = Vec::with_capacity(dropped.len());
+        let mut removed = 0;
+        for &gone in &dropped {
+            before.push(removed);
+            removed += usize::from(gone);
+        }
+        for site in &mut self.noted_sites {
+            site.diagnostic -= before[site.diagnostic];
+        }
+        let mut index = 0;
+        self.diagnostics.retain(|_| {
+            let keep = !dropped[index];
+            index += 1;
+            keep
+        });
+    }
+
     /// Each site the evaluation publishes, by construct and cause, where
     /// `test_support::published_sites` collects: what a sweep counts
     /// repetitions by, before spans are remapped.
@@ -411,37 +477,6 @@ pub(super) fn operands_are_certain(state: &State<'_>, text: &str) -> bool {
     properties::property_references(text).all(|name| directory_build::is_certain(state, name))
 }
 
-/// Whether the rejection judgement holds `name` read now as the build reads
-/// it: [`directory_build::is_certain`], but that in the second walk
-/// ([`State::second_walk`]) a bound name's refusal mark is no doubt
-/// ([`directory_build::is_certain_setting_aside_refusal`]). It is read only
-/// where the judgement settles which names a path it did not take leaves
-/// unknown, and which of a text's throws it names: there holding a name
-/// certain can only add a site. Wherever a reading decides what MSBuild
-/// reaches (the walk's course, what it judges, the gates it judges, the
-/// operands of a condition it reaches) and a site's certainty, it is
-/// [`directory_build::is_certain`], in either walk:
-/// a reach the second walk narrowed by holding a name certain would hide a
-/// site wherever the name's value is not the build's (a toolset seed in the
-/// slot a refusal emptied, a rewrite the build may not make). So the second
-/// walk reaches what the first does, and may judge content its own reading
-/// would rule out, which costs a decline and never a site MSBuild meets
-/// (#1183).
-///
-/// In the first walk it records whether the second walk's answer would differ
-/// ([`State::second_walk_needed`]): the second walk is run only then, or where
-/// [`judge_throwing_expression`] would name another throw.
-pub(super) fn judged_certain(state: &State<'_>, name: &str) -> bool {
-    if state.second_walk {
-        return directory_build::is_certain_setting_aside_refusal(state, name);
-    }
-    let certain = directory_build::is_certain(state, name);
-    if !certain && directory_build::is_certain_setting_aside_refusal(state, name) {
-        state.second_walk_needed.set(true);
-    }
-    certain
-}
-
 /// Whether the walk holds a value of `name` MSBuild may hold, as a Possible
 /// site asks: one it computed (bound), however it doubts it, or an undefined
 /// read it shows exact. A value the walk doubts is one MSBuild may hold among
@@ -457,6 +492,20 @@ pub(super) fn holds_a_value_msbuild_may(state: &State<'_>, name: &str) -> bool {
 }
 
 impl State<'_> {
+    /// Whether the judgement stands in content the walk does not take: a
+    /// speculative walk, or a group the item pass judges from a path the walk
+    /// did not take ([`Self::open_speculation`], [`Self::judge_from_path`]).
+    /// There a name the content writes holds a value from before it, which
+    /// MSBuild may not hold on that path, so the judgement tries no value for
+    /// any name: what a value tried for one name does beside such a name
+    /// proves nothing, and which names such content writes moves with a
+    /// refused history, so trying values there is not monotone in them
+    /// (#1164). A throw on the values held is a Possible site there instead:
+    /// a decline where MSBuild's value on the path does not throw (#1200).
+    pub(super) fn speculating(&self) -> bool {
+        self.speculation.is_some()
+    }
+
     /// Where the conditions the walk evaluates now are MSBuild's: the
     /// property pass's, an item definition group's, or another of the item
     /// pass's ([`condition::Site`]).
@@ -578,7 +627,12 @@ impl State<'_> {
                 .keys()
                 .filter(|name| {
                     crate::cost::count(|costs| costs.path_writes_examined += 1);
-                    !judged_certain(self, name)
+                    // Settled as main reads it, in either walk: what the path
+                    // leaves unknown decides only that the judgement tries
+                    // no value there ([`State::speculating`]), which no
+                    // reading of a refused name moves, so it schedules no
+                    // second walk.
+                    !directory_build::is_certain(self, name)
                 })
                 .cloned()
                 .collect();
@@ -661,7 +715,7 @@ pub(super) fn import_failure_certainty(
 /// A condition that throws on the values the walk holds
 /// ([`condition::Outcome::Illegal`]) may make MSBuild reject the project. The
 /// rejection is certain where MSBuild throws whatever the names the walk is
-/// not certain of hold ([`judged_certain`], the stale channel
+/// not certain of hold ([`directory_build::is_certain`], the stale channel
 /// included): MSBuild evaluates the condition left to right and stops at the
 /// operand that decides it ([`condition::throws_whatever`]), so a throw on certain
 /// values that MSBuild reaches through operands of certain value is certain,
@@ -699,7 +753,10 @@ pub(super) fn judge_condition_rejection(
         exists: &exists,
         observer,
     });
-    let doubted = |name: &str| !holds_a_value_msbuild_may(state, name);
+    // In content the walk does not take no name is doubted: every leaf is
+    // judged on the values held ([`State::speculating`]).
+    let speculating = state.speculating();
+    let doubted = |name: &str| !speculating && !holds_a_value_msbuild_may(state, name);
     // Which operands MSBuild reaches is main's to decide, in either walk: a
     // name the second walk holds certain may be one whose value is not the
     // build's (#1153). What the second walk holds is the path's settlement.
@@ -735,6 +792,7 @@ pub(super) fn judge_condition_rejection(
             state.condition_site(),
             &uncertain,
             &doubted,
+            speculating,
         )
     {
         state.note_rejection_at(
@@ -796,13 +854,14 @@ pub(super) fn throws_in(issues: &[properties::Issue]) -> Vec<Thrown> {
 /// certain ([`directory_build::is_certain`]).
 ///
 /// Short of that it is Possible, where every name one of them read holds a
-/// value MSBuild may hold ([`holds_a_value_msbuild_may`]), or where one
-/// throws whatever its expressions on the names that do not return
+/// value MSBuild may hold ([`holds_a_value_msbuild_may`]), or where the text
+/// stands in content the walk does not take ([`State::speculating`]), or
+/// where one throws whatever its expressions on the names that do not return
 /// ([`condition::expression_throws_whatever_they_return`]). Any other throw on
 /// such a name is no site: the value held is none MSBuild need hold, and
 /// whether the function throws on MSBuild's own value is the judgement over
-/// the values a name may hold (#1009's second stage), as for a condition
-/// ([`condition::may_throw_on_held`]).
+/// the values a name may hold (#1009's second stage, #1201), as for a
+/// condition ([`condition::may_throw_on_held`]).
 pub(super) fn judge_throwing_expression(
     state: &mut State<'_>,
     thrown: Vec<Thrown>,
@@ -810,7 +869,10 @@ pub(super) fn judge_throwing_expression(
     span: Range<usize>,
     text: u32,
 ) {
-    let unheld = |name: &str| !holds_a_value_msbuild_may(state, name);
+    // In content the walk does not take no name is unheld: no value is
+    // tried there ([`State::speculating`]).
+    let speculating = state.speculating();
+    let unheld = |name: &str| !speculating && !holds_a_value_msbuild_may(state, name);
     let (held, on_unheld): (Vec<Thrown>, Vec<Thrown>) = thrown
         .into_iter()
         .partition(|thrown| !thrown.reads.iter().any(|name| unheld(name)));

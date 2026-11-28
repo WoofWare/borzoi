@@ -85,11 +85,12 @@ fn a_seed_in_a_refused_slot_is_no_rewrite() {
 }
 
 /// Nor does another name's rewrite make the seed the build's value: the
-/// project rewrites `P`, which the arm writes too, so the second walk runs,
-/// but it holds `MSBuildExtensionsPath32`, whose refused slot the SDK seeded,
-/// as doubtful as the first does, and finds no throw in `VersionEquals` on
-/// the seed's directory, where the build compares its `1.0` and evaluates the
-/// project (#1153).
+/// project rewrites `P` after a refusal, so the second walk runs (`K`'s text,
+/// whose throws the two walks name apart, adopts `$(P[9])`), but it holds
+/// `MSBuildExtensionsPath32`, whose refused slot the SDK seeded, as doubtful
+/// as the first does. So in `I`'s text it names the certain `$(S[9])`, as
+/// the first walk does, never `VersionEquals` on the seed's directory, where
+/// the build compares its `1.0` and evaluates true (#1153).
 #[test]
 fn another_names_rewrite_leaves_a_seed_doubted() {
     // The seed as it stands, and copied into its own slot after the SDK.
@@ -104,28 +105,32 @@ fn another_names_rewrite_leaves_a_seed_doubted() {
             "Demo.fsproj",
             &format!(
                 "<Project>\
-         <Choose><When Condition=\"'É' == 'é'\"><PropertyGroup>\
-         <MSBuildExtensionsPath32>2.0</MSBuildExtensionsPath32><P>x</P></PropertyGroup>\
-         <ItemGroup><I Include=\"$([MSBuild]::VersionEquals('$(MSBuildExtensionsPath32)', '1.0'))\" />\
-         </ItemGroup></When></Choose>\
          <PropertyGroup><MSBuildExtensionsPath32>1.0</MSBuildExtensionsPath32>\
          <MSBuildExtensionsPath32>$([System.String]::Copy('1.0'))</MSBuildExtensionsPath32>\
-         <P>@(J)</P><P>z</P></PropertyGroup>\
+         <P>@(J)</P><P>z</P><S>a</S></PropertyGroup>\
          <Import Project=\"Sdk.props\" Sdk=\"MySdk\" />{copy}\
+         <ItemGroup><I Include=\"$([MSBuild]::VersionEquals('$(MSBuildExtensionsPath32)', '1.0'))$(S[9])\" />\
+         <K Include=\"$(P[9])$(S[9])\" /></ItemGroup>\
          <PropertyGroup><After>ok</After></PropertyGroup></Project>"
             ),
         );
         let result =
             parse_file_with_sdk_env(&project_path, resolver, HashMap::new(), HashMap::new());
-        assert_eq!(result.rejection, None, "{copy}: {:#?}", result.diagnostics);
+        assert_eq!(
+            noted_causes(&result),
+            ["$(S[9])", "$(S[9])", "$(P[9])"],
+            "{copy}: {:#?}",
+            result.diagnostics
+        );
     }
 }
 
 /// A rewrite that held is undone by a later write that copies a seed: `P`
 /// is refused, rewritten to `z`, then given the seeded
 /// `MSBuildExtensionsPath32`, and the second walk holds it as doubtful as the
-/// first does, so finds no throw in `VersionEquals('$(P)', '1.0')`, which
-/// the build, holding the project's `1.0` there, evaluates true (#1153).
+/// first does. So in `I`'s text each walk names the certain `$(S[9])`, never
+/// `VersionEquals('$(P)', '1.0')` on the seed's directory, which the build,
+/// holding the project's `1.0` there, evaluates true (#1153).
 #[test]
 fn a_seed_copied_over_a_rewrite_undoes_it() {
     let tmp = TempDir::new().unwrap();
@@ -134,16 +139,36 @@ fn a_seed_copied_over_a_rewrite_undoes_it() {
         tmp.path(),
         "Demo.fsproj",
         "<Project>\
-         <Choose><When Condition=\"'É' == 'é'\"><PropertyGroup><P>2.0</P></PropertyGroup>\
-         <ItemGroup><I Include=\"$([MSBuild]::VersionEquals('$(P)', '1.0'))\" /></ItemGroup>\
-         </When></Choose>\
          <PropertyGroup><MSBuildExtensionsPath32>$([System.String]::Copy('1.0'))</MSBuildExtensionsPath32>\
-         <P>@(J)</P><P>z</P></PropertyGroup>\
+         <P>@(J)</P><P>z</P><S>a</S></PropertyGroup>\
          <Import Project=\"Sdk.props\" Sdk=\"MySdk\" />\
-         <PropertyGroup><P>$(MSBuildExtensionsPath32)</P><After>ok</After></PropertyGroup></Project>",
+         <PropertyGroup><P>$(MSBuildExtensionsPath32)</P><After>ok</After></PropertyGroup>\
+         <ItemGroup><I Include=\"$([MSBuild]::VersionEquals('$(P)', '1.0'))$(S[9])\" /></ItemGroup></Project>",
     );
     let result = parse_file_with_sdk_env(&project_path, resolver, HashMap::new(), HashMap::new());
-    assert_eq!(result.rejection, None, "{:#?}", result.diagnostics);
+    assert_eq!(
+        noted_causes(&result),
+        ["$(S[9])"],
+        "{:#?}",
+        result.diagnostics
+    );
+}
+
+/// The expression each rejection site `result` notes throws on, in order.
+fn noted_causes(result: &ParsedProject) -> Vec<String> {
+    result
+        .diagnostics
+        .iter()
+        .filter_map(|d| match &d.kind {
+            DiagnosticKind::Rejected {
+                cause: RejectionCause::ThrowingExpression { expression },
+            }
+            | DiagnosticKind::MayBeRejected {
+                cause: RejectionCause::ThrowingExpression { expression },
+            } => Some(expression.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// `Seen`, the body's copy of `$(VisualStudioVersion)`, when committed.

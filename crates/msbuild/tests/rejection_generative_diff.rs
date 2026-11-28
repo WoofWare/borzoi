@@ -240,9 +240,10 @@ fn text(rng: &mut SplitMix64, names: &[&str]) -> String {
 }
 
 /// What a text's expression on a name the walk is not sure of is struck to:
-/// the values the walk's own judgement tries such an expression as returning
-/// (`condition::RETURNED`), so that a rejection that survives every one is
-/// one the walk claims.
+/// empty, a word, a number, a version, a boolean either way, a list, and the
+/// hyphen a prerelease version joins with. Where MSBuild evaluates a project
+/// with such an expression struck to one of them, its rejection rests on that
+/// name's value, which the walk does not know (#1051).
 const STRUCK_AS: &[&str] = &["", "x", "1", "1.2", "true", "false", "a;b", "-"];
 
 /// The ways `n` struck expressions can each take a value of [`STRUCK_AS`]:
@@ -530,7 +531,68 @@ const HISTORY_SITES: &[&str] = &[
     "<Choose><When Condition=\"UNDECIDED_TRUE\"><PropertyGroup><A>1</A></PropertyGroup><ItemGroup><I Include=\"x\"><M Condition=\"{c}\">{t}</M></I></ItemGroup></When></Choose>",
     "<Choose><When Condition=\"UNDECIDED_TRUE\"><PropertyGroup><A>1</A></PropertyGroup><ItemGroup><I Include=\"x\" /><I Update=\"x\" Condition=\"{c}\"><M>{t}</M></I></ItemGroup></When></Choose>",
     "<Choose><When Condition=\"UNDECIDED_TRUE\"><PropertyGroup><A>1</A></PropertyGroup><ItemDefinitionGroup><I Condition=\"{c}\"><M>{t}</M></I></ItemDefinitionGroup></When></Choose>",
+    // A write in content the walk does not take of a value a function throws
+    // on, beside writes of names a later group rewrites (to their first
+    // values), each perhaps after a refused write of its name, and a text
+    // there reading them all: which names the walk holds none of moves with
+    // the history, and MSBuild's throw rests on the written value whatever
+    // they hold (#1164). Read by the item pass, and by the property pass.
+    "<Choose><When Condition=\"UNDECIDED_TRUE\"><PropertyGroup><A>abc</A><B>abc</B><U>nope</U></PropertyGroup><ItemGroup><I Include=\"{t}\" /></ItemGroup></When></Choose><PropertyGroup>{refused:A}<A>{a}</A>{refused:B}<B>{b}</B></PropertyGroup>",
+    "<Choose><When Condition=\"UNDECIDED_TRUE\"><PropertyGroup><A>abc</A><B>abc</B><U>nope</U></PropertyGroup><ItemGroup><I Include=\"x\" Condition=\"{c}\" /></ItemGroup></When></Choose><PropertyGroup>{refused:A}<A>{a}</A>{refused:B}<B>{b}</B></PropertyGroup>",
+    // The same, the text and the condition a version call over the three
+    // names, some spliced together, and the rewrites version-shaped
+    // ([`history_shape`]): the shape #1164 was found in.
+    "<Choose><When Condition=\"UNDECIDED_TRUE\"><PropertyGroup><A>abc</A><B>abc</B><U>nope</U></PropertyGroup><ItemGroup><I Include=\"{v}\" /></ItemGroup></When></Choose><PropertyGroup>{refused:A}<A>{va}</A>{refused:B}<B>{vb}</B></PropertyGroup>",
+    "<Choose><When Condition=\"UNDECIDED_TRUE\"><PropertyGroup><A>abc</A><B>abc</B><U>nope</U></PropertyGroup><ItemGroup><I Include=\"x\" Condition=\"{v}\" /></ItemGroup></When></Choose><PropertyGroup>{refused:A}<A>{va}</A>{refused:B}<B>{vb}</B></PropertyGroup>",
+    "<PropertyGroup Condition=\"UNDECIDED_TRUE\"><A>abc</A><U>nope</U><R>{t}</R></PropertyGroup><PropertyGroup>{refused:A}<A>{a}</A></PropertyGroup>",
+    // A write gated on a name with a refused history, in content the walk
+    // does not take, then a read of the written name: where MSBuild skips
+    // the write, the read sees the name's earlier value (#1164's comments).
+    "<PropertyGroup Condition=\"UNDECIDED_TRUE\"><B Condition=\"'$(A)' == 'off'\">abcdefghijkl</B><R>{t}</R></PropertyGroup>",
+    "<Choose><When Condition=\"UNDECIDED_TRUE\"><PropertyGroup><B Condition=\"'$(A)' == 'off'\">abcdefghijkl</B></PropertyGroup><ItemGroup><I Include=\"{t}\" /></ItemGroup></When></Choose>",
 ];
+
+/// The names a [`HISTORY_SITES`] template may rewrite after its arm, each
+/// perhaps after a refused write (`{refused:A}` before `<A>{a}</A>`).
+const IN_SITE_REWRITES: [&str; 2] = ["A", "B"];
+
+/// What [`history_shape`] draws a rewrite's value from: versions with and
+/// without the `v` MSBuild accepts, empty, and words no splice makes one.
+const VERSION_SHAPED: &[&str] = &["", "v1.0", "1.0", "1", "2.0.1", "abc", "v"];
+
+/// What [`refused_history_sweep`]'s draws of [`history_shape`] are seeded
+/// with, beside the sweep's own seed: a stream of their own, so that the
+/// projects without a `{v}` are the ones drawn before it was.
+const SHAPE_STREAM: u64 = 0x1164_5ba9_e000;
+
+/// A [`HISTORY_SITES`] template's `{v}`, `{va}` and `{vb}`, as
+/// (placeholder, text) pairs: a version function of `A`, `B`, `U` and `X`
+/// (a write the walk refuses, so holds no value of), each argument one name
+/// or two spliced, and version-shaped values of the rewrites of `A` and `B`.
+/// Where a splice of two names parses as a version on some of their values
+/// and not others, which names MSBuild's throw rests on turns on the values
+/// tried for the names the walk holds none of.
+fn history_shape(rng: &mut SplitMix64) -> [(&'static str, String); 3] {
+    let names = ["A", "B", "U", "X"];
+    let argument = |rng: &mut SplitMix64| {
+        let first = *rng.pick(&names);
+        if rng.below(2) == 0 {
+            format!("$({first})")
+        } else {
+            format!("$({first})$({})", rng.pick(&names))
+        }
+    };
+    let function = *rng.pick(&["VersionLessThan", "VersionGreaterThan", "VersionEquals"]);
+    let (left, right) = (argument(rng), argument(rng));
+    [
+        (
+            "{v}",
+            format!("$([MSBuild]::{function}('{left}','{right}'))"),
+        ),
+        ("{va}", (*rng.pick(VERSION_SHAPED)).to_owned()),
+        ("{vb}", (*rng.pick(VERSION_SHAPED)).to_owned()),
+    ]
+}
 
 /// Whether `template` puts its text in a metadatum's value, where MSBuild
 /// expands metadata references before properties.
@@ -770,6 +832,9 @@ enum RefusedBefore {
     FirstWrite(&'static str),
     /// Before the rewrite after the site, whose value the item pass reads.
     Rewrite,
+    /// Before a rewrite of `A` or `B` the site itself makes, after the arm it
+    /// writes in ([`HISTORY_SITES`]' `{refused:A}` and `{refused:B}`).
+    InSite(&'static str),
 }
 
 /// Which history [`project_sweep`] draws for a project with a rewrite: the
@@ -822,12 +887,22 @@ fn document_text(writes: &str, later: &str, site: &str) -> String {
 
 /// `drawing` as text, with the refused writes `refused` names.
 fn render(drawing: &Drawing, refused: &[RefusedBefore]) -> Rendered {
-    let site = drawing
+    let mut site = drawing
         .template
         .replace("{c}", &xml_attribute(&drawing.gate))
         .replace("{t}", &xml_attribute(&drawing.body))
         .replace("UNDECIDED_TRUE", &xml_attribute(UNDECIDED_TRUE))
-        .replace("UNDECIDED_FALSE", &xml_attribute(UNDECIDED_FALSE));
+        .replace("UNDECIDED_FALSE", &xml_attribute(UNDECIDED_FALSE))
+        .replace("{a}", &xml_text(&drawing.a.value))
+        .replace("{b}", &xml_text(&drawing.b.value));
+    for name in IN_SITE_REWRITES {
+        let refused_write = if refused.contains(&RefusedBefore::InSite(name)) {
+            format!("<{name}>{REFUSED}</{name}>")
+        } else {
+            String::new()
+        };
+        site = site.replace(&format!("{{refused:{name}}}"), &refused_write);
+    }
     // A value overwritten later has been read by the site in between.
     let mut resets = String::new();
     for (name, drawn) in [("A", &drawing.a), ("B", &drawing.b)] {
@@ -1035,11 +1110,13 @@ impl Witness {
     }
 }
 
-/// One witness per gap, each a project an earlier fixed seed drew.
+/// One witness per gap, each a project an earlier fixed seed drew (the first
+/// moved out of the untaken `<Choose>` it was drawn in, where no value is
+/// tried for `X` and the walk now withdraws it, #1164).
 const WITNESSES: &[Witness] = &[
     Witness {
         values: ["1.2.3", "true @evil.rsp", "1", "1.2.3"],
-        template: "<Choose><When Condition=\"UNDECIDED_TRUE\"><Choose><When Condition=\"UNDECIDED_FALSE\"><PropertyGroup><B>abcdefghijklmnop</B></PropertyGroup></When><Otherwise><ItemGroup Condition=\"{c}\"><I Include=\"x\" /></ItemGroup></Otherwise></Choose></When></Choose>",
+        template: "<ItemGroup><I Include=\"x\" Condition=\"{c}\" /></ItemGroup>",
         body: "",
         gate: "!(Exists('$([MSBuild]::VersionLessThan(`$(X)`, `2.0`))'))",
         gap: "uncertain-value",
@@ -1648,7 +1725,10 @@ struct HistoryCensus {
     /// those with more than one.
     first_write: usize,
     rewrite: usize,
+    in_site: usize,
     several: usize,
+    /// Pairs of twins compared, the refused writes of one among the other's.
+    twin_pairs: usize,
     /// Of the twins compared, those whose project the walk withdraws, and
     /// those whose project it commits a value of.
     withdrawn: usize,
@@ -1673,9 +1753,10 @@ struct HistoryCensus {
 /// several names are held too. No oracle is asked, so it covers far more
 /// drawn projects than [`project_sweep`] can.
 ///
-/// Only a twin and its project are compared, not two twins: what the walk's
-/// judgement makes of two sets of unknown names is not ordered by the sets
-/// (#1009's second stage, #1164).
+/// So are two twins, where one's refused writes are among the other's: the
+/// one with more is no more certain, and withdrawn wherever the other is.
+/// A judgement that tried values for the names the walk holds none of
+/// answered two such twins in no order (#1164).
 ///
 /// A write whose body reads its own name is passed over: there the refused
 /// write's value is MSBuild's input, not history.
@@ -1720,6 +1801,7 @@ fn refused_history_sweep(rng: &mut SplitMix64, cases: usize) -> HistoryCensus {
     let names = ["A", "B", "U", "X", "R", "After", "Delta"];
     let sites: Vec<&'static str> = SITES.iter().chain(HISTORY_SITES).copied().collect();
     let mut tally = HistoryCensus::default();
+    let mut shapes = SplitMix64(rng.0 ^ SHAPE_STREAM);
     let mut drawn = 0;
     while drawn < cases {
         let Some(drawing) = draw_project(rng, &excluded, &sites) else {
@@ -1738,6 +1820,14 @@ fn refused_history_sweep(rng: &mut SplitMix64, cases: usize) -> HistoryCensus {
         {
             eligible.push(RefusedBefore::Rewrite);
         }
+        for (name, value) in [("A", &drawing.a.value), ("B", &drawing.b.value)] {
+            // A `{v}` site rewrites to a version-shaped value of its own.
+            if drawing.template.contains(&format!("{{refused:{name}}}"))
+                && (drawing.template.contains("{v}") || !reads_itself(name, value))
+            {
+                eligible.push(RefusedBefore::InSite(name));
+            }
+        }
         let twins = (1..1usize << eligible.len()).map(|mask| {
             eligible
                 .iter()
@@ -1746,8 +1836,24 @@ fn refused_history_sweep(rng: &mut SplitMix64, cases: usize) -> HistoryCensus {
                 .map(|(_, refused)| *refused)
                 .collect::<Vec<_>>()
         });
+        // A `{v}` site's call and rewrites, drawn once for the project and
+        // its twins.
+        let shape = drawing
+            .template
+            .contains("{v}")
+            .then(|| history_shape(&mut shapes));
+        let render = |drawing: &Drawing, refused: &[RefusedBefore]| {
+            let mut rendered = render(drawing, refused);
+            for (placeholder, text) in shape.iter().flatten() {
+                rendered.xml = rendered.xml.replace(placeholder, &xml_attribute(text));
+            }
+            rendered
+        };
         let plain = render(&drawing, &[]);
         let (ours, ours_published) = published_sites(|| walk(&plain.xml));
+        // Every twin walked, for the comparison of two twins below.
+        let mut walked: Vec<(Vec<RefusedBefore>, String, borzoi_msbuild::ParsedProject)> =
+            Vec::new();
         for refused in twins {
             let twin = render(&drawing, &refused);
             let ((theirs, second_sites), theirs_published) =
@@ -1763,6 +1869,12 @@ fn refused_history_sweep(rng: &mut SplitMix64, cases: usize) -> HistoryCensus {
                 .any(|r| matches!(r, RefusedBefore::FirstWrite(_)))
             {
                 tally.first_write += 1;
+            }
+            if refused
+                .iter()
+                .any(|r| matches!(r, RefusedBefore::InSite(_)))
+            {
+                tally.in_site += 1;
             }
             let describe = || {
                 format!(
@@ -1837,6 +1949,52 @@ fn refused_history_sweep(rng: &mut SplitMix64, cases: usize) -> HistoryCensus {
                 .any(|name| matches!(ours.property(name), PropertyRead::Value(_)))
             {
                 tally.committed += 1;
+            }
+            walked.push((refused, twin.xml, theirs));
+        }
+        // Two twins whose refused writes are ordered by inclusion: the one
+        // with more is held to the other as a twin is to its project. Each
+        // refused write only adds a doubt, so the walk's judgement may not
+        // withdraw less, nor claim more, for the twin with more of them.
+        for (fewer, fewer_xml, fewer_parsed) in &walked {
+            for (more, more_xml, more_parsed) in &walked {
+                if more.len() <= fewer.len() || !fewer.iter().all(|r| more.contains(r)) {
+                    continue;
+                }
+                tally.twin_pairs += 1;
+                let describe = || {
+                    format!(
+                        "--- twin ({fewer:?}) ---\n{}\n{:#?}\n--- twin ({more:?}) ---\n{}\n{:#?}",
+                        elide(fewer_xml),
+                        fewer_parsed.rejection,
+                        elide(more_xml),
+                        more_parsed.rejection
+                    )
+                };
+                let certainty = |parsed: &borzoi_msbuild::ParsedProject| {
+                    parsed.rejection.as_ref().map(|r| r.certainty)
+                };
+                assert!(
+                    twin_verdict_claims_no_more(certainty(fewer_parsed), certainty(more_parsed)),
+                    "the walk judges a twin {:?} and a twin with more refused writes before clean \
+                     ones, which MSBuild evaluates alike, {:?}\n{}",
+                    certainty(fewer_parsed),
+                    certainty(more_parsed),
+                    describe()
+                );
+                for name in names {
+                    assert!(
+                        twin_claims_no_more(
+                            &fewer_parsed.property(name),
+                            &more_parsed.property(name)
+                        ),
+                        "the walk reads {name} of the twin with more refused writes exactly as \
+                         {:?}, and of the one with fewer as {:?}\n{}",
+                        more_parsed.property(name),
+                        fewer_parsed.property(name),
+                        describe()
+                    );
+                }
             }
         }
     }
@@ -1926,7 +2084,8 @@ enum HistoryAt {
 /// The grid cells where a walk commits a value MSBuild does not hold, each
 /// with which walks do and how ([`wrong_commits`]'s spelling), and the gap it
 /// is: a gated item definition's throw on a final value (#1172), or a throw
-/// on the value of the arm's own write, which the walk does not hold (#1051).
+/// on the value of the arm's own write, where the value the walk holds does
+/// not throw (#1051).
 /// Pinned by [`refused_history_reach_grid`]'s label and compared exactly, so
 /// that one closing, another opening, or a cell moving from one walk or kind
 /// to another fails it; none is the history's.
@@ -2040,17 +2199,7 @@ const REACH_GRID_KNOWN_WRONG: &[(&str, &str, &str)] = &[
         "#1051",
     ),
     (
-        "BeforeTheChoose / 'É' == 'é' / <ItemGroup><I Include=\"x\" /><I Update=\"x\" Condition=\"'$(P)' != 'z'\"><M>$(P.Split(';')[3])</M></I></ItemGroup> / z",
-        BOTH_COMMIT_ON_REJECTED,
-        "#1051",
-    ),
-    (
         "BeforeTheChoose / 'É' == 'é' / <ItemGroup><I Include=\"x\" /><I Update=\"x\" Condition=\"'$(P)' == 'abcdefghijkl'\"><M>$(P.Split(';')[3])</M></I></ItemGroup> / abcdefghijklmn;b;c;d",
-        BOTH_COMMIT_ON_REJECTED,
-        "#1051",
-    ),
-    (
-        "BeforeTheChoose / 'É' == 'é' / <ItemGroup><I Include=\"x\" /><I Update=\"x\" Condition=\"'$(P)' == 'abcdefghijkl'\"><M>$(P.Split(';')[3])</M></I></ItemGroup> / z",
         BOTH_COMMIT_ON_REJECTED,
         "#1051",
     ),
@@ -2060,17 +2209,7 @@ const REACH_GRID_KNOWN_WRONG: &[(&str, &str, &str)] = &[
         "#1051",
     ),
     (
-        "BeforeTheChoose / 'É' == 'é' / <ItemGroup><I Include=\"x\"><M Condition=\"'$(P)' != 'z'\">$(P.Split(';')[3])</M></I></ItemGroup> / z",
-        BOTH_COMMIT_ON_REJECTED,
-        "#1051",
-    ),
-    (
         "BeforeTheChoose / 'É' == 'é' / <ItemGroup><I Include=\"x\"><M Condition=\"'$(P)' == 'abcdefghijkl'\">$(P.Split(';')[3])</M></I></ItemGroup> / abcdefghijklmn;b;c;d",
-        BOTH_COMMIT_ON_REJECTED,
-        "#1051",
-    ),
-    (
-        "BeforeTheChoose / 'É' == 'é' / <ItemGroup><I Include=\"x\"><M Condition=\"'$(P)' == 'abcdefghijkl'\">$(P.Split(';')[3])</M></I></ItemGroup> / z",
         BOTH_COMMIT_ON_REJECTED,
         "#1051",
     ),
@@ -2100,8 +2239,10 @@ const REACH_GRID_KNOWN_WRONG: &[(&str, &str, &str)] = &[
 ///   with the walk's own code, which
 ///   doubts a refused name in the arm's gate, so the second walk may find a
 ///   site in an arm MSBuild does not take. Such a site is Possible, a decline,
-///   and the manifest is its cost. A site the first walk notes is the
-///   refusal's doubt, as on main, and is not counted.
+///   and the manifest is its cost. It pins too which walks withdraw a project
+///   MSBuild evaluates: each judges a name the arm writes on the value it
+///   holds from before the arm (#1164), so it may withdraw where MSBuild,
+///   holding the arm's value, evaluates the project (#1200).
 #[test]
 fn refused_history_reach_grid() {
     const CONTAINERS: &[&str] = &[
@@ -2231,6 +2372,18 @@ fn refused_history_reach_grid() {
                                     }
                                 }
                             }
+                            if theirs.is_some() {
+                                for (which, parsed) in [("project", &plain), ("twin", &twin)] {
+                                    if parsed.rejection.is_some() {
+                                        declines.push((
+                                            label.clone(),
+                                            format!(
+                                                "{which}: withdraws a project MSBuild evaluates"
+                                            ),
+                                        ));
+                                    }
+                                }
+                            }
                             if theirs.is_some() && plain.rejection.is_none() {
                                 must_commit += 1;
                                 // Every site the twin publishes is one it
@@ -2291,9 +2444,12 @@ fn refused_history_reach_grid() {
          rejection_generative_diff refused_history_reach_grid\n\
          Each entry is a grid cell where the twin's second walk adopts a cause the project's \
          walk does not note, or where MSBuild evaluates the twin, the project's walk commits, and the \
-         twin's second walk alone withdraws it: a decline, the second walk's cost.",
+         twin's second walk alone withdraws it: a decline, the second walk's cost; or where a \
+         walk withdraws a project MSBuild evaluates (#1200).",
     );
-    assert!(second > 0 && must_commit > 0, "the grid exercises nothing");
+    // The second walk may adopt no site here: each walk judges the arm's
+    // names on the values it holds (#1164).
+    assert!(must_commit > 0, "the grid exercises nothing");
 }
 
 /// That the evaluation `sites` describe ([`published_sites`]) noted no
@@ -2351,12 +2507,669 @@ fn refused_history_sweep_fixed_seed() {
     let census = refused_history_sweep(&mut rng, 3_000);
     eprintln!("refused history sweep: {census:?}");
     assert!(
-        census.first_write > 0 && census.rewrite > 0 && census.several > 0,
+        census.first_write > 0 && census.rewrite > 0 && census.in_site > 0 && census.several > 0,
         "{census:?}"
     );
+    assert!(census.twin_pairs > 0, "{census:?}");
     assert!(census.second_walk_sites > 0, "{census:?}");
     assert_eq!(census.second_walk_causes_beyond_project, 0, "{census:?}");
     assert!(census.withdrawn > 0 && census.committed > 0, "{census:?}");
+}
+
+/// #1164's table: an arm the walk cannot decide writes `R` a value
+/// `VersionLessThan` throws on, and an item there calls it on `R` and on
+/// `P` and `Q`, which the arm writes too and a later group rewrites, each
+/// rewrite after a refused write of its name or not, in its `Include` and in
+/// its condition. MSBuild takes the arm and rejects every row (MSB4184).
+/// Which names the walk leaves unknown moves with the history, so a judgement
+/// that tries values for those names answers each row differently; the walk
+/// may commit no row's `After`.
+#[test]
+fn a_throw_in_an_arm_is_judged_alike_whatever_the_history() {
+    let mut oracle = Oracle::spawn();
+    let tmp = TempDir::new().unwrap();
+    let dir = borzoi_msbuild::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    let project_path = dir.join("Demo.fsproj");
+    let names = vec!["After".to_owned()];
+    let call = "$([MSBuild]::VersionLessThan('$(Q)$(P)','$(R)'))";
+    let sites = [
+        format!("<I Include=\"{call}\" />"),
+        format!("<I Include=\"x\" Condition=\"{call}\" />"),
+    ];
+    for site in &sites {
+        for (p, q) in [(false, false), (false, true), (true, false), (true, true)] {
+            let refused = |on: bool, name: &str| {
+                if on {
+                    format!("<{name}>{REFUSED}</{name}>")
+                } else {
+                    String::new()
+                }
+            };
+            let xml = format!(
+                "<Project>\n  <PropertyGroup><R>bad</R></PropertyGroup>\n  \
+             <Choose><When Condition=\"{}\">\n    \
+             <PropertyGroup><P>abc</P><Q>abc</Q><R>nope</R></PropertyGroup>\n    \
+             <ItemGroup>{site}</ItemGroup>\n  \
+             </When></Choose>\n  \
+             <PropertyGroup>{}<P>v1.0</P>{}<Q></Q><After>ok</After></PropertyGroup>\n</Project>\n",
+                xml_attribute(UNDECIDED_TRUE),
+                refused(p, "P"),
+                refused(q, "Q"),
+            );
+            assert_eq!(
+                oracle.project(&xml, &names, Some(&project_path), &[]),
+                None,
+                "MSBuild rejects every row:\n{xml}"
+            );
+            let parsed = parse_fsproj_with_imports(
+                &borzoi_msbuild::ProjectFile::buffer(&project_path, &xml).unwrap(),
+                &HashMap::new(),
+                &HashMap::new(),
+                None,
+                None,
+            )
+            .unwrap();
+            assert!(
+                !parsed.property("After").is_exact(),
+                "MSBuild rejects the project, but we commit {:?} ({:?}):\n{xml}",
+                parsed.property("After"),
+                parsed.rejection
+            );
+        }
+    }
+}
+
+/// One cell of [`arm_history_grid`]: its document in each history
+/// ([`HISTORIES`], in order), and the document with the write MSBuild may
+/// make and the walk does not hold left out, `{held}` standing for the value
+/// the walk holds of `held_name`.
+struct GridCell {
+    label: String,
+    documents: Vec<String>,
+    held: String,
+    held_name: &'static str,
+    /// Whether the arm is one MSBuild takes.
+    taken: bool,
+    /// The hostile dimensions of the values the cell writes, none for the
+    /// grid's own.
+    hostile: BTreeSet<Dimension>,
+    /// The site's text, and the names it reads whose values the walk holds.
+    call: String,
+    held_names: &'static [&'static str],
+    /// The graded names MSBuild defines where it evaluates the cell, empty
+    /// or not: the oracle reports an undefined name as `""`, so whether an
+    /// exact absence or an exact `""` is MSBuild's is read from the document.
+    defined: Vec<&'static str>,
+}
+
+/// The hostile values [`arm_history_grid`] does not draw.
+const ARM_GRID_EXCLUDED: &[(Dimension, &str)] = &[
+    PROJECT_EXCLUDED[0],
+    (
+        Dimension::OverwrittenLater,
+        "a grid cell's hostile value is its name's last write, which no later write puts back",
+    ),
+];
+
+/// [`arm_history_grid`]'s histories: whether a refused write goes before the
+/// write of `A`, and of `B`, that MSBuild makes after the site's arm.
+const HISTORIES: [[bool; 2]; 4] = [[false, false], [true, false], [false, true], [true, true]];
+
+/// A value a grid cell writes, as the document spells it, as its label names
+/// it, and of which hostile dimensions.
+struct GridValue {
+    text: String,
+    label: String,
+    hostile: BTreeSet<Dimension>,
+}
+
+/// The values a grid cell's `plain` axis takes: each plain value, and, in
+/// one corner of the other axes (an arm MSBuild takes, `U` written `nope`
+/// over `bad`, or the gated family's `z`), every hostile value of
+/// `value::alphabet()` the grid draws, rendered around the first plain value.
+/// Labelled by its dimension and a hash, as a manifest key holds no line
+/// break.
+fn rewrites(plain: &[&str], arm: &str, before: &str, written: &str) -> Vec<GridValue> {
+    let mut values: Vec<GridValue> = plain
+        .iter()
+        .map(|value| GridValue {
+            text: xml_text(value),
+            label: (*value).to_owned(),
+            hostile: BTreeSet::new(),
+        })
+        .collect();
+    let corner = arm == UNDECIDED_TRUE
+        && ((before == "bad" && written == "nope") || (before.is_empty() && written == "z"));
+    if corner {
+        let excluded: BTreeSet<Dimension> = ARM_GRID_EXCLUDED.iter().map(|(d, _)| *d).collect();
+        for entry in value::alphabet().entries() {
+            if excluded.contains(&entry.dimension) {
+                continue;
+            }
+            let rendered = entry.value.render(plain[0]);
+            values.push(GridValue {
+                text: xml_text(&rendered),
+                label: format!("{}:{}", entry.dimension.id(), fnv1a(&rendered)),
+                hostile: BTreeSet::from([entry.dimension]),
+            });
+        }
+    }
+    values
+}
+
+/// [`arm_history_grid`]'s cells. Family `item`: #1164's own shape, an arm
+/// writing a value `U` that a call there throws on (or not), beside `A` and
+/// `B`, which a group after the arm rewrites, each perhaps after a refused
+/// write; the call in an item's `Include` and in its condition. Family
+/// `gated`: #1164's comments' shape, a write in an arm gated on `A`, which
+/// has a refused history or not, then a read of the written name, in a
+/// property body and an item's `Include`.
+fn arm_history_cells() -> Vec<GridCell> {
+    let refused = |on: bool, name: &str| {
+        if on {
+            format!("<{name}>{REFUSED}</{name}>")
+        } else {
+            String::new()
+        }
+    };
+    let mut cells = Vec::new();
+    // (Include text, condition) pairs, each calling on `U` but the last, the
+    // last three on `X`, a write the walk refuses, so holds no value of, and MSBuild
+    // holds `Debug` of: the last reads `U` only past a step that throws on
+    // the values held, which a value tried for `X` gets past.
+    let calls: &[(&str, &str)] = &[
+        (
+            "$([MSBuild]::VersionLessThan('$(B)$(A)','$(U)'))",
+            "$([MSBuild]::VersionLessThan('$(B)$(A)','$(U)'))",
+        ),
+        (
+            "$([MSBuild]::VersionLessThan('$(A)','$(U)'))",
+            "$([MSBuild]::VersionLessThan('$(A)','$(U)'))",
+        ),
+        ("a$(U[3])b", "'$(U[3])' == ''"),
+        (
+            "$([MSBuild]::VersionLessThan('$(U)v$(X)','1.0'))",
+            "$([MSBuild]::VersionLessThan('$(U)v$(X)','1.0'))",
+        ),
+        (
+            "$(Q.Split('q$(X)')[1].Split('q$(U)')[1])",
+            "'$(Q.Split(`q$(X)`)[1].Split(`q$(U)`)[1])' == ''",
+        ),
+        // One on `X` alone, which throws on the empty value the walk reads
+        // and not on MSBuild's `Debug`.
+        ("a$(X[0])b", "'$(X[0])' == 'D'"),
+    ];
+    for arm in [UNDECIDED_TRUE, UNDECIDED_FALSE] {
+        for (text, condition) in calls {
+            for (call, site) in [
+                (text, format!("<I Include=\"{}\" />", xml_attribute(text))),
+                (
+                    condition,
+                    format!(
+                        "<I Include=\"x\" Condition=\"{}\" />",
+                        xml_attribute(condition)
+                    ),
+                ),
+            ] {
+                for before in ["", "1", "bad", "2.0", "abcd"] {
+                    for written in ["nope", "3.0"] {
+                        for a in rewrites(&["v1.0", "abc"], arm, before, written) {
+                            for b in ["", "1"] {
+                                let site_text = site.clone();
+                                let (a_label, a_hostile) = (a.label.clone(), a.hostile.clone());
+                                let a = a.text.clone();
+                                let final_writes = format!("<A>{a}</A><B>{b}</B><After>");
+                                let document = move |arm_write: &str, history: &[bool]| {
+                                    let site = &site_text;
+                                    format!(
+                                        "<Project>\n  <PropertyGroup><U>{before}</U><X>{REFUSED}</X><Q>axc1d</Q></PropertyGroup>\n  \
+                                         <Choose><When Condition=\"{}\">\
+                                         <PropertyGroup><A>abc</A><B>abc</B>{arm_write}</PropertyGroup>\
+                                         <ItemGroup>{site}</ItemGroup></When></Choose>\n  \
+                                         <PropertyGroup>{}<A>{a}</A>{}<B>{b}</B><After>ok</After></PropertyGroup>\n\
+                                         </Project>\n",
+                                        xml_attribute(arm),
+                                        refused(history[0], "A"),
+                                        refused(history[1], "B"),
+                                    )
+                                };
+                                let arm_write = format!("<U>{written}</U>");
+                                cells.push(GridCell {
+                                    label: format!(
+                                        "item / {arm} / {site} / U={before} then {written} / A={a_label} / B={b}"
+                                    ),
+                                    // As the walk holds it: `X`, a write it
+                                    // refuses, as the empty value it reads.
+                                    // and `A` as the value it holds.
+                                    held: document("", &HISTORIES[0])
+                                        .replace(&format!("<X>{REFUSED}</X>"), "<X></X>")
+                                        .replace(
+                                            &final_writes,
+                                            &format!("<A>{{held}}</A><B>{b}</B><After>"),
+                                        ),
+                                    held_name: "A",
+                                    documents: HISTORIES
+                                        .iter()
+                                        .map(|history| document(&arm_write, history))
+                                        .collect(),
+                                    taken: arm == UNDECIDED_TRUE,
+                                    hostile: a_hostile,
+                                    call: (*call).to_owned(),
+                                    held_names: &["U", "A", "B", "Q"],
+                                    defined: vec!["After", "A", "B", "U", "X", "Q"],
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for arm in [UNDECIDED_TRUE, UNDECIDED_FALSE] {
+        for text in ["$(B[9])", "$([MSBuild]::VersionLessThan('$(B)', '2.0'))"] {
+            for (kind, site) in [
+                (
+                    "body",
+                    format!(
+                        "<PropertyGroup Condition=\"{}\">{{gated}}<R>{}</R></PropertyGroup>",
+                        xml_attribute(arm),
+                        xml_text(text)
+                    ),
+                ),
+                (
+                    "include",
+                    format!(
+                        "<Choose><When Condition=\"{}\"><PropertyGroup>{{gated}}</PropertyGroup>\
+                     <ItemGroup><I Include=\"{}\" /></ItemGroup></When></Choose>",
+                        xml_attribute(arm),
+                        xml_attribute(text)
+                    ),
+                ),
+            ] {
+                for a in ["z", "off"] {
+                    for before in rewrites(&["a", "abcdefghijkl0", "1.0"], arm, "", a) {
+                        let (before_label, before_hostile) =
+                            (before.label.clone(), before.hostile.clone());
+                        let before = before.text.clone();
+                        let first_writes = format!("<A>{a}</A><B>{before}</B>");
+                        let site_text = site.clone();
+                        let document = move |gated: &str, history: &[bool]| {
+                            let site = &site_text;
+                            format!(
+                                "<Project>\n  <PropertyGroup>{}<A>{a}</A>{}<B>{before}</B></PropertyGroup>\n  \
+                                 {}\n  <PropertyGroup><After>ok</After></PropertyGroup>\n</Project>\n",
+                                refused(history[0], "A"),
+                                refused(history[1], "B"),
+                                site.replace("{gated}", gated),
+                            )
+                        };
+                        let gated = format!(
+                            "<B Condition=\"{}\">abcdefghijkl</B>",
+                            xml_attribute("'$(A)' == 'off'")
+                        );
+                        cells.push(GridCell {
+                            label: format!(
+                                "gated / {arm} / {kind} / {text} / A={a} / B={before_label}"
+                            ),
+                            held: document("", &HISTORIES[0])
+                                .replace(&first_writes, &format!("<A>{a}</A><B>{{held}}</B>")),
+                            held_name: "B",
+                            documents: HISTORIES
+                                .iter()
+                                .map(|history| document(&gated, history))
+                                .collect(),
+                            taken: arm == UNDECIDED_TRUE,
+                            hostile: before_hostile,
+                            call: text.to_owned(),
+                            held_names: &["A", "B"],
+                            // `R` is written in the body only, under the arm.
+                            defined: if kind == "body" && arm == UNDECIDED_TRUE {
+                                vec!["After", "A", "B", "R"]
+                            } else {
+                                vec!["After", "A", "B"]
+                            },
+                        });
+                    }
+                }
+            }
+        }
+    }
+    cells
+}
+
+/// #1164's shapes, graded against MSBuild in every history
+/// ([`arm_history_cells`]): each cell walked as is and with a refused write
+/// before each later write [`HISTORIES`] names, which MSBuild evaluates
+/// alike. Per cell and history:
+///
+/// - where MSBuild evaluates the project, the walk claims no certain
+///   rejection, and a value it commits is MSBuild's;
+/// - where MSBuild rejects it, the walk commits nothing, but where MSBuild
+///   evaluates the cell's held document (the arm's write the walk does not
+///   hold left out, `X` read empty): the rejection rests on a value the walk
+///   does not know, which it does not judge (#1051); or where the walk's own
+///   expansion of the site's text on the values it holds is one it does not
+///   model, no site yet (#1094). Those cells are pinned in
+///   `manifests/rejection_arm_history_grid.txt`, so that one closing, or
+///   opening, shows there; so are the cells it withdraws though MSBuild
+///   evaluates them, the decline's cost;
+/// - of two histories, the one with more refused writes is withdrawn
+///   wherever the other is, and certain only where it is;
+/// - and where MSBuild takes the arm and evaluates both the project and its
+///   held document, in a cell of the grid's own values, the call throws on
+///   neither MSBuild's values nor the walk's, so the walk must commit: a
+///   judgement that withdrew on every name it is unsure of would fail there.
+///
+/// One corner of the grid takes every hostile value of `value::alphabet()`
+/// as the rewrite of `A` (or the gated family's earlier `B`), counted in the
+/// `arm_history` census.
+#[test]
+fn arm_history_grid() {
+    let mut oracle = Oracle::spawn();
+    let tmp = TempDir::new().unwrap();
+    let dir = borzoi_msbuild::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    let project_path = dir.join("Demo.fsproj");
+    // `After`, the sentinel of a withdrawal, and every name the cells write.
+    const GRADED: [&str; 7] = ["After", "A", "B", "U", "X", "R", "Q"];
+    let oracle_names: Vec<String> = GRADED.map(String::from).to_vec();
+    let walk = |xml: &str| {
+        parse_fsproj_with_imports(
+            &borzoi_msbuild::ProjectFile::buffer(&project_path, xml).unwrap(),
+            &HashMap::new(),
+            // The environment the oracle runs in, so that a value reading a
+            // variable reads the same on both sides.
+            &common::oracle_environment(),
+            None,
+            None,
+        )
+        .unwrap()
+    };
+    let certainty =
+        |parsed: &borzoi_msbuild::ParsedProject| parsed.rejection.as_ref().map(|r| r.certainty);
+    // A name's read as a claim: its value, an exact absence as the empty
+    // value MSBuild reports, or none.
+    let claim = |parsed: &borzoi_msbuild::ParsedProject, name: &str| match parsed.property(name) {
+        PropertyRead::Unset => Some(String::new()),
+        read => read.value().map(str::to_owned),
+    };
+    let (mut cases, mut must_commit, mut rejected) = (0usize, 0usize, 0usize);
+    let mut failures = Vec::new();
+    let mut pinned = Vec::new();
+    let census = coverage::open(
+        "crates/msbuild/tests/rejection_generative_diff.rs",
+        "arm_history",
+        ARM_GRID_EXCLUDED,
+    );
+    for cell in arm_history_cells() {
+        let plain = &cell.documents[0];
+        let theirs = oracle.project_design_time(plain, &oracle_names, Some(&project_path), &[]);
+        rejected += usize::from(theirs.is_none());
+        let walked: Vec<(&[bool; 2], &String, borzoi_msbuild::ParsedProject)> = HISTORIES
+            .iter()
+            .zip(&cell.documents)
+            .map(|(history, xml)| (history, xml, walk(xml)))
+            .collect();
+        // The values the walk holds of the names the site reads, in the plain
+        // history: what MSBuild is run on in the held document, and what the
+        // walk's own expansion of the site is made on.
+        let held_values: Vec<(String, String)> = cell
+            .held_names
+            .iter()
+            .filter_map(|name| {
+                walked[0]
+                    .2
+                    .properties
+                    .get(*name)
+                    .map(|value| ((*name).to_owned(), value.clone()))
+            })
+            .collect();
+        let held_value = held_values
+            .iter()
+            .find(|(name, _)| name == cell.held_name)
+            .map_or(String::new(), |(_, value)| spelt(value));
+        // MSBuild's answer with the names as the walk holds them.
+        let held_evaluates = oracle
+            .project_design_time(
+                &cell.held.replace("{held}", &held_value),
+                &oracle_names,
+                Some(&project_path),
+                &[],
+            )
+            .is_some();
+        census.reached(
+            &cell.hostile,
+            outcome(
+                theirs.is_none(),
+                claim(&walked[0].2, "After").is_some() && theirs.is_some(),
+            ),
+        );
+        let mut verdicts: Vec<&str> = Vec::new();
+        for (history, xml, parsed) in &walked {
+            cases += 1;
+            let committed = claim(parsed, "After");
+            let claims: Vec<(&str, String)> = GRADED
+                .iter()
+                .filter_map(|name| claim(parsed, name).map(|value| (*name, value)))
+                .collect();
+            let mut verdict = "-";
+            match &theirs {
+                None if !claims.is_empty() => {
+                    // A function the walk does not model in the site's text,
+                    // on the values it holds: no site yet (#1094).
+                    let unmodelled = substitute(&cell.call, &property_map(&held_values))
+                        .1
+                        .iter()
+                        .any(|issue| matches!(issue, Issue::Unsupported { .. }));
+                    if held_evaluates {
+                        verdict = "commits on a rejection resting on a value the walk does not hold (#1051)";
+                    } else if unmodelled {
+                        verdict =
+                            "commits on a rejection in a text the walk does not model (#1094)";
+                    } else {
+                        failures.push(format!(
+                            "{} / {history:?}: MSBuild rejects, and the walk commits {claims:?}\n{xml}",
+                            cell.label
+                        ));
+                    }
+                }
+                None => {}
+                Some(values) => {
+                    if certainty(parsed) == Some(RejectionCertainty::Certain) {
+                        failures.push(format!(
+                            "{} / {history:?}: MSBuild evaluates, and the walk claims it rejects: {:?}\n{xml}",
+                            cell.label, parsed.rejection
+                        ));
+                    }
+                    for (name, value) in &claims {
+                        // An exact absence of a name MSBuild defines, or a
+                        // value of one it does not, is wrong whatever the
+                        // oracle's flattening says.
+                        let exact_absence = matches!(parsed.property(name), PropertyRead::Unset);
+                        let defined = cell.defined.contains(name);
+                        if exact_absence == defined || values.get(*name) != Some(value) {
+                            failures.push(format!(
+                                "{} / {history:?}: the walk commits {name}={value:?}, MSBuild {:?}\n{xml}",
+                                cell.label,
+                                values.get(*name)
+                            ));
+                        }
+                    }
+                    if parsed.rejection.is_some() {
+                        verdict = "withdraws a project MSBuild evaluates";
+                    }
+                    // The grid's own values only: a hostile one may make a
+                    // write the walk refuses, so that it holds another value
+                    // than the held document says, and declines.
+                    if cell.taken && held_evaluates && cell.hostile.is_empty() {
+                        must_commit += 1;
+                        if committed.is_none() {
+                            failures.push(format!(
+                                "{} / {history:?}: the call throws on no value either side holds, \
+                                 and the walk withdraws: {:?}\n{xml}",
+                                cell.label, parsed.rejection
+                            ));
+                        }
+                    }
+                }
+            }
+            verdicts.push(verdict);
+        }
+        for (fewer, fewer_xml, fewer_parsed) in &walked {
+            for (more, _, more_parsed) in &walked {
+                let ordered = fewer.iter().zip(more.iter()).all(|(f, m)| !f || *m) && fewer != more;
+                if ordered
+                    && (!twin_verdict_claims_no_more(
+                        certainty(fewer_parsed),
+                        certainty(more_parsed),
+                    ) || GRADED.iter().any(|name| {
+                        !twin_claims_no_more(
+                            &fewer_parsed.property(name),
+                            &more_parsed.property(name),
+                        )
+                    }))
+                {
+                    failures.push(format!(
+                        "{}: history {fewer:?} judged {:?}, history {more:?} {:?}\n{fewer_xml}",
+                        cell.label, fewer_parsed.rejection, more_parsed.rejection
+                    ));
+                }
+            }
+        }
+        // Each history's verdict, in [`HISTORIES`]' order, so that one moving
+        // shows whichever history it is.
+        if verdicts.iter().any(|verdict| *verdict != "-") {
+            pinned.push((cell.label.clone(), verdicts.join(" | ")));
+        }
+    }
+    eprintln!(
+        "arm history grid: {cases} cases, {rejected} cells MSBuild rejects, {must_commit} \
+         must-commit points, {} cells pinned",
+        pinned.len()
+    );
+    assert!(
+        failures.is_empty(),
+        "{} failures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+    assert!(
+        rejected > 0 && must_commit > 0,
+        "the grid exercises nothing"
+    );
+    census.finish(
+        "BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-msbuild --test \
+         rejection_generative_diff arm_history_grid",
+    );
+    let manifest = Manifest::from_keyed(pinned).expect("well-formed entries");
+    manifest::check(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/manifests/rejection_arm_history_grid.txt"),
+        &manifest,
+        "BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-msbuild --test \
+         rejection_generative_diff arm_history_grid\n\
+         Each entry is a grid cell where, in some history, the walk commits on a project MSBuild \
+         rejects over a value the walk does not hold (#1051) or in a text it does not model \
+         (#1094), or withdraws a project MSBuild evaluates: the decline's cost. Its value is each history's verdict, in HISTORIES' order \
+         (`-` for none).",
+    );
+}
+
+/// #1164's review: in content the walk does not take, no value is tried for
+/// a name the walk holds no value of (`X`, a refused write MSBuild computes to
+/// `Debug`). Beside one the content may write (`B`, under a gate on `A`, or
+/// before the read, `B` absent before the content), held at its value from
+/// before the content, what a value tried for `X` does proves nothing of the
+/// build. So a condition there is judged on the values held, and a boolean
+/// unknown there may be a throw, and a text that throws there is a site:
+/// MSBuild rejects each row (MSB4184) whether or not a refused write
+/// precedes `A`'s, and the walk commits no row's `After`. The cost is that a
+/// throw there on the value held of `X` is a site though MSBuild's value does
+/// not throw (`'$(X[0])' == 'D'`, `Debug`'s `D`): a decline, never a claim
+/// (#1200).
+#[test]
+fn untaken_content_tries_no_value_for_a_name() {
+    let mut oracle = Oracle::spawn();
+    let tmp = TempDir::new().unwrap();
+    let dir = borzoi_msbuild::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    let project_path = dir.join("Demo.fsproj");
+    let names = vec!["After".to_owned()];
+    let document = |refused: bool, condition: &str| {
+        let refused = if refused {
+            format!("<A>{REFUSED}</A>")
+        } else {
+            String::new()
+        };
+        format!(
+            "<Project>\n  <PropertyGroup><B></B><X>{REFUSED}</X>{refused}<A>z</A></PropertyGroup>\n  \
+             <PropertyGroup Condition=\"{}\"><B Condition=\"{}\">bad</B>\
+             <R Condition=\"{}\">r</R></PropertyGroup>\n  \
+             <PropertyGroup><After>ok</After></PropertyGroup>\n</Project>\n",
+            xml_attribute(UNDECIDED_TRUE),
+            xml_attribute("'$(A)' == 'off'"),
+            xml_attribute(condition),
+        )
+    };
+    let walk = |xml: &str| {
+        parse_fsproj_with_imports(
+            &borzoi_msbuild::ProjectFile::buffer(&project_path, xml).unwrap(),
+            &HashMap::new(),
+            &HashMap::new(),
+            None,
+            None,
+        )
+        .unwrap()
+    };
+    for refused in [false, true] {
+        let rejected = document(
+            refused,
+            "'$([MSBuild]::VersionLessThan(`$(B)$(X)v1.0`,`$(X.Length).0`))É' == 'Trueé'",
+        );
+        assert_eq!(
+            oracle.project_design_time(&rejected, &names, Some(&project_path), &[]),
+            None,
+            "MSBuild rejects the row:\n{rejected}"
+        );
+        let parsed = walk(&rejected);
+        assert!(
+            !parsed.property("After").is_exact(),
+            "MSBuild rejects the project, but we commit {:?}:\n{rejected}",
+            parsed.property("After")
+        );
+        let declined = document(refused, "'$(X[0])' == 'D'");
+        assert!(
+            oracle
+                .project_design_time(&declined, &names, Some(&project_path), &[])
+                .is_some(),
+            "MSBuild evaluates the row:\n{declined}"
+        );
+        let parsed = walk(&declined);
+        assert_eq!(
+            parsed.rejection.as_ref().map(|r| r.certainty),
+            Some(RejectionCertainty::Possible),
+            "{declined}"
+        );
+        assert!(!parsed.property("After").is_exact(), "{declined}");
+    }
+    // A text in a `<When>` the walk cannot decide, `B` absent before it.
+    let text = format!(
+        "<Project>\n  <PropertyGroup><X>{REFUSED}</X></PropertyGroup>\n  \
+         <Choose><When Condition=\"{}\"><PropertyGroup><B>bad</B>\
+         <R>{}</R></PropertyGroup></When></Choose>\n  \
+         <PropertyGroup><After>ok</After></PropertyGroup>\n</Project>\n",
+        xml_attribute(UNDECIDED_TRUE),
+        xml_text("$([MSBuild]::VersionLessThan('$(B)v$(X)','1.0'))"),
+    );
+    assert_eq!(
+        oracle.project_design_time(&text, &names, Some(&project_path), &[]),
+        None,
+        "MSBuild rejects the row:\n{text}"
+    );
+    let parsed = walk(&text);
+    assert!(
+        !parsed.property("After").is_exact(),
+        "MSBuild rejects the project, but we commit {:?}:\n{text}",
+        parsed.property("After")
+    );
 }
 
 /// Fresh-seed twin of [`refused_history_sweep_fixed_seed`].
@@ -2836,7 +3649,11 @@ fn a_group_guard_does_not_rule_out_rejecting_an_uncomputed_import() {
 /// imports, two files (`x.props`, `y.props`) failing one import at one span,
 /// a file failing an import that the walks reach through two spellings of
 /// its directory (`sub/z.props`, `SUB/z.props`, one file where the file
-/// system folds case), and one cause in two texts of an element.
+/// system folds case), one cause in two texts of an element, and texts
+/// reached for certain whose throws the two walks name apart (`$(P[9])` in
+/// the second, holding the refused `P` at its final value, the certain
+/// `$(S[9])` in the first), which is where a second walk adopts a site once
+/// both walks judge an arm's names on the values they hold (#1164).
 const SITE_BLOCKS: &[&str] = &[
     "<PropertyGroup><P>@(J)</P><P>z</P></PropertyGroup>",
     "<PropertyGroup><P>@(J)</P><P></P></PropertyGroup>",
@@ -2853,6 +3670,8 @@ const SITE_BLOCKS: &[&str] = &[
     "<Choose><When Condition=\"'$(P)' == 'off' And '$(S[9])' != ''\"><PropertyGroup><W>1</W></PropertyGroup></When><Otherwise><PropertyGroup><G>x.props</G></PropertyGroup></Otherwise></Choose><Import Project=\"$(G)\" Condition=\"'$(G)' != ''\" /><Import Project=\"y.props\" />",
     "<Choose><When Condition=\"'$(P)' == 'off' And '$(S[9])' != ''\"><PropertyGroup><W>1</W></PropertyGroup></When><Otherwise><PropertyGroup><H>SUB/z.props</H></PropertyGroup></Otherwise></Choose><Import Project=\"$(H)\" Condition=\"'$(H)' != ''\" /><Import Project=\"sub/z.props\" />",
     "<Choose><When Condition=\"'É' == 'é'\"><PropertyGroup><P>abcdefghijkl</P><Q>nope</Q></PropertyGroup><ItemGroup><I Include=\"$([MSBuild]::VersionLessThan('$(P)v1.0','$(Q)'))$([MSBuild]::VersionLessThan('nope','$(Q)'))\" Exclude=\"$([MSBuild]::VersionLessThan('nope','$(Q)'))\" /></ItemGroup></When></Choose>",
+    "<PropertyGroup><P>@(J)</P><P>z</P></PropertyGroup><ItemGroup><K Include=\"$(P[9])$(S[9])\" Exclude=\"$(P[9])\" /></ItemGroup>",
+    "<PropertyGroup><P>@(J)</P><P>z</P><T>$(P[9])$(S[9])</T></PropertyGroup>",
 ];
 
 /// What [`second_walk_site_sweep`] compared.

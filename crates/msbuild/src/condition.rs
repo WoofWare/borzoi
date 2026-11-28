@@ -570,10 +570,12 @@ enum Walk<'a> {
     /// the caller is not certain of is evaluated on the values held, its
     /// failure judged as [`Reject::judged_on_doubted_values`] says where it
     /// rests on such a name, rather than by its kind, and its boolean is none
-    /// of MSBuild's.
+    /// of MSBuild's. `speculating`: the condition stands in content the walk
+    /// does not take ([`may_throw_on_held`]).
     Possibility {
         later: bool,
         on_held: Option<&'a dyn Fn(&str) -> bool>,
+        speculating: bool,
     },
 }
 
@@ -613,7 +615,7 @@ pub fn may_throw(
     uncertain: &dyn Fn(&str) -> bool,
 ) -> bool {
     let fs = Ctx { probes, site };
-    may_throw_walked(source, props, fs, uncertain, None)
+    may_throw_walked(source, props, fs, uncertain, None, false)
 }
 
 /// Whether MSBuild may throw evaluating `source` on the values `props`
@@ -626,6 +628,15 @@ pub fn may_throw(
 /// whether a function it calls throws on MSBuild's value is the judgement
 /// over the values a name may hold (#1009's second stage). A condition wholly
 /// outside the grammar we parse claims nothing (#1095).
+///
+/// `speculating`: the condition stands in content the walk does not take,
+/// where a name that content writes holds a value from before it, which may
+/// not be MSBuild's on that path. There the caller doubts no name, and a leaf
+/// whose boolean is unknown on the values held, beside a name it is not
+/// certain of, may throw: what a value tried for one name does beside another
+/// that sits at a value the path may have replaced proves nothing, and trying
+/// values there is not monotone in which names such content leaves unknown
+/// (#1164). Where no operand of such a leaf can throw, this declines (#1208).
 pub fn may_throw_on_held(
     source: &str,
     props: &PropertyMap,
@@ -633,9 +644,10 @@ pub fn may_throw_on_held(
     site: Site,
     unsure: &dyn Fn(&str) -> bool,
     doubted: &dyn Fn(&str) -> bool,
+    speculating: bool,
 ) -> bool {
     let fs = Ctx { probes, site };
-    may_throw_walked(source, props, fs, unsure, Some(doubted))
+    may_throw_walked(source, props, fs, unsure, Some(doubted), speculating)
 }
 
 /// `may_throw` or [`may_throw_on_held`], as `on_held` says.
@@ -645,6 +657,7 @@ fn may_throw_walked(
     fs: Ctx<'_>,
     uncertain: &dyn Fn(&str) -> bool,
     on_held: Option<&dyn Fn(&str) -> bool>,
+    speculating: bool,
 ) -> bool {
     match parse_condition(source) {
         Ok(Some(expr)) => {
@@ -656,6 +669,7 @@ fn may_throw_walked(
                 Walk::Possibility {
                     later: false,
                     on_held,
+                    speculating,
                 },
             )
             .throws
@@ -713,6 +727,13 @@ fn judge_expr(
                 } => Some(doubted),
                 _ => None,
             };
+            let speculating = matches!(
+                walk,
+                Walk::Possibility {
+                    speculating: true,
+                    ..
+                }
+            );
             if doubted.is_none() {
                 if explicit_doubt {
                     // A certain value that may complete an item or metadata
@@ -766,6 +787,12 @@ fn judge_expr(
                     Judgement::of(None, throws, false)
                 }
                 Ok(value) => Judgement::of(Some(value), Throws::Never, false),
+                // In content the walk does not take, a boolean unknown on the
+                // values held beside a name the caller is not certain of may
+                // be a throw on MSBuild's value ([`may_throw_on_held`]).
+                Err(Reject::Undecided) if speculating && (explicit_doubt || implicit_doubt) => {
+                    Judgement::of(None, Throws::Maybe, true)
+                }
                 Err(reject) if reads_doubted => match doubted_failures(expr, props, fs, doubted) {
                     None => reject.judged(),
                     Some(_) if throws_whatever_they_return(expr, props, fs, doubted) => {
@@ -1069,14 +1096,22 @@ fn judge_chain(
     };
     for (index, operand) in operands.iter().enumerate() {
         let walk = match walk {
-            Walk::Possibility { later, on_held } => {
+            Walk::Possibility {
+                later,
+                on_held,
+                speculating,
+            } => {
                 let later = later || last_throwing.is_some_and(|last| last > index);
                 if !later && last_throwing != Some(index) {
                     // Nothing from here on can throw, nor be reached by
                     // anything that can.
                     return Judgement::of(None, throws, unevaluated);
                 }
-                Walk::Possibility { later, on_held }
+                Walk::Possibility {
+                    later,
+                    on_held,
+                    speculating,
+                }
             }
             other => other,
         };

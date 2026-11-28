@@ -857,7 +857,8 @@ pub(super) fn is_certain(state: &State<'_>, name: &str) -> bool {
 /// value to after its refusal ([`State::rewritten_after_refusal`]) is no doubt
 /// ([`super::Trust::is_certain_but_for_refusal`]). A name bound otherwise (a
 /// toolset seed filling the slot a refusal emptied) keeps it. The rejection
-/// judgement's second walk reads names so (`rejection::judged_certain`).
+/// judgement's second walk reads names so where it names a text's throw
+/// (`rejection::judge_throwing_expression`).
 pub(super) fn is_certain_setting_aside_refusal(state: &State<'_>, name: &str) -> bool {
     is_certain_reading(state, name, true)
 }
