@@ -686,27 +686,65 @@ fn the_outer_dispatch_build_reports_its_dropped_edges() {
     assert!(message.contains("<ProjectReference>"), "{message}");
 }
 
-/// …and the graph predicate agrees with the reported one on every combination,
-/// because there is only one predicate.
+/// …and the graph predicates agree with the reported ones on every
+/// combination, because there is only one predicate for each: dropped edges,
+/// and a kept list that may lack edges (#1181). The two never both hold: a
+/// dropped list says more.
 #[test]
 fn the_edge_verdict_and_the_reported_capability_are_one_fact() {
     let mut parsed = certain_project();
     for uncertain in [false, true] {
-        for outer in [false, true] {
-            parsed.project_references_uncertain = uncertain;
-            let eval = ProjectEvaluation::Evaluated {
-                parsed: &parsed,
-                not_an_inner_build: outer,
-            };
-            assert_eq!(
-                eval.drops_reference_edges(),
-                deferrals(eval, FoldOutcome::Unknown)
-                    .iter()
-                    .any(|d| d.capability() == DeferredCapability::ProjectReferenceEdges),
-                "uncertain={uncertain} outer={outer}"
-            );
+        for incomplete in [false, true] {
+            for outer in [false, true] {
+                parsed.project_references_uncertain = uncertain;
+                parsed.project_references_incomplete = incomplete;
+                let eval = ProjectEvaluation::Evaluated {
+                    parsed: &parsed,
+                    not_an_inner_build: outer,
+                };
+                let reported = deferrals(eval, FoldOutcome::Unknown);
+                let case = format!("uncertain={uncertain} incomplete={incomplete} outer={outer}");
+                assert_eq!(
+                    eval.drops_reference_edges(),
+                    reported
+                        .iter()
+                        .any(|d| d.capability() == DeferredCapability::ProjectReferenceEdges),
+                    "{case}"
+                );
+                assert_eq!(
+                    eval.may_lack_reference_edges(true),
+                    reported
+                        .iter()
+                        .any(|d| d.capability() == DeferredCapability::CompleteReferenceSet),
+                    "{case}"
+                );
+                assert!(
+                    !(eval.drops_reference_edges() && eval.may_lack_reference_edges(true)),
+                    "{case}"
+                );
+                assert_eq!(
+                    eval.may_lack_reference_edges(true),
+                    incomplete && !uncertain && !outer,
+                    "{case}"
+                );
+            }
         }
     }
+}
+
+/// A kept reference list that may lack references the build has costs the
+/// assembly env its completeness, not its edges, and the message says that,
+/// not that the edges were dropped (#1181).
+#[test]
+fn an_incomplete_reference_list_is_reported_as_incomplete() {
+    let mut parsed = certain_project();
+    parsed.project_references_incomplete = true;
+    let ds = deferrals(evaluated(&parsed), FoldOutcome::Unknown);
+    assert_eq!(ds.len(), 1, "{ds:?}");
+    assert_eq!(ds[0].capability(), DeferredCapability::CompleteReferenceSet);
+    let message = message_for(&parsed).expect("an incomplete list is reported");
+    assert!(message.contains("may lack"), "{message}");
+    assert!(!message.contains("ignoring"), "{message}");
 }
 
 /// The fold has exits of its own, reached only after the evaluation gate passed

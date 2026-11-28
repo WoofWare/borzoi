@@ -692,24 +692,41 @@ fn compare_compile(parsed: &ParsedProject, msbuild: &MsbuildOutput) -> FacetRepo
 }
 
 fn compare_project_references(parsed: &ParsedProject, msbuild: &MsbuildOutput) -> FacetReport {
-    if parsed.project_references_uncertain {
+    let claim = common::reference_claim(parsed);
+    if claim == common::ReferenceClaim::Nothing {
         return FacetReport::skipped(
             "project_references",
             "project_references_uncertain=true".to_string(),
         )
         .classed("decline(project_references_uncertain)".to_string());
     }
+    // Lexically normalised and nothing else, as the LSP reads a published
+    // path: a symlink resolved or a backslash turned into a separator would
+    // let an edge the LSP follows elsewhere pass as MSBuild's.
+    let published = |path: &Path| normalize_lexical(path).to_string_lossy().into_owned();
     let ours: Vec<String> = parsed
         .project_references
         .iter()
-        .map(|item| path_key(&item.include))
+        .map(|item| published(&item.include))
         .collect();
     let theirs: Vec<String> = msbuild
         .items
         .project_reference
         .iter()
-        .map(|item| path_key(Path::new(&item.full_path)))
+        .map(|item| published(Path::new(&item.full_path)))
         .collect();
+    if claim == common::ReferenceClaim::Within {
+        // The edges an incomplete list holds are still followed: each must be
+        // MSBuild's.
+        return match common::check_reference_claim(claim, &ours, &theirs) {
+            Ok(()) => FacetReport::skipped(
+                "project_references",
+                "project_references_incomplete=true".to_string(),
+            )
+            .classed("decline(project_references_incomplete)".to_string()),
+            Err(failure) => FacetReport::diverged("project_references", failure),
+        };
+    }
     compare_vec("project_references", ours, theirs)
 }
 

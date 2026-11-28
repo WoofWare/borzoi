@@ -2,13 +2,16 @@
 //! name the walk doubts, against the real MSBuild evaluator (the oracle's
 //! `itemsMeta` op).
 //!
-//! The reference list's contract (`ParsedProject::project_references_uncertain`)
-//! tolerates a missing edge where the walk cannot say MSBuild has one: an
-//! `Include` behind a gate it could not decide, or one whose value it cannot
-//! compute from names it holds exactly. An `Include` that reads a name the
-//! walk doubts (a write it refused to compute, one under a gate it could not
-//! decide, a copy of either) is an edge MSBuild has at a path the walk does
-//! not know, so a list missing it is no certain list (#1098).
+//! A reference list the walk publishes as certain (neither
+//! `ParsedProject::project_references_uncertain` nor
+//! `project_references_incomplete`) is MSBuild's exactly: no phantom edge, and
+//! no edge missing. An `Include` behind a gate the walk could not decide, or
+//! one whose value it cannot compute from names it holds exactly, is an edge
+//! MSBuild may have that the list lacks, so the list is incomplete (#1181);
+//! an `Include` that reads a name the walk doubts (a write it refused to
+//! compute, one under a gate it could not decide, a copy of either) is an
+//! edge MSBuild has at a path the walk does not know, so the list is
+//! uncertain (#1098).
 //!
 //! [`doubted_read_sweep`] generates writes of two names (hostile literals,
 //! functions the walk does not compute, copies, gates reading either name or
@@ -38,6 +41,25 @@ fn lexical(path: &str) -> PathBuf {
     let path = path.replace('\\', "/");
     let mut out = PathBuf::new();
     for component in Path::new(&path).components() {
+        match component {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// A path the walker published, as the LSP reads it: lexically normalised
+/// (`.` and `..` folded, which `workspace::lexically_normalize` does too) and
+/// nothing else. A backslash stays, so a walker that publishes one where
+/// MSBuild's `FullPath` has a separator fails the comparison rather than
+/// being repaired by it.
+fn published(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
         match component {
             Component::ParentDir => {
                 out.pop();
@@ -433,7 +455,7 @@ fn grade_read_document(oracle: &mut Oracle, document: &ReadDocument) -> (ReadOut
             .project_references
             .iter()
             .filter(|item| starts.iter().position(|s| *s == item.span.start) == Some(i))
-            .map(|item| lexical(&item.include.to_string_lossy()))
+            .map(|item| published(&item.include))
             .collect()
     };
     let doubted = |name: &str| {
@@ -454,17 +476,33 @@ fn grade_read_document(oracle: &mut Oracle, document: &ReadDocument) -> (ReadOut
         .any(|(i, reference)| {
             reference.reads.iter().any(|name| doubted(name)) && !theirs_of(i).is_empty()
         });
-    if parsed.project_references_uncertain {
+    let claim = common::reference_claim(&parsed);
+    if claim == common::ReferenceClaim::Nothing {
         return (ReadOutcome::Declined { owed }, evaluated);
     }
     // A reference MSBuild made reading a name the walk doubts may hold
-    // another path in another world, even where this one's agrees.
+    // another path in another world, even where this one's agrees, and its
+    // value withdraws the list whether the walk kept the reference or dropped
+    // it (#1098; `ParsedProject::project_references_uncertain`): neither a
+    // certain list nor an incomplete one may stand beside it.
     assert!(
         !owed,
-        "#1098: the list is certain, and a reference MSBuild made reads a name the walk \
+        "#1098: the list is {claim:?}, and a reference MSBuild made reads a name the walk \
          doubts:\n{xml}\nours: {:#?}",
         parsed.project_references
     );
+    let all_ours: Vec<PathBuf> = parsed
+        .project_references
+        .iter()
+        .map(|item| published(&item.include))
+        .collect();
+    let all_theirs: Vec<PathBuf> = theirs
+        .iter()
+        .map(|(_, meta)| lexical(&meta["FullPath"]))
+        .collect();
+    if let Err(failure) = common::check_reference_claim(claim, &all_ours, &all_theirs) {
+        panic!("{failure}\n{xml}");
+    }
     assert_eq!(
         parsed.project_references.len(),
         (0..document.references.len())
@@ -485,11 +523,18 @@ fn grade_read_document(oracle: &mut Oracle, document: &ReadDocument) -> (ReadOut
             };
             unmatched.remove(at);
         }
+        // A certain list is MSBuild's whole list (#1181): an edge missing
+        // from it is a wrong answer whatever its `Include` reads, and one
+        // reading a doubted name is #1098 as well.
         assert!(
-            unmatched.is_empty() || !reads.iter().any(|name| doubted(name)),
-            "#1098: the list is certain without {unmatched:?} of reference E{i}, whose `Include` \
-             reads a name the walk doubts ({reads:?}):\n{xml}\nours: {ours:#?}"
+            unmatched.is_empty() || claim == common::ReferenceClaim::Within,
+            "the list is certain without {unmatched:?} of reference E{i} (whose `Include` reads \
+             {reads:?}, doubted: {}):\n{xml}\nours: {ours:#?}",
+            reads.iter().any(|name| doubted(name))
         );
+    }
+    if claim == common::ReferenceClaim::Within {
+        return (ReadOutcome::Declined { owed }, evaluated);
     }
     (ReadOutcome::Committed, evaluated)
 }
@@ -823,7 +868,7 @@ fn an_implicit_read_leaves_no_certain_list_short() {
     let root = borzoi_msbuild::observed::host_fs::canonicalize(dir.path()).expect("canonicalize");
     let proj = layout(&root);
     std::fs::write(&proj, xml).unwrap();
-    let mut theirs: Vec<PathBuf> = Oracle::spawn_in_dir_with_env(&root, &env)
+    let theirs: Vec<PathBuf> = Oracle::spawn_in_dir_with_env(&root, &env)
         .items(xml, &proj, "ProjectReference", &[])
         .expect("MSBuild evaluates this document")
         .iter()
@@ -841,103 +886,158 @@ fn an_implicit_read_leaves_no_certain_list_short() {
     )
     .expect("well-formed XML parses");
     assert_eq!(theirs.len(), 2, "{theirs:?}");
-    if !parsed.project_references_uncertain {
-        let mut ours: Vec<PathBuf> = parsed
-            .project_references
-            .iter()
-            .map(|item| lexical(&item.include.to_string_lossy()))
-            .collect();
-        ours.sort();
-        theirs.sort();
-        assert_eq!(ours, theirs, "a certain list is MSBuild's: {xml}");
+    let ours: Vec<PathBuf> = parsed
+        .project_references
+        .iter()
+        .map(|item| published(&item.include))
+        .collect();
+    if let Err(failure) =
+        common::check_reference_claim(common::reference_claim(&parsed), &ours, &theirs)
+    {
+        panic!("{failure}\n{xml}");
     }
 }
 
 /// A reference behind a gate false whatever any name holds reads nothing
-/// MSBuild uses, however doubted the names it reads, beside a live sibling
-/// in a group the walk cannot decide: the list keeps every edge it knows,
-/// certain, and MSBuild agrees with each.
+/// MSBuild uses, however doubted the names it reads: the list is never
+/// uncertain for it. Where the walk also decides every gate and computes
+/// every `Include` it keeps, the list is certain and MSBuild's exactly;
+/// where it cannot, the list is incomplete, and every edge it holds is
+/// MSBuild's. Each row pins which of the two it is, so a walk that learns to
+/// decide a row moves it.
 #[test]
 fn a_dead_reference_reading_a_refused_name_costs_no_certainty() {
+    use DeadRow::{Exact, Incomplete};
     let rows = [
-        // False gates, on a reference beside a live sibling in a group the
-        // walk cannot decide, and on a group.
-        format!(
-            "<ItemGroup{UNSUPPORTED_TRUE}><ProjectReference Include=\"B.fsproj\" />\
-             <ProjectReference Include=\"$(P).fsproj\" Condition=\"false\" /></ItemGroup>\
-             <ItemGroup Condition=\"false\"><ProjectReference Include=\"$(P).fsproj\" /></ItemGroup>"
+        // False gates, on a reference in a group the walk cannot decide, and
+        // on a group.
+        (
+            Exact,
+            format!(
+                "<ItemGroup{UNSUPPORTED_TRUE}>\
+                 <ProjectReference Include=\"$(P).fsproj\" Condition=\"false\" /></ItemGroup>\
+                 <ItemGroup Condition=\"false\"><ProjectReference Include=\"$(P).fsproj\" /></ItemGroup>"
+            ),
         ),
         // A gate on a name a refused write and then a clean one wrote: the
         // clean write decides it.
-        format!(
-            "<PropertyGroup><Gate>{REFUSED_BODY}</Gate></PropertyGroup>\
-             <PropertyGroup><Gate>false</Gate></PropertyGroup>\
-             <ItemGroup><ProjectReference Include=\"$(P).fsproj\" Condition=\"$(Gate)\" /></ItemGroup>"
+        (
+            Exact,
+            format!(
+                "<PropertyGroup><Gate>{REFUSED_BODY}</Gate></PropertyGroup>\
+                 <PropertyGroup><Gate>false</Gate></PropertyGroup>\
+                 <ItemGroup><ProjectReference Include=\"$(P).fsproj\" Condition=\"$(Gate)\" /></ItemGroup>"
+            ),
         ),
         // A `<When>` after one the walk cannot decide, false on the state
         // before the `<Choose>`, which is the state MSBuild evaluates it in
         // (the undecided branch's write to `Off` never precedes it).
-        format!(
-            "<PropertyGroup><Off>false</Off></PropertyGroup>\
-             <Choose><When{UNSUPPORTED_TRUE}><PropertyGroup><Off>true</Off></PropertyGroup></When>\
-             <When Condition=\"$(Off)\"><ItemGroup><ProjectReference Include=\"$(P).fsproj\" /></ItemGroup></When></Choose>"
+        (
+            Exact,
+            format!(
+                "<PropertyGroup><Off>false</Off></PropertyGroup>\
+                 <Choose><When{UNSUPPORTED_TRUE}><PropertyGroup><Off>true</Off></PropertyGroup></When>\
+                 <When Condition=\"$(Off)\"><ItemGroup><ProjectReference Include=\"$(P).fsproj\" /></ItemGroup></When></Choose>"
+            ),
         ),
         // A `<When>` false on a name a refused write and then a clean one
-        // wrote, after one the walk cannot decide.
-        format!(
-            "<PropertyGroup><Gate>{REFUSED_BODY}</Gate></PropertyGroup>\
-             <PropertyGroup><Gate>false</Gate></PropertyGroup>\
-             <Choose><When{UNSUPPORTED_TRUE}><PropertyGroup><X>1</X></PropertyGroup></When>\
-             <When Condition=\"$(Gate)\"><ItemGroup><ProjectReference Include=\"$(P).fsproj\" /></ItemGroup></When></Choose>"
+        // wrote, after one the walk cannot decide. The walk does not decide
+        // the arm (#1184).
+        (
+            Incomplete,
+            format!(
+                "<PropertyGroup><Gate>{REFUSED_BODY}</Gate></PropertyGroup>\
+                 <PropertyGroup><Gate>false</Gate></PropertyGroup>\
+                 <Choose><When{UNSUPPORTED_TRUE}><PropertyGroup><X>1</X></PropertyGroup></When>\
+                 <When Condition=\"$(Gate)\"><ItemGroup><ProjectReference Include=\"$(P).fsproj\" /></ItemGroup></When></Choose>"
+            ),
         ),
         // A padded bare read, which MSBuild expands to empty whatever `P`
-        // holds.
-        "<ItemGroup><ProjectReference Include=\"B$( P).fsproj\" /></ItemGroup>".to_owned(),
-        "<ItemGroup><ProjectReference Include=\"B$(P ).fsproj\" /></ItemGroup>".to_owned(),
+        // holds. The walk does not model the padded spelling, so it drops
+        // the `B.fsproj` MSBuild keeps (#1184).
+        (
+            Incomplete,
+            "<ItemGroup><ProjectReference Include=\"B$( P).fsproj\" /></ItemGroup>".to_owned(),
+        ),
+        (
+            Incomplete,
+            "<ItemGroup><ProjectReference Include=\"B$(P ).fsproj\" /></ItemGroup>".to_owned(),
+        ),
         // An `Exclude` reading it from an `Include` empty whatever any name
-        // holds: it excludes nothing.
-        "<ItemGroup><ProjectReference Include=\"$(OptionalProjects)\" Exclude=\"$(P)\" /></ItemGroup>"
-            .to_owned(),
+        // holds: it excludes nothing. The walk does not see that the
+        // `Exclude` is idle (#1184).
+        (
+            Incomplete,
+            "<ItemGroup><ProjectReference Include=\"$(OptionalProjects)\" Exclude=\"$(P)\" /></ItemGroup>"
+                .to_owned(),
+        ),
         // The same from an item list the walk knows to be empty.
-        "<ItemGroup><ProjectReference Include=\"@(OptionalProjects)\" Exclude=\"$(P)\" /></ItemGroup>"
-            .to_owned(),
+        (
+            Incomplete,
+            "<ItemGroup><ProjectReference Include=\"@(OptionalProjects)\" Exclude=\"$(P)\" /></ItemGroup>"
+                .to_owned(),
+        ),
         // A name only a branch MSBuild cannot take writes, beside an
         // undecided one: its write never happens, so a read of it is exact.
-        format!(
-            "<Choose><When{UNSUPPORTED_TRUE}><PropertyGroup><X>1</X></PropertyGroup></When>\
-             <When Condition=\"false\"><PropertyGroup><OptionalProjects>B.fsproj</OptionalProjects></PropertyGroup></When></Choose>\
-             <ItemGroup><ProjectReference Include=\"$(OptionalProjects)\" /></ItemGroup>"
+        (
+            Exact,
+            format!(
+                "<Choose><When{UNSUPPORTED_TRUE}><PropertyGroup><X>1</X></PropertyGroup></When>\
+                 <When Condition=\"false\"><PropertyGroup><OptionalProjects>B.fsproj</OptionalProjects></PropertyGroup></When></Choose>\
+                 <ItemGroup><ProjectReference Include=\"$(OptionalProjects)\" /></ItemGroup>"
+            ),
         ),
         // A gate false whatever a doubted name holds, which the walk cannot
         // evaluate on the value it holds (`É` against `é`).
-        format!(
-            "<PropertyGroup><Gate{UNSUPPORTED_TRUE}>É</Gate></PropertyGroup>\
-             <ItemGroup><ProjectReference Include=\"$(Gate).fsproj\" Condition=\"'$(Gate)' == 'é' And false\" /></ItemGroup>"
+        (
+            Exact,
+            format!(
+                "<PropertyGroup><Gate{UNSUPPORTED_TRUE}>É</Gate></PropertyGroup>\
+                 <ItemGroup><ProjectReference Include=\"$(Gate).fsproj\" Condition=\"'$(Gate)' == 'é' And false\" /></ItemGroup>"
+            ),
         ),
         // A nested `<When>` a clean value decides false whatever a name the
-        // enclosing undecided branch writes holds.
-        format!(
-            "<PropertyGroup><Gate>{REFUSED_BODY}</Gate></PropertyGroup>\
-             <PropertyGroup><Gate>false</Gate></PropertyGroup>\
-             <Choose><When{UNSUPPORTED_TRUE}><PropertyGroup><X>one</X></PropertyGroup>\
-             <Choose><When Condition=\"$(Gate) And '$(X)' == 'one'\">\
-             <ItemGroup><ProjectReference Include=\"$(P).fsproj\" /></ItemGroup></When></Choose></When></Choose>"
+        // enclosing undecided branch writes holds. The walk does not decide
+        // it (#1184).
+        (
+            Incomplete,
+            format!(
+                "<PropertyGroup><Gate>{REFUSED_BODY}</Gate></PropertyGroup>\
+                 <PropertyGroup><Gate>false</Gate></PropertyGroup>\
+                 <Choose><When{UNSUPPORTED_TRUE}><PropertyGroup><X>one</X></PropertyGroup>\
+                 <Choose><When Condition=\"$(Gate) And '$(X)' == 'one'\">\
+                 <ItemGroup><ProjectReference Include=\"$(P).fsproj\" /></ItemGroup></When></Choose></When></Choose>"
+            ),
         ),
-        // The same of a name written under a gate the walk cannot decide.
-        format!(
-            "<PropertyGroup><G{UNSUPPORTED_TRUE}>x</G></PropertyGroup>\
-             <ItemGroup><ProjectReference Include=\"B$( G).fsproj\" /></ItemGroup>"
+        // A padded read of a name written under a gate the walk cannot
+        // decide, as the padded rows above (#1184).
+        (
+            Incomplete,
+            format!(
+                "<PropertyGroup><G{UNSUPPORTED_TRUE}>x</G></PropertyGroup>\
+                 <ItemGroup><ProjectReference Include=\"B$( G).fsproj\" /></ItemGroup>"
+            ),
         ),
     ];
     let mut oracle = Oracle::spawn();
-    for row in rows {
-        dead_reference_row(&mut oracle, &row);
+    for (expected, row) in rows {
+        dead_reference_row(&mut oracle, expected, &row);
     }
+}
+
+/// What [`a_dead_reference_reading_a_refused_name_costs_no_certainty`] pins
+/// of one row's list. Neither is uncertain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DeadRow {
+    /// Certain, and MSBuild's list exactly.
+    Exact,
+    /// Incomplete, and every edge it holds MSBuild's.
+    Incomplete,
 }
 
 /// One row of [`a_dead_reference_reading_a_refused_name_costs_no_certainty`],
 /// beside a refused `P` and a live reference.
-fn dead_reference_row(oracle: &mut Oracle, row: &str) {
+fn dead_reference_row(oracle: &mut Oracle, expected: DeadRow, row: &str) {
     let xml = format!(
         "<Project><PropertyGroup><P>{REFUSED_BODY}</P></PropertyGroup>\
          <ItemGroup><ProjectReference Include=\"A.fsproj\" /></ItemGroup>{row}</Project>"
@@ -961,16 +1061,194 @@ fn dead_reference_row(oracle: &mut Oracle, row: &str) {
         None,
     )
     .expect("well-formed XML parses");
-    assert!(!parsed.project_references_uncertain, "{xml}");
     let ours: Vec<PathBuf> = parsed
         .project_references
         .iter()
-        .map(|item| lexical(&item.include.to_string_lossy()))
+        .map(|item| published(&item.include))
         .collect();
-    assert!(
-        !ours.is_empty() && ours.iter().all(|p| theirs.contains(p)),
-        "{ours:?} {theirs:?}"
+    assert!(!parsed.project_references_uncertain, "{xml}");
+    let got = if parsed.project_references_incomplete {
+        DeadRow::Incomplete
+    } else {
+        DeadRow::Exact
+    };
+    assert_eq!(got, expected, "{xml}\nours: {ours:?}\ntheirs: {theirs:?}");
+    assert!(!ours.is_empty(), "the live reference is held: {xml}");
+    if let Err(failure) =
+        common::check_reference_claim(common::reference_claim(&parsed), &ours, &theirs)
+    {
+        panic!("{failure}\n{xml}");
+    }
+}
+
+/// A reference the walk captured, whose only doubt is in a metadatum it
+/// resolves (a refused write, as an attribute or a child element), is in the
+/// list: the list is certain and MSBuild's. What the metadatum does to the
+/// edge is the metadatum's own verdict (`ItemMetadataValue::Unknown`), not a
+/// missing reference.
+#[test]
+fn a_doubted_metadatum_leaves_the_list_certain() {
+    let mut oracle = Oracle::spawn();
+    for name in [
+        "PrivateAssets",
+        "ReferenceOutputAssembly",
+        "ExcludeAssets",
+        "IncludeAssets",
+    ] {
+        for element in [false, true] {
+            let reference = if element {
+                format!(
+                    "<ProjectReference Include=\"B.fsproj\"><{name}>{REFUSED_BODY}</{name}></ProjectReference>"
+                )
+            } else {
+                format!("<ProjectReference Include=\"B.fsproj\" {name}=\"{REFUSED_BODY}\" />")
+            };
+            let xml = format!(
+                "<Project><ItemGroup><ProjectReference Include=\"A.fsproj\" />{reference}</ItemGroup></Project>"
+            );
+            let dir = tempfile::TempDir::new().expect("tempdir");
+            let root =
+                borzoi_msbuild::observed::host_fs::canonicalize(dir.path()).expect("canonicalize");
+            let proj = layout(&root);
+            std::fs::write(&proj, &xml).unwrap();
+            let theirs: Vec<PathBuf> = oracle
+                .items(&xml, &proj, "ProjectReference", &[])
+                .expect("MSBuild evaluates this document")
+                .iter()
+                .map(|p| lexical(p))
+                .collect();
+            assert_eq!(theirs.len(), 2, "{theirs:?}");
+            let parsed = parse_fsproj_with_imports(
+                &borzoi_msbuild::ProjectFile::buffer(&proj, &xml)
+                    .expect("a project path spelt as its full path"),
+                &HashMap::new(),
+                &common::oracle_environment(),
+                None,
+                None,
+            )
+            .expect("well-formed XML parses");
+            let ours: Vec<PathBuf> = parsed
+                .project_references
+                .iter()
+                .map(|item| published(&item.include))
+                .collect();
+            assert_eq!(
+                common::reference_claim(&parsed),
+                common::ReferenceClaim::Exact,
+                "{xml}"
+            );
+            if let Err(failure) =
+                common::check_reference_claim(common::ReferenceClaim::Exact, &ours, &theirs)
+            {
+                panic!("{failure}\n{xml}");
+            }
+        }
+    }
+}
+
+/// #1181: a live reference beside the dead one, in a group the walk cannot
+/// decide, is one MSBuild keeps and the walk drops: the list is incomplete,
+/// not certain, while every edge it holds is MSBuild's.
+#[test]
+fn a_live_reference_in_an_undecided_group_leaves_the_list_incomplete() {
+    let xml = format!(
+        "<Project><PropertyGroup><P>{REFUSED_BODY}</P></PropertyGroup>\
+         <ItemGroup><ProjectReference Include=\"A.fsproj\" /></ItemGroup>\
+         <ItemGroup{UNSUPPORTED_TRUE}><ProjectReference Include=\"B.fsproj\" />\
+         <ProjectReference Include=\"$(P).fsproj\" Condition=\"false\" /></ItemGroup></Project>"
     );
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let root = borzoi_msbuild::observed::host_fs::canonicalize(dir.path()).expect("canonicalize");
+    let proj = layout(&root);
+    std::fs::write(&proj, &xml).unwrap();
+    let theirs: Vec<PathBuf> = Oracle::spawn()
+        .items(&xml, &proj, "ProjectReference", &[])
+        .expect("MSBuild evaluates this document")
+        .iter()
+        .map(|p| lexical(p))
+        .collect();
+    assert_eq!(theirs.len(), 2, "MSBuild keeps B: {theirs:?}");
+    let parsed = parse_fsproj_with_imports(
+        &borzoi_msbuild::ProjectFile::buffer(&proj, &xml)
+            .expect("a project path spelt as its full path"),
+        &HashMap::new(),
+        &common::oracle_environment(),
+        None,
+        None,
+    )
+    .expect("well-formed XML parses");
+    assert!(
+        parsed.project_references_incomplete && !parsed.project_references_uncertain,
+        "{xml}"
+    );
+    let ours: Vec<PathBuf> = parsed
+        .project_references
+        .iter()
+        .map(|item| published(&item.include))
+        .collect();
+    assert!(!ours.is_empty(), "A is held: {xml}");
+    if let Err(failure) =
+        common::check_reference_claim(common::reference_claim(&parsed), &ours, &theirs)
+    {
+        panic!("{failure}\n{xml}");
+    }
+}
+
+/// A gate an `Exists` probe decides whatever a refused name beside it holds
+/// is decided (#1181), so the references under it are kept; an item
+/// expression whose separator argument holds a `;` among them makes no edge
+/// MSBuild lacks (#1204), on either glob seam.
+#[test]
+fn a_gate_decided_by_exists_keeps_no_fabricated_edge() {
+    let xml = format!(
+        "<Project><PropertyGroup><Gate>{REFUSED_BODY}</Gate></PropertyGroup>\
+         <ItemGroup><Helper Include=\"A.fsproj\" /></ItemGroup>\
+         <ItemGroup Condition=\"Exists('Demo.fsproj') Or '$(Gate)' == 'x'\">\
+         <ProjectReference Include=\"@(Helper, ';Wrong.fsproj;')\" />\
+         <ProjectReference Include=\"Literal.fsproj\" /></ItemGroup></Project>"
+    );
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let root = borzoi_msbuild::observed::host_fs::canonicalize(dir.path()).expect("canonicalize");
+    let proj = layout(&root);
+    std::fs::write(&proj, &xml).unwrap();
+    let theirs: Vec<PathBuf> = Oracle::spawn()
+        .items(&xml, &proj, "ProjectReference", &[])
+        .expect("MSBuild evaluates this document")
+        .iter()
+        .map(|p| lexical(p))
+        .collect();
+    let resolver: &borzoi_msbuild::GlobResolver<'_> = &borzoi_msbuild::glob_resolver::resolve;
+    for with_resolver in [false, true] {
+        let parsed = parse_fsproj_with_imports(
+            &borzoi_msbuild::ProjectFile::buffer(&proj, &xml)
+                .expect("a project path spelt as its full path"),
+            &HashMap::new(),
+            &common::oracle_environment(),
+            None,
+            with_resolver.then_some(resolver),
+        )
+        .expect("well-formed XML parses");
+        let ours: Vec<PathBuf> = parsed
+            .project_references
+            .iter()
+            .map(|item| published(&item.include))
+            .collect();
+        // The gate is decided, so the list is not withdrawn and its literal
+        // reference, named apart from what the expression makes, is kept.
+        let claim = common::reference_claim(&parsed);
+        assert_ne!(
+            claim,
+            common::ReferenceClaim::Nothing,
+            "resolver: {with_resolver}: the decided gate withdrew the list"
+        );
+        assert!(
+            ours.contains(&root.join("proj/Literal.fsproj")),
+            "resolver: {with_resolver}: the literal reference is kept: {ours:?}"
+        );
+        if let Err(failure) = common::check_reference_claim(claim, &ours, &theirs) {
+            panic!("resolver: {with_resolver}: {failure}\n{xml}");
+        }
+    }
 }
 
 /// A `<ProjectReference>` metadatum's own gate on a name the walk holds no

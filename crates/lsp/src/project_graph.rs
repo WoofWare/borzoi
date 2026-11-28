@@ -186,8 +186,12 @@ pub struct ProjectNode {
     /// declare a type that shadows a package or framework one.
     pub references_uncertain: bool,
     /// Whether the assemblies this node's edges contribute may lack some the
-    /// build references through them: a reference whose compile contribution
-    /// turns on metadata the evaluator could not resolve
+    /// build references: its `<ProjectReference>` list may lack references
+    /// the build has
+    /// ([`borzoi_msbuild::ParsedProject::project_references_incomplete`]: an
+    /// `Include` the evaluator dropped behind a gate it could not decide,
+    /// say), or a kept reference's compile contribution turns on metadata the
+    /// evaluator could not resolve
     /// ([`borzoi_msbuild::ItemMetadataValue::Unknown`]), whose edge is dropped
     /// or degraded (`workspace::compile_edge_kind`). The edges it keeps are
     /// real; the env built over them is not complete, for the same reason

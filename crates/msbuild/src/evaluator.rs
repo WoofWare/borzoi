@@ -1252,13 +1252,16 @@ struct State<'r> {
     project_references_uncertain: bool,
     /// Whether a `<ProjectReference>` `Include` that may run in the real build
     /// went uncaptured — skipped on an untrusted gate, or one we could not
-    /// evaluate. The list contract tolerates that (a missing edge never
-    /// fabricates one), so this alone does not raise
-    /// [`Self::project_references_uncertain`]; an `Include` whose value read a
-    /// name the walk doubts raises it as well, dropped or kept
-    /// (`item_pass::reads_a_doubted_name`). But a list *derived* from
-    /// `@(ProjectReference)` is then incomplete, and a `Remove` driven by it can
-    /// miss an item MSBuild removes. [`item_pass`]'s item-list view reads it.
+    /// evaluate. Every captured item is still one MSBuild has (that is
+    /// [`Self::project_references_uncertain`]'s to doubt), but the list may lack
+    /// one, so it is published as incomplete
+    /// ([`ParsedProject::project_references_incomplete`]): a missing edge is no
+    /// proof the build lacks it. An `Include` whose value read a name the walk
+    /// doubts raises `project_references_uncertain` as well, dropped or kept
+    /// (`item_pass::reads_a_doubted_name`). A list *derived* from
+    /// `@(ProjectReference)` is then incomplete too, and a `Remove` driven by
+    /// it can miss an item MSBuild removes. [`item_pass`]'s item-list view
+    /// reads it.
     project_reference_includes_hidden: bool,
     /// Whether the captured package/framework-reference set may diverge from
     /// MSBuild. Accumulates into [`ParsedProject::package_references_uncertain`].
@@ -2447,8 +2450,7 @@ impl<'r> State<'r> {
             compile_item_uncertainties,
             package_context: _,
             project_references_uncertain,
-            // Consumed in the item pass, by a `@(ProjectReference)` view.
-            project_reference_includes_hidden: _,
+            project_reference_includes_hidden,
             package_references_uncertain,
             package_reference_uncertainties,
             current_file: _,
@@ -2649,6 +2651,7 @@ impl<'r> State<'r> {
             items,
             project_references,
             project_references_uncertain,
+            project_references_incomplete: project_reference_includes_hidden,
             package_references,
             package_versions,
             global_package_references,
@@ -3503,15 +3506,29 @@ impl<'r> State<'r> {
     /// differ too (#780). A refused name a later clean write bound holds a
     /// value computed exactly (the mark outlives the overwrite for the import
     /// points alone; [`Trust::refused`]).
-    fn condition_reads_untrusted_value(&self, node: Node<'_, '_>) -> bool {
+    ///
+    /// So does any other unbound name whose undefined read is not exact
+    /// ([`Self::undefined_read_is_exact`]): a toolset name the walk holds no
+    /// value of (`MSBuildStartupDirectory`, evaluating for no process), a name
+    /// the environment may supply, one content the walk did not enter may
+    /// write. The real build may hold a value there, and the gate may go the
+    /// other way (#1181).
+    ///
+    /// Every name above is one [`Self::condition_is_decided_exactly`] counts
+    /// unknown (an untrusted reference, or an unbound name whose undefined
+    /// read is not exact), so the predicate is that decision's negation: a
+    /// condition leans on such a value exactly when the values the walk holds
+    /// exactly do not decide it.
+    ///
+    /// `exists_dir` is the directory the gate's own evaluation resolves
+    /// `Exists('…')` against (the project's for an item, the containing
+    /// file's for an import), so a probe that settles the gate whatever the
+    /// doubted names hold settles it here too.
+    fn condition_reads_untrusted_value(&self, node: Node<'_, '_>, exists_dir: &Path) -> bool {
         attribute(node, "Condition").as_deref().is_some_and(|cond| {
-            if self.condition_trust(cond, None).reference_is_untrusted() {
-                return true;
-            }
-            !self.condition_is_decided_exactly(cond, None, &|name| {
+            !self.condition_is_decided_exactly(cond, Some(exists_dir), &|name| {
                 self.undefined_read_is_exact(name)
-            }) && properties::property_references(cond)
-                .any(|name| !self.lookup.is_bound(name) && self.trust_of(name).refused())
+            })
         })
     }
 
@@ -4229,7 +4246,7 @@ fn walk_top_level(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State
             // untrusted decision here hides (or phantom-includes) whatever
             // the group's imports carry, `<ProjectReference>` mutations
             // included.
-            if state.condition_reads_untrusted_value(node) {
+            if state.condition_reads_untrusted_value(node, current_file_dir) {
                 state.project_references_uncertain = true;
             }
             // Same rule as `follow_explicit_import`: an undecided group
@@ -6209,7 +6226,7 @@ fn follow_explicit_import(node: Node<'_, '_>, current_file_dir: &Path, state: &m
     // gate we could not decide at all, or one outside our grammar, raised a
     // diagnostic in the gate context, which withdraws the list on its own
     // account.)
-    if state.condition_reads_untrusted_value(node) {
+    if state.condition_reads_untrusted_value(node, current_file_dir) {
         state.project_references_uncertain = true;
     }
     // An import gate we could not decide exactly (its evaluation raised

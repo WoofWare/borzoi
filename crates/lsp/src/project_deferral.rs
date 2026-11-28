@@ -112,8 +112,10 @@ impl ProjectEvaluation<'_> {
     }
 
     /// Whether the inter-project reference edges are kept for this project
-    /// but may contribute fewer assemblies than the build references through
-    /// them, so the assembly env built from them is incomplete: a kept
+    /// but the assemblies they contribute may lack some the build references,
+    /// so the assembly env built from them is incomplete: the list may lack
+    /// references the build has
+    /// ([`ParsedProject::project_references_incomplete`]), or a kept
     /// reference's compile contribution turns on metadata the evaluator could
     /// not resolve, or on significant P2P metadata the walk does not model
     /// (`workspace::CompileContribution::exact`), read for an entry edge or
@@ -123,8 +125,25 @@ impl ProjectEvaluation<'_> {
     ///
     /// Shared rather than restated, for the reason
     /// [`Self::drops_reference_edges`] is.
+    ///
+    /// Not claimed: that a missing reference could contribute to the compile
+    /// closure. An omitted `<ProjectReference>` whose own metadata makes it
+    /// build-order-only (`ReferenceOutputAssembly="false"`) marks the env
+    /// incomplete too (#1184).
     pub fn may_lack_reference_edges(&self, is_entry: bool) -> bool {
-        !self.inexact_references(is_entry).is_empty()
+        self.list_may_lack_references() || !self.inexact_references(is_entry).is_empty()
+    }
+
+    /// Whether the kept list may lack references the build has
+    /// ([`ParsedProject::project_references_incomplete`]): never when the
+    /// edges are dropped.
+    fn list_may_lack_references(&self) -> bool {
+        match self {
+            ProjectEvaluation::Failed => false,
+            ProjectEvaluation::Evaluated { parsed, .. } => {
+                !self.drops_reference_edges() && parsed.project_references_incomplete
+            }
+        }
     }
 
     /// The kept references whose compile contribution is inexact, as
@@ -193,11 +212,12 @@ pub enum DeferredCapability {
     /// the edge from the runtime `AssemblyEnv`.
     ProjectReferenceEdges,
     /// A complete set of referenced assemblies. The project's
-    /// `<ProjectReference>` edges are kept and followed, but a reference's
-    /// compile contribution turns on metadata the evaluator could not resolve
-    /// (or the walk does not model), so the build may reference assemblies
-    /// through it that the `AssemblyEnv` lacks, and the env is marked
-    /// incomplete: a name it does not find is not proof the build lacks it.
+    /// `<ProjectReference>` edges are kept and followed, but the list may lack
+    /// references the build has, or a reference's compile contribution turns
+    /// on metadata the evaluator could not resolve (or the walk does not
+    /// model), so the build may reference assemblies the `AssemblyEnv` lacks,
+    /// and the env is marked incomplete: a name it does not find is not proof
+    /// the build lacks it.
     ///
     /// Declined by [`crate::workspace`]'s `references_incomplete`, which sets
     /// [`crate::project_graph::ProjectNode::references_incomplete`].
@@ -218,8 +238,9 @@ impl DeferredCapability {
                  projects won't resolve"
             }
             DeferredCapability::CompleteReferenceSet => {
-                "what this project's <ProjectReference>s contribute is not fully known, so names \
-                 that could come from a referenced project may not resolve"
+                "the assemblies this project references may lack some the build has (a \
+                 <ProjectReference> may be missing, or what one contributes is not fully known), \
+                 so names that could come from a referenced project may not resolve"
             }
         }
     }
@@ -636,12 +657,25 @@ pub fn deferrals(eval: ProjectEvaluation<'_>, fold: FoldOutcome<'_>) -> Vec<Defe
     }
 
     // The report is the entry project's own.
-    let inexact = eval.inexact_references(true);
-    if !inexact.is_empty() {
+    if eval.may_lack_reference_edges(true) {
+        // A dropped `Include` records no cause of its own beyond that one was
+        // dropped; an inexact reference names itself and its metadata.
+        let dropped = eval
+            .list_may_lack_references()
+            .then(|| {
+                "the evaluator dropped a <ProjectReference> it reached under a gate or value it \
+                 could not decide"
+                    .to_string()
+            })
+            .into_iter();
         out.push(Deferral::new(
             DeferredCapability::CompleteReferenceSet,
             DeclineStage::Evaluation,
-            inexact.into_iter().map(render_inexact_reference),
+            dropped.chain(
+                eval.inexact_references(true)
+                    .into_iter()
+                    .map(render_inexact_reference),
+            ),
         ));
     }
 

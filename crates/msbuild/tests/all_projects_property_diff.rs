@@ -13,9 +13,10 @@
 //! pass, before the write, stays exact; and a gate another operand decides
 //! stays decided.
 //!
-//! The reference list's contract tolerates a missing edge behind a gate the
-//! walk cannot decide (`ParsedProject::project_references_uncertain`), so a
-//! certain list is held to no phantom edge only. What tells an empty list the
+//! The reference list is graded by the claim it makes
+//! (`common::reference_claim`, `common::check_reference_claim`; #1181): a
+//! certain list is MSBuild's exactly, an incomplete one holds only MSBuild's
+//! references, in order, and an uncertain one makes no claim. What tells an empty list the
 //! walk mistook for exact from a decline is the walk's own read of the list,
 //! the one an `@(ProjectReference)` in it takes (`ItemRead::exact`): an exact
 //! one must hold MSBuild's references, so a walk that took the opened gate for
@@ -123,21 +124,17 @@ fn all_projects_after_the_property_pass_is_exact_or_declined() {
                     ));
                 }
             }
-            if !ours.project_references_uncertain {
-                let our_references: Vec<String> = ours
-                    .project_references
-                    .iter()
-                    .map(|item| item.include.to_string_lossy().into_owned())
-                    .collect();
-                if our_references
-                    .iter()
-                    .any(|reference| !their_references.contains(reference))
-                {
-                    violations.push(format!(
-                        "{label}: ProjectReference {our_references:?} committed, a phantom edge: MSBuild holds \
-                         {their_references:?}"
-                    ));
-                }
+            let our_references: Vec<String> = ours
+                .project_references
+                .iter()
+                .map(|item| item.include.to_string_lossy().into_owned())
+                .collect();
+            if let Err(failure) = common::check_reference_claim(
+                common::reference_claim(&ours),
+                &our_references,
+                &their_references,
+            ) {
+                violations.push(format!("{label}: ProjectReference: {failure}"));
             }
             let probe = ReadProbe {
                 item_types: vec!["ProjectReference".to_owned()],

@@ -16,9 +16,12 @@
 //! every fact `D′` publishes as certain (a property read as a value or as
 //! unset, the Compile items while `items_uncertain` is clear,
 //! `define_constants` while `define_constants_uncertain` is clear, the
-//! `ProjectReference` list while `project_references_uncertain` is clear, a
-//! known `target_name`), **every world must publish the same fact, certain,
-//! with the same value**. A world that differs means `D′` committed a value it
+//! `ProjectReference` list while neither `project_references_uncertain` nor
+//! `project_references_incomplete` is set, a known `target_name`), **every
+//! world must publish the same fact, certain, with the same value**. An
+//! incomplete reference list's edges (#1181) are held as
+//! `common::check_reference_claim` holds them: an ordered subsequence of each
+//! world's certain list, witnessed by some world. A world that differs means `D′` committed a value it
 //! could not know; a world that declines means `D′` claimed more than a
 //! document strictly easier to evaluate.
 //!
@@ -306,7 +309,13 @@ type Facts = BTreeMap<Fact, Option<Vec<String>>>;
 enum Fact {
     Property(String),
     CompileItems,
+    /// The `<ProjectReference>` list, published when it is certain: MSBuild's
+    /// list exactly.
     ProjectReferences,
+    /// The edges an incomplete `<ProjectReference>` list keeps (neither
+    /// certain nor uncertain, #1181): every one MSBuild's, in its order, and
+    /// MSBuild may have more. Held to the worlds' certain lists.
+    ProjectReferencesRetained,
     DefineConstants,
     TargetName,
 }
@@ -338,15 +347,22 @@ fn facts(project: &ParsedProject, names: &[&'static str]) -> Facts {
         Fact::CompileItems,
         (!project.items_uncertain).then(|| paths(&project.items)),
     );
+    let references = || -> Vec<String> {
+        project
+            .project_references
+            .iter()
+            .map(|i| i.include.display().to_string())
+            .collect()
+    };
     out.insert(
         Fact::ProjectReferences,
-        (!project.project_references_uncertain).then(|| {
-            project
-                .project_references
-                .iter()
-                .map(|i| i.include.display().to_string())
-                .collect()
-        }),
+        (!project.project_references_uncertain && !project.project_references_incomplete)
+            .then(references),
+    );
+    out.insert(
+        Fact::ProjectReferencesRetained,
+        (!project.project_references_uncertain && project.project_references_incomplete)
+            .then(references),
     );
     out.insert(
         Fact::DefineConstants,
@@ -364,23 +380,62 @@ fn facts(project: &ParsedProject, names: &[&'static str]) -> Facts {
 }
 
 impl Fact {
-    /// Whether a world publishing `world` agrees with a certain `claim`. Every
-    /// facet is claimed exactly but one: the `ProjectReference` list promises
-    /// no phantom edge and tolerates a missing one (an `Include` behind an
-    /// untrusted gate is left out without declining), so its claim holds when
-    /// every edge it names is one the world has.
+    /// The fact a world must publish for this one's claim to be checked
+    /// against it: an incomplete list's edges are held to a world's certain
+    /// list, every other fact to the same fact.
+    fn graded_against(&self) -> Fact {
+        match self {
+            Fact::ProjectReferencesRetained => Fact::ProjectReferences,
+            other => other.clone(),
+        }
+    }
+
+    /// Whether a world publishing `world` (for [`Self::graded_against`])
+    /// agrees with a `claim`: equal, but for an incomplete reference list,
+    /// whose edges must be an ordered subsequence of the world's list.
     fn claim_holds_in(&self, claim: &[String], world: &[String]) -> bool {
         match self {
-            Fact::ProjectReferences => claim.iter().all(|edge| world.contains(edge)),
+            Fact::ProjectReferencesRetained => {
+                let mut rest = world.iter();
+                claim.iter().all(|edge| rest.any(|w| w == edge))
+            }
             _ => world == claim,
         }
     }
 
-    /// Whether `claim` holds in every world whatever the world publishes: an
-    /// empty `ProjectReference` list names no edge, so it can hold no phantom
-    /// one. Such a claim needs no world to commit it.
+    /// Whether `claim` needs no world to commit it: only an incomplete list
+    /// that keeps no edge, which names nothing a world could lack. A certain
+    /// list, even an empty one, needs a world that commits one; an incomplete
+    /// list's edges need a world whose certain or incomplete list holds them
+    /// ([`Self::witnessed_by_retained`]).
     fn claim_is_vacuous(&self, claim: &[String]) -> bool {
-        matches!(self, Fact::ProjectReferences) && claim.is_empty()
+        matches!(self, Fact::ProjectReferencesRetained) && claim.is_empty()
+    }
+
+    /// Whether a world's incomplete list witnesses an incomplete `claim`: its
+    /// edges are the build's, so a claim it holds, in order, is the build's
+    /// too.
+    fn witnessed_by_retained(&self, claim: &[String], retained: &[String]) -> bool {
+        match self {
+            Fact::ProjectReferencesRetained => {
+                let mut rest = retained.iter();
+                claim.iter().all(|edge| rest.any(|r| r == edge))
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether a world's incomplete list contradicts a certain `claim`: every
+    /// edge it keeps is the build's, so a certain list must hold each, in
+    /// order.
+    fn contradicted_by_retained(&self, claim: &[String], retained: &[String]) -> bool {
+        match self {
+            Fact::ProjectReferences => {
+                let mut rest = claim.iter();
+                !retained.iter().all(|edge| rest.any(|c| c == edge))
+            }
+            _ => false,
+        }
     }
 }
 
@@ -389,6 +444,7 @@ fn fact_kind(fact: &Fact) -> &'static str {
         Fact::Property(_) => "property",
         Fact::CompileItems => "Compile items",
         Fact::ProjectReferences => "ProjectReference items",
+        Fact::ProjectReferencesRetained => "retained ProjectReference items",
         Fact::DefineConstants => "DefineConstants",
         Fact::TargetName => "target name",
     }
@@ -464,11 +520,12 @@ fn check(
             (fact, undecided_construct),
             (Fact::Property(name), Undecided::Write(wrapped)) if name.eq_ignore_ascii_case(wrapped)
         );
-        let values: Vec<&Option<Vec<String>>> = worlds.iter().map(|(_, w)| &w[fact]).collect();
+        let graded = fact.graded_against();
+        let values: Vec<&Option<Vec<String>>> = worlds.iter().map(|(_, w)| &w[&graded]).collect();
         let world_committed: Vec<&Vec<String>> = values.iter().filter_map(|v| v.as_ref()).collect();
         let owed = world_committed.len() == values.len()
             && world_committed.windows(2).any(|w| w[0] != w[1]);
-        if owed && derived {
+        if owed && derived && graded == *fact {
             *census.owed.entry(fact_kind(fact)).or_default() += 1;
             if claim.is_none() {
                 *census.paid.entry(fact_kind(fact)).or_default() += 1;
@@ -478,12 +535,35 @@ fn check(
         let disagreeing = worlds
             .iter()
             .find(|(_, facts)| {
-                facts[fact]
+                facts[&graded]
                     .as_ref()
                     .is_some_and(|world| !fact.claim_holds_in(claim, world))
             })
-            .map(|(world, facts)| (world.clone(), facts[fact].clone()));
-        let nobody_commits = world_committed.is_empty() && !fact.claim_is_vacuous(claim);
+            .map(|(world, facts)| (world.clone(), facts[&graded].clone()))
+            .or_else(|| {
+                worlds
+                    .iter()
+                    .find(|(_, facts)| {
+                        facts
+                            .get(&Fact::ProjectReferencesRetained)
+                            .and_then(Option::as_ref)
+                            .is_some_and(|kept| fact.contradicted_by_retained(claim, kept))
+                    })
+                    .map(|(world, facts)| {
+                        (
+                            world.clone(),
+                            facts[&Fact::ProjectReferencesRetained].clone(),
+                        )
+                    })
+            });
+        let witnessed_by_retained = worlds.iter().any(|(_, facts)| {
+            facts
+                .get(&Fact::ProjectReferencesRetained)
+                .and_then(Option::as_ref)
+                .is_some_and(|kept| fact.witnessed_by_retained(claim, kept))
+        });
+        let nobody_commits =
+            world_committed.is_empty() && !witnessed_by_retained && !fact.claim_is_vacuous(claim);
         if disagreeing.is_none() && !nobody_commits {
             if world_committed.len() < values.len() {
                 census.world_declined += 1;
@@ -1127,21 +1207,38 @@ fn a_refused_write_is_not_published_as_never_written() {
     assert_eq!(project.target_name, ItemMetadataValue::Unknown);
 }
 
-/// #780: an item gate reads a refused name as never written, capturing a
-/// phantom `ProjectReference`.
+/// #780, #1181: a gate reading a name whose write the walk refused decides
+/// nothing about the reference behind it, whichever way the walk's reading
+/// of it went: kept, it may be a phantom edge; dropped, it may be one the
+/// build has. Either way the list is not the build's, on the element's gate as
+/// on its group's.
 #[test]
 fn a_project_reference_gated_on_a_refused_name_is_not_certain() {
-    let project = pure_evaluate(
-        r#"<Project>
-  <PropertyGroup><Bar>$(Configuration.Substring(0,1))</Bar></PropertyGroup>
-  <ItemGroup Condition="'$(Bar)' == ''"><ProjectReference Include="x.fsproj" /></ItemGroup>
-</Project>"#,
-    );
-    assert!(
-        project.project_references_uncertain || project.project_references.is_empty(),
-        "MSBuild computes `Bar` and skips the group; we captured {:?} as certain",
-        project.project_references
-    );
+    for refused in [
+        "$(Configuration.Substring(0,1))",
+        "$([System.String]::Copy('D'))",
+    ] {
+        for comparison in ["==", "!="] {
+            for site in ["group", "element"] {
+                let gate = format!("'$(Bar)' {comparison} ''");
+                let text = match site {
+                    "group" => format!(
+                        "<Project>\n  <PropertyGroup><Bar>{refused}</Bar></PropertyGroup>\n  <ItemGroup Condition=\"{gate}\"><ProjectReference Include=\"x.fsproj\" /></ItemGroup>\n</Project>"
+                    ),
+                    _ => format!(
+                        "<Project>\n  <PropertyGroup><Bar>{refused}</Bar></PropertyGroup>\n  <ItemGroup><ProjectReference Include=\"x.fsproj\" Condition=\"{gate}\" /></ItemGroup>\n</Project>"
+                    ),
+                };
+                let project = pure_evaluate(&text);
+                assert!(
+                    project.project_references_uncertain || project.project_references_incomplete,
+                    "the gate reads a refused name, and the walk published {:?} as the build's \
+                     whole list:\n{text}",
+                    project.project_references
+                );
+            }
+        }
+    }
 }
 
 /// #1098: a `ProjectReference` reading a name refused twice (a refused write,
@@ -1245,7 +1342,7 @@ fn a_project_reference_gated_on_a_rewritten_refused_name_is_certain() {
   <ItemGroup Condition="'$(Bar)' == 'x'"><ProjectReference Include="x.fsproj" /></ItemGroup>
 </Project>"#,
     );
-    assert!(!project.project_references_uncertain);
+    assert!(!project.project_references_uncertain && !project.project_references_incomplete);
     assert_eq!(project.project_references.len(), 1);
     assert_eq!(
         project.property("Bar"),

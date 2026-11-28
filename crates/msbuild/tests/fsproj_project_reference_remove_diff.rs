@@ -16,11 +16,12 @@
 //!
 //! ## The asserted property
 //!
-//! The reference list's contract (`ParsedProject::project_references_uncertain`)
-//! is *no phantom edges*: when the flag is clear, every reference we report is
-//! one MSBuild reports, as a multiset of full paths. When, in addition, the
-//! parse raised no diagnostic, the lists must be equal, order included. A
-//! decline makes no claim, so the harness also counts the cases that committed
+//! Each list is graded by the claim it makes (`common::reference_claim`,
+//! `common::check_reference_claim`; #1181): a certain list (neither
+//! `project_references_uncertain` nor `project_references_incomplete`) is
+//! MSBuild's list of full paths exactly, order included; an incomplete one
+//! holds only MSBuild's references, as an ordered subsequence; an uncertain
+//! one makes no claim. So the harness also counts the cases that committed
 //! *through* a `Remove` that removed something, and floors that count — a model
 //! that declined every `Remove` would otherwise pass vacuously.
 //!
@@ -133,7 +134,7 @@ const EXACT_GATES: &[&str] = &[
 /// constructs the model decides exactly — exact gates, decided groups, and
 /// spellings inside the identity domain — so it must commit; that obligation,
 /// per case, is what keeps the sweep from passing by declining. An `Any` case
-/// may hold anything, and is held only to no phantom edges.
+/// may hold anything, and is held to whatever claim its list makes.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Space {
     Clean,
@@ -413,8 +414,44 @@ fn lexical(path: &str) -> PathBuf {
     out
 }
 
+/// A path the walker published, as the LSP reads it: lexically normalised
+/// (`.` and `..` folded, which `workspace::lexically_normalize` does too) and
+/// nothing else. A backslash stays, so a walker that publishes one where
+/// MSBuild's `FullPath` has a separator fails the comparison rather than
+/// being repaired by it.
+fn published(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// The file names of `paths`, in order.
+fn file_names(paths: &[PathBuf]) -> Vec<String> {
+    paths
+        .iter()
+        .map(|p| {
+            p.file_name()
+                .expect("a file")
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect()
+}
+
 struct Outcome {
     committed: bool,
+    /// The claim the list made ([`common::reference_claim`]).
+    claim: common::ReferenceClaim,
+    /// The file names of the references the list holds, in order.
+    held: Vec<String>,
     /// Committed, and a `Remove` changed the list on MSBuild's side — the case
     /// that only a modelled `Remove` can commit.
     committed_through_a_remove: bool,
@@ -464,33 +501,25 @@ fn check(oracle: &mut Oracle, blocks: &[Block], with_resolver: bool) -> Outcome 
         .map(|p| lexical(p))
         .collect();
 
-    if parsed.project_references_uncertain {
-        return Outcome {
-            committed: false,
-            committed_through_a_remove: false,
-        };
-    }
     let ours: Vec<PathBuf> = parsed
         .project_references
         .iter()
-        .map(|item| lexical(&item.include.to_string_lossy()))
+        .map(|item| published(&item.include))
         .collect();
-    let mut unmatched = theirs.clone();
-    for path in &ours {
-        let Some(at) = unmatched.iter().position(|p| p == path) else {
-            panic!(
-                "phantom edge: {} is not in MSBuild's list.\nproject:\n{xml}\nours:   {ours:#?}\ntheirs: {theirs:#?}\ndiags: {:#?}",
-                path.display(),
-                parsed.diagnostics
-            );
-        };
-        unmatched.remove(at);
-    }
-    if parsed.diagnostics.is_empty() {
-        assert_eq!(
-            ours, theirs,
-            "a diagnostic-free parse must match exactly.\nproject:\n{xml}"
+    let claim = common::reference_claim(&parsed);
+    if let Err(failure) = common::check_reference_claim(claim, &ours, &theirs) {
+        panic!(
+            "{failure}\nproject:\n{xml}\ndiags: {:#?}",
+            parsed.diagnostics
         );
+    }
+    if claim != common::ReferenceClaim::Exact {
+        return Outcome {
+            committed: false,
+            claim,
+            held: file_names(&ours),
+            committed_through_a_remove: false,
+        };
     }
     let removed_something = blocks
         .iter()
@@ -498,6 +527,8 @@ fn check(oracle: &mut Oracle, blocks: &[Block], with_resolver: bool) -> Outcome 
         && theirs.len() < included_count(blocks, oracle, &proj);
     Outcome {
         committed: true,
+        claim,
+        held: file_names(&ours),
         committed_through_a_remove: removed_something,
     }
 }
@@ -644,6 +675,99 @@ fn a_hidden_include_cannot_hide_a_removal() {
         for with_resolver in [false, true] {
             check(&mut oracle, &blocks, with_resolver);
         }
+    }
+}
+
+/// An incomplete list (an `Include` behind a gate the walk cannot evaluate)
+/// still applies the `Remove`s after it, and every edge it holds after them is
+/// MSBuild's: the LSP follows those edges (#1181).
+#[test]
+fn an_incomplete_list_still_applies_its_removes() {
+    let mut oracle = Oracle::spawn();
+    let blocks = [Block::Group {
+        gate: "",
+        ops: vec![
+            Op::Include {
+                spec: "../A/A.fsproj",
+                gate: UNSUPPORTED_TRUE,
+            },
+            Op::Include {
+                spec: "../B/B.fsproj",
+                gate: "",
+            },
+            Op::Include {
+                spec: "../M/M.fsproj",
+                gate: "",
+            },
+            Op::Remove {
+                spec: "../M/M.fsproj",
+                gate: "",
+            },
+        ],
+    }];
+    for with_resolver in [false, true] {
+        let outcome = check(&mut oracle, &blocks, with_resolver);
+        assert_eq!(
+            outcome.claim,
+            common::ReferenceClaim::Within,
+            "the gated `Include` leaves the list incomplete, and nothing else doubts it"
+        );
+        assert_eq!(
+            outcome.held,
+            ["B.fsproj"],
+            "resolver: {with_resolver}: the `Remove` takes `M` and leaves `B`"
+        );
+    }
+}
+
+/// A `Remove="@(ProjectReference)"` empties MSBuild's list whatever it holds,
+/// but the walk marks an undecided `<Choose>` branch's hidden `Include`s in
+/// the property pass, ahead of the item replay: a removal *before* such a
+/// `<Choose>` must not end its doubt. Both document orders are held to the
+/// claim the list makes; one after the hidden `Include` leaves the list
+/// incomplete, though it could be certain (#1184).
+#[test]
+fn a_whole_list_removal_ends_no_doubt_in_either_order() {
+    let mut oracle = Oracle::spawn();
+    let remove = || Op::Remove {
+        spec: "@(ProjectReference)",
+        gate: "",
+    };
+    let live = || Op::Include {
+        spec: "../B/B.fsproj",
+        gate: "",
+    };
+    let hidden_then_remove = vec![
+        Block::UndecidedChoose {
+            runs: true,
+            ops: vec![Op::Include {
+                spec: "../A/A.fsproj",
+                gate: "",
+            }],
+        },
+        Block::Group {
+            gate: "",
+            ops: vec![remove(), live()],
+        },
+    ];
+    let remove_then_hidden = vec![
+        Block::Group {
+            gate: "",
+            ops: vec![remove(), live()],
+        },
+        Block::UndecidedChoose {
+            runs: true,
+            ops: vec![Op::Include {
+                spec: "../A/A.fsproj",
+                gate: "",
+            }],
+        },
+    ];
+    for with_resolver in [false, true] {
+        let outcome = check(&mut oracle, &hidden_then_remove, with_resolver);
+        assert_eq!(outcome.claim, common::ReferenceClaim::Within);
+        let outcome = check(&mut oracle, &remove_then_hidden, with_resolver);
+        assert_eq!(outcome.claim, common::ReferenceClaim::Within);
     }
 }
 
@@ -800,14 +924,14 @@ fn the_non_existent_idiom_commits_on_the_real_sdk() {
         "MSBuild drops the missing reference"
     );
     assert!(
-        !parsed.project_references_uncertain,
+        !parsed.project_references_uncertain && !parsed.project_references_incomplete,
         "the idiom must commit on the real SDK; diagnostics: {:#?}",
         parsed.diagnostics
     );
     let ours: Vec<PathBuf> = parsed
         .project_references
         .iter()
-        .map(|item| lexical(&item.include.to_string_lossy()))
+        .map(|item| published(&item.include))
         .collect();
     assert_eq!(ours, theirs);
 }

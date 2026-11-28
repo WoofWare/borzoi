@@ -2763,12 +2763,30 @@ fn resolve_node_uncached(
             // too: only a contribution present under every TFM is invariant,
             // so a target that any branch demotes to OutputOnly (e.g. a
             // TFM-conditioned `ExcludeAssets`) survives as OutputOnly.
+            // What any TFM takes, by target, the transparent kind winning: the
+            // intersection's shortfall against it is a reference the real build
+            // may take that the env lacks.
+            let mut taken_by_some: HashMap<PathBuf, EdgeKind> = HashMap::new();
+            let mut note_taken = |target: &PathBuf, kind: EdgeKind| {
+                taken_by_some
+                    .entry(target.clone())
+                    .and_modify(|k| {
+                        if kind == EdgeKind::Full {
+                            *k = EdgeKind::Full;
+                        }
+                    })
+                    .or_insert(kind);
+            };
+            for e in &outer_edges {
+                note_taken(&e.target, e.kind);
+            }
             let mut surviving = outer_edges;
             // Any branch whose list was suppressed leaves the intersection
             // short of edges the real build may take, whichever TFM it picks.
             let mut any_suppressed = outer_suppressed;
-            // And any branch whose edges may contribute less than the build
-            // references leaves the intersection short of it too.
+            // And any branch whose list may lack a reference, or whose edges
+            // may contribute less than the build references, leaves the
+            // intersection short of it too.
             let mut any_incomplete = outer_incomplete;
             for tfm in declared.iter().skip(1) {
                 let mut map = extra_build_properties.clone();
@@ -2802,6 +2820,9 @@ fn resolve_node_uncached(
                         })
                         .or_insert(e.kind);
                 }
+                for (target, kind) in &branch_kinds {
+                    note_taken(target, *kind);
+                }
                 surviving.retain_mut(|e| match branch_kinds.get(&e.target) {
                     None => false,
                     Some(EdgeKind::Full) => true,
@@ -2818,21 +2839,43 @@ fn resolve_node_uncached(
                 // retain below is a no-op on an empty vector, so the only cost
                 // is the remaining evaluations.
             }
+            // Each evaluation's list may be exact while the intersection is
+            // not the build's: whatever some TFM takes beyond it is missing
+            // from the env under that TFM (#1181).
+            // Compared by target, the transparent kind winning, as the graph
+            // follows them: a target that survives as `Full` through any of
+            // its edges lost nothing, whichever order they were declared in.
+            let mut surviving_by_target: HashMap<&PathBuf, EdgeKind> = HashMap::new();
+            for e in &surviving {
+                surviving_by_target
+                    .entry(&e.target)
+                    .and_modify(|k| {
+                        if e.kind == EdgeKind::Full {
+                            *k = EdgeKind::Full;
+                        }
+                    })
+                    .or_insert(e.kind);
+            }
+            let intersection_short = taken_by_some
+                .iter()
+                .any(|(target, kind)| surviving_by_target.get(target) != Some(kind));
             NodeResult::Resolved {
                 edges: surviving,
                 tfm: NodeTfm::Unresolved,
                 output_name: None,
                 references_uncertain: any_suppressed,
-                references_incomplete: any_incomplete && !any_suppressed,
+                references_incomplete: (any_incomplete || intersection_short) && !any_suppressed,
             }
         }
     }
 }
 
 /// Whether the assemblies this evaluation's kept edges contribute may lack
-/// some the build references through them: a reference whose compile
-/// contribution is inexact ([`CompileContribution::exact`]), read for an
-/// entry edge or not as `is_entry` says. Read back so the node can carry it
+/// some the build references: the list may lack references the build has
+/// ([`borzoi_msbuild::ParsedProject::project_references_incomplete`]), or a
+/// reference's compile contribution is inexact
+/// ([`CompileContribution::exact`]), read for an entry edge or not as
+/// `is_entry` says. Read back so the node can carry it
 /// ([`ProjectNode::references_incomplete`](crate::project_graph::ProjectNode::references_incomplete)).
 /// Only the compile closure reads completeness, and a suppressed list says
 /// more already. The project-side half is
@@ -5501,6 +5544,44 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_reference_behind_an_undecided_gate_is_reported_as_an_incomplete_list() {
+        // The entry project's own list may lack `Other`, which MSBuild keeps
+        // behind a gate the walk cannot decide; its fold is fine, and its kept
+        // edge is followed. The env built from it is marked incomplete
+        // (`semantic`'s `a_reference_dropped_behind_an_undecided_gate_makes_the_env_incomplete`),
+        // so the deferral report must say so (#1181).
+        let tmp = TempDir::new().unwrap();
+        let proj = tmp.path().join("P.fsproj");
+        write_file(
+            &proj,
+            r#"<Project>
+              <PropertyGroup>
+                <TargetFramework>net8.0</TargetFramework>
+                <Gate>$([System.String]::Copy('D'))</Gate>
+              </PropertyGroup>
+              <ItemGroup>
+                <Compile Include="A.fs" />
+                <ProjectReference Include="Lib/Lib.fsproj" />
+              </ItemGroup>
+              <ItemGroup Condition="'$(Gate)' == 'D'">
+                <ProjectReference Include="Other/Other.fsproj" />
+              </ItemGroup>
+            </Project>"#,
+        );
+        write_file(&tmp.path().join("A.fs"), "let x = 1");
+        let mut ws = Workspace::default();
+        let eval = ws.project_evaluation(&proj);
+        assert!(!eval.drops_reference_edges());
+        let deferrals =
+            crate::project_deferral::deferrals(eval, crate::project_deferral::FoldOutcome::Unknown);
+        assert_eq!(
+            deferrals.iter().map(|d| d.capability()).collect::<Vec<_>>(),
+            vec![crate::project_deferral::DeferredCapability::CompleteReferenceSet],
+            "{deferrals:?}"
+        );
+    }
+
     // ----- Stage 3.1: `Workspace::project_graph` over real fsproj trees -----
 
     use crate::project_graph::{GraphProblem, ProjectKind};
@@ -5677,6 +5758,73 @@ mod tests {
                 lexically_normalize(&d),
             ],
         );
+    }
+
+    /// #1181: the TFM-invariant intersection keeps only what every TFM takes,
+    /// so whatever any one TFM takes beyond it — a reference only some TFMs
+    /// make, or one another TFM blocks or demotes to `OutputOnly` — is a
+    /// reference the real build may take that the env lacks: the node's list
+    /// is incomplete, though each evaluation's list is exact. Where every TFM
+    /// takes the same edges, nothing is lost.
+    #[test]
+    fn an_unseeded_intersection_that_drops_an_edge_is_incomplete() {
+        let cases = [
+            (
+                "one TFM's extra reference",
+                r#"<ProjectReference Include="../C/C.fsproj" />
+                   <ProjectReference Include="../D/D.fsproj" Condition="'$(TargetFramework)' == 'net10.0'" />"#,
+                true,
+            ),
+            (
+                "a different reference under each TFM",
+                r#"<ProjectReference Include="../C/C.fsproj" Condition="'$(TargetFramework)' == 'net8.0'" />
+                   <ProjectReference Include="../D/D.fsproj" Condition="'$(TargetFramework)' == 'net10.0'" />"#,
+                true,
+            ),
+            (
+                "a reference one TFM blocks",
+                r#"<ProjectReference Include="../C/C.fsproj" ExcludeAssets="compile" Condition="'$(TargetFramework)' == 'net8.0'" />
+                   <ProjectReference Include="../C/C.fsproj" Condition="'$(TargetFramework)' == 'net10.0'" />"#,
+                true,
+            ),
+            (
+                "the same references under every TFM",
+                r#"<ProjectReference Include="../C/C.fsproj" />"#,
+                false,
+            ),
+        ];
+        for (label, references, incomplete) in cases {
+            let tmp = TempDir::new().unwrap();
+            let a = tmp.path().join("A/A.fsproj");
+            let b = tmp.path().join("B/B.fsproj");
+            write_file(&a, &fsproj_with_refs(&["../B/B.fsproj"]));
+            write_file(
+                &b,
+                &format!(
+                    r#"<Project>
+                      <PropertyGroup>
+                        <TargetFrameworks>net10.0;net8.0</TargetFrameworks>
+                      </PropertyGroup>
+                      <ItemGroup>{references}</ItemGroup>
+                    </Project>"#
+                ),
+            );
+            write_file(&tmp.path().join("C/C.fsproj"), &fsproj_with_refs(&[]));
+            write_file(&tmp.path().join("D/D.fsproj"), &fsproj_with_refs(&[]));
+            let ws = Workspace::default();
+            let graph = ws.project_graph_with_producer_tfms(
+                &a,
+                &BTreeMap::new(),
+                &borzoi_msbuild::observed::Observer::new(),
+            );
+            let node = graph
+                .nodes
+                .iter()
+                .find(|n| n.path == lexically_normalize(&b))
+                .unwrap_or_else(|| panic!("{label}: B is a node"));
+            assert!(!node.references_uncertain, "{label}");
+            assert_eq!(node.references_incomplete, incomplete, "{label}");
+        }
     }
 
     /// `<ProjectReference>` metadata the P2P protocol treats as significant
@@ -6813,6 +6961,55 @@ mod tests {
             node_paths(&compile_closure),
             vec![lexically_normalize(&a), lexically_normalize(&c)],
         );
+    }
+
+    /// #1181, on an unseeded multi-target entry, where a blocked edge degrades
+    /// to the target's output: an edge one TFM demotes to `OutputOnly` loses
+    /// what flows through it under the other TFM, so the node is incomplete;
+    /// a target referenced twice under every TFM, once blocked and once not,
+    /// survives as `Full` and loses nothing, in either declaration order.
+    #[test]
+    fn an_entry_intersection_compares_each_target_by_its_strongest_edge() {
+        let blocked = r#"<ProjectReference Include="../C/C.fsproj" ExcludeAssets="compile" />"#;
+        let plain = r#"<ProjectReference Include="../C/C.fsproj" />"#;
+        let demoted = r#"<ProjectReference Include="../C/C.fsproj">
+              <ExcludeAssets Condition="'$(TargetFramework)' == 'net8.0'">compile</ExcludeAssets>
+            </ProjectReference>"#;
+        let cases = [
+            ("demoted under one TFM", demoted.to_string(), true),
+            ("blocked, then plain", format!("{blocked}{plain}"), false),
+            ("plain, then blocked", format!("{plain}{blocked}"), false),
+        ];
+        for (label, references, incomplete) in cases {
+            let tmp = TempDir::new().unwrap();
+            let a = tmp.path().join("A/A.fsproj");
+            write_file(
+                &a,
+                &format!(
+                    r#"<Project>
+                      <PropertyGroup>
+                        <TargetFrameworks>net10.0;net8.0</TargetFrameworks>
+                      </PropertyGroup>
+                      <ItemGroup>{references}</ItemGroup>
+                    </Project>"#
+                ),
+            );
+            write_file(
+                &tmp.path().join("C/C.fsproj"),
+                &fsproj_with_refs(&["../D/D.fsproj"]),
+            );
+            write_file(&tmp.path().join("D/D.fsproj"), &fsproj_with_refs(&[]));
+            let ws = Workspace::default();
+            let graph = ws.project_graph_with_producer_tfms(
+                &a,
+                &BTreeMap::new(),
+                &borzoi_msbuild::observed::Observer::new(),
+            );
+            let entry = &graph.nodes[0];
+            assert_eq!(entry.path, lexically_normalize(&a), "{label}");
+            assert!(!entry.references_uncertain, "{label}");
+            assert_eq!(entry.references_incomplete, incomplete, "{label}");
+        }
     }
 
     /// A `<ProjectReference>` item with the given `ReferenceOutputAssembly`

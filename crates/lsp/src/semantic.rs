@@ -3116,9 +3116,10 @@ impl ReferenceSet {
     /// resolve. The env is empty. The edges it did not reach claim nothing;
     /// what the graph walk already knows its nodes lack
     /// ([`graph_doubt_edges`]) it still says, so the empty env does not claim
-    /// completeness over it — a suppressed list in one TFM of an unseeded
-    /// multi-target node masks another TFM's inexact contribution, so both
-    /// kinds are carried. Whether a declined env is complete at all is #1190.
+    /// completeness over it — a reference the graph knows is missing, or a
+    /// suppressed list in one TFM of an unseeded multi-target node that masks
+    /// another TFM's inexact contribution. Whether a declined env is complete
+    /// at all is #1190.
     fn declined(retryable: bool, ref_targets: &GraphRefTargets) -> Self {
         ReferenceSet {
             dlls: Vec::new(),
@@ -3207,7 +3208,9 @@ struct GraphRefTargets {
     /// mark needs.
     suppressed: Vec<PathBuf>,
     /// Nodes whose edges may contribute fewer assemblies than the build
-    /// references through them
+    /// references: the `<ProjectReference>` list may lack references the build
+    /// has, or a kept reference's contribution turns on metadata the evaluator
+    /// could not resolve
     /// ([`crate::project_graph::ProjectNode::references_incomplete`]). Their
     /// edges are kept, so they are in [`Self::fsharp`] and [`Self::csharp`];
     /// what is missing is not, and one [`ReferenceOutcome::Unread`] per such
@@ -3533,10 +3536,10 @@ fn resolve_reference_dlls(
 /// What the graph walk already knows its nodes lack, as one
 /// [`ReferenceOutcome::Unread`] per node: one whose references were
 /// suppressed ([`GraphRefTargets::suppressed`]), and one whose edges may
-/// contribute fewer assemblies than the build references through them
+/// contribute fewer assemblies than the build references
 /// ([`GraphRefTargets::incomplete`]). There is nothing to look for — the edges
-/// are gone, or their contribution turns on metadata the evaluator could not
-/// resolve — so each is a pure incompleteness claim, and `transient: false`
+/// are gone, were never found, or their contribution turns on metadata the
+/// evaluator could not resolve — so each is a pure incompleteness claim, and `transient: false`
 /// because only an edit to that project can change it. It holds whether or
 /// not the resolution reached the edges the walk kept.
 ///
@@ -3555,8 +3558,8 @@ fn graph_doubt_edges(ref_targets: &GraphRefTargets) -> impl Iterator<Item = Refe
     let incomplete = ref_targets.incomplete.iter().map(|project| ReferenceEdge {
         project: project.clone(),
         outcome: ReferenceOutcome::Unread {
-            why: "a reference's compile contribution turns on metadata the evaluator could \
-                  not resolve",
+            why: "the project's own reference list, or what a reference contributes, may lack \
+                  assemblies the build references",
             transient: false,
         },
     });
@@ -8064,6 +8067,106 @@ mod tests {
                 assert_eq!((folds, incomplete), (built, false), "{row}");
             }
         }
+    }
+
+    /// #1181: a reference the walk dropped behind a gate it could not decide,
+    /// which MSBuild's build keeps (the gate reads a property MSBuild computes
+    /// as `D` and the walk refuses to compute), leaves the env short of its
+    /// assemblies just as a suppressed list does. The edges the walk did
+    /// capture are real and still fold; the env must not claim completeness,
+    /// or an absence of a name the dropped project declares reads as proof.
+    #[test]
+    fn a_reference_dropped_behind_an_undecided_gate_makes_the_env_incomplete() {
+        let dll_bytes = minilibfs_dll_bytes();
+
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let sibling_dir = root.join("MiniLibFs");
+        std::fs::create_dir_all(&sibling_dir).unwrap();
+        built_fsproj(&sibling_dir, "MiniLibFs", "Release", "net10.0", &dll_bytes);
+
+        let proj = root.join("App.fsproj");
+        write(
+            &proj,
+            r#"<Project>
+              <PropertyGroup><Gate>$([System.String]::Copy('D'))</Gate></PropertyGroup>
+              <ItemGroup>
+                <ProjectReference Include="MiniLibFs/MiniLibFs.fsproj" />
+              </ItemGroup>
+              <ItemGroup Condition="'$(Gate)' == 'D'">
+                <ProjectReference Include="Other/Other.fsproj" />
+              </ItemGroup>
+            </Project>"#,
+        );
+        let dotnet_root = root.join("dotnet");
+        std::fs::create_dir_all(&dotnet_root).unwrap();
+        write_app_assets(root, true);
+
+        let mut sema = SemanticState::new();
+        let env = sema.assembly_env_for_project(
+            &proj,
+            Some(&dotnet_root),
+            &ServedTfm::NoneDeclared,
+            &Workspace::default(),
+        );
+        assert!(
+            env.has_namespace(&["MiniLibFs".to_string()]),
+            "the captured reference is real, so its output still folds"
+        );
+        assert!(
+            env.identities_incomplete(),
+            "MSBuild keeps `Other`, the walk dropped it behind a gate it could not decide, and \
+             the env must not claim to be complete without it"
+        );
+    }
+
+    /// #1181: the same project unrestored, with on-demand restore off, so the
+    /// reference resolution declines and the env is empty. The graph still
+    /// knows the list may lack `Other`, and the empty env must not claim
+    /// completeness over it. (Whether a declined env is complete at all is
+    /// #1190.)
+    #[test]
+    fn a_declined_resolution_keeps_the_graphs_incompleteness() {
+        let dll_bytes = minilibfs_dll_bytes();
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let sibling_dir = root.join("MiniLibFs");
+        std::fs::create_dir_all(&sibling_dir).unwrap();
+        built_fsproj(&sibling_dir, "MiniLibFs", "Release", "net10.0", &dll_bytes);
+        let proj = root.join("App.fsproj");
+        write(
+            &proj,
+            r#"<Project>
+              <PropertyGroup><Gate>$([System.String]::Copy('D'))</Gate></PropertyGroup>
+              <ItemGroup>
+                <ProjectReference Include="MiniLibFs/MiniLibFs.fsproj" />
+              </ItemGroup>
+              <ItemGroup Condition="'$(Gate)' == 'D'">
+                <ProjectReference Include="Other/Other.fsproj" />
+              </ItemGroup>
+            </Project>"#,
+        );
+        let dotnet_root = root.join("dotnet");
+        std::fs::create_dir_all(&dotnet_root).unwrap();
+        {
+            use crate::observed::host_fs::HostPath as _;
+            assert!(!root.join("obj").join("project.assets.json").host_exists());
+        }
+        let mut sema = SemanticState::new();
+        let env = sema.assembly_env_for_project(
+            &proj,
+            Some(&dotnet_root),
+            &ServedTfm::NoneDeclared,
+            &Workspace::default(),
+        );
+        assert!(
+            !env.has_namespace(&["MiniLibFs".to_string()]),
+            "the resolution declined, so nothing folds"
+        );
+        assert!(
+            env.identities_incomplete(),
+            "the graph knows the list may lack `Other`"
+        );
     }
 
     /// A restored `App.fsproj` whose one `<ProjectReference>` is the C# project

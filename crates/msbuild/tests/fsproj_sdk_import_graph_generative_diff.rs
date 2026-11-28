@@ -1827,10 +1827,21 @@ fn evaluate(shared: &mut Shared, case: &Case) -> (Outcome, String) {
                 kind: FindingKind::Compile,
             });
         }
-        if !parsed.project_references_uncertain {
+        // A rejected project has no reference list: a certain one, even empty,
+        // is one no build holds, and an incomplete one holding an edge claims
+        // that edge.
+        let claim = common::reference_claim(&parsed);
+        let held: Vec<&std::path::Path> = parsed
+            .project_references
+            .iter()
+            .map(|item| item.include.as_path())
+            .collect();
+        if claim == common::ReferenceClaim::Exact
+            || (claim == common::ReferenceClaim::Within && !held.is_empty())
+        {
             outcome.findings.push(Finding {
                 what: "ProjectReference".to_owned(),
-                ours: "a certain reference list".to_owned(),
+                ours: format!("{claim:?} reference list {held:?}"),
                 theirs: "a rejected project".to_owned(),
                 kind: FindingKind::References,
             });
@@ -1940,8 +1951,9 @@ fn evaluate(shared: &mut Shared, case: &Case) -> (Outcome, String) {
     // So must a reference list the walk calls certain: the LSP's project graph
     // reads it as the edges MSBuild builds. Identities are relative to the
     // project's directory, as the Compile items' are.
-    if !parsed.project_references_uncertain {
-        outcome.certain_references = true;
+    let claim = common::reference_claim(&parsed);
+    if claim != common::ReferenceClaim::Nothing {
+        outcome.certain_references = claim == common::ReferenceClaim::Exact;
         let project_dir = project_path.parent().expect("a project has a directory");
         let ours: Vec<PathBuf> = parsed
             .project_references
@@ -1954,10 +1966,12 @@ fn evaluate(shared: &mut Shared, case: &Case) -> (Outcome, String) {
             .iter()
             .map(|item| project_dir.join(item["identity"].as_str().expect("an identity")))
             .collect();
-        outcome.body_reference_kept = theirs.contains(&project_dir.join(BODY_REFERENCE));
-        if ours != theirs {
+        if claim == common::ReferenceClaim::Exact {
+            outcome.body_reference_kept = theirs.contains(&project_dir.join(BODY_REFERENCE));
+        }
+        if common::check_reference_claim(claim, &ours, &theirs).is_err() {
             outcome.findings.push(Finding {
-                what: "ProjectReference".to_owned(),
+                what: format!("ProjectReference ({claim:?})"),
                 ours: format!("{ours:?}"),
                 theirs: format!("{theirs:?}"),
                 kind: FindingKind::References,
