@@ -152,6 +152,7 @@ crates/lsp/tests/all/xml_doc_source_diff/signature.rs	pending	3
 crates/lsp/tests/all/xml_doc_type_id_diff.rs	pending	3
 crates/msbuild/src/condition.rs	pending	2
 crates/msbuild/src/document.rs	pending	2
+crates/msbuild/src/evaluator/item_pass.rs	not-applicable	spec_fragments_split_as_msbuild_splits_or_refuse enumerates every string of up to six characters over the closed alphabet the SemiColonTokenizer reads (@ ( ) ' " ; a letter, a space) and holds the splitter to a port of it; the alphabet is the dimension, so no value is drawn from a hostile alphabet
 crates/msbuild/src/fsc.rs	draws	variable_class=env+name+value
 crates/msbuild/src/glob/file_matcher/tests.rs	pending	2
 crates/msbuild/src/glob_resolver.rs	pending	2
@@ -212,12 +213,13 @@ crates/msbuild/tests/fsproj_target_definitions_generative_diff.rs	pending	2
 crates/msbuild/tests/fsproj_target_execution_generative_diff.rs	pending	2
 crates/msbuild/tests/glob_msbuild_diff.rs	pending	2
 crates/msbuild/tests/global_json_lookup_diff.rs	pending	2
+crates/msbuild/tests/item_expression_separator_grid.rs	not-applicable	a closed table of item-expression forms whose arguments hold a separator, over Compile and ProjectReference and both glob seams, each held to MSBuild; the forms are the dimension, so no value is drawn from a hostile alphabet
 crates/msbuild/tests/path_fixup_diff.rs	pending	2
 crates/msbuild/tests/path_fixup_expansion_diff.rs	pending	2
 crates/msbuild/tests/path_spelling_generative_diff.rs	pending	2
 crates/msbuild/tests/property_expr_diff.rs	pending	2
 crates/msbuild/tests/property_reference_scan.rs	pending	2
-crates/msbuild/tests/rejection_generative_diff.rs	draws	judge_operands=value;rejection_projects=value
+crates/msbuild/tests/rejection_generative_diff.rs	draws	judge_operands=value;refused_history=value;rejection_projects=value
 crates/msbuild/tests/reserved_global_diff.rs	pending	2
 crates/msbuild/tests/sdk_directory_probe_diff.rs	pending	2
 crates/msbuild/tests/sdk_import_project_path_diff.rs	pending	2

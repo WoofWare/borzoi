@@ -666,7 +666,11 @@ pub struct ParsedProject {
     /// Why MSBuild rejects the whole project, or may, or `None` when nothing
     /// the walk passed could make it: the first construct the walk claims
     /// MSBuild rejects ([`RejectionCertainty::Certain`]), else the first that
-    /// may ([`RejectionCertainty::Possible`]). MSBuild's rejection is total: the build has
+    /// may ([`RejectionCertainty::Possible`]), in the order the walk noted them
+    /// (a second walk's own after the first's: `evaluator::rejection`'s
+    /// module docs). A possible construct is one that may make MSBuild reject
+    /// the project, not a claim about the error MSBuild reports. MSBuild's
+    /// rejection is total: the build has
     /// no value for any property, and no item. So the walk publishes nothing
     /// as the build's once this is `Some`, whatever it bound before or after
     /// the construct: every [`Self::property`] read is inexact

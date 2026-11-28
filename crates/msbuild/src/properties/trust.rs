@@ -338,6 +338,22 @@ impl Trust {
         unpinned.is_none() && sdk_package.is_none() && !refused && stale.is_none()
     }
 
+    /// Whether every channel but the refused one is clean. Of a name a clean
+    /// write stored a value to after its refusal, that its value is one the
+    /// walk computed as the build does, the mark history kept for the import
+    /// points ([`Self::refused`]). Of any other name it says nothing: a seed
+    /// may fill the slot a refusal emptied, and an unbound name's refusal is
+    /// what the undefined-read guard reads.
+    pub(crate) fn is_certain_but_for_refusal(&self) -> bool {
+        let Trust {
+            unpinned,
+            sdk_package,
+            refused: _,
+            stale,
+        } = self;
+        unpinned.is_none() && sdk_package.is_none() && stale.is_none()
+    }
+
     #[cfg(test)]
     pub(crate) fn shape(&self) -> TrustShape {
         let Trust {

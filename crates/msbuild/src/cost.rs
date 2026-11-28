@@ -30,6 +30,50 @@ pub struct WalkCosts {
     /// The comparisons of two names `loader::first_repeat` made, finding a
     /// repeated parameter name.
     pub name_comparisons: u64,
+    /// The second walks an evaluation ran, judging a name refused then
+    /// rebound as certain (`evaluator::rejection`'s module docs): one
+    /// wherever the first walk rebound such a name.
+    pub second_walks: u64,
+    /// The lookups and comparisons the first walk made adopting the second
+    /// walk's sites (`State::adopt_second_walk`), placing them among its own.
+    pub site_merge_probes: u64,
+    /// The property writes the first walk stored.
+    pub property_writes: u64,
+    /// The property writes the second walk stored: the work it adds, as a
+    /// share of [`Self::property_writes`].
+    pub second_walk_property_writes: u64,
+    /// The groups the first walk judged from a path the walk did not take
+    /// on which a name whose only doubt is a refusal's mark reaches the group
+    /// (`PathOf::reaches`): a narrower trigger for the second walk than the
+    /// one it runs on, kept as a census, and counted only where the caller
+    /// asks (`test_support::with_refusal_census`).
+    pub refusal_paths: u64,
+}
+
+/// Whether the caller asked for `WalkCosts::refusal_paths`'s census on
+/// this thread ([`crate::test_support::with_refusal_census`]): it costs work
+/// in each group the walk judges from a path, so nothing else pays it.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn census_requested() -> bool {
+    CENSUS.with(std::cell::Cell::get)
+}
+
+/// [`census_requested`]'s flag, set for the span of a closure.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn with_census<T>(walk: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            CENSUS.with(|census| census.set(self.0));
+        }
+    }
+    let _restore = Restore(CENSUS.with(|census| census.replace(true)));
+    walk()
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static CENSUS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -42,6 +86,11 @@ thread_local! {
             struck_bytes: 0,
             name_comparisons: 0,
             registration_expansions: 0,
+            second_walks: 0,
+            site_merge_probes: 0,
+            property_writes: 0,
+            second_walk_property_writes: 0,
+            refusal_paths: 0,
         })
     };
 }
