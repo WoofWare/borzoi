@@ -977,6 +977,10 @@ struct State<'r> {
     /// Include + `Update` collapse — [`item_pass::finalize_package_references`]
     /// folds these into [`Self::package_references`] once every item is seen.
     captured_package_references: Vec<CapturedPackageReference>,
+    /// Whether a Compile item whose identity MSBuild's versions key
+    /// differently (`item_spec::key_is_version_dependent`) has been included:
+    /// a Compile `Update` after it declines.
+    version_dependent_compile_included: bool,
     /// `<PackageReference>` / `<FrameworkReference>` items — the NuGet
     /// dependency set. Separate buckets from Compile/ProjectReference: a
     /// package reference is neither a source input nor an inter-project
@@ -1886,6 +1890,7 @@ impl<'r> State<'r> {
             next_item_order: 0,
             project_references: Vec::new(),
             captured_package_references: Vec::new(),
+            version_dependent_compile_included: false,
             package_references: Vec::new(),
             #[cfg(any(test, feature = "test-support"))]
             package_reference_rows: Vec::new(),
@@ -2380,6 +2385,7 @@ impl<'r> State<'r> {
             // Already collapsed into `package_references` by the item pass's
             // `finalize_package_references`.
             captured_package_references: _,
+            version_dependent_compile_included: _,
             package_references,
             #[cfg(any(test, feature = "test-support"))]
                 package_reference_rows: _,

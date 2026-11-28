@@ -495,6 +495,60 @@ fn compile_update_compile_order_scales_with_a_long_update_spec() {
     );
 }
 
+/// MSBuild's versions key a spelling with a trailing separator or a NUL
+/// differently (#1195): SDK 10.0.401 trims the separator and never throws,
+/// SDK 8.0.425 keeps it, and its `GetFullPath` throws on a NUL while an
+/// `Update` keys the list. So a Compile `Update` declines where its own
+/// fragment spells one, or where an item included before it does; an
+/// `Update` matching neither stands.
+#[test]
+#[cfg(not(windows))]
+fn a_compile_update_declines_on_a_spelling_msbuild_versions_key_differently() {
+    let version_dependent = |p: &ParsedProject| {
+        p.diagnostics.iter().any(|d| {
+            matches!(
+                &d.kind,
+                DiagnosticKind::UnsupportedItemOperation { operation }
+                    if operation.contains("trailing separator or a NUL")
+            )
+        })
+    };
+    for items in [
+        // The `Include`'s trailing separator.
+        r#"<Compile Include="C.fs;A.fs/" /><Compile Update="A.fs" CompileOrder="CompileFirst" />"#,
+        // The `Update`'s.
+        r#"<Compile Include="C.fs;A.fs" /><Compile Update="A.fs/" CompileOrder="CompileFirst" />"#,
+        // Separators alone.
+        r#"<Compile Include="A.fs;$(MSBuildProjectDirectory)" /><Compile Update="//" CompileOrder="CompileFirst" />"#,
+        // An included NUL, though the item is excluded from the order.
+        r#"<Compile Include="C.fs;A.fs" /><Compile Include="Bad%00.fs" CompileOrder="Excluded" /><Compile Update="A.fs" CompileOrder="CompileFirst" />"#,
+    ] {
+        let p = parse(&format!(
+            "<Project><ItemGroup>{items}</ItemGroup></Project>"
+        ));
+        assert!(p.items_uncertain, "{items}: {:?}", file_names(&p.items));
+        assert!(version_dependent(&p), "{items}: {:?}", p.diagnostics);
+    }
+    // The same `Update`s with no such spelling, and one whose lossy item is
+    // included only after it, stand.
+    for (items, order) in [
+        (
+            r#"<Compile Include="C.fs;A.fs" /><Compile Update="A.fs" CompileOrder="CompileFirst" />"#,
+            &["A.fs", "C.fs"][..],
+        ),
+        (
+            r#"<Compile Include="C.fs;A.fs" /><Compile Update="A.fs" CompileOrder="CompileFirst" /><Compile Include="B.fs/" />"#,
+            &["A.fs", "C.fs", "B.fs"][..],
+        ),
+    ] {
+        let p = parse(&format!(
+            "<Project><ItemGroup>{items}</ItemGroup></Project>"
+        ));
+        assert!(!p.items_uncertain, "{items}: {:?}", p.diagnostics);
+        assert_eq!(file_names(&p.items), order, "{items}");
+    }
+}
+
 /// MSBuild's lazy evaluator abandons batching an `Update` spec at a fragment
 /// that repeats an earlier one's path or holds an escape, and strands the
 /// fragments before it, which then reach later `Include`s (an upstream bug;

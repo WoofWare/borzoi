@@ -2043,6 +2043,13 @@ fn resolve_compile_update_targets(
     if expansion.had_issue() {
         return None;
     }
+    // A match MSBuild's versions make differently declines: an item included
+    // before this `Update` whose identity they key differently, or a fragment
+    // of its own below (`item_spec::key_is_version_dependent`).
+    if state.version_dependent_compile_included {
+        note_version_dependent_update(node, raw, state);
+        return None;
+    }
     let mut targets = Vec::new();
     let mut batch = UpdateBatch::default();
     let Ok(fragments) = spec_fragments(expansion.value.ignoring_trust()) else {
@@ -2082,6 +2089,10 @@ fn resolve_compile_update_targets(
         // file as `Include="a%20b.fs"`, and comparing escaped against decoded
         // would silently match nothing.
         let decoded = fragment_identity(entry);
+        if item_spec::key_is_version_dependent(&decoded) {
+            note_version_dependent_update(node, raw, state);
+            return None;
+        }
         let unnormalised = crate::glob::compares_unnormalised(&decoded);
         let normalised = decoded.replace('\\', "/");
         let target = UpdateTarget {
@@ -2105,6 +2116,20 @@ fn resolve_compile_update_targets(
         targets.push(target);
     }
     Some(targets)
+}
+
+/// Decline the Compile `Update` at `node`, spelt `raw`, whose match rests on
+/// a spelling MSBuild's versions key differently
+/// (`item_spec::key_is_version_dependent`).
+fn note_version_dependent_update(node: Node<'_, '_>, raw: &str, state: &mut State<'_>) {
+    state.push(
+        DiagnosticKind::UnsupportedItemOperation {
+            operation: format!(
+                "Compile Update=\"{raw}\" whose match rests on a spelling with a trailing separator or a NUL, which MSBuild's versions key differently"
+            ),
+        },
+        node.range(),
+    );
 }
 
 /// MSBuild's lazy evaluator batching one `Update` spec's fragments, as far as
@@ -4472,6 +4497,11 @@ fn push_resolved_item(
     item: ResolvedItem,
     identity: Option<String>,
 ) {
+    if item.kind == ItemKind::Compile
+        && item_spec::key_is_version_dependent(&item.include.to_string_lossy())
+    {
+        state.version_dependent_compile_included = true;
+    }
     let order = state.next_item_order;
     state.next_item_order += 1;
     bucket_for_placement(state, placement).push(OrderedResolvedItem {

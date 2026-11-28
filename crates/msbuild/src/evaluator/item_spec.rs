@@ -68,6 +68,16 @@ fn in_domain(identity: &str) -> bool {
         && !identity.trim_end_matches(['/', '\\']).is_empty()
 }
 
+/// Whether MSBuild's versions may key `identity` differently when an
+/// `Update` matches: SDK 10.0.401's `NormalizePathForComparisonNoThrow` trims
+/// a trailing separator and never throws, while SDK 8.0.428 keeps the
+/// separator, and its `GetFullPath` throws on a NUL while an `Update` keys
+/// the list (#1195). A property of the spelling alone, whatever the project
+/// directory: every caller declines it.
+pub(super) fn key_is_version_dependent(identity: &str) -> bool {
+    identity.ends_with(['/', '\\']) || identity.contains('\0')
+}
+
 /// The key two identities are compared by when a `Remove` or `Exclude`
 /// matches: `NormalizePathForComparisonNoThrow(identity, project_dir)`,
 /// case-folded. Two identities match exactly when their keys are equal.

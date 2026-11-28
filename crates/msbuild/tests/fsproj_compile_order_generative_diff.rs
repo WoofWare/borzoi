@@ -1226,30 +1226,37 @@ const CORNERS: &[(&str, bool)] = &[
     ),
     // MSBuild trims a spelling's trailing separators before combining it with
     // the project directory, so `/` names the project directory and `/..`
-    // the root: the bucketless `/` stays out of the list.
+    // the root: the bucketless `/` stays out of the list. The `Update`
+    // follows an `Include` spelling a trailing separator, which MSBuild's
+    // versions key differently (#1195), so it declines, though here both
+    // agree.
     (
         r#"    <Compile Include="A.fs" />
     <Compile Include="/" CompileOrder="Middle" />
     <Compile Update="/.." CompileOrder="CompileFirst" />"#,
-        true,
+        false,
     ),
+    // These three match through a trailing separator, which SDK 10.0.401
+    // trims and SDK 8.0.425 keeps, so the two compile them in different
+    // orders: they decline (#1195). They were certain only while this
+    // differential graded one SDK's MSBuild.
     (
         r#"    <Compile Include="A.fs" />
     <Compile Include="$(MSBuildProjectDirectory)" />
     <Compile Update="//" CompileOrder="CompileFirst" />"#,
-        true,
+        false,
     ),
     (
         r#"    <Compile Include="A.fs" />
     <Compile Include="/" />
     <Compile Update="$(MSBuildProjectDirectory)/" CompileOrder="CompileFirst" />"#,
-        true,
+        false,
     ),
     (
         r#"    <Compile Include="A.fs" />
     <Compile Include="sub/" />
     <Compile Update="sub" CompileOrder="CompileFirst" />"#,
-        true,
+        false,
     ),
     // Batching (F3). A repeated fragment strands the one before it, which
     // then reaches the `A.fs` included after the `Update`: declined.
@@ -1405,6 +1412,27 @@ const CORNERS: &[(&str, bool)] = &[
   <ItemGroup Condition="'$(Flip)' == 'off'">
     <Compile Update="B.fs" Visible="false" />"#,
         true,
+    ),
+    // A trailing separator on the `Include`, then on the `Update`: SDK 10
+    // matches, SDK 8 does not (#1195). Both decline.
+    (
+        r#"    <Compile Include="C.fs;A.fs/" />
+    <Compile Update="A.fs" CompileOrder="CompileFirst" />"#,
+        false,
+    ),
+    (
+        r#"    <Compile Include="C.fs;A.fs" />
+    <Compile Update="A.fs/" CompileOrder="CompileFirst" />"#,
+        false,
+    ),
+    // An included identity holding a NUL: SDK 8's `GetFullPath` throws on it
+    // when an `Update` keys the list, so SDK 8 rejects the project, though
+    // the item is excluded from the order. It declines.
+    (
+        r#"    <Compile Include="C.fs;A.fs" />
+    <Compile Include="Bad%00.fs" CompileOrder="Excluded" />
+    <Compile Update="A.fs" CompileOrder="CompileFirst" />"#,
+        false,
     ),
 ];
 
