@@ -75,32 +75,6 @@ fn in_domain(identity: &str) -> bool {
 ///
 /// `None` outside the domain.
 pub(super) fn comparison_key(identity: &str, project_dir: &Path) -> Option<String> {
-    comparison_key_reading(identity, project_dir).map(|(key, _)| key)
-}
-
-/// Whether reading `identity` for a key loses anything of its spelling
-/// ([`spelling_read`]): a trailing separator, which SDK 10.0.401 trims and
-/// SDK 8.0.428 keeps, so MSBuild's versions may not share the key. A property
-/// of the spelling alone, whatever the project directory and whether a key
-/// can be computed there: every caller of this declines it, and a rule that
-/// makes the reading lossy says so in [`spelling_read`].
-pub(super) fn key_is_lossy(identity: &str) -> bool {
-    identity.ends_with(['/', '\\'])
-}
-
-/// The spelling a key is computed from (`\` as `/`, trailing separators
-/// trimmed), and whether reading it lost anything ([`key_is_lossy`]).
-fn spelling_read(identity: &str) -> (String, bool) {
-    let spelled = identity.replace('\\', "/");
-    let trimmed = spelled.trim_end_matches('/');
-    let lossy = key_is_lossy(identity);
-    debug_assert_eq!(lossy, trimmed.len() != spelled.len());
-    (trimmed.to_owned(), lossy)
-}
-
-/// [`comparison_key`], and whether computing it lost anything of the
-/// spelling ([`key_is_lossy`]).
-fn comparison_key_reading(identity: &str, project_dir: &Path) -> Option<(String, bool)> {
     if !in_domain(identity) {
         return None;
     }
@@ -112,11 +86,27 @@ fn comparison_key_reading(identity: &str, project_dir: &Path) -> Option<(String,
     if crate::glob::compares_unnormalised(identity) {
         return None;
     }
-    let (trimmed, lossy) = spelling_read(identity);
-    let mut key = full_path(&trimmed, project_dir)?;
+    let spelled = identity.replace('\\', "/");
+    let mut key = full_path(spelled.trim_end_matches('/'), project_dir)?;
     key.make_ascii_lowercase();
-    Some((key, lossy))
+    Some(key)
 }
+
+/// Whether MSBuild's versions may key `identity` differently: whether SDK
+/// 10.0.401's key (`NormalizePathForComparisonNoThrow`: the full path with a
+/// trailing separator trimmed, nothing escaped, never throwing) loses
+/// anything of SDK 8.0.428's (the full path escaped by
+/// `EscapingUtilities.Escape`, untrimmed, from a `GetFullPath` that throws
+/// on a NUL). That is a spelling with a trailing separator, with a character
+/// `Escape` escapes, or with a NUL. A property of the spelling alone,
+/// whatever the project directory and whether a key can be computed there:
+/// every caller of this declines it.
+pub(super) fn key_is_lossy(identity: &str) -> bool {
+    identity.ends_with(['/', '\\']) || identity.contains(MSBUILD_ESCAPED) || identity.contains('\0')
+}
+
+/// The characters `EscapingUtilities.Escape` escapes.
+const MSBUILD_ESCAPED: [char; 9] = ['%', '*', '?', '@', '$', '(', ')', ';', '\''];
 
 /// The key a batch of `Update`s holds a fragment by, comparing it with the
 /// other fragments and with the keys earlier `Update`s left

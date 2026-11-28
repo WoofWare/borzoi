@@ -2031,6 +2031,27 @@ fn an_opaque_batch_keeps_an_outcome_a_known_collision_rules_out() {
     assert!(p.items_uncertain, "{:?}", file_names(&p.items));
 }
 
+/// SDK 8.0.428 keys a spelling by its escaped full path, so a rooted fragment
+/// holding a `(` is not its own key there, and removing it by its text
+/// strands it: after `/tmp/A(x).fs;/tmp/A(x).fs`, SDK 8 compiles `B.fs`
+/// first and SDK 10.0.401 does not (probed by codex, round 39). SDK 8's full
+/// path throws on a NUL, so an included `Bad%00.fs` fails its evaluation of
+/// a later multi-fragment `Update` (probed by codex, round 39). Neither key
+/// is one both versions share, so the order the batch adds declines.
+#[test]
+#[cfg(not(windows))]
+fn a_key_msbuild_versions_compute_differently_declines_the_order_the_batch_adds() {
+    for items in [
+        r#"<Compile Update="/tmp/A(x).fs;/tmp/A(x).fs" Link="a" /><Compile Update="B.fs;/tmp/A(x).fs" CompileOrder="CompileFirst" /><Compile Include="C.fs;B.fs" />"#,
+        r#"<Compile Include="C.fs" /><Compile Include="Bad%00.fs" CompileOrder="Excluded" /><Compile Update="A.fs;Z.fs" CompileOrder="CompileFirst" />"#,
+    ] {
+        let p = parse(&format!(
+            "<Project><ItemGroup>{items}</ItemGroup></Project>"
+        ));
+        assert!(p.items_uncertain, "{items}: {:?}", file_names(&p.items));
+    }
+}
+
 /// An over-decline, pinned and not fixed here (#1209): on Unix
 /// `$(MSBuildThisFileDirectory)/A.fs` expands to a rooted path holding `//`,
 /// which the batch keys as one `MaybeAdjustFilePath` may respell, though with
