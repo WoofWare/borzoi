@@ -1881,12 +1881,12 @@ fn a_second_walks_sites_follow_the_first_walks() {
     };
     for (items, sites) in [
         (
-            "<I Include=\"$(P[9])$(Short[9])\" /><I Include=\"$(Short[9])\" />",
-            vec!["$(Short[9])", "$(Short[9])", "$(P[9])"],
+            "<I Include=\"$(P[9])$(Short[9])\" /><I Include=\"$(Short[8])\" />",
+            vec!["$(Short[9])", "$(Short[8])", "$(P[9])"],
         ),
         (
-            "<I Include=\"$(P[9])$(Short[9])\" Exclude=\"$(Short[9])\" />",
-            vec!["$(Short[9])", "$(Short[9])", "$(P[9])"],
+            "<I Include=\"$(P[9])$(Short[9])\" Exclude=\"$(Short[8])\" />",
+            vec!["$(Short[9])", "$(Short[8])", "$(P[9])"],
         ),
         (
             "<I Include=\"$(Short[9])\" Exclude=\"$(Short[9])\" />",
@@ -1940,27 +1940,31 @@ fn sites_from_either_walk_are_each_noted_once() {
         Alike,
         Apart,
     }
-    let expression = |text: Text| match text {
-        Text::Alike => "$(Short[9])",
-        Text::Apart => "$(P[9])$(Short[9])",
+    // Each text's throws are indexed by its place, so that every site's
+    // cause is its own and the order of the causes is the order of the sites.
+    let short = |at: usize| format!("$(Short[{}])", 10 + at);
+    let rebound = |at: usize| format!("$(P[{}])", 20 + at);
+    let expression = |text: Text, at: usize| match text {
+        Text::Alike => short(at),
+        Text::Apart => format!("{}{}", rebound(at), short(at)),
     };
     let all = [Text::Alike, Text::Apart];
     let mut cases: Vec<(String, Vec<Text>)> = Vec::new();
     for a in all {
         for b in all {
-            let include = |t: Text| format!("<I Include=\"{}\" />", expression(t));
-            cases.push((format!("{}{}", include(a), include(b)), vec![a, b]));
+            let include = |t: Text, at: usize| format!("<I Include=\"{}\" />", expression(t, at));
+            cases.push((format!("{}{}", include(a, 0), include(b, 1)), vec![a, b]));
             cases.push((
                 format!(
                     "<I Include=\"{}\" Exclude=\"{}\" />",
-                    expression(a),
-                    expression(b)
+                    expression(a, 0),
+                    expression(b, 1)
                 ),
                 vec![a, b],
             ));
             for c in all {
                 cases.push((
-                    format!("{}{}{}", include(a), include(b), include(c)),
+                    format!("{}{}{}", include(a, 0), include(b, 1), include(c, 2)),
                     vec![a, b, c],
                 ));
             }
@@ -1975,16 +1979,16 @@ fn sites_from_either_walk_are_each_noted_once() {
             "<PropertyGroup><P>@(J)</P><P>z</P><Short>a</Short></PropertyGroup>\
              <ItemGroup>{items}</ItemGroup>"
         );
-        // The first walk names `$(Short[9])` in every text, the second walk
-        // `$(P[9])` too in each text apart.
-        let expected: Vec<RejectionCause> = texts
-            .iter()
-            .map(|_| throw("$(Short[9])"))
+        // The first walk names each text's `Short` throw, in order; the second
+        // walk each text apart's `P` throw, in order, after them.
+        let expected: Vec<RejectionCause> = (0..texts.len())
+            .map(|at| throw(&short(at)))
             .chain(
                 texts
                     .iter()
-                    .filter(|t| matches!(t, Text::Apart))
-                    .map(|_| throw("$(P[9])")),
+                    .enumerate()
+                    .filter(|(_, t)| matches!(t, Text::Apart))
+                    .map(|(at, _)| throw(&rebound(at))),
             )
             .collect();
         let tmp = TempDir::new().unwrap();
