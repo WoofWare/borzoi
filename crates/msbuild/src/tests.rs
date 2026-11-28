@@ -1493,6 +1493,31 @@ fn a_property_backed_update_is_expanded_once() {
     assert_eq!(costs.silent_expansions, N as u64, "texts expanded silently");
 }
 
+/// A metadatum written as an attribute is read twice by the read scan, as
+/// written and again as XML, only where the second reading can differ: with
+/// no `<` in it, the two are one text, expanded once (codex found, round 34).
+#[test]
+fn a_plain_metadatum_is_read_once() {
+    const N: usize = 50;
+    let items: String = (0..N)
+        .map(|i| format!("    <Other Include=\"o{i}\" Link=\"$(P)/A{i}.fs\" />\n"))
+        .collect();
+    let silent = |pending: &str| {
+        let src = format!(
+            "<Project><PropertyGroup><P>pfx</P></PropertyGroup><ItemGroup>\n{pending}{items}  </ItemGroup></Project>"
+        );
+        crate::test_support::count_walk_costs(|| parse(&src))
+            .1
+            .silent_expansions
+    };
+    // With no batch pending the read scan is not asked; with one, it reads
+    // each item's metadatum, and the walk's own reads are the same in both.
+    // The one more is the batch's expansion of the pending `Update`'s spec.
+    let without = silent("");
+    let with = silent("    <Compile Update=\"A.fs;B.fs\" Link=\"a\" />\n");
+    assert_eq!(with - without, N as u64 + 1, "texts the read scan expanded");
+}
+
 /// A run of `Update`s no operation flushes keeps every key it expands, so
 /// thousands of them behind one long property would hold megabytes of keys.
 /// The batch holds at most `MAX_HELD_BYTES` of them, then is followed no
@@ -1773,6 +1798,26 @@ fn a_skipped_update_the_walk_cannot_expand_declines_nothing() {
     );
     assert!(!p.items_uncertain, "{:?}", p.diagnostics);
     assert_eq!(file_names(&p.items), ["B.fs", "A.fs"]);
+}
+
+/// An over-decline, pinned and not fixed here (#1207): an opaque
+/// batch keeps the outcome in which `X.fs;X.fs` joins whole, though its own
+/// repeated key makes it leave, flushing the batch. The later `Update`s then
+/// may strand in that impossible outcome, and the walk declines.
+#[test]
+#[cfg(not(windows))]
+fn an_opaque_batch_keeps_an_outcome_a_known_collision_rules_out() {
+    let p = parse(
+        r#"<Project><ItemGroup>
+    <Compile Update="Ü.fs" Link="u" />
+    <Compile Update="X.fs;X.fs" Link="x" />
+    <Compile Update="B.fs" Link="b" />
+    <Compile Update="A.fs;A.fs" Link="a" />
+    <Compile Update="B.fs;A.fs" CompileOrder="CompileFirst" />
+    <Compile Include="C.fs;A.fs;B.fs" />
+  </ItemGroup></Project>"#,
+    );
+    assert!(p.items_uncertain, "{:?}", file_names(&p.items));
 }
 
 /// An over-decline, pinned and not fixed here (#1203): a Compile `Update`
@@ -2158,37 +2203,56 @@ fn case_sensitive_item_names_decline_the_order_the_batch_adds() {
     );
 }
 
-/// An `Update` that leaves the batch at its first fragment reads no further:
-/// a wildcard first, then a hundred thousand fragments, has the batch read a
-/// bounded number of fragments and ask for as many keys, whatever follows.
+/// An `Update` that leaves the batch at its first fragment reads no further
+/// fragments: a wildcard first, then a hundred thousand fragments, has the
+/// batch read a bounded number of fragments and ask for as many keys,
+/// whatever follows. The spec itself is expanded and checked for an item
+/// expression holding a `;` once, whole, like every spec the batch reads
+/// (`SplitSpec`): once per `Update`, never once per outcome.
 #[test]
 #[cfg(not(windows))]
 fn an_update_settled_at_its_first_fragment_reads_no_further() {
     const N: usize = 100_000;
-    let rest: Vec<String> = (0..N).map(|i| format!("F{i}.fs")).collect();
+    let files: Vec<String> = (0..N).map(|i| format!("F{i}.fs")).collect();
+    let files = files.join(";");
+    let expressions = vec!["@(H)"; N].join(";");
     // Fed to a pending batch run and not run, and to a flushed one run; and
-    // one leaving a pending batch at its first fragment, a collision.
-    for (before, first, gate) in [
+    // one leaving a pending batch at its first fragment, a collision; and
+    // one whose suffix is item expressions.
+    for (before, first, gate, rest) in [
         (
             r#"<Compile Update="A.fs" Link="a" />"#,
             "*.fs",
             r#" Condition="false""#,
+            &files,
         ),
         (
             r#"<Compile Update="A.fs" Link="a" /><Compile Include="B.fs" />"#,
             "*.fs",
             "",
+            &files,
         ),
-        (r#"<Compile Update="A.fs" Link="a" />"#, "A.fs", ""),
+        (r#"<Compile Update="A.fs" Link="a" />"#, "A.fs", "", &files),
+        (
+            r#"<Compile Update="A.fs" Link="a" />"#,
+            "*.fs",
+            r#" Condition="false""#,
+            &expressions,
+        ),
     ] {
         let src = format!(
             r#"<Project><ItemGroup>
     {before}
-    <Compile Update="{first};{}" Link="b"{gate} />
-  </ItemGroup></Project>"#,
-            rest.join(";")
+    <Compile Update="{first};{rest}" Link="b"{gate} />
+  </ItemGroup></Project>"#
         );
         let (_, costs) = crate::test_support::count_walk_costs(|| parse(&src));
+        // The two `Update`s, each checked once.
+        assert!(
+            costs.batch_specs_split <= 2,
+            "{before}: {} specs checked whole",
+            costs.batch_specs_split
+        );
         assert!(
             costs.batch_keys <= 16,
             "{before}: {} fragment keys asked for",

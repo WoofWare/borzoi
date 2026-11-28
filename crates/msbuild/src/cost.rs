@@ -69,6 +69,9 @@ pub struct WalkCosts {
     /// The texts the item pass expanded silently, to judge rather than to
     /// record (`item_pass::expand_silent`).
     pub silent_expansions: u64,
+    /// The expanded `Update` specs the batch checked whole for an item
+    /// expression holding a `;` (`item_pass::SplitSpec::of`).
+    pub batch_specs_split: u64,
 }
 
 /// Whether the caller asked for `WalkCosts::refusal_paths`'s census on
@@ -119,6 +122,7 @@ thread_local! {
             batch_spec_expansions: 0,
             batch_fragments_read: 0,
             silent_expansions: 0,
+            batch_specs_split: 0,
         })
     };
 }

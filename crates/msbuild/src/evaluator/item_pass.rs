@@ -97,6 +97,7 @@ struct SplitSpec<'s>(&'s Escaped);
 impl<'s> SplitSpec<'s> {
     /// `spec`, where [`spec_fragments`] accepts it.
     fn of(spec: &'s Escaped) -> Option<Self> {
+        crate::cost::count(|costs| costs.batch_specs_split += 1);
         spec_fragments(spec).ok().map(|_| SplitSpec(spec))
     }
 
@@ -3430,30 +3431,27 @@ fn attributes_may_read_item_lists(
         if !attr.value().contains(['@', '%', '$', '<']) {
             return false;
         }
-        let decoded = || {
-            let value = crate::document::attribute_value(element, &attr);
-            match update {
-                Some(update) if attr.namespace().is_none() && attr.name() == "Update" => {
-                    text_reads_unexpanded(&value).unwrap_or_else(|| {
-                        update.expansion(state).is_none_or(|expansion| {
-                            expansion_may_read_item_lists(&value, expansion, state)
-                        })
-                    })
-                }
-                _ => text_may_read_item_lists(Some(&value), state),
-            }
-        };
-        match reading(attr.name()) {
-            AttributeReading::Unevaluated => false,
-            AttributeReading::Decoded => decoded(),
-            AttributeReading::Metadatum => {
-                decoded()
-                    || text_may_read_item_lists(
-                        metadata_attribute(element, &attr).as_deref(),
-                        state,
-                    )
-            }
+        let reading = reading(attr.name());
+        if matches!(reading, AttributeReading::Unevaluated) {
+            return false;
         }
+        let value = crate::document::attribute_value(element, &attr);
+        let decoded = match update {
+            Some(update) if attr.namespace().is_none() && attr.name() == "Update" => {
+                text_reads_unexpanded(&value).unwrap_or_else(|| {
+                    update.expansion(state).is_none_or(|expansion| {
+                        expansion_may_read_item_lists(&value, expansion, state)
+                    })
+                })
+            }
+            _ => text_may_read_item_lists(Some(&value), state),
+        };
+        // Read again as XML, a value with no `<` is the same text
+        // ([`metadata_attribute`]), already read.
+        decoded
+            || (matches!(reading, AttributeReading::Metadatum)
+                && value.contains('<')
+                && text_may_read_item_lists(metadata_attribute(element, &attr).as_deref(), state))
     })
 }
 
