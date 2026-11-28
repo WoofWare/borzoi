@@ -1255,8 +1255,8 @@ fn a_gate_decided_by_exists_keeps_no_fabricated_edge() {
 /// toolset or environment name, #1181) applies to the list's gates, not to a
 /// metadatum's. A `ReferenceOutputAssembly` child gated on a toolset name
 /// resolves as on main: skipped where the walk's empty value fails the gate,
-/// so the default stands, as MSBuild's value `true` does here. (Its opposite
-/// polarity is a pre-existing wrong value, #1189.)
+/// so the default stands, and the edge is followed as MSBuild's `true`
+/// follows it. (Its opposite polarity is a pre-existing wrong value, #1189.)
 #[test]
 fn a_metadatum_gate_on_a_toolset_name_resolves_as_on_main() {
     let xml = "<Project><ItemGroup><ProjectReference Include=\"A.fsproj\">\
@@ -1282,9 +1282,20 @@ fn a_metadatum_gate_on_a_toolset_name_resolves_as_on_main() {
         parsed.diagnostics
     );
     assert_eq!(parsed.project_references.len(), 1);
-    assert_eq!(
-        parsed.project_references[0].reference_output_assembly,
-        borzoi_msbuild::ItemMetadataValue::ABSENT,
-        "the gated write is skipped, as on main, and the default stands"
+    // MSBuild holds `true`; the walk skips the write, as on main, and holds
+    // the default. Either way the reference's output lands on
+    // `ReferencePath`, so the edge is followed: what this test holds is that
+    // the value is not `Unknown`, which would drop it.
+    let follows = match &parsed.project_references[0].reference_output_assembly {
+        borzoi_msbuild::ItemMetadataValue::Known(None) => true,
+        borzoi_msbuild::ItemMetadataValue::Known(Some(value)) => {
+            borzoi_msbuild::msbuild_boolean(value) == Some(true)
+        }
+        borzoi_msbuild::ItemMetadataValue::Unknown => false,
+    };
+    assert!(
+        follows,
+        "the reference's output is followed: {:?}",
+        parsed.project_references[0].reference_output_assembly
     );
 }

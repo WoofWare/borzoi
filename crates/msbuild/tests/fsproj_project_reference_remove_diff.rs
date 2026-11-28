@@ -433,10 +433,25 @@ fn published(path: &Path) -> PathBuf {
     out
 }
 
+/// The file names of `paths`, in order.
+fn file_names(paths: &[PathBuf]) -> Vec<String> {
+    paths
+        .iter()
+        .map(|p| {
+            p.file_name()
+                .expect("a file")
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect()
+}
+
 struct Outcome {
     committed: bool,
     /// The claim the list made ([`common::reference_claim`]).
     claim: common::ReferenceClaim,
+    /// The file names of the references the list holds, in order.
+    held: Vec<String>,
     /// Committed, and a `Remove` changed the list on MSBuild's side — the case
     /// that only a modelled `Remove` can commit.
     committed_through_a_remove: bool,
@@ -502,6 +517,7 @@ fn check(oracle: &mut Oracle, blocks: &[Block], with_resolver: bool) -> Outcome 
         return Outcome {
             committed: false,
             claim,
+            held: file_names(&ours),
             committed_through_a_remove: false,
         };
     }
@@ -512,6 +528,7 @@ fn check(oracle: &mut Oracle, blocks: &[Block], with_resolver: bool) -> Outcome 
     Outcome {
         committed: true,
         claim,
+        held: file_names(&ours),
         committed_through_a_remove: removed_something,
     }
 }
@@ -694,6 +711,11 @@ fn an_incomplete_list_still_applies_its_removes() {
             outcome.claim,
             common::ReferenceClaim::Within,
             "the gated `Include` leaves the list incomplete, and nothing else doubts it"
+        );
+        assert_eq!(
+            outcome.held,
+            ["B.fsproj"],
+            "resolver: {with_resolver}: the `Remove` takes `M` and leaves `B`"
         );
     }
 }
