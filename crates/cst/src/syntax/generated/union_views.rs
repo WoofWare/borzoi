@@ -8,8 +8,8 @@
 //! or an [`UnexpectedChild`] for any other. Not part of the union's lock or
 //! of any facade.
 
-use super::union_pats::*;
-use super::union_standalone::*;
+use super::union_pats::{LongIdentPat, Pat};
+use super::union_standalone::{ActivePatName, LongIdent, NamePatPairs, TyparDecls};
 use crate::syntax::{
     AstNode, NodeOrToken, SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, TextRange,
 };
@@ -47,6 +47,18 @@ pub enum LongIdentPatToken {
 }
 
 impl LongIdentPatChild {
+    /// The child itself, as the tree holds it.
+    pub fn element(&self) -> SyntaxElement {
+        match self {
+            LongIdentPatChild::LongIdent(c) => NodeOrToken::Node(c.syntax().clone()),
+            LongIdentPatChild::ActivePatName(c) => NodeOrToken::Node(c.syntax().clone()),
+            LongIdentPatChild::TyparDecls(c) => NodeOrToken::Node(c.syntax().clone()),
+            LongIdentPatChild::NamePatPairs(c) => NodeOrToken::Node(c.syntax().clone()),
+            LongIdentPatChild::Arg(c) => NodeOrToken::Node(c.syntax().clone()),
+            LongIdentPatChild::Token(_, t) => NodeOrToken::Token(t.clone()),
+        }
+    }
+
     /// Classify one non-trivia child of a `LongIdentPat` whose kind is `parent`.
     fn classify(parent: SyntaxKind, el: SyntaxElement) -> Result<Self, UnexpectedChild> {
         let unexpected = UnexpectedChild {
@@ -122,6 +134,14 @@ pub enum LongIdentToken {
 }
 
 impl LongIdentChild {
+    /// The child itself, as the tree holds it.
+    pub fn element(&self) -> SyntaxElement {
+        match self {
+            LongIdentChild::ActivePatName(c) => NodeOrToken::Node(c.syntax().clone()),
+            LongIdentChild::Token(_, t) => NodeOrToken::Token(t.clone()),
+        }
+    }
+
     /// Classify one non-trivia child of a `LongIdent` whose kind is `parent`.
     fn classify(parent: SyntaxKind, el: SyntaxElement) -> Result<Self, UnexpectedChild> {
         let unexpected = UnexpectedChild {
@@ -166,57 +186,67 @@ impl LongIdent {
     }
 }
 
-/// Each viewed node kind, with every child kind its view declares.
+/// Each viewed node kind, with every child its view declares: a kind, and
+/// whether the child is a token.
 #[cfg_attr(not(any(test, feature = "view-reference")), allow(dead_code))]
-pub(crate) const VIEWED: &[(SyntaxKind, &[SyntaxKind])] = &[
+pub(crate) const VIEWED: &[(SyntaxKind, &[(SyntaxKind, bool)])] = &[
     (
         SyntaxKind::LONG_IDENT_PAT,
         &[
-            SyntaxKind::LONG_IDENT,
-            SyntaxKind::ACTIVE_PAT_NAME,
-            SyntaxKind::TYPAR_DECLS,
-            SyntaxKind::NAME_PAT_PAIRS,
-            SyntaxKind::NAMED_PAT,
-            SyntaxKind::LONG_IDENT_PAT,
-            SyntaxKind::WILDCARD_PAT,
-            SyntaxKind::PAREN_PAT,
-            SyntaxKind::CONST_PAT,
-            SyntaxKind::MEASURE_LIT_PAT,
-            SyntaxKind::NULL_PAT,
-            SyntaxKind::TYPED_PAT,
-            SyntaxKind::TUPLE_PAT,
-            SyntaxKind::AS_PAT,
-            SyntaxKind::ARRAY_OR_LIST_PAT,
-            SyntaxKind::RECORD_PAT,
-            SyntaxKind::IS_INST_PAT,
-            SyntaxKind::LIST_CONS_PAT,
-            SyntaxKind::ANDS_PAT,
-            SyntaxKind::OR_PAT,
-            SyntaxKind::ATTRIB_PAT,
-            SyntaxKind::OPTIONAL_VAL_PAT,
-            SyntaxKind::QUOTE_PAT,
-            SyntaxKind::ERROR,
+            (SyntaxKind::LONG_IDENT, false),
+            (SyntaxKind::ACTIVE_PAT_NAME, false),
+            (SyntaxKind::TYPAR_DECLS, false),
+            (SyntaxKind::NAME_PAT_PAIRS, false),
+            (SyntaxKind::NAMED_PAT, false),
+            (SyntaxKind::LONG_IDENT_PAT, false),
+            (SyntaxKind::WILDCARD_PAT, false),
+            (SyntaxKind::PAREN_PAT, false),
+            (SyntaxKind::CONST_PAT, false),
+            (SyntaxKind::MEASURE_LIT_PAT, false),
+            (SyntaxKind::NULL_PAT, false),
+            (SyntaxKind::TYPED_PAT, false),
+            (SyntaxKind::TUPLE_PAT, false),
+            (SyntaxKind::AS_PAT, false),
+            (SyntaxKind::ARRAY_OR_LIST_PAT, false),
+            (SyntaxKind::RECORD_PAT, false),
+            (SyntaxKind::IS_INST_PAT, false),
+            (SyntaxKind::LIST_CONS_PAT, false),
+            (SyntaxKind::ANDS_PAT, false),
+            (SyntaxKind::OR_PAT, false),
+            (SyntaxKind::ATTRIB_PAT, false),
+            (SyntaxKind::OPTIONAL_VAL_PAT, false),
+            (SyntaxKind::QUOTE_PAT, false),
+            (SyntaxKind::ERROR, true),
         ],
     ),
     (
         SyntaxKind::LONG_IDENT,
         &[
-            SyntaxKind::ACTIVE_PAT_NAME,
-            SyntaxKind::IDENT_TOK,
-            SyntaxKind::DOT_TOK,
-            SyntaxKind::NEW_TOK,
-            SyntaxKind::LPAREN_TOK,
-            SyntaxKind::RPAREN_TOK,
+            (SyntaxKind::ACTIVE_PAT_NAME, false),
+            (SyntaxKind::IDENT_TOK, true),
+            (SyntaxKind::DOT_TOK, true),
+            (SyntaxKind::NEW_TOK, true),
+            (SyntaxKind::LPAREN_TOK, true),
+            (SyntaxKind::RPAREN_TOK, true),
         ],
     ),
 ];
 
-/// The verdict of `node`'s view, or `None` for a node no view reads.
+/// What `node`'s view yields, each child as the tree holds it, or `None`
+/// for a node no view reads.
 #[cfg_attr(not(any(test, feature = "view-reference")), allow(dead_code))]
-pub(crate) fn view_of(node: &SyntaxNode) -> Option<Result<(), UnexpectedChild>> {
+pub(crate) fn view_of(node: &SyntaxNode) -> Option<Result<Vec<SyntaxElement>, UnexpectedChild>> {
     match node.kind() {
-        SyntaxKind::LONG_IDENT_PAT => Some(LongIdentPat::cast(node.clone())?.view().map(drop)),
-        SyntaxKind::LONG_IDENT => Some(LongIdent::cast(node.clone())?.view().map(drop)),
+        SyntaxKind::LONG_IDENT_PAT => Some(
+            LongIdentPat::cast(node.clone())?
+                .view()
+                .map(|children| children.iter().map(|c| c.element()).collect()),
+        ),
+        SyntaxKind::LONG_IDENT => Some(
+            LongIdent::cast(node.clone())?
+                .view()
+                .map(|children| children.iter().map(|c| c.element()).collect()),
+        ),
         _ => None,
     }
 }

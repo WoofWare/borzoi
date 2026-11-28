@@ -71,6 +71,19 @@ fn an_active_pattern_name_beside_the_head_is_a_child() {
     );
 }
 
+/// A named-field group, which `LongIdentPat::args` skips, is a child of its
+/// own.
+#[test]
+fn a_named_field_group_is_a_child() {
+    let (pat, clean) = first::<LongIdentPat>("match x with\n| Case (a = 1) -> 0\n| _ -> 1\n");
+    assert!(clean);
+    assert_eq!(pat.args().count(), 0, "the accessor skips it");
+    assert_eq!(
+        spell_pat(&pat.view().unwrap()),
+        ["LongIdent", "NamePatPairs"]
+    );
+}
+
 /// The lex filter's zero-width layout virtual before an adjacent argument is
 /// a token child, declared and yielded like any other.
 #[test]
@@ -133,4 +146,31 @@ fn debris_the_accessors_skip_is_refused() {
         usize::from(refused.range.end()),
     );
     assert_eq!(&src[start..end], ")");
+}
+
+/// A parse stopped at the depth bound leaves an `ERROR` *node* under a
+/// `LONG_IDENT_PAT`, whose view declares an `ERROR` *token* only: the view
+/// refuses the node, and the parse-time check, which runs on such a parse
+/// too, tells the two apart.
+#[test]
+fn a_depth_limited_parse_s_error_node_is_refused() {
+    let depth = 600;
+    let src = format!(
+        "let f {}x{} = 0\n",
+        "(Some ".repeat(depth),
+        ")".repeat(depth)
+    );
+    let parsed = parse(&src);
+    assert!(!parsed.errors.is_empty(), "the depth bound stops the parse");
+    let refused: Vec<_> = parsed
+        .root
+        .descendants()
+        .filter_map(LongIdentPat::cast)
+        .filter(|l| l.syntax().children().any(|c| c.kind() == SyntaxKind::ERROR))
+        .map(|l| l.view().expect_err("an `ERROR` node is no declared child"))
+        .collect();
+    assert!(!refused.is_empty(), "some pattern holds an `ERROR` node");
+    for r in refused {
+        assert_eq!((r.kind, r.is_token), (SyntaxKind::ERROR, false));
+    }
 }

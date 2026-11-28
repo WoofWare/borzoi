@@ -798,8 +798,12 @@ fn parse_inner_stopping_at(
     // regardless.)
     if parser.depth_limit_hit {
         let span = parser.depth_limit_span.clone().unwrap_or(0..source.len());
+        let root = parser.builder.finish();
+        // The depth error stands in for the whole recovered tree.
+        #[cfg(feature = "view-reference")]
+        assert_views_agree_with_the_tree(&root, source, false);
         return Parse {
-            root: parser.builder.finish(),
+            root,
             errors: vec![
                 ParseError {
                     message: "nesting is too deep; parsing stopped here".to_string(),
@@ -960,14 +964,19 @@ fn assert_glued_stars_are_the_lexer_s(root: &SyntaxNode, glued_stars: &[Range<us
 }
 
 /// The exhaustive child views (`tools/astgen/src/views.rs`) agree with the
-/// tree. For every viewed node, its `view()` fails exactly when the node holds
-/// a non-trivia child whose kind the view does not declare, so the generated
-/// classifier and the table it was generated from say the same thing; and
-/// when the parse recovered from nothing (`clean`), no viewed node holds such
-/// a child, so the table covers what the parser emits.
+/// tree. For every viewed node, its `view()` yields exactly the node's
+/// non-trivia children, in order, when each is a child its view declares (by
+/// kind, and as a node or a token), and refuses the first one that is not;
+/// so the generated classifier and the table it was generated from say the
+/// same thing. And when the parse recovered from nothing (`clean`), no viewed
+/// node holds an undeclared child, so the table covers what the parser emits.
 #[cfg(feature = "view-reference")]
 fn assert_views_agree_with_the_tree(root: &SyntaxNode, source: &str, clean: bool) {
-    use crate::syntax::{VIEWED, view_of};
+    use crate::syntax::{NodeOrToken, SyntaxElement, VIEWED, view_of};
+    let at = |range: crate::syntax::TextRange| {
+        let (start, end) = (usize::from(range.start()), usize::from(range.end()));
+        format!("{start}..{end} ({:?})", &source[start..end])
+    };
     for node in root.descendants() {
         let Some(verdict) = view_of(&node) else {
             continue;
@@ -977,28 +986,44 @@ fn assert_views_agree_with_the_tree(root: &SyntaxNode, source: &str, clean: bool
             .find(|(kind, _)| *kind == node.kind())
             .map(|(_, declared)| *declared)
             .expect("every node with a view is in `VIEWED`");
-        let undeclared = node
+        let children: Vec<SyntaxElement> = node
             .children_with_tokens()
-            .find(|el| !el.kind().is_trivia() && !declared.contains(&el.kind()));
-        let at = |range: crate::syntax::TextRange| {
-            let (start, end) = (usize::from(range.start()), usize::from(range.end()));
-            format!("{start}..{end} ({:?})", &source[start..end])
+            .filter(|el| !el.kind().is_trivia())
+            .collect();
+        let is_declared = |el: &SyntaxElement| {
+            declared.contains(&(el.kind(), matches!(el, NodeOrToken::Token(_))))
         };
-        assert_eq!(
-            verdict.is_ok(),
-            undeclared.is_none(),
-            "the `{:?}` at {}: its view says {verdict:?}, but the first child its view does \
-             not declare is {:?}",
+        let undeclared = children.iter().find(|el| !is_declared(el));
+        let agrees = match (&verdict, undeclared) {
+            (Ok(yielded), None) => *yielded == children,
+            (Err(refused), Some(el)) => {
+                refused.parent == node.kind()
+                    && refused.kind == el.kind()
+                    && refused.is_token == matches!(el, NodeOrToken::Token(_))
+                    && refused.range == el.text_range()
+            }
+            (Ok(_), Some(_)) | (Err(_), None) => false,
+        };
+        assert!(
+            agrees,
+            "the `{:?}` at {}: its view says {verdict:?}, but its children are {:?} and the \
+             first its view does not declare is {:?}",
             node.kind(),
             at(node.text_range()),
-            undeclared.as_ref().map(|el| el.kind()),
+            children.iter().map(|el| el.kind()).collect::<Vec<_>>(),
+            undeclared,
         );
         if clean && let Some(el) = undeclared {
             panic!(
-                "a parse that recovered from nothing holds a `{:?}` child at {} under the \
+                "a parse that recovered from nothing holds a `{:?}` {} at {} under the \
                  `{:?}` at {}, which its view does not declare: declare it in \
                  `tools/astgen/src/views.rs` and regenerate",
                 el.kind(),
+                if matches!(el, NodeOrToken::Token(_)) {
+                    "token"
+                } else {
+                    "node"
+                },
                 at(el.text_range()),
                 node.kind(),
                 at(node.text_range()),
