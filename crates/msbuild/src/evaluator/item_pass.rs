@@ -4918,16 +4918,27 @@ fn resolve_string_metadata(
         // stays exact under the environment model — the pinned
         // `'$(NoSuchProp)'` cases.)
         let untrusted_gate = state.metadatum_gate_is_undecided(child, &state.entry_project_dir);
+        // Under a gate the walk cannot decide, a write that leaves the value
+        // as it stands moves nothing whichever way MSBuild takes the gate.
+        let undecided = |resolved: &ItemMetadataValue| {
+            if literal_metadata_write(child).is_some_and(|written| {
+                normalized_metadata(&written) == normalized_metadata(resolved)
+            }) {
+                resolved.clone()
+            } else {
+                ItemMetadataValue::Unknown
+            }
+        };
         match evaluate_item_condition(child, state) {
             CondGate::Run => {
                 if untrusted_gate {
-                    resolved = ItemMetadataValue::Unknown;
+                    resolved = undecided(&resolved);
                     continue;
                 }
             }
             CondGate::Skip => {
                 if untrusted_gate {
-                    resolved = ItemMetadataValue::Unknown;
+                    resolved = undecided(&resolved);
                 }
                 continue;
             }
@@ -4968,6 +4979,28 @@ fn resolve_string_metadata(
     match resolved {
         ItemMetadataValue::Known(Some(v)) if v.is_empty() => ItemMetadataValue::Known(None),
         other => other,
+    }
+}
+
+/// The value a metadatum write `child` gives, where that is known without
+/// expanding it: an empty body is the empty value, and literal text (no
+/// `$`, `@` or `%`, so no expansion or escape, and no backslash, which
+/// MSBuild's path fixup may rewrite) is itself. `None` where the walk would
+/// have to evaluate the body to know.
+fn literal_metadata_write(child: Node<'_, '_>) -> Option<ItemMetadataValue> {
+    let raw = collect_element_text(child)?;
+    if raw.trim().is_empty() {
+        return Some(ItemMetadataValue::Known(None));
+    }
+    (!raw.contains(['$', '@', '%', '\\'])).then(|| ItemMetadataValue::Known(Some(raw)))
+}
+
+/// A metadatum value with an empty value read as absent, as the caller of
+/// [`resolve_string_metadata`] reads it.
+fn normalized_metadata(value: &ItemMetadataValue) -> ItemMetadataValue {
+    match value {
+        ItemMetadataValue::Known(Some(v)) if v.is_empty() => ItemMetadataValue::Known(None),
+        other => other.clone(),
     }
 }
 

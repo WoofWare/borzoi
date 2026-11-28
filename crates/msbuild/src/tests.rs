@@ -4591,6 +4591,9 @@ fn item_definition_group_project_reference_inert_default_stays_certain() {
         r#"<ProjectReference><Targets></Targets></ProjectReference>"#,
         r#"<ProjectReference><Targets>$(NoSuchProp)</Targets></ProjectReference>"#,
         r#"<ProjectReference OutputItemType="Content" />"#,
+        // An empty write under a gate the walk cannot decide leaves the
+        // value empty whichever way MSBuild takes it.
+        r#"<ProjectReference><Targets Condition="'$(MSBuildStartupDirectory)' != ''" /></ProjectReference>"#,
     ] {
         let src = format!(
             r#"<Project>
