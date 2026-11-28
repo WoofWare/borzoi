@@ -977,6 +977,18 @@ struct State<'r> {
     /// Include + `Update` collapse — [`item_pass::finalize_package_references`]
     /// folds these into [`Self::package_references`] once every item is seen.
     captured_package_references: Vec<CapturedPackageReference>,
+    /// The item types (`Compile`, `PackageReference`) an item with a lossy
+    /// key (`item_spec::key_is_lossy`) has been included in: an `Update` of
+    /// one may match it as one version of MSBuild does and another does not
+    /// ([`item_pass`]'s `batch_commit_is_lossless`).
+    lossy_keys_included: HashSet<&'static str>,
+    /// Whether the environment sets MSBuild's `MSBUILDUSECASESENSITIVEITEMNAMES`
+    /// escape hatch to `1`, under which `compile` and `Compile` are separate
+    /// item types with separate batches. The walk keys item types without
+    /// case (#1162), so no batch is followed then, and each `Update` is
+    /// judged as `update_may_strand` judges it ([`item_pass`]'s
+    /// `feed_update_batch`).
+    case_sensitive_item_names: bool,
     /// `<PackageReference>` / `<FrameworkReference>` items — the NuGet
     /// dependency set. Separate buckets from Compile/ProjectReference: a
     /// package reference is neither a source input nor an inter-project
@@ -1021,6 +1033,10 @@ struct State<'r> {
     /// set from a root's `DefaultTargets`, or left unset because a root's
     /// could not be decided.
     default_targets_decided: bool,
+    /// MSBuild's batch of `Update`s for each item type whose `Update`s the walk
+    /// follows (`Compile`, `PackageReference`), keyed by lowercased item type
+    /// ([`item_pass`]'s `feed_update_batch`).
+    update_batches: HashMap<String, item_pass::BatchState>,
     package_versions: Vec<PackageVersion>,
     package_versions_untracked: bool,
     global_package_references: Vec<GlobalPackageReference>,
@@ -1388,9 +1404,10 @@ struct State<'r> {
     /// The two walks take one course, so they open each file at one path.
     site_file: Option<std::rc::Rc<Path>>,
     /// How many constructs the walk is inside whose gate it did not decide
-    /// from certain inputs and took: a `<PropertyGroup>`, a `<Choose>` past a
-    /// `<When>` so decided, or an import whose path it did not compute from
-    /// certain values. Import gates count in
+    /// from certain inputs and took: a `<PropertyGroup>` or `<ItemGroup>`, a
+    /// `<Choose>` past a `<When>` so decided, or an import whose path it did
+    /// not compute from certain values; in the item pass, also a replayed
+    /// group the property pass did not reach for certain. Import gates count in
     /// [`directory_build::Bookkeeping`] instead. A construct reached inside
     /// one is not reached for certain ([`rejection::reach_is_certain`]).
     reach_doubted: usize,
@@ -1886,6 +1903,10 @@ impl<'r> State<'r> {
             next_item_order: 0,
             project_references: Vec::new(),
             captured_package_references: Vec::new(),
+            lossy_keys_included: HashSet::new(),
+            case_sensitive_item_names: environment
+                .get("MSBUILDUSECASESENSITIVEITEMNAMES")
+                .is_some_and(|value| value == "1"),
             package_references: Vec::new(),
             #[cfg(any(test, feature = "test-support"))]
             package_reference_rows: Vec::new(),
@@ -1905,6 +1926,7 @@ impl<'r> State<'r> {
             package_versions: Vec::new(),
             package_versions_untracked: false,
             default_targets_decided: false,
+            update_batches: HashMap::new(),
             global_package_references: Vec::new(),
             framework_references: Vec::new(),
             evaluated_items: HashMap::new(),
@@ -2380,6 +2402,8 @@ impl<'r> State<'r> {
             // Already collapsed into `package_references` by the item pass's
             // `finalize_package_references`.
             captured_package_references: _,
+            lossy_keys_included: _,
+            case_sensitive_item_names: _,
             package_references,
             #[cfg(any(test, feature = "test-support"))]
                 package_reference_rows: _,
@@ -2396,6 +2420,7 @@ impl<'r> State<'r> {
             #[cfg(any(test, feature = "test-support"))]
                 package_cause_owners: _,
             default_targets_decided: _,
+            update_batches: _,
             package_versions,
             package_versions_untracked,
             global_package_references,

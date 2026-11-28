@@ -670,6 +670,55 @@ impl Oracle {
         )
     }
 
+    /// [`Self::items_meta`] from the evaluation a design-time host loads (the
+    /// editable `Project`, as `dotnet msbuild -getItem:` with no target
+    /// builds), not a build's.
+    #[allow(dead_code)]
+    pub fn items_meta_design_time(
+        &mut self,
+        xml: &str,
+        path: &Path,
+        item_type: &str,
+        metadata: &[&str],
+    ) -> Option<Vec<(String, HashMap<String, String>)>> {
+        let resp = self.request(&serde_json::json!({
+            "op": "itemsMeta",
+            "xml": xml,
+            "path": path.to_string_lossy().into_owned(),
+            "itemType": item_type,
+            "metadata": metadata,
+            "designTime": true,
+        }));
+        if resp["ok"].as_bool() != Some(true) {
+            return None;
+        }
+        Some(
+            resp["items"]
+                .as_array()
+                .expect("oracle ok response carries an items array")
+                .iter()
+                .map(|item| {
+                    let identity = item["identity"]
+                        .as_str()
+                        .expect("each item carries a string identity")
+                        .to_string();
+                    let metadata = item["metadata"]
+                        .as_object()
+                        .expect("each item carries a metadata object")
+                        .iter()
+                        .map(|(k, v)| {
+                            (
+                                k.clone(),
+                                v.as_str().expect("metadata values are strings").to_string(),
+                            )
+                        })
+                        .collect();
+                    (identity, metadata)
+                })
+                .collect(),
+        )
+    }
+
     /// [`Self::items_meta`], each item with its identity's escaped spelling too
     /// (MSBuild's `EvaluatedIncludeEscaped`).
     pub fn items_meta_spelled(

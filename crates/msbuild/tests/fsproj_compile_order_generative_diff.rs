@@ -54,9 +54,13 @@
 //! - in a sweep of its own (`update_batches_match_msbuild`), runs of
 //!   consecutive `Update`s whose fragments repeat across specs, each
 //!   `Update` and each group perhaps under a gate MSBuild skips, the walk
-//!   cannot decide, or the walk takes on an untrusted or inexact read: the
-//!   batch of `Update`s the walk follows across elements, and which
-//!   operations join it.
+//!   cannot decide, or the walk takes on an untrusted or inexact read, in
+//!   spellings that are and are not their own key (`:`-bearing ones, which
+//!   MSBuild keys as written, among them), under an ASCII and a non-ASCII
+//!   project directory: the batch of `Update`s the walk follows across
+//!   elements, by its keys and its operations. A commit there is held to the
+//!   design-time evaluation's order too, which batches a condition-false
+//!   `Update` a build skips.
 //!
 //! Two of the files carry characters MSBuild escapes (a space and a `;`), so
 //! escapes meet every other dimension at once (stage F4). Escape spellings in
@@ -97,7 +101,7 @@ const PROP_NAMES: [&str; 3] = ["Src", "Pair", "Order"];
 /// `CompileOrder` values: the five buckets, two in another case
 /// (`WithMetadataValue` compares ignoring case), and one naming no bucket,
 /// which the target drops from the compile list altogether.
-const ORDERS: [&str; 8] = [
+const ORDERS: [&str; 10] = [
     "CompileFirst",
     "CompileBefore",
     "",
@@ -106,6 +110,10 @@ const ORDERS: [&str; 8] = [
     "compilelast",
     "COMPILEBEFORE",
     "Middle",
+    // The SDK's order target compares the escaped value as written, so
+    // neither of these is in any bucket.
+    " CompileFirst ",
+    "Compile%46irst",
 ];
 
 /// A property value.
@@ -212,6 +220,22 @@ enum Spelling {
     /// `%41.fs`: the first character escaped. MSBuild stops batching an
     /// `Update` spec at an escaped fragment.
     Escaped,
+    /// `A.fs:v`: another item, never included, whose `:` SDK 10.0.401's
+    /// `NormalizePathForComparisonNoThrow` refuses, so it keys the spelling
+    /// as written, where SDK 8.0.428 normalises it. The walk keys none of
+    /// the three `Verbatim` spellings, and must decline past them; only
+    /// `Update` batches meet them.
+    Verbatim,
+    /// `$(MSBuildProjectDirectory)/A.fs:v`: keyed as written, which is a
+    /// full path, so it is its own key and an `Update` leaving the batch
+    /// removes it.
+    VerbatimRooted,
+    /// `A.fs:v/.`: its file name is `.`, so MSBuild normalises it, to the
+    /// key [`Spelling::VerbatimRooted`] is written as.
+    VerbatimDotted,
+    /// `ÉA.fs`: another item, never included, outside the ASCII domain the
+    /// walk keys, so the batch holds a key the walk does not know.
+    Unkeyed,
 }
 
 impl Spelling {
@@ -226,6 +250,10 @@ impl Spelling {
             Spelling::Lower => name.to_ascii_lowercase(),
             Spelling::TrailingSlash => format!("{name}/"),
             Spelling::Escaped => format!("%{:02x}{}", name.as_bytes()[0], &name[1..]),
+            Spelling::Verbatim => format!("{name}:v"),
+            Spelling::VerbatimRooted => format!("$(MSBuildProjectDirectory)/{name}:v"),
+            Spelling::VerbatimDotted => format!("{name}:v/."),
+            Spelling::Unkeyed => format!("\u{c9}{name}"),
         }
     }
 }
@@ -261,6 +289,8 @@ enum UpdateSpec {
 impl UpdateSpec {
     fn render(&self) -> String {
         match self {
+            // `;`, not an empty attribute, which MSBuild refuses.
+            UpdateSpec::Files(files) if files.is_empty() => ";".to_string(),
             UpdateSpec::Files(files) => files
                 .iter()
                 .map(|&(i, spelling)| spelling.of(i))
@@ -342,7 +372,22 @@ enum Boundary {
     Exclude(IncludeSpec, usize),
     /// `<Compile Include="@(Compile)">`: duplicates every item so far.
     SelfReference,
+    /// An item of another type that reads `@(Compile)`, written out verbatim,
+    /// between two `Update`s of one run ([`IN_RUN_READS`]).
+    Read(&'static str),
 }
+
+/// The item-list reads [`batch_runs_strategy`] places inside a run, between
+/// its `Update`s: each a single item, in the spellings the reviews found.
+const IN_RUN_READS: [&str; 7] = [
+    r#"<Other Include="x" Condition="'@(Compile)' != ''" />"#,
+    r#"<Other Include="x" Condition="'@( Compile )' != ''" />"#,
+    r#"<Other Include="x"><Meta>@<!-- -->(Compile)</Meta></Other>"#,
+    r#"<Other Include="x" Meta="&lt;![CDATA[@]]&gt;(Compile)" />"#,
+    r#"<Other Include="x"><Meta><Inner />@(Compile)</Meta></Other>"#,
+    r#"<Other Include="x"><ItemDefinitionGroup>@<!-- -->(Compile)</ItemDefinitionGroup></Other>"#,
+    r#"<Project Include="x"><ItemDefinitionGroup>@<!-- -->(Compile)</ItemDefinitionGroup></Project>"#,
+];
 
 impl ItemDecl {
     fn render(&self, out: &mut String) {
@@ -364,6 +409,7 @@ impl ItemDecl {
                         FILES[*file]
                     ),
                     Boundary::SelfReference => "<Compile Include=\"@(Compile)\" />".to_string(),
+                    Boundary::Read(read) => (*read).to_string(),
                 };
                 let _ = writeln!(out, "    {line}");
                 return;
@@ -401,6 +447,32 @@ impl ItemDecl {
     }
 }
 
+/// Where [`Group::ReadsCompile`] reads `@(Compile)`.
+#[derive(Debug, Clone, Copy)]
+enum CompileRead {
+    ItemCondition,
+    GroupCondition,
+    Spaced,
+    ThroughProperty,
+    UntakenChooseArm,
+    /// `$(At)(Compile)`, `At` holding `@`: a reference only the expansion
+    /// spells.
+    SplicedProperty,
+    /// Through a property whose body is a CDATA section.
+    CdataProperty,
+    /// A metadatum body a comment splits.
+    CommentSplitMetadatum,
+    /// A metadatum attribute MSBuild reads again as XML.
+    MetadatumAttributeAsXml,
+    /// A metadatum body of mixed content: an element, then the reference.
+    MixedContentMetadatum,
+    /// `$(AtF)(Compile)`, `AtF` written as a property function spelled with
+    /// whitespace after `$(` that returns `@`.
+    SpacedFunctionProperty,
+    /// A metadatum named `ItemDefinitionGroup`, its body split by a comment.
+    MetadatumNamedAsGroup,
+}
+
 #[derive(Debug, Clone)]
 enum Group {
     Props {
@@ -419,6 +491,9 @@ enum Group {
     /// `off`: what [`Cond::Flipped`] reads. And `Src`, written `A.fs;A.fs`
     /// under the same gate: unset to the walk.
     Flip,
+    /// An element that reads `@(Compile)`, in one of the places a read can
+    /// sit ([`CompileRead`]): MSBuild computes the list there, once.
+    ReadsCompile(CompileRead),
 }
 
 impl Group {
@@ -426,6 +501,47 @@ impl Group {
         match self {
             Group::Raw(body) => {
                 let _ = writeln!(out, "  <ItemGroup>\n{body}\n  </ItemGroup>");
+            }
+            Group::ReadsCompile(read) => {
+                let body = match read {
+                    CompileRead::ItemCondition => {
+                        r#"  <ItemGroup><Other Include="x" Condition="'@(Compile)' != ''" /></ItemGroup>"#
+                    }
+                    CompileRead::GroupCondition => {
+                        r#"  <ItemGroup Condition="'@(Compile)' != ''"><Other Include="x" /></ItemGroup>"#
+                    }
+                    CompileRead::Spaced => {
+                        r#"  <ItemGroup><Other Include="x" Condition="'@( Compile )' != ''" /></ItemGroup>"#
+                    }
+                    CompileRead::ThroughProperty => {
+                        r#"  <PropertyGroup><Read>@(Compile)</Read></PropertyGroup><ItemGroup><Other Include="x" Condition="'$(Read)' != ''" /></ItemGroup>"#
+                    }
+                    CompileRead::SplicedProperty => {
+                        r#"  <PropertyGroup><At>@</At></PropertyGroup><ItemGroup><Other Include="x" Condition="'$(At)(Compile)' != ''" /></ItemGroup>"#
+                    }
+                    CompileRead::CdataProperty => {
+                        r#"  <PropertyGroup><ReadC><![CDATA[@(Compile)]]></ReadC></PropertyGroup><ItemGroup><Other Include="x" Condition="'$(ReadC)' != ''" /></ItemGroup>"#
+                    }
+                    CompileRead::CommentSplitMetadatum => {
+                        r#"  <ItemGroup><Other Include="x"><Meta>@<!-- -->(Compile)</Meta></Other></ItemGroup>"#
+                    }
+                    CompileRead::MetadatumAttributeAsXml => {
+                        r#"  <ItemGroup><Other Include="x" Meta="&lt;![CDATA[@]]&gt;(Compile)" /></ItemGroup>"#
+                    }
+                    CompileRead::MixedContentMetadatum => {
+                        r#"  <ItemGroup><Other Include="x"><Meta><Inner />@(Compile)</Meta></Other></ItemGroup>"#
+                    }
+                    CompileRead::SpacedFunctionProperty => {
+                        r#"  <PropertyGroup><AtF>$( [MSBuild]::ConvertFromBase64(QA==))</AtF></PropertyGroup><ItemGroup><Other Include="x" Condition="'$(AtF)(Compile)' != ''" /></ItemGroup>"#
+                    }
+                    CompileRead::MetadatumNamedAsGroup => {
+                        r#"  <ItemGroup><Other Include="x"><ItemDefinitionGroup>@<!-- -->(Compile)</ItemDefinitionGroup></Other></ItemGroup>"#
+                    }
+                    CompileRead::UntakenChooseArm => {
+                        r#"  <Choose><When Condition="'É' == 'é'"><ItemGroup><Other Include="x" Condition="'@(Compile)' != ''" /></ItemGroup></When></Choose>"#
+                    }
+                };
+                let _ = writeln!(out, "{body}");
             }
             Group::Flip => {
                 let _ = writeln!(
@@ -587,9 +703,11 @@ fn update_spec_strategy() -> impl Strategy<Value = UpdateSpec> {
 fn order_value_strategy() -> impl Strategy<Value = OrderValue> {
     prop_oneof![
         // Weighted towards the buckets: the case variants and the bucketless
-        // value are single, sharp probes.
+        // value are single, sharp probes. The spellings the walk declines
+        // (padded, escaped) are the batch sweep's ([`batch_runs_strategy`]):
+        // here, with a dozen order values a case, they would decline most.
         8 => (0..5usize).prop_map(OrderValue::Lit),
-        2 => (5..ORDERS.len()).prop_map(OrderValue::Lit),
+        2 => (5..8usize).prop_map(OrderValue::Lit),
         1 => (0..PROP_NAMES.len()).prop_map(OrderValue::Prop),
     ]
 }
@@ -745,7 +863,75 @@ impl Drop for Laid {
     }
 }
 
+/// Where a case's project directory lies: `case<n>/proj`, or `caseÖ<n>/proj`,
+/// whose path .NET compares by its own case-folding table, not ASCII's.
+#[derive(Debug, Clone, Copy)]
+enum CaseDir {
+    Ascii,
+    NonAscii,
+}
+
 fn write_and_parse(fixture: &Fixture) -> (Laid, ParsedProject) {
+    write_and_parse_under(fixture, CaseDir::Ascii)
+}
+
+/// Whether the walk keys every fragment spelled under `path`, as the
+/// fixtures' rooted `$(MSBuildProjectDirectory)/…` fragments are: ASCII
+/// letters, digits and `/._-` only, so no character the walk declines to key
+/// (a `|`, a `:`, a `%`, …).
+fn keyable(path: &Path) -> bool {
+    path.to_string_lossy()
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "/._-".contains(c))
+}
+
+/// Where the cases lie: beside the shared SDKs where that path is keyable
+/// ([`keyable`]), and else under a keyable temporary directory, so that
+/// [`CaseDir::Ascii`] names a project path the walk keys whatever the
+/// checkout's path.
+fn case_root() -> &'static Path {
+    static ROOT: OnceLock<PathBuf> = OnceLock::new();
+    ROOT.get_or_init(|| {
+        let shared = &shared().root;
+        // Off Unix the walk computes no batch key, so the shared root serves
+        // whatever its path.
+        if cfg!(windows) || keyable(shared) {
+            return shared.clone();
+        }
+        // A fresh directory of this run's own, kept for the run, under a
+        // keyable parent: the system's temporary directory where that is one,
+        // else `/tmp`. Each case's directory is removed with it ([`Laid`]);
+        // the empty root outlives the run (#1185).
+        static FALLBACK: OnceLock<tempfile::TempDir> = OnceLock::new();
+        let fresh = FALLBACK.get_or_init(|| {
+            let system = std::env::temp_dir();
+            // Judged as it resolves: a keyable link to an unkeyable directory
+            // is no keyable parent.
+            let resolved = borzoi_msbuild::observed::host_fs::canonicalize(&system)
+                .unwrap_or_else(|_| system.clone());
+            let parent = if keyable(&resolved) {
+                resolved
+            } else {
+                PathBuf::from("/tmp")
+            };
+            tempfile::Builder::new()
+                .prefix("compile-order-cases-")
+                .tempdir_in(parent)
+                .expect("a fresh temporary directory")
+        });
+        let root =
+            borzoi_msbuild::observed::host_fs::canonicalize(fresh.path()).expect("canonicalize");
+        assert!(
+            keyable(&root),
+            "neither {} nor {} is keyable",
+            shared.display(),
+            root.display()
+        );
+        root
+    })
+}
+
+fn write_and_parse_under(fixture: &Fixture, dir: CaseDir) -> (Laid, ParsedProject) {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     let shared = shared();
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
@@ -759,7 +945,10 @@ fn write_and_parse(fixture: &Fixture) -> (Laid, ParsedProject) {
     std::fs::write(&props, fixture.sdk_props_xml()).expect("write Sdk.props");
     std::fs::write(&targets, fixture.sdk_targets_xml(&shared.order_target))
         .expect("write Sdk.targets");
-    let case_dir = shared.root.join(format!("case{n}"));
+    let case_dir = case_root().join(match dir {
+        CaseDir::Ascii => format!("case{n}"),
+        CaseDir::NonAscii => format!("case\u{d6}{n}"),
+    });
     std::fs::create_dir_all(case_dir.join("proj")).expect("mkdir proj");
     let proj = case_dir.join("proj/Demo.fsproj");
     let project_xml = fixture.project_xml(&sdk);
@@ -810,7 +999,18 @@ fn write_and_parse(fixture: &Fixture) -> (Laid, ParsedProject) {
 /// The property body: certain ⇒ our compile order is MSBuild's, exactly.
 /// Returns whether the case was certain (i.e. the oracle ran).
 fn check_certain_implies_exact(fixture: &Fixture) -> Result<bool, TestCaseError> {
-    let (laid, parsed) = write_and_parse(fixture);
+    check_certain_implies_exact_under(fixture, CaseDir::Ascii, false)
+}
+
+/// [`check_certain_implies_exact`] with the project laid out under `dir`,
+/// and with `design_time`, also held to the order the design-time
+/// evaluation's items give ([`design_time_compile_order`]).
+fn check_certain_implies_exact_under(
+    fixture: &Fixture,
+    dir: CaseDir,
+    design_time: bool,
+) -> Result<bool, TestCaseError> {
+    let (laid, parsed) = write_and_parse_under(fixture, dir);
     if parsed.items_uncertain {
         return Ok(false);
     }
@@ -834,11 +1034,79 @@ fn check_certain_implies_exact(fixture: &Fixture) -> Result<bool, TestCaseError>
     prop_assert_eq!(
         &ours,
         &theirs,
-        "claimed certain, but the compile order diverges.\n{}\nour diagnostics: {:#?}",
+        "claimed certain, but the compile order diverges ({:?} directory).\n{}\nour diagnostics: {:#?}",
+        dir,
         fixture.describe(),
         parsed.diagnostics
     );
+    if design_time {
+        let theirs = design_time_compile_order(&laid, &fixture.project_xml(&laid.sdk));
+        prop_assert_eq!(
+            &ours,
+            &theirs,
+            "claimed certain, but the design-time order diverges ({:?} directory).\n{}\nour diagnostics: {:#?}",
+            dir,
+            fixture.describe(),
+            parsed.diagnostics
+        );
+    }
     Ok(true)
+}
+
+/// MSBuild's unescaping of `escaped`, once: each `%` and two hex digits is
+/// the byte they name.
+fn unescape_once(escaped: &str) -> String {
+    let bytes = escaped.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let pair = bytes.get(i + 1..i + 3);
+        match pair.and_then(|pair| u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()) {
+            Some(byte) if bytes[i] == b'%' => {
+                out.push(byte);
+                i += 3;
+            }
+            _ => {
+                out.push(bytes[i]);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).expect("an unescaped path is UTF-8")
+}
+
+/// The order `FSharpSourceCodeCompileOrder` gives the items of the
+/// design-time evaluation (`dotnet msbuild -getItem:` with no target): its
+/// buckets, each by `WithMetadataValue`, which ignores case. A design-time
+/// evaluation batches an `Update` its build skips, so the two can differ.
+fn design_time_compile_order(laid: &Laid, xml: &str) -> Vec<String> {
+    let mut oracle = shared().oracle.lock().unwrap_or_else(|e| e.into_inner());
+    let mut items = |item_type: &str| {
+        oracle
+            .items_meta_design_time(xml, &laid.proj, item_type, &["CompileOrder", "FullPath"])
+            .unwrap_or_else(|| panic!("MSBuild rejected a generated project (SDK {})", laid.sdk))
+    };
+    let compile = items("Compile");
+    let before = items("CompileBefore");
+    let after = items("CompileAfter");
+    // Escaped like every metadatum the design-time op returns: a path is
+    // unescaped once, as the build's own `FullPath` is.
+    let full = |item: &(String, HashMap<String, String>)| unescape_once(&item.1["FullPath"]);
+    let bucket = |value: &str| {
+        compile
+            .iter()
+            .filter(|item| item.1["CompileOrder"].eq_ignore_ascii_case(value))
+            .map(full)
+            .collect::<Vec<_>>()
+    };
+    let mut order = bucket("CompileFirst");
+    order.extend(before.iter().map(full));
+    order.extend(bucket("CompileBefore"));
+    order.extend(bucket(""));
+    order.extend(bucket("CompileAfter"));
+    order.extend(after.iter().map(full));
+    order.extend(bucket("CompileLast"));
+    order
 }
 
 /// Driven through a manual [`TestRunner`] (rather than the `proptest!` macro)
@@ -876,13 +1144,21 @@ fn certain_compile_order_matches_msbuild() {
 /// and across consecutive specs, in spellings that are and are not their own
 /// key (`Rooted` is the full path; the rest are not), with an escaped
 /// fragment where the batch is left for certain.
-fn batch_update_spec_strategy() -> impl Strategy<Value = UpdateSpec> {
+fn batch_update_spec_strategy(dir: CaseDir) -> impl Strategy<Value = UpdateSpec> {
+    let (common, rooted) = match dir {
+        CaseDir::Ascii => (1, 3),
+        CaseDir::NonAscii => (8, 1),
+    };
     let spelling = prop_oneof![
-        4 => Just(Spelling::Bare),
-        3 => Just(Spelling::Rooted),
-        1 => Just(Spelling::DotSlash),
-        1 => Just(Spelling::Lower),
-        1 => Just(Spelling::Escaped),
+        4 * common => Just(Spelling::Bare),
+        rooted => Just(Spelling::Rooted),
+        common => Just(Spelling::DotSlash),
+        common => Just(Spelling::Lower),
+        common => Just(Spelling::Escaped),
+        common => Just(Spelling::Verbatim),
+        1 => Just(Spelling::VerbatimRooted),
+        common => Just(Spelling::VerbatimDotted),
+        1 => Just(Spelling::Unkeyed),
     ];
     prop_oneof![
         // One fragment, which cannot leave the batch past its first.
@@ -891,6 +1167,8 @@ fn batch_update_spec_strategy() -> impl Strategy<Value = UpdateSpec> {
         // `$(Src)`: `A.fs;A.fs` to MSBuild, and unset to the walk
         // ([`Group::Flip`]).
         1 => Just(UpdateSpec::Prop(0)),
+        // No fragment: it joins the batch all the same.
+        1 => Just(UpdateSpec::Files(Vec::new())),
     ]
 }
 
@@ -927,9 +1205,19 @@ fn batch_group_cond_strategy() -> impl Strategy<Value = Cond> {
 /// with each `Update`, and each run's group, perhaps under a gate
 /// ([`batch_cond_strategy`]): an operation that does not run, or may not,
 /// takes part in the batch otherwise.
-fn batch_fixture_strategy() -> impl Strategy<Value = Fixture> {
+fn batch_fixture_strategy() -> impl Strategy<Value = (Fixture, CaseDir)> {
+    prop_oneof![Just(CaseDir::Ascii), Just(CaseDir::NonAscii)]
+        .prop_flat_map(|dir| (batch_runs_strategy(dir), Just(dir)))
+}
+
+/// [`batch_fixture_strategy`]'s project under `dir`.
+fn batch_runs_strategy(dir: CaseDir) -> impl Strategy<Value = Fixture> {
     let update = prop_oneof![
-        1 => (batch_update_spec_strategy(), (0..5usize), batch_cond_strategy())
+        1 => (
+            batch_update_spec_strategy(dir),
+            prop_oneof![9 => 0..5usize, 1 => 5..ORDERS.len()],
+            batch_cond_strategy(),
+        )
             .prop_map(|(spec, order, cond)| ItemDecl::OrderUpdate {
                 spec,
                 order: OrderMeta {
@@ -938,7 +1226,7 @@ fn batch_fixture_strategy() -> impl Strategy<Value = Fixture> {
                 },
                 cond,
             }),
-        1 => (batch_update_spec_strategy(), batch_cond_strategy())
+        1 => (batch_update_spec_strategy(dir), batch_cond_strategy())
             .prop_map(|(spec, cond)| ItemDecl::Boundary(Boundary::GatedMetadataUpdate(spec, cond))),
     ];
     let include = (0..3usize).prop_map(|file| ItemDecl::Include {
@@ -957,27 +1245,57 @@ fn batch_fixture_strategy() -> impl Strategy<Value = Fixture> {
             cond: Cond::None,
         })
     });
+    // A read between two `Update`s of the run, where a restart can move the
+    // order the run's last `Include`s show.
+    let in_run_read = proptest::option::weighted(
+        0.25,
+        (proptest::sample::select(IN_RUN_READS.to_vec()), 1..5usize),
+    );
     let run = (
         proptest::collection::vec(include, 0..2),
         proptest::collection::vec(update, 2..6),
+        in_run_read,
         after,
     )
-        .prop_map(|(before, updates, after)| {
+        .prop_map(|(before, mut updates, read, after)| {
+            if let Some((read, at)) = read {
+                let at = at.min(updates.len() - 1);
+                updates.insert(at, ItemDecl::Boundary(Boundary::Read(read)));
+            }
             before
                 .into_iter()
                 .chain(updates)
                 .chain(after)
                 .collect::<Vec<_>>()
         });
-    proptest::collection::vec((run, batch_group_cond_strategy()), 1..4).prop_map(|runs| Fixture {
-        sdk_props: Vec::new(),
-        project: std::iter::once(Group::Flip)
-            .chain(
-                runs.into_iter()
-                    .map(|(items, cond)| Group::Items { cond, items }),
-            )
-            .collect(),
-        sdk_targets: Vec::new(),
+    let read = proptest::option::weighted(
+        0.2,
+        prop_oneof![
+            Just(CompileRead::ItemCondition),
+            Just(CompileRead::GroupCondition),
+            Just(CompileRead::Spaced),
+            Just(CompileRead::ThroughProperty),
+            Just(CompileRead::UntakenChooseArm),
+            Just(CompileRead::SplicedProperty),
+            Just(CompileRead::CdataProperty),
+            Just(CompileRead::CommentSplitMetadatum),
+            Just(CompileRead::MetadatumAttributeAsXml),
+            Just(CompileRead::MixedContentMetadatum),
+            Just(CompileRead::SpacedFunctionProperty),
+            Just(CompileRead::MetadatumNamedAsGroup),
+        ],
+    );
+    proptest::collection::vec((run, batch_group_cond_strategy(), read), 1..4).prop_map(|runs| {
+        let mut project = vec![Group::Flip];
+        for (items, cond, read) in runs {
+            project.push(Group::Items { cond, items });
+            project.extend(read.map(Group::ReadsCompile));
+        }
+        Fixture {
+            sdk_props: Vec::new(),
+            project,
+            sdk_targets: Vec::new(),
+        }
     })
 }
 
@@ -998,8 +1316,8 @@ fn update_batches_match_msbuild() {
     });
     let oracle_hits = std::cell::Cell::new(0u32);
     runner
-        .run(&batch_fixture_strategy(), |fixture| {
-            if check_certain_implies_exact(&fixture)? {
+        .run(&batch_fixture_strategy(), |(fixture, dir)| {
+            if check_certain_implies_exact_under(&fixture, dir, true)? {
                 oracle_hits.set(oracle_hits.get() + 1);
             }
             Ok(())
@@ -1015,39 +1333,61 @@ fn update_batches_match_msbuild() {
     );
 }
 
+/// One over the commit rate [`batch_cases_often_commit`] holds its fixed
+/// sample to, under each kind of directory: 5 of 202 commit under an ASCII
+/// directory and 15 of 198 under the other. The corners
+/// ([`corners_decline_or_match_msbuild`]) are the points that must commit.
+const FLOOR_DENOMINATOR: u32 = 50;
+
 /// [`update_batches_match_msbuild`] skips the cases the walk declines, so on
 /// its own it could rot into grading (almost) nothing. Sample the strategy
-/// deterministically, our walk only, and require that a fortieth commit to
-/// an order of two or more distinct files, one a wrong batch could get
-/// wrong (18 of the 400 do: an `Update` of two or more fragments, or the
-/// unset `$(Src)`, declines the rest). The sample is fixed, so the count moves only with the
-/// walk or the generator.
+/// deterministically, our walk only, and require that a fiftieth commit
+/// to an order of two or more distinct files, one a wrong batch could get
+/// wrong, under each kind of directory (strands, gated operations whose
+/// outcomes differ, item-list reads that may restart the batch, keys the walk
+/// does not compute and the unset `$(Src)` decline the rest). The sample is
+/// fixed, so the count moves only with the walk or the generator. The floor
+/// is Unix's: off Unix a multi-fragment `Update` declines
+/// (`item_spec::in_domain`).
 #[test]
+#[cfg(not(windows))]
 fn batch_cases_often_commit() {
     let mut runner = TestRunner::deterministic();
     let strategy = batch_fixture_strategy();
     let total = 400;
-    let mut observable = 0;
+    let mut observable = HashMap::<&'static str, (u32, u32)>::new();
     for _ in 0..total {
-        let fixture = strategy
+        let (fixture, dir) = strategy
             .new_tree(&mut runner)
             .expect("generate fixture")
             .current();
-        let (_laid, parsed) = write_and_parse(&fixture);
+        let (_laid, parsed) = write_and_parse_under(&fixture, dir);
+        let name = match dir {
+            CaseDir::Ascii => "ascii",
+            CaseDir::NonAscii => "non-ascii",
+        };
         let distinct: std::collections::HashSet<String> = parsed
             .items
             .iter()
             .map(|item| full_path(&item.include))
             .collect();
-        if !parsed.items_uncertain && distinct.len() >= 2 {
-            observable += 1;
-        }
+        let (seen, committed) = observable.entry(name).or_default();
+        *seen += 1;
+        *committed += u32::from(!parsed.items_uncertain && distinct.len() >= 2);
     }
-    eprintln!("{observable}/{total} batch cases committed to an order of distinct files");
-    assert!(
-        observable * 40 >= total,
-        "only {observable}/{total} batch cases committed to an order of distinct files"
-    );
+    eprintln!("batch cases (seen, committed to an order of distinct files): {observable:?}");
+    for name in ["ascii", "non-ascii"] {
+        let (seen, committed) = observable.get(name).copied().unwrap_or_default();
+        assert!(
+            seen > 0,
+            "the sample laid out no case under the {name} directory"
+        );
+        assert!(
+            committed * FLOOR_DENOMINATOR >= seen,
+            "only {committed}/{seen} batch cases under the {name} directory committed to an \
+             order of distinct files"
+        );
+    }
 }
 
 /// The property above skips uncertain cases, so on its own it could rot into
@@ -1071,11 +1411,11 @@ fn most_generated_cases_are_certain() {
         }
     }
     eprintln!("{certain}/{total} generated cases were certain");
-    // Every `Update` of two or more fragments declines (`update_may_strand`
-    // in the evaluator), which costs this sample 23 cases: 97 of the 200 are
-    // certain.
+    // Off Unix a multi-fragment `Update` declines (`item_spec::in_domain`), so
+    // there the floor is the one the walk held before it followed the batch.
+    let floor = if cfg!(windows) { 9 } else { 11 };
     assert!(
-        certain * 20 >= total * 9,
+        certain * 20 >= total * floor,
         "only {certain}/{total} generated cases were certain; the differential \
          property is barely exercising the oracle — rebalance the generator \
          weights or investigate an over-degrading evaluator"
@@ -1203,6 +1543,59 @@ fn full_path(include: &Path) -> String {
 /// skipped. The project directory is `case<n>/proj`, and the body follows
 /// [`Group::Flip`]'s property group.
 const CORNERS: &[(&str, bool)] = &[
+    // A batch holding a key the walk does not compute is pending; an
+    // `Update` with an expansion character anywhere leaves it, at that
+    // fragment or before, and flushes it: the order after is followed.
+    (
+        r#"    <Compile Update="Ü.fs" Visible="false" />
+    <Compile Update="A.fs;*.fs" Visible="false" />
+    <Compile Include="C.fs;A.fs;B.fs" />
+    <Compile Update="A.fs;B.fs" CompileOrder="CompileFirst" />"#,
+        true,
+    ),
+    // A condition-false `Update` with no fragment joins the design-time batch
+    // and leaves it pending, so `A.fs` that follows flushes the stranded
+    // `A.fs;A.fs`, and `A.fs;B.fs` strands `A.fs` after `B.fs;B.fs`: the
+    // walk declines (codex found MSBuild puts `A.fs` first).
+    (
+        r#"    <Compile Update="A.fs;A.fs" Link="a" Condition="false" />
+    <Compile Update=";" Link="x" Condition="false" />
+    <Compile Update="A.fs" Link="b" />
+    <Compile Update="B.fs;B.fs" Link="c" Condition="false" />
+    <Compile Update="A.fs;B.fs" CompileOrder="CompileFirst" />
+    <Compile Include="C.fs;A.fs;B.fs" />"#,
+        false,
+    ),
+    // An `Update` whose spec holds no fragment joins nothing; the `Include`
+    // after it leaves the batch empty, and the next `Update` is followed.
+    (
+        r#"    <Compile Update=";" Link="x" />
+    <Compile Include="C.fs;A.fs;B.fs" />
+    <Compile Update="A.fs;B.fs" CompileOrder="CompileFirst" />"#,
+        true,
+    ),
+    // An `Update` with no fragment joins the batch all the same, leaving it
+    // pending: here the pending `A.fs` batch stays pending through it.
+    (
+        r#"    <Compile Update="A.fs" Link="a" />
+    <Compile Update=";" Link="x" />
+    <Compile Update="B.fs;A.fs" CompileOrder="CompileFirst" />
+    <Compile Include="A.fs;B.fs" />"#,
+        true,
+    ),
+    // The SDK's order target buckets the escaped `CompileOrder` as written:
+    // a padded or an escaped `CompileFirst` is in no bucket, and its items
+    // are not compiled. The walk declines both.
+    (
+        r#"    <Compile Include="C.fs;A.fs;B.fs" />
+    <Compile Update="A.fs;B.fs" CompileOrder=" CompileFirst " />"#,
+        false,
+    ),
+    (
+        r#"    <Compile Include="C.fs;A.fs;B.fs" />
+    <Compile Update="A.fs;B.fs" CompileOrder="Compile%46irst" />"#,
+        false,
+    ),
     // Every case variant of the folded name moves.
     (
         r#"    <Compile Include="a.fs" />
@@ -1278,14 +1671,13 @@ const CORNERS: &[(&str, bool)] = &[
         true,
     ),
     // A fragment written as its own full path is removed by that text, so
-    // repeating it strands nothing; but only its key says so, and the walk
-    // follows no batch keys: declined.
+    // repeating it strands nothing.
     (
         r#"    <Compile Include="A.fs" />
     <Compile Update="$(MSBuildProjectDirectory)/A.fs;$(MSBuildProjectDirectory)/A.fs" CompileOrder="CompileLast" />
     <Compile Include="A.fs" />
     <Compile Include="B.fs" />"#,
-        false,
+        true,
     ),
     // `..` at the root stays at the root.
     (
@@ -1373,15 +1765,16 @@ const CORNERS: &[(&str, bool)] = &[
         false,
     ),
     // An undecided group whose only `Update` is certainly skipped changes
-    // nothing, whichever way MSBuild takes it; but `B.fs;A.fs` may leave the
-    // batch past its first fragment, which the walk does not follow.
+    // nothing, whichever way MSBuild takes it: a build skips `Z.fs`, a
+    // design-time evaluation batches it, and `B.fs;A.fs` strands nothing
+    // either way.
     (
         r#"  </ItemGroup>
   <ItemGroup Condition="'$(Flip)' == 'off'"><Compile Update="Z.fs" Visible="false" Condition="'$(Switch)' == 'false'" /></ItemGroup>
   <ItemGroup>
     <Compile Update="B.fs;A.fs" CompileOrder="CompileFirst" />
     <Compile Include="A.fs;B.fs" />"#,
-        false,
+        true,
     ),
     // MSBuild removes the rooted `A.fs` from the batch by its spelling, so
     // `A.fs;B.fs;B.fs` joins afresh and strands `B.fs`, and `C.fs;B.fs`
@@ -1408,6 +1801,16 @@ const CORNERS: &[(&str, bool)] = &[
     ),
 ];
 
+/// Whether a corner holds an `Update` whose spec may have several fragments:
+/// a `;`, or a value the walk expands. Only those turn on the batch keys the
+/// walk computes on Unix alone.
+fn needs_batch_keys(body: &str) -> bool {
+    body.split("Update=\"")
+        .skip(1)
+        .filter_map(|rest| rest.split('"').next())
+        .any(|spec| spec.contains(';') || spec.contains("$("))
+}
+
 #[test]
 fn corners_decline_or_match_msbuild() {
     for (index, &(body, certain)) in CORNERS.iter().enumerate() {
@@ -1416,12 +1819,74 @@ fn corners_decline_or_match_msbuild() {
             project: vec![Group::Flip, Group::Raw(body)],
             sdk_targets: Vec::new(),
         };
-        let reached =
-            check_certain_implies_exact(&fixture).unwrap_or_else(|e| panic!("corner {index}: {e}"));
-        assert_eq!(
-            reached, certain,
-            "corner {index} certain={reached}, recorded {certain}:\n{body}"
+        // Held to design-time evaluation too: its batch takes in a
+        // condition-false `Update`, where a build skips it.
+        let reached = check_certain_implies_exact_under(&fixture, CaseDir::Ascii, true)
+            .unwrap_or_else(|e| panic!("corner {index}: {e}"));
+        if cfg!(windows) && needs_batch_keys(body) {
+            // Off Unix a multi-fragment `Update` declines (`item_spec::in_domain`),
+            // so a corner recorded certain that holds one may decline there.
+            // One that commits was held to MSBuild all the same.
+            assert!(
+                !reached || certain,
+                "corner {index} certain={reached}, recorded {certain}:\n{body}"
+            );
+        } else {
+            assert_eq!(
+                reached, certain,
+                "corner {index} certain={reached}, recorded {certain}:\n{body}"
+            );
+        }
+    }
+}
+
+/// An item-list read between two `Update`s, in each spelling the batch sweep
+/// places there ([`IN_RUN_READS`]), restarts the batch in design-time
+/// evaluation (all but one, SDK 10.0.401), and then `A.fs;B.fs` strands
+/// `A.fs` with `CompileFirst`. A
+/// read in another item's metadata happens only when that item's list is
+/// computed, so a later item reads both lists to force it. Design-time
+/// MSBuild's order is pinned per spelling, apart from the walk, which must
+/// decline every one.
+#[test]
+fn an_item_list_read_between_updates_restarts_the_batch() {
+    for read in IN_RUN_READS {
+        let body: &'static str = Box::leak(
+            format!(
+                r#"    <Compile Update="A.fs;A.fs" Link="a" Condition="false" />
+    <Compile Update="A.fs" Link="b" />
+    {read}
+    <Compile Update="B.fs;B.fs" Link="c" Condition="false" />
+    <Compile Update="A.fs;B.fs" CompileOrder="CompileFirst" />
+    <Compile Include="C.fs;A.fs;B.fs" />
+    <Forced Include="y" Condition="'@(Other);@(Project)' != ''" />"#
+            )
+            .into_boxed_str(),
         );
+        let fixture = Fixture {
+            sdk_props: Vec::new(),
+            project: vec![Group::Flip, Group::Raw(body)],
+            sdk_targets: Vec::new(),
+        };
+        let (laid, parsed) = write_and_parse_under(&fixture, CaseDir::Ascii);
+        let theirs: Vec<String> = design_time_compile_order(&laid, &fixture.project_xml(&laid.sdk))
+            .iter()
+            .map(|path| {
+                Path::new(path)
+                    .file_name()
+                    .map_or_else(|| path.clone(), |name| name.to_string_lossy().into_owned())
+            })
+            .collect();
+        // MSBuild does not restart the batch through a metadatum of an item
+        // named `Project` here; the walk declines it all the same.
+        let restarts = !read.starts_with("<Project ");
+        let expected = if restarts {
+            ["A.fs", "C.fs", "B.fs"]
+        } else {
+            ["C.fs", "A.fs", "B.fs"]
+        };
+        assert_eq!(theirs, expected, "MSBuild, read {read}");
+        assert!(parsed.items_uncertain, "read {read} committed:\n{body}");
     }
 }
 

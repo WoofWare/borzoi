@@ -891,6 +891,13 @@ fn message(kind: &DiagnosticKind, discovery_failure: Option<&DiscoveryError>) ->
                  not claimed"
             )
         }
+        DiagnosticKind::MayStrandUpdatePrefix { update, fragment } => {
+            format!(
+                "Update=\"{update}\" may stop MSBuild batching at `{fragment}` (a design-time \
+                 evaluation and a build can differ), which re-applies the fragments before it \
+                 to later Includes (an MSBuild bug) — compile order not claimed"
+            )
+        }
         DiagnosticKind::UnmodelledUpdateBatch { update } => {
             format!(
                 "Update=\"{update}\" may stop MSBuild batching past its first fragment, which \

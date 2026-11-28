@@ -352,6 +352,7 @@ fn compile_update_compile_order_declines_non_ascii_case_folding() {
 /// non-ASCII project directory (where every key has a non-ASCII unit), finish
 /// at once. A quadratic matcher takes seconds here even optimised.
 #[test]
+#[cfg(not(windows))]
 fn compile_update_compile_order_scales_with_items_and_targets() {
     const N: usize = 4000;
     let mut src = String::from("<Project>\n  <ItemGroup>\n");
@@ -383,7 +384,7 @@ fn compile_update_compile_order_scales_with_items_and_targets() {
         (names[N / 2], names[N - 1]),
         ("F0.fs", &*format!("F{}.fs", N - 2))
     );
-    assert_only_the_batch_declines(&p);
+    assert!(!p.items_uncertain, "{:?}", p.diagnostics);
     assert!(
         elapsed < std::time::Duration::from_secs(20),
         "{N} items against {N} targets took {elapsed:?}"
@@ -471,6 +472,7 @@ fn compile_update_compile_order_declines_an_unnormalised_spelling() {
 /// fragment, not a comparison with every earlier one: a spec of many distinct
 /// targets, against a single item, finishes at once.
 #[test]
+#[cfg(not(windows))]
 fn compile_update_compile_order_scales_with_a_long_update_spec() {
     const N: usize = 20_000;
     let targets: Vec<String> = (0..N).map(|i| format!("T{i}.fs")).collect();
@@ -488,7 +490,7 @@ fn compile_update_compile_order_scales_with_a_long_update_spec() {
     let p = parse(&src);
     let elapsed = start.elapsed();
     assert_eq!(file_names(&p.items), ["T7.fs", "A.fs"]);
-    assert_only_the_batch_declines(&p);
+    assert!(!p.items_uncertain, "{:?}", p.diagnostics);
     assert!(
         elapsed < std::time::Duration::from_secs(20),
         "a {N}-target Update took {elapsed:?}"
@@ -501,6 +503,7 @@ fn compile_update_compile_order_scales_with_a_long_update_spec() {
 /// `fsproj_compile_order_generative_diff` pins it). The evaluator declines
 /// exactly where something is stranded.
 #[test]
+#[cfg(not(windows))]
 fn compile_update_compile_order_declines_a_stranded_prefix() {
     let stranded = |spec: &str| {
         let src = format!(
@@ -519,9 +522,7 @@ fn compile_update_compile_order_declines_a_stranded_prefix() {
                 DiagnosticKind::StrandedUpdatePrefix { fragment, .. } if !fragment.is_empty()
             )
         });
-        // Every spec here but the escaped-first one may also leave the batch
-        // of `Update`s past its first fragment, which declines on its own.
-        assert!(!flagged || p.items_uncertain, "{spec}: {:?}", p.diagnostics);
+        assert_eq!(flagged, p.items_uncertain, "{spec}: {:?}", p.diagnostics);
         flagged
     };
     // A repeat, under any spelling, after the first fragment.
@@ -566,11 +567,11 @@ fn compile_update_strand_without_a_pending_batch_declines() {
 /// An `Update` whose own walk names the fragment it strands at is declined
 /// once, by that name.
 #[test]
+#[cfg(not(windows))]
 fn a_strand_the_walk_names_is_declined_once() {
     let p = parse(
         r#"<Project><ItemGroup>
     <Compile Include="A.fs" />
-    <Compile Update="Z.fs" Link="z" />
     <Compile Update="A.fs;A.fs" CompileOrder="CompileLast" />
   </ItemGroup></Project>"#,
     );
@@ -585,37 +586,41 @@ fn a_strand_the_walk_names_is_declined_once() {
     );
 }
 
-/// The walk computed `p`'s Compile order, and declines it only because an
-/// `Update` may leave MSBuild's batch of `Update`s past its first fragment.
-fn assert_only_the_batch_declines(p: &ParsedProject) {
-    assert!(p.items_uncertain);
-    assert!(
-        p.diagnostics
-            .iter()
-            .all(|d| matches!(d.kind, DiagnosticKind::UnmodelledUpdateBatch { .. })),
-        "{:?}",
-        p.diagnostics
-    );
-}
-
-/// An `Update` that may leave MSBuild's batch past its first fragment
-/// declines its list, whatever the keys and whether it runs: even two
-/// distinct names may collide with a key an earlier `Update` left.
+/// Once the walk does not know the batch, an `Update` that may leave it past
+/// its first fragment declines its list: after `Ü.fs;Ü.fs`, whose keys the
+/// walk does not compute, even two distinct names may collide with a key the
+/// batch holds. Where the walk knows the batch, they do not.
 #[test]
-fn a_multi_fragment_update_declines_its_list() {
+#[cfg(not(windows))]
+fn a_multi_fragment_update_past_an_unknown_batch_declines_its_list() {
     let p = parse(
         r#"<Project><ItemGroup>
+    <Compile Include="Z.fs" />
+    <PackageReference Include="Z" Version="1.0" />
+    <Compile Update="&#xDC;.fs;&#xDC;.fs" Link="u" />
+    <PackageReference Update="&#xDC;;&#xDC;" VersionOverride="1.0" />
     <Compile Update="A.fs;B.fs" Link="x" />
     <PackageReference Update="Delta;Gamma" VersionOverride="1.0" />
     <Compile Include="A.fs" />
     <PackageReference Include="Gamma" Version="1.0" />
   </ItemGroup></Project>"#,
     );
-    assert_only_the_batch_declines(&p);
+    assert!(p.items_uncertain);
+    assert!(p.diagnostics.iter().any(|d| matches!(
+        &d.kind,
+        DiagnosticKind::UnmodelledUpdateBatch { update } if update == "A.fs;B.fs"
+    )));
     assert!(p.package_reference_uncertainties.iter().any(|c| matches!(
         &c.kind,
         PackageReferenceUncertaintyCauseKind::UnmodelledUpdateBatch { update } if update == "Delta;Gamma"
     )));
+    let p = parse(
+        r#"<Project><ItemGroup>
+    <Compile Update="A.fs;B.fs" Link="x" />
+    <Compile Include="A.fs" />
+  </ItemGroup></Project>"#,
+    );
+    assert!(!p.items_uncertain, "{:?}", p.diagnostics);
 }
 
 /// No `Update` can strand where every `Update` leaves the batch at its first
@@ -676,7 +681,9 @@ fn an_update_that_may_strand_declines_however_it_is_gated() {
         assert!(
             p.diagnostics.iter().any(|d| matches!(
                 &d.kind,
-                DiagnosticKind::UnmodelledUpdateBatch { update } if update != "B.fs"
+                DiagnosticKind::UnmodelledUpdateBatch { update }
+                | DiagnosticKind::StrandedUpdatePrefix { update, .. }
+                | DiagnosticKind::MayStrandUpdatePrefix { update, .. } if update != "B.fs"
             )),
             "{case}: {:?}",
             p.diagnostics
@@ -693,7 +700,9 @@ fn an_update_that_may_strand_declines_however_it_is_gated() {
     assert!(
         p.diagnostics.iter().any(|d| matches!(
             &d.kind,
-            DiagnosticKind::UnmodelledUpdateBatch { update } if update == "B.fs;B.fs"
+            DiagnosticKind::UnmodelledUpdateBatch { update }
+            | DiagnosticKind::StrandedUpdatePrefix { update, .. }
+            | DiagnosticKind::MayStrandUpdatePrefix { update, .. } if update == "B.fs;B.fs"
         )),
         "{:?}",
         p.diagnostics
@@ -708,7 +717,10 @@ fn an_update_that_may_strand_declines_however_it_is_gated() {
     assert!(
         p.package_reference_uncertainties.iter().any(|c| matches!(
             &c.kind,
-            PackageReferenceUncertaintyCauseKind::UnmodelledUpdateBatch { update } if update == "Beta;Beta"
+            PackageReferenceUncertaintyCauseKind::UnmodelledUpdateBatch { update }
+            | PackageReferenceUncertaintyCauseKind::StrandedUpdate { update, .. }
+            | PackageReferenceUncertaintyCauseKind::MayStrandUpdate { update, .. }
+                if update == "Beta;Beta"
         )),
         "{:?}",
         p.package_reference_uncertainties
@@ -802,6 +814,1846 @@ fn a_package_update_that_may_strand_declines_only_its_list() {
 /// untrusted read.
 const UNTRUSTED_F: &str =
     r#"<PropertyGroup><F>on</F><F Condition="'É' == 'é'">off</F></PropertyGroup>"#;
+
+/// MSBuild keys every fragment of a batched `Update`, so one whose key the
+/// walk cannot compute (`Ü.fs`, outside the ASCII domain) joins the batch
+/// like any other, and the fragments after it may join and strand too: here
+/// `./A.fs` is stranded, and the next `Update` collides on it, stranding
+/// `B.fs` with `CompileFirst`. No compile order is certain.
+#[test]
+fn a_fragment_without_a_key_does_not_end_the_batch() {
+    let src = r#"<Project>
+  <ItemGroup>
+    <Compile Update="&#xDC;.fs;./A.fs;S%3bq.fs" Visible="false" />
+    <Compile Update="B.fs;A.fs">
+      <CompileOrder>CompileFirst</CompileOrder>
+    </Compile>
+    <Compile Include="B.fs;C.fs" />
+    <Compile Update="B.fs" CompileOrder="CompileAfter" />
+  </ItemGroup>
+</Project>"#;
+    let p = parse(src);
+    assert!(p.items_uncertain, "{:?}", p.diagnostics);
+    // Within one spec: `Ü` and `Alpha` join, the second `Alpha` collides,
+    // and the first stays stranded with its override until `Alpha` is
+    // included. MSBuild gives it `2.0`.
+    let p = parse(
+        r#"<Project><ItemGroup>
+    <PackageReference Update="&#xDC;;Alpha;Alpha" VersionOverride="2.0" />
+    <PackageReference Include="Alpha" Version="1.0" />
+  </ItemGroup></Project>"#,
+    );
+    let alpha = p.package_references.iter().find(|r| r.id == "Alpha");
+    assert!(
+        p.package_references_uncertain
+            || alpha.is_some_and(|r| r.version_override.as_deref() == Some("2.0")),
+        "{:?}",
+        p.package_references
+    );
+}
+
+/// A batch that may hold a key the walk cannot compute may collide with any
+/// later fragment: after a lone `Ü.fs`, the next `Update` may strand
+/// `B.fs`, so no compile order is certain.
+#[test]
+fn a_batch_holding_an_unknown_key_may_strand_a_later_update() {
+    let src = r#"<Project>
+  <ItemGroup>
+    <Compile Update="&#xDC;.fs" Visible="false" />
+    <Compile Update="B.fs;&#xDC;.fs" CompileOrder="CompileFirst" />
+    <Compile Include="C.fs;B.fs" />
+  </ItemGroup>
+</Project>"#;
+    let p = parse(src);
+    assert!(p.items_uncertain, "{:?}", p.diagnostics);
+}
+
+/// An `Update` the walk does not certainly run may or may not join the
+/// batch. MSBuild skips the false `x:v;./x:v`, so `A.fs;A.fs` leaves with no
+/// batch pending, stranding `A.fs`, and `B.fs;A.fs` collides on it, stranding
+/// `B.fs` with `CompileFirst` until `B.fs` is included: MSBuild compiles
+/// `B.fs` first. Taken as joined, the false `Update` would leave a batch
+/// pending, and the walk would see no strand.
+#[test]
+fn an_update_the_walk_may_not_run_leaves_the_batch_unknown() {
+    let p = parse(
+        r#"<Project><ItemGroup>
+    <Compile Update="x:v;./x:v" Visible="false" Condition="'$(NeverSet)' == 'true'" />
+    <Compile Update="A.fs;A.fs" Link="x" />
+    <Compile Update="B.fs;A.fs" CompileOrder="CompileFirst" />
+    <Compile Include="C.fs;B.fs" />
+  </ItemGroup></Project>"#,
+    );
+    assert!(
+        p.items_uncertain || file_names(&p.items) == ["B.fs", "C.fs"],
+        "{:?}",
+        file_names(&p.items)
+    );
+}
+
+/// A lone fragment entering a batch known to be empty joins it, whatever
+/// its key, so the next operation flushes the batch: `Résumé.fs` leaves
+/// nothing behind, and the order is certain. MSBuild's final flush gives
+/// `B.fs` `CompileFirst`.
+#[test]
+#[cfg(not(windows))]
+fn a_lone_fragment_without_a_key_is_flushed_by_the_next_operation() {
+    let p = parse(
+        r#"<Project><ItemGroup>
+    <Compile Update="R&#xE9;sum&#xE9;.fs" Link="R&#xE9;sum&#xE9;.fs" />
+    <Compile Include="C.fs;B.fs" />
+    <Compile Update="A.fs;B.fs" CompileOrder="CompileFirst" />
+  </ItemGroup></Project>"#,
+    );
+    assert!(!p.items_uncertain, "{:?}", p.diagnostics);
+    assert_eq!(file_names(&p.items), ["B.fs", "C.fs"]);
+}
+
+/// Whether `Remove` finds `src\A:B.fsproj` turns on MSBuild's version (SDK
+/// 10.0.401 compares it as written, after collapsing its `\` only when the
+/// build's working directory holds `src`; SDK 8.0.428 normalises it), so the
+/// walk gives it no key and the list is not certain.
+#[test]
+#[cfg(not(windows))]
+fn a_verbatim_spelling_with_a_backslash_has_no_key() {
+    let p = parse(
+        r#"<Project><ItemGroup>
+    <ProjectReference Include="src\A:B.fsproj" />
+    <ProjectReference Remove="src/A:B.fsproj" />
+  </ItemGroup></Project>"#,
+    );
+    assert!(p.project_references_uncertain, "{:?}", p.project_references);
+}
+
+/// An `Update` the walk cannot expand may leave any key in the batch, so
+/// any fragment of the next `Update` may collide with one: `Beta.fs;Alpha`
+/// may strand `Beta.fs` with its `CompileOrder`. No compile order is
+/// certain.
+#[test]
+fn an_update_the_walk_does_not_know_may_strand_a_later_one() {
+    let p = parse(
+        r#"<Project><PropertyGroup><P>$([System.Guid]::NewGuid())</P></PropertyGroup><ItemGroup>
+    <Compile Update="$(P)" Link="x" />
+    <Compile Update="Beta.fs;Alpha" CompileOrder="CompileFirst" />
+    <Compile Include="First.fs" />
+    <Compile Include="Beta.fs" />
+  </ItemGroup></Project>"#,
+    );
+    assert!(p.items_uncertain, "{:#?}", p.items);
+}
+
+/// MSBuild's versions key a spelling with a `:` in its file name
+/// differently. SDK 10.0.401 keys `A.fs:x` as written, so `A.fs:x` and
+/// `./A.fs:x` both join the batch and the `Update` leaves only at the second
+/// `B.fs`, stranding the first with its `CompileFirst`; SDK 8.0.428
+/// normalises both to one key, and the `Update` leaves at `./A.fs:x`. The
+/// walk keys neither, and declines.
+#[test]
+fn a_spelling_msbuild_versions_key_differently_declines() {
+    let src = r#"<Project>
+  <ItemGroup>
+    <Compile Update="A.fs:x;./A.fs:x;B.fs;B.fs" Visible="false" CompileOrder="CompileFirst" />
+    <Compile Include="C.fs;B.fs" />
+  </ItemGroup>
+</Project>"#;
+    let p = parse(src);
+    assert!(p.items_uncertain, "{:?}", file_names(&p.items));
+}
+
+/// An `Update` that leaves the batch removes its earlier fragments by their
+/// written text, so one already spelled as its key leaves the batch: the
+/// first `Update` strands nothing, `Abs` joins the second afresh, which then
+/// strands `Beta`, and the third collides on it, stranding `Alpha` with its
+/// `CompileOrder` until `Alpha` is included. MSBuild compiles `Alpha` first.
+#[test]
+#[cfg(not(windows))]
+fn a_fragment_spelled_as_its_key_leaves_the_batch_with_its_update() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    let abs = root.join("Abs.fs");
+    let source = format!(
+        r#"<Project><PropertyGroup><Abs>{}</Abs></PropertyGroup><ItemGroup>
+    <Compile Update="$(Abs);$(Abs)" Link="x" />
+    <Compile Update="$(Abs);Beta.fs;Beta.fs" Link="y" />
+    <Compile Update="Alpha.fs;Beta.fs" CompileOrder="CompileFirst" />
+    <Compile Include="First.fs" />
+    <Compile Include="Alpha.fs" />
+  </ItemGroup></Project>"#,
+        abs.display()
+    );
+    let p = crate::parse_fsproj_with_imports(
+        &crate::ProjectFile::buffer(&root.join("Demo.fsproj"), &source).unwrap(),
+        &HashMap::new(),
+        &HashMap::new(),
+        None,
+        None,
+    )
+    .unwrap();
+    let names: Vec<_> = p.items.iter().map(|i| i.include.clone()).collect();
+    assert!(
+        p.items_uncertain || names == [root.join("Alpha.fs"), root.join("First.fs")],
+        "{names:?}"
+    );
+}
+
+/// Under a project directory that is not ASCII, relative fragments are
+/// still keyed against each other: `Alpha;Alpha` strands `Alpha`, and the
+/// next `Update` collides on it, stranding `Beta.fs` with `CompileFirst`
+/// until `Beta.fs` is included. MSBuild compiles `Beta.fs` first.
+#[test]
+#[cfg(not(windows))]
+fn relative_fragments_are_batched_under_a_non_ascii_directory() {
+    let source = r#"<Project><ItemGroup>
+    <Compile Update="Alpha;Alpha" Link="x" />
+    <Compile Update="Beta.fs;Alpha" CompileOrder="CompileFirst" />
+    <Compile Include="First.fs" />
+    <Compile Include="Beta.fs" />
+  </ItemGroup></Project>"#;
+    let p = parse_fsproj(
+        &crate::ProjectFile::buffer(Path::new("/r\u{f6}\u{f6}t/proj/Demo.fsproj"), source)
+            .expect("a project path spelt as its full path"),
+        &HashMap::new(),
+        &HashMap::new(),
+    )
+    .expect("well-formed XML parses");
+    assert!(
+        p.items_uncertain || file_names(&p.items) == ["Beta.fs", "First.fs"],
+        "{:?}",
+        file_names(&p.items)
+    );
+    // Keyed, two distinct fragments collide with nothing: the order is
+    // certain.
+    let source = r#"<Project><ItemGroup>
+    <Compile Update="Alpha;Beta.fs" CompileOrder="CompileFirst" />
+    <Compile Include="First.fs" />
+    <Compile Include="Beta.fs" />
+  </ItemGroup></Project>"#;
+    let p = parse_fsproj(
+        &crate::ProjectFile::buffer(Path::new("/r\u{f6}\u{f6}t/proj/Demo.fsproj"), source)
+            .expect("a project path spelt as its full path"),
+        &HashMap::new(),
+        &HashMap::new(),
+    )
+    .expect("well-formed XML parses");
+    assert!(!p.items_uncertain, "{:?}", p.diagnostics);
+    assert_eq!(file_names(&p.items), ["First.fs", "Beta.fs"]);
+}
+
+/// Parse `body` after [`UNTRUSTED_F`], with the stranding tail every batch
+/// test shares: `Update="A.fs;A.fs"` leaves its batch at the second `A.fs`
+/// where no batch is pending, stranding `A.fs`, and `Update="B.fs;A.fs"`
+/// then collides on it, stranding `B.fs` with `CompileFirst` until `B.fs` is
+/// included. Where no batch is pending before the first, MSBuild compiles
+/// `B.fs` first.
+fn parse_before_a_strand(body: &str) -> ParsedProject {
+    parse(&format!(
+        r#"<Project>{UNTRUSTED_F}
+  {body}
+  <ItemGroup>
+    <Compile Update="A.fs;A.fs" Link="a" />
+    <Compile Update="B.fs;A.fs" CompileOrder="CompileFirst" />
+    <Compile Include="A.fs;B.fs" />
+  </ItemGroup></Project>"#
+    ))
+}
+
+/// The walk commits to no compile order but MSBuild's, `B.fs` first.
+fn assert_b_first_or_declined(p: &ParsedProject, case: &str) {
+    assert_order_or_declined(p, &["B.fs", "A.fs"], case);
+}
+
+/// The walk commits to no compile order but `msbuild`.
+fn assert_order_or_declined(p: &ParsedProject, msbuild: &[&str], case: &str) {
+    assert!(
+        p.items_uncertain || file_names(&p.items) == msbuild,
+        "{case}: {:?} {:?}",
+        file_names(&p.items),
+        p.diagnostics
+    );
+}
+
+/// A condition-false `Update` is none of MSBuild's batch: it leaves no batch
+/// pending for `A.fs;A.fs` to flush, so `B.fs` takes the stranded
+/// `CompileFirst`, as without it.
+#[test]
+fn a_condition_false_update_joins_no_batch() {
+    let p = parse_before_a_strand(
+        r#"<ItemGroup><Compile Update="Z.fs" Condition="'$(NeverSet)' == 'true'" Link="z" /></ItemGroup>"#,
+    );
+    assert_b_first_or_declined(&p, "false Update");
+}
+
+/// An `Update` the walk may or may not reach may or may not leave a batch
+/// pending: under an own gate, or a group gate, that the walk takes on an
+/// untrusted read or on an inexact one (MSBuild sets the toolset's
+/// `MSBuildStartupDirectory`, which the pure walk does not hold), or in a
+/// `<Choose>` arm it took so. MSBuild skips each, and compiles `B.fs` first.
+#[test]
+fn an_update_the_walk_may_not_reach_may_leave_no_batch_pending() {
+    for (case, body) in [
+        (
+            "own gate",
+            r#"<ItemGroup><Compile Update="Z.fs" Condition="'$(F)' == 'on'" Link="z" /></ItemGroup>"#,
+        ),
+        (
+            "group gate",
+            r#"<ItemGroup Condition="'$(F)' == 'on'"><Compile Update="Z.fs" Link="z" /></ItemGroup>"#,
+        ),
+        (
+            "inexact group gate",
+            r#"<ItemGroup Condition="'$(MSBuildStartupDirectory)' == ''"><Compile Update="Z.fs" Link="z" /></ItemGroup>"#,
+        ),
+        (
+            "Choose arm",
+            r#"<Choose><When Condition="'$(F)' == 'on'"><ItemGroup><Compile Update="Z.fs" Link="z" /></ItemGroup></When></Choose>"#,
+        ),
+        (
+            "Choose arm taken on an inexact read",
+            r#"<Choose><When Condition="'$(MSBuildStartupDirectory)' == ''"><ItemGroup><Compile Update="Z.fs" Link="z" /></ItemGroup></When></Choose>"#,
+        ),
+    ] {
+        assert_b_first_or_declined(&parse_before_a_strand(body), case);
+    }
+}
+
+/// A group the walk skips on an untrusted read may run: its `A.fs;A.fs`
+/// strands `A.fs`, and `B.fs;A.fs` collides on it, so MSBuild compiles
+/// `B.fs` first.
+#[test]
+fn a_group_the_walk_skips_may_feed_the_batch() {
+    let p = parse(&format!(
+        r#"<Project>{UNTRUSTED_F}
+  <ItemGroup Condition="'$(F)' == 'off'"><Compile Update="A.fs;A.fs" Link="a" /></ItemGroup>
+  <ItemGroup>
+    <Compile Update="B.fs;A.fs" CompileOrder="CompileFirst" />
+    <Compile Include="A.fs;B.fs" />
+  </ItemGroup></Project>"#
+    ));
+    assert_b_first_or_declined(&p, "skipped group");
+}
+
+/// An operation the walk may not reach behind a pending batch may flush it,
+/// or not: where MSBuild runs the `Include` the walk skips, `Z.fs`'s batch is
+/// flushed, `A.fs;A.fs` strands `A.fs`, and MSBuild compiles `B.fs` first.
+#[test]
+fn an_operation_the_walk_may_skip_may_flush_a_pending_batch() {
+    for (case, body) in [
+        (
+            "own gate",
+            r#"<ItemGroup><Compile Update="Z.fs" Link="z" /><Compile Include="C.fs" Condition="'$(F)' == 'off'" /></ItemGroup>"#,
+        ),
+        (
+            "group gate",
+            r#"<ItemGroup><Compile Update="Z.fs" Link="z" /></ItemGroup><ItemGroup Condition="'$(F)' == 'off'"><Compile Include="C.fs" /></ItemGroup>"#,
+        ),
+    ] {
+        assert_order_or_declined(
+            &parse_before_a_strand(body),
+            &["B.fs", "C.fs", "A.fs"],
+            case,
+        );
+    }
+}
+
+/// An `Update` the walk may not reach is one whose two outcomes coincide
+/// only where the walk reads its spec as MSBuild does: `Spec` is empty to
+/// the walk and `Z.fs` to MSBuild, whose `Update` then collides on the
+/// pending `Z.fs` and flushes it, so `A.fs;A.fs` strands `A.fs` and
+/// MSBuild compiles `B.fs` first (probed, SDK 10.0.401).
+#[test]
+fn an_update_the_walk_may_not_reach_reads_its_spec_exactly() {
+    let p = parse_before_a_strand(
+        r#"<PropertyGroup><Spec Condition="'É' == 'é'">Z.fs</Spec></PropertyGroup>
+  <ItemGroup><Compile Update="Z.fs" Link="z" /></ItemGroup>
+  <ItemGroup Condition="'É' == 'é'"><Compile Update="$(Spec)" Link="s" /></ItemGroup>"#,
+    );
+    assert_b_first_or_declined(&p, "inexact spec");
+}
+
+/// A group gate the file system settles is settled: `Exists('absent')` is
+/// false, so the group cannot run whatever `G` holds, and its `Update`
+/// changes nothing. The order is certain. So it stays where the gate also
+/// reads the untrusted `F`, even where some write of `F` may be `@(Compile)`:
+/// the gate might read the list, but no `Update` precedes it, so no batch is
+/// pending there for a read to restart.
+#[test]
+#[cfg(not(windows))]
+fn a_group_the_file_system_rules_out_feeds_no_batch() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    let f_may_read =
+        r#"<PropertyGroup><F>on</F><F Condition="'É' == 'é'">@(Compile)</F></PropertyGroup>"#;
+    for (case, f, gate, certain) in [
+        (
+            "exact read",
+            UNTRUSTED_F,
+            "Exists('absent') And '$(G)' == 'on'",
+            true,
+        ),
+        (
+            "untrusted read",
+            UNTRUSTED_F,
+            "Exists('absent') And '$(F)' == 'on'",
+            true,
+        ),
+        (
+            "untrusted item read",
+            f_may_read,
+            "Exists('absent') And '$(F)' == 'on'",
+            true,
+        ),
+    ] {
+        let source = format!(
+            r#"<Project>{f}<PropertyGroup><G>on</G></PropertyGroup>
+  <ItemGroup Condition="{gate}"><Compile Update="Z.fs" Link="z" /></ItemGroup>
+  <ItemGroup>
+    <Compile Update="B.fs;A.fs" CompileOrder="CompileFirst" />
+    <Compile Include="A.fs;B.fs" />
+  </ItemGroup></Project>"#
+        );
+        let p = crate::parse_fsproj_with_imports(
+            &crate::ProjectFile::buffer(&root.join("Demo.fsproj"), &source).unwrap(),
+            &HashMap::new(),
+            &HashMap::new(),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(!p.items_uncertain, certain, "{case}: {:#?}", p.diagnostics);
+        if certain {
+            assert_eq!(file_names(&p.items), ["A.fs", "B.fs"]);
+        }
+    }
+}
+
+/// An undecided group whose only `Update` is certainly skipped leaves the
+/// batch as it was: MSBuild orders `A.fs, B.fs` whether the group runs or
+/// not.
+#[test]
+#[cfg(not(windows))]
+fn an_undecided_group_of_skipped_updates_leaves_the_batch() {
+    let p = parse(
+        r#"<Project>
+  <ItemGroup Condition="'É' == 'é'"><Compile Update="Z.fs" Condition="false" Link="z" /></ItemGroup>
+  <ItemGroup>
+    <Compile Update="B.fs;A.fs" CompileOrder="CompileFirst" />
+    <Compile Include="A.fs;B.fs" />
+  </ItemGroup></Project>"#,
+    );
+    assert!(!p.items_uncertain, "{:#?}", p.diagnostics);
+    assert_eq!(file_names(&p.items), ["A.fs", "B.fs"]);
+}
+
+/// `S` is `A.fs` to the walk, which refuses its second write (a function it
+/// does not evaluate), and `A.fs;A.fs` to MSBuild. A spec read from it is not
+/// exact: MSBuild strands `A.fs` there, with the `Update`'s metadata, and the
+/// walk follows neither the batch nor the strand. In a batch the walk knows,
+/// `$(S)` then `B.fs;A.fs` strands `B.fs`; in one it does not (after `Ü.fs`,
+/// which the walk cannot key, and a flush), `$(S)` strands `A.fs` with
+/// `CompileFirst`. MSBuild compiles `B.fs`, then `A.fs`, first (probed, SDK
+/// 10.0.401). The read is refused, not unpinned, so the expansion itself
+/// reports nothing.
+#[test]
+fn a_spec_the_walk_reads_on_a_refused_value_is_not_exact() {
+    let s =
+        r#"<PropertyGroup><S>A.fs</S><S>$([System.String]::Copy('A.fs;A.fs'))</S></PropertyGroup>"#;
+    let known = parse(&format!(
+        r#"<Project>{UNTRUSTED_F}{s}<ItemGroup>
+    <Compile Update="$(S)" Link="s" />
+    <Compile Update="B.fs;A.fs" CompileOrder="CompileFirst" />
+    <Compile Include="A.fs;B.fs" />
+  </ItemGroup></Project>"#
+    ));
+    assert_order_or_declined(&known, &["B.fs", "A.fs"], "known batch");
+    let unknown = parse(&format!(
+        r#"<Project>{UNTRUSTED_F}{s}<ItemGroup>
+    <Compile Update="Z.fs" Link="z" />
+    <Compile Update="&#xDC;.fs" Link="u" />
+    <Compile Include="C.fs" />
+    <Compile Update="$(S)" CompileOrder="CompileFirst" />
+    <Compile Include="B.fs;A.fs" />
+  </ItemGroup></Project>"#
+    ));
+    assert_order_or_declined(&unknown, &["A.fs", "C.fs", "B.fs"], "unknown batch");
+}
+
+/// Following an operation the walk may or may not run costs a bounded copy
+/// of the batch (`MAX_COPIED_KEYS`): a batch of `N` keys left by a strand,
+/// then `N` `Update`s the walk may not run, all leaving at a key the batch
+/// holds, or all moving it now and then, or all rolling back a key spelled as
+/// itself (whose outcomes coincide), copies a bounded multiple of `N` keys
+/// and asks about a bounded multiple of `N` fragments.
+#[test]
+#[cfg(not(windows))]
+fn updates_the_walk_may_not_run_cost_the_batch_linearly() {
+    const N: usize = 2000;
+    let keys: Vec<String> = (0..N).map(|i| format!("K{i}.fs")).collect();
+    let present = |i: usize| format!("K{i}.fs");
+    let moving = |i: usize| {
+        if i.is_multiple_of(128) {
+            format!("New{i}.fs")
+        } else {
+            format!("K{i}.fs")
+        }
+    };
+    let rolling_back = |_: usize| "$(MSBuildProjectDirectory)/Fresh.fs;K0.fs".to_owned();
+    let patterns: [(&str, &dyn Fn(usize) -> String); 3] = [
+        ("present", &present),
+        ("moving", &moving),
+        ("rolling back", &rolling_back),
+    ];
+    for (name, update) in patterns {
+        let mut src = format!(
+            "<Project>{UNTRUSTED_F}<ItemGroup>\n    <Compile Update=\"{};K0.fs\" Link=\"k\" />\n",
+            keys.join(";"),
+        );
+        for i in 0..N {
+            src.push_str(&format!(
+                "    <Compile Update=\"{}\" Link=\"m\" Condition=\"'$(F)' == 'on'\" />\n",
+                update(i)
+            ));
+        }
+        src.push_str("  </ItemGroup></Project>");
+        let (_, costs) = crate::test_support::count_walk_costs(|| parse(&src));
+        assert!(
+            costs.batch_keys_copied <= 8 * N as u64,
+            "{name}: {} keys copied for {N} keys and {N} Updates",
+            costs.batch_keys_copied
+        );
+        assert!(
+            costs.batch_keys <= 8 * N as u64,
+            "{name}: {} fragments asked about for {N} keys and {N} Updates",
+            costs.batch_keys
+        );
+    }
+}
+
+/// Following a batch through operations the walk certainly runs copies no
+/// keys: `N` `Update`s of distinct keys move one batch in place.
+/// A batch holding one long key costs no more to follow than its length,
+/// once: after a key of `N` bytes is stranded, `N` condition-false
+/// `Update`s that would roll back a key spelled as itself copy and compare a
+/// bounded multiple of `N` bytes.
+#[test]
+#[cfg(not(windows))]
+fn a_long_stranded_key_costs_the_batch_linearly() {
+    const N: usize = 20_000;
+    let long = "x".repeat(N);
+    let mut src =
+        format!("<Project><ItemGroup>\n    <Compile Update=\"{long}.fs;%41.fs\" Link=\"k\" />\n");
+    for _ in 0..N / 10 {
+        src.push_str(
+            "    <Compile Update=\"/Fresh.fs;%41.fs\" Link=\"m\" Condition=\"false\" />\n",
+        );
+    }
+    src.push_str("  </ItemGroup></Project>");
+    let (_, costs) = crate::test_support::count_walk_costs(|| parse(&src));
+    assert!(
+        costs.batch_bytes_copied <= 8 * N as u64,
+        "{} bytes copied or compared for a {N}-byte key",
+        costs.batch_bytes_copied
+    );
+}
+
+/// Off Unix the walk keys no fragment ([`crate::evaluator::item_spec`]'s
+/// domain), so it follows no batch: an `Update` that may leave it past its
+/// first fragment declines its list.
+#[test]
+#[cfg(windows)]
+fn off_unix_a_multi_fragment_update_declines() {
+    let p = parse(
+        r#"<Project><ItemGroup>
+    <Compile Update="A.fs;B.fs" Link="x" />
+    <Compile Include="A.fs" />
+  </ItemGroup></Project>"#,
+    );
+    assert!(p.items_uncertain, "{:?}", p.diagnostics);
+}
+
+/// A rollback that removes most of a large batch leaves a table no copy pays
+/// for: thousands of rooted keys rolled back around one stranded relative
+/// key, then condition-false `Update`s whose two outcomes are copies of that
+/// batch, cost a bounded multiple of the `Update`s.
+#[test]
+#[cfg(not(windows))]
+fn a_rolled_back_batch_costs_its_copies_little() {
+    const N: usize = 4000;
+    let rooted: Vec<String> = (0..N)
+        .map(|i| format!("$(MSBuildProjectDirectory)/R{i}.fs"))
+        .collect();
+    let mut src = format!(
+        "<Project><ItemGroup>\n    <Compile Update=\"Kept.fs;{};%41.fs\" Link=\"k\" />\n",
+        rooted.join(";")
+    );
+    for _ in 0..N / 10 {
+        src.push_str(
+            "    <Compile Update=\"/Fresh.fs;%41.fs\" Link=\"m\" Condition=\"false\" />\n",
+        );
+    }
+    src.push_str("  </ItemGroup></Project>");
+    let (_, costs) = crate::test_support::count_walk_costs(|| parse(&src));
+    assert!(
+        costs.batch_keys_copied <= 2 * N as u64,
+        "{} table slots copied for {} Updates",
+        costs.batch_keys_copied,
+        N / 10
+    );
+}
+
+/// The SDK's order target buckets `Compile` items by their `CompileOrder` as
+/// written, escaped and untrimmed (`WithMetadataValue`): ` CompileFirst `
+/// and `Compile%46irst` are in no bucket, so the item is not compiled at all
+/// (SDK 10.0.401 compiles only `C.fs` here, as codex found). The walk reads
+/// neither spelling, on an `Update` of one file or of several, or on an
+/// `Include`, and declines.
+#[test]
+fn a_compile_order_the_sdk_reads_as_written_declines() {
+    for order in [" CompileFirst ", "Compile%46irst"] {
+        for items in [
+            format!(
+                r#"<Compile Include="C.fs;A.fs;B.fs" /><Compile Update="A.fs;B.fs" CompileOrder="{order}" />"#
+            ),
+            format!(
+                r#"<Compile Include="C.fs;A.fs" /><Compile Update="A.fs" CompileOrder="{order}" />"#
+            ),
+            format!(
+                r#"<Compile Include="C.fs" /><Compile Include="A.fs" CompileOrder="{order}" />"#
+            ),
+        ] {
+            let p = parse(&format!(
+                "<Project><ItemGroup>{items}</ItemGroup></Project>"
+            ));
+            assert!(p.items_uncertain, "{items}: {:?}", file_names(&p.items));
+        }
+    }
+}
+
+/// A batch the walk no longer follows expands no later `Update`'s spec to
+/// feed it: each is judged without it, which reads its spec once.
+#[test]
+fn a_batch_the_walk_no_longer_follows_expands_no_spec() {
+    const N: usize = 50;
+    // A spec the walk cannot expand: the batch is not followed past it.
+    let mut src = String::from(
+        "<Project><PropertyGroup><P>$([System.Guid]::NewGuid())</P></PropertyGroup><ItemGroup>\n    <Compile Update=\"$(P)\" Link=\"x\" />\n",
+    );
+    for i in 0..N {
+        src.push_str(&format!("    <Compile Update=\"K{i}.fs\" Link=\"k\" />\n"));
+    }
+    src.push_str("  </ItemGroup></Project>");
+    let (_, costs) = crate::test_support::count_walk_costs(|| parse(&src));
+    // One expansion each: the batch's for the first, and the judgement
+    // without it for the rest, never both.
+    assert_eq!(
+        costs.batch_spec_expansions,
+        N as u64 + 1,
+        "specs expanded for the batch"
+    );
+}
+
+/// An `Update` the batch follows is expanded once: the batch's verdict, the
+/// shape `update_may_strand` judges, and the lossless check all read that
+/// one expansion (codex found, round 32).
+#[test]
+fn a_followed_update_is_expanded_once() {
+    const N: usize = 50;
+    let mut src = String::from("<Project><ItemGroup>\n");
+    for i in 0..N {
+        src.push_str(&format!(
+            "    <Compile Update=\"A{i}.fs;B{i}.fs\" CompileOrder=\"CompileFirst\" />\n"
+        ));
+    }
+    src.push_str("    <Compile Include=\"A0.fs\" />\n  </ItemGroup></Project>");
+    let (p, costs) = crate::test_support::count_walk_costs(|| parse(&src));
+    assert!(!p.items_uncertain, "{:?}", p.diagnostics);
+    assert_eq!(
+        costs.batch_spec_expansions, N as u64,
+        "specs expanded for the batch"
+    );
+}
+
+/// A run of `Update`s no operation flushes keeps every key it expands, so
+/// thousands of them behind one long property would hold megabytes of keys.
+/// The batch holds at most `MAX_HELD_BYTES` of them, then is followed no
+/// further. So too within one `Update` of many fragments: the batch stops
+/// before it holds the key that would pass the budget.
+#[test]
+#[cfg(not(windows))]
+fn a_long_run_of_updates_holds_bounded_keys() {
+    const N: usize = 2000;
+    let long = "L".repeat(16 * 1024);
+    // Fragments per `Update`, in order: one each, sixteen each, all in one,
+    // and one before all the rest, which then meet a pending batch, the
+    // walk following them run and not run, or a batch holding a key the walk
+    // does not compute (opaque), after a lone `é.fs`.
+    let chunkings: [(Vec<usize>, &str, &str); 5] = [
+        (vec![1; N], "", ""),
+        (vec![16; N / 16], "", ""),
+        (vec![N], "", ""),
+        (vec![1, N - 1], r#" Condition="false""#, ""),
+        (vec![N], "", r#"<Compile Update="é.fs" Visible="false" />"#),
+    ];
+    for (chunks, gate, opening) in chunkings {
+        let mut src = format!(
+            "<Project><PropertyGroup><Long>{long}</Long></PropertyGroup><ItemGroup>\n    {opening}\n"
+        );
+        let mut start = 0;
+        for chunk in &chunks {
+            let spec: Vec<String> = (start..start + chunk)
+                .map(|i| format!("$(Long){i}.fs"))
+                .collect();
+            let gate = if start == 0 { "" } else { gate };
+            start += chunk;
+            src.push_str(&format!(
+                "    <Compile Update=\"{}\" Visible=\"false\"{gate} />\n",
+                spec.join(";")
+            ));
+        }
+        src.push_str("  </ItemGroup></Project>");
+        let (_, costs) = crate::test_support::count_walk_costs(|| parse(&src));
+        assert!(
+            costs.batch_bytes_held_peak <= 4 * 1024 * 1024,
+            "{} Updates: {} bytes of keys held at once",
+            chunks.len(),
+            costs.batch_bytes_held_peak
+        );
+    }
+}
+
+/// A key normalising collapses (`a/../` repeated) is kept in a buffer about
+/// its length, not the one it was built in: the batch holds what it counts
+/// (`UpdateBatchRun::insert` asserts it), behind an opaque batch too.
+#[test]
+#[cfg(not(windows))]
+fn a_collapsed_key_is_held_in_a_buffer_its_length() {
+    let prefix = "a/../".repeat(1000);
+    for opening in ["", r#"<Compile Update="Ü.fs" Visible="false" />"#] {
+        let spec: Vec<String> = (0..64).map(|i| format!("{prefix}F{i}.fs")).collect();
+        let p = parse(&format!(
+            r#"<Project><ItemGroup>
+    {opening}
+    <Compile Update="{}" Visible="false" />
+    <Compile Include="A.fs" />
+  </ItemGroup></Project>"#,
+            spec.join(";")
+        ));
+        assert_eq!(file_names(&p.items), ["A.fs"], "{opening}");
+    }
+}
+
+/// An `Update` whose spec expands to no fragment joins nothing: it may flush
+/// a pending batch or leave it be, and either way the `Include` after it
+/// leaves the batch empty, so the next `Update` is followed.
+#[test]
+#[cfg(not(windows))]
+fn an_empty_update_leaves_the_batch_followed() {
+    let p = parse(
+        r#"<Project><PropertyGroup><Optional></Optional></PropertyGroup><ItemGroup>
+    <Compile Update="$(Optional)" Link="x" />
+    <Compile Include="C.fs;A.fs;B.fs" />
+    <Compile Update="A.fs;B.fs" CompileOrder="CompileFirst" />
+  </ItemGroup></Project>"#,
+    );
+    assert!(!p.items_uncertain, "{:?}", p.diagnostics);
+    assert_eq!(file_names(&p.items), ["A.fs", "B.fs", "C.fs"]);
+}
+
+/// A strand's fragment is named as MSBuild's tokenizer splits the spec. A
+/// spec in which an item expression holds a `;` has no fragments the walk
+/// names (`spec_fragments`): it declines, naming no strand.
+#[test]
+#[cfg(not(windows))]
+fn a_stranding_fragment_is_named_whole() {
+    let source = |spec: &str| {
+        format!(
+            r#"<Project><ItemGroup>
+    <H Include="h.fs" />
+    <Compile Update="{spec}" CompileOrder="CompileFirst" />
+    <Compile Include="A.fs;B.fs" />
+  </ItemGroup></Project>"#
+        )
+    };
+    let strands = |p: &ParsedProject| -> Vec<String> {
+        p.diagnostics
+            .iter()
+            .filter_map(|d| match &d.kind {
+                DiagnosticKind::StrandedUpdatePrefix { fragment, .. }
+                | DiagnosticKind::MayStrandUpdatePrefix { fragment, .. } => Some(fragment.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    for spec in [
+        "B.fs;@(H->'%(Filename);%(Extension)')",
+        "B.fs;@(H->'%(Filename); %(Extension)')",
+    ] {
+        let p = parse(&source(spec));
+        assert!(p.items_uncertain, "{spec}");
+        assert!(strands(&p).is_empty(), "{spec}: {:?}", p.diagnostics);
+    }
+    // A literal `(` is no item expression, and spaces stand as written.
+    for (spec, named) in [
+        ("B.fs;*.foo(;C.fs", "*.foo("),
+        // The expression ends where its parenthesis closes, not at the spec's
+        // end.
+        ("B.fs;@(H);C.fs", "@(H)"),
+        // MSBuild's tokenizer ends the expression at its first unquoted `)`,
+        // here `Distinct()`'s, and then splits at the quoted `;`: probed with
+        // SDK 10.0.401, `Include="A;@(H->Distinct(), ';')"` makes the items
+        // `A`, `@(H->Distinct(), '` and `')` (codex round 31 read it whole).
+        ("B.fs;@(H->Distinct(), ';')", "@(H->Distinct(), '"),
+    ] {
+        let p = parse(&source(spec));
+        assert_eq!(strands(&p), [named], "{spec}: {:?}", p.diagnostics);
+    }
+}
+
+/// A strand diagnostic names expanded text, so a long property spliced into
+/// many `Update`s is named by a bounded preview in each, not held whole once
+/// per `Update` (codex found, round 31). The bound holds for the batch's
+/// strand diagnostic, for the walk's own (which case-sensitive item names
+/// leave standing, as no batch is followed then), and for the Compile set's
+/// record of them.
+#[test]
+fn a_long_stranding_fragment_is_named_by_a_bounded_preview() {
+    const UPDATES: usize = 40;
+    const BOUND: usize = 256 + '…'.len_utf8();
+    let pattern = format!("{}*.fs", "d/".repeat(20_000));
+    let long = format!("{}x.fs", "d/".repeat(20_000));
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    let sensitive = HashMap::from([(
+        "MSBUILDUSECASESENSITIVEITEMNAMES".to_owned(),
+        "1".to_owned(),
+    )]);
+    // Each case: the `Update` spec (after `F{i}.fs;`), the group's gate, the
+    // environment, and whether every `Update` strands. Gated by a condition
+    // the walk cannot decide (non-ASCII case folding), the batch passes four
+    // outcomes after a few `Update`s, and the rest decline as unmodelled.
+    // Under case-sensitive item names, a wildcard declines as unmodelled
+    // before anything strands, and a repeated literal strands where the walk
+    // judges it alone.
+    for (spec, gate, env, every_update_strands) in [
+        ("$(Pattern)", "", HashMap::new(), true),
+        (
+            "$(Pattern)",
+            r#" Condition="'É' == 'é'""#,
+            HashMap::new(),
+            false,
+        ),
+        ("$(Long);$(Long)", "", sensitive, true),
+    ] {
+        let updates: String = (0..UPDATES)
+            .map(|i| format!(r#"<Compile Update="F{i}.fs;{spec}" CompileOrder="CompileFirst" />"#))
+            .collect();
+        let source = format!(
+            r#"<Project>
+  <PropertyGroup><Pattern>{pattern}</Pattern><Long>{long}</Long></PropertyGroup>
+  <ItemGroup{gate}>{updates}</ItemGroup>
+  <ItemGroup><Compile Include="A.fs" /></ItemGroup>
+</Project>"#
+        );
+        let p = crate::parse_fsproj_with_imports(
+            &crate::ProjectFile::buffer(&root.join("Demo.fsproj"), &source).unwrap(),
+            &HashMap::new(),
+            &env,
+            None,
+            None,
+        )
+        .unwrap();
+        let gate = format!("{gate} {env:?}");
+        let strand_name = |kind: &DiagnosticKind| match kind {
+            DiagnosticKind::StrandedUpdatePrefix { fragment, .. }
+            | DiagnosticKind::MayStrandUpdatePrefix { fragment, .. } => Some(fragment.clone()),
+            _ => None,
+        };
+        let named: Vec<String> = p
+            .diagnostics
+            .iter()
+            .filter_map(|d| strand_name(&d.kind))
+            .collect();
+        let recorded: Vec<String> = p
+            .compile_item_uncertainties
+            .iter()
+            .filter_map(|cause| match &cause.kind {
+                crate::CompileItemUncertaintyCauseKind::Diagnostic(kind) => strand_name(kind),
+                _ => None,
+            })
+            .collect();
+        if every_update_strands {
+            assert_eq!(named.len(), UPDATES, "{gate}: {:?}", p.diagnostics);
+        } else {
+            assert!(!named.is_empty(), "{gate}: {:?}", p.diagnostics);
+        }
+        assert_eq!(recorded.len(), named.len(), "{gate}");
+        for fragment in named.iter().chain(&recorded) {
+            assert!(fragment.len() <= BOUND, "{gate}: {} bytes", fragment.len());
+            assert!(fragment.starts_with("d/d/"), "{gate}: {fragment}");
+        }
+    }
+}
+
+/// A `CompileOrder` the SDK reads as written, padded or escaped, declines,
+/// and its diagnostic names the value by a bounded preview: one long value
+/// held by a property and read by many items is not held whole once per
+/// item (codex found, round 32).
+#[test]
+fn a_long_compile_order_is_named_by_a_bounded_preview() {
+    const ITEMS: usize = 20;
+    let order = format!("%41{}", "x".repeat(10_000));
+    let items: String = (0..ITEMS)
+        .map(|i| format!(r#"<Compile Include="F{i}.fs" CompileOrder="$(Order)" />"#))
+        .collect();
+    let p = parse(&format!(
+        "<Project><PropertyGroup><Order>{order}</Order></PropertyGroup><ItemGroup>{items}</ItemGroup></Project>"
+    ));
+    assert!(p.items_uncertain);
+    let named: Vec<&str> = p
+        .diagnostics
+        .iter()
+        .filter_map(|d| match &d.kind {
+            DiagnosticKind::UnsupportedItemOperation { operation }
+                if operation.contains("padded or escaped") =>
+            {
+                Some(operation.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(named.len(), ITEMS, "{:?}", p.diagnostics);
+    for operation in named {
+        assert!(operation.len() < 400, "{} bytes", operation.len());
+    }
+}
+
+/// Only the order the batch adds, for an `Update` that may leave past its
+/// first fragment, rests on every key being lossless. A one-fragment `Update`
+/// strands nothing whatever the batch holds, and an earlier lossy key it
+/// cannot match moves nothing, so the order stands.
+#[test]
+#[cfg(not(windows))]
+fn an_update_that_cannot_strand_reads_no_lossy_key() {
+    let p = parse(
+        r#"<Project><ItemGroup><Compile Include="C.fs/;B.fs;A.fs" /><Compile Update="A.fs" CompileOrder="CompileFirst" /></ItemGroup></Project>"#,
+    );
+    assert!(!p.items_uncertain, "{:?}", p.diagnostics);
+    assert_eq!(file_names(&p.items), ["A.fs", "C.fs", "B.fs"]);
+}
+
+/// An `Update` MSBuild never runs applies nothing, so a spec the walk cannot
+/// expand leaves the batch unknown but declines nothing on its own.
+#[test]
+fn a_skipped_update_the_walk_cannot_expand_declines_nothing() {
+    let p = parse(
+        r#"<Project><PropertyGroup><P>$([System.Guid]::NewGuid())</P></PropertyGroup><ItemGroup><Compile Update="$(P);A.fs" CompileOrder="CompileFirst" Condition="false" /><Compile Include="B.fs;A.fs" /></ItemGroup></Project>"#,
+    );
+    assert!(!p.items_uncertain, "{:?}", p.diagnostics);
+    assert_eq!(file_names(&p.items), ["B.fs", "A.fs"]);
+}
+
+/// An over-decline, pinned and not fixed here (#1203): a Compile `Update`
+/// that writes no `CompileOrder` moves no item, whatever it matches, yet an
+/// earlier Compile item's lossy key declines it.
+#[test]
+#[cfg(not(windows))]
+fn a_metadata_only_update_declines_on_an_earlier_lossy_key() {
+    let p = parse(
+        r#"<Project><ItemGroup><Compile Include="C.fs/" /><Compile Update="A.fs;B.fs" Visible="false" /><Compile Include="A.fs;B.fs" /></ItemGroup></Project>"#,
+    );
+    assert!(p.items_uncertain);
+    assert!(
+        p.diagnostics.iter().any(|d| matches!(
+            &d.kind,
+            DiagnosticKind::UnsupportedItemOperation { operation }
+                if operation.contains("trailing separator")
+        )),
+        "{:?}",
+        p.diagnostics
+    );
+}
+
+/// The certain order the batch adds over `update_may_strand` (a multi-fragment
+/// `Update` followed and found to strand nothing) stands only where every key
+/// the `Update` could match on is lossless. `A.fs/` is one item with `A.fs`
+/// to SDK 10.0.401, which trims the separator, and another to SDK 8.0.428,
+/// which does not, so here SDK 10 compiles `A.fs/` first and SDK 8 keeps
+/// `C.fs` first (codex found, round 26). The walk declines, on either side.
+#[test]
+#[cfg(not(windows))]
+fn a_lossy_key_declines_the_order_the_batch_adds() {
+    // The decline names the trailing separator, not a strand the batch ruled
+    // out.
+    let p = parse(
+        r#"<Project><ItemGroup><Compile Include="C.fs;A.fs/" /><Compile Update="A.fs;Z.fs" CompileOrder="CompileFirst" /></ItemGroup></Project>"#,
+    );
+    assert!(p.items_uncertain);
+    assert!(
+        p.diagnostics.iter().any(|d| matches!(
+            &d.kind,
+            DiagnosticKind::UnsupportedItemOperation { operation }
+                if operation.contains("trailing separator")
+        )) && !p
+            .diagnostics
+            .iter()
+            .any(|d| matches!(d.kind, DiagnosticKind::UnmodelledUpdateBatch { .. })),
+        "{:?}",
+        p.diagnostics
+    );
+    for items in [
+        r#"<Compile Include="C.fs;A.fs/;B.fs" /><Compile Update="A.fs;Z.fs" CompileOrder="CompileFirst" />"#,
+        r#"<Compile Include="C.fs;A.fs;B.fs" /><Compile Update="A.fs/;Z.fs" CompileOrder="CompileFirst" />"#,
+        // Past the fragment it leaves a pending batch at, where the batch
+        // keys nothing.
+        r#"<Compile Include="C.fs;A.fs;Q.fs" /><Compile Update="X.fs" Link="x" /><Compile Update="A.fs;X.fs;Q.fs/" CompileOrder="CompileFirst" />"#,
+    ] {
+        let p = parse(&format!(
+            "<Project><ItemGroup>{items}</ItemGroup></Project>"
+        ));
+        assert!(p.items_uncertain, "{items}: {:?}", file_names(&p.items));
+    }
+    // So too under a project directory that is not ASCII, where the walk
+    // computes keys of its own, and for an identity that is nothing but a
+    // separator, which has no key at all.
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    let dir = root.join("proj\u{d6}");
+    std::fs::create_dir(&dir).unwrap();
+    for (case, dir, items) in [
+        (
+            "non-ASCII directory",
+            &dir,
+            r#"<Compile Include="C.fs;A.fs/;B.fs" /><Compile Update="A.fs;Z.fs" CompileOrder="CompileFirst" />"#,
+        ),
+        (
+            "separator only",
+            &root,
+            r#"<Compile Include="C.fs;/;B.fs" /><Compile Update="B.fs;Z.fs" CompileOrder="CompileFirst" />"#,
+        ),
+    ] {
+        let p = crate::parse_fsproj_with_imports(
+            &crate::ProjectFile::buffer(
+                &dir.join("Demo.fsproj"),
+                format!("<Project><ItemGroup>{items}</ItemGroup></Project>"),
+            )
+            .unwrap(),
+            &HashMap::new(),
+            &HashMap::new(),
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(p.items_uncertain, "{case}: {:?}", file_names(&p.items));
+    }
+    // Lossless on both sides, the same order commits.
+    let p = parse(
+        r#"<Project><ItemGroup><Compile Include="C.fs;A.fs;B.fs" /><Compile Update="A.fs;Z.fs" CompileOrder="CompileFirst" /></ItemGroup></Project>"#,
+    );
+    assert!(!p.items_uncertain, "{:?}", p.diagnostics);
+    assert_eq!(file_names(&p.items), ["A.fs", "C.fs", "B.fs"]);
+}
+
+/// Where the batch's own outcomes strand nothing, the strand that walking
+/// the element names against an empty batch is no certain one: here the
+/// pending `Z.fs` batch is flushed at the repeated `A.fs`, and nothing applies
+/// late. The walk still declines (an over-decline, kept and filed as #1197), saying
+/// MSBuild may strand.
+#[test]
+#[cfg(not(windows))]
+fn a_strand_the_batch_rules_out_is_reported_as_possible() {
+    let p = parse(
+        r#"<Project><ItemGroup>
+    <Compile Update="Z.fs" Link="z" />
+    <Compile Update="A.fs;A.fs" CompileOrder="CompileFirst" />
+    <Compile Include="C.fs;A.fs" />
+  </ItemGroup></Project>"#,
+    );
+    assert!(p.items_uncertain);
+    assert!(
+        !p.diagnostics.iter().any(|d| matches!(
+            &d.kind,
+            DiagnosticKind::StrandedUpdatePrefix { update, .. } if update == "A.fs;A.fs"
+        )),
+        "{:?}",
+        p.diagnostics
+    );
+}
+
+/// A batch holding a key the walk does not compute is pending, and an
+/// `Update` with an expansion character anywhere leaves it for certain, at
+/// that fragment or before, flushing it: the batch is known again, and the
+/// order after it is followed.
+#[test]
+#[cfg(not(windows))]
+fn a_later_wildcard_flushes_an_opaque_batch() {
+    let p = parse(
+        r#"<Project><ItemGroup>
+    <Compile Update="Ü.fs" Visible="false" />
+    <Compile Update="A.fs;*.fs" Visible="false" />
+    <Compile Include="C.fs;A.fs;B.fs" />
+    <Compile Update="A.fs;B.fs" CompileOrder="CompileFirst" />
+  </ItemGroup></Project>"#,
+    );
+    assert!(!p.items_uncertain, "{:?}", p.diagnostics);
+    assert_eq!(file_names(&p.items), ["A.fs", "B.fs", "C.fs"]);
+}
+
+/// An `Update` whose spec holds no fragment joins the batch all the same
+/// (`LazyItemList.ComputeItems` marks it added), leaving it pending. So here
+/// `A.fs` flushes the condition-false `A.fs;A.fs` in design-time
+/// evaluation, and `A.fs;B.fs` then strands `A.fs` after `B.fs;B.fs`:
+/// design-time MSBuild compiles `A.fs` first (SDK 10.0.401, as codex
+/// found). No compile order is certain.
+#[test]
+#[cfg(not(windows))]
+fn an_empty_update_leaves_the_batch_pending() {
+    let p = parse(
+        r#"<Project><ItemGroup>
+    <Compile Update="A.fs;A.fs" Link="a" Condition="false" />
+    <Compile Update=";" Link="x" Condition="false" />
+    <Compile Update="A.fs" Link="b" />
+    <Compile Update="B.fs;B.fs" Link="c" Condition="false" />
+    <Compile Update="A.fs;B.fs" CompileOrder="CompileFirst" />
+    <Compile Include="C.fs;A.fs;B.fs" />
+  </ItemGroup></Project>"#,
+    );
+    assert!(
+        p.items_uncertain || file_names(&p.items) == ["A.fs", "C.fs", "B.fs"],
+        "{:?}",
+        file_names(&p.items)
+    );
+}
+
+/// An `Update` that strands a fragment in one outcome the walk follows and
+/// not another says so: after a condition-false `A.fs;A.fs`, which only
+/// design-time evaluation batches, `B.fs;A.fs` strands `B.fs` there and not
+/// in a build (which leaves both items' metadata unset, as codex found). The
+/// walk declines, saying MSBuild may strand it.
+#[test]
+#[cfg(not(windows))]
+fn a_strand_in_some_outcomes_is_reported_as_possible() {
+    let p = parse(
+        r#"<Project><ItemGroup>
+    <Compile Update="A.fs;A.fs" Link="a" Condition="false" />
+    <Compile Update="B.fs;A.fs" CompileOrder="CompileFirst" />
+    <Compile Include="A.fs;B.fs" />
+  </ItemGroup></Project>"#,
+    );
+    assert!(p.items_uncertain);
+    let strands: Vec<_> = p
+        .diagnostics
+        .iter()
+        .filter(|d| {
+            matches!(
+                d.kind,
+                DiagnosticKind::StrandedUpdatePrefix { .. }
+                    | DiagnosticKind::MayStrandUpdatePrefix { .. }
+            )
+        })
+        .map(|d| d.kind.clone())
+        .collect();
+    assert_eq!(
+        strands,
+        [DiagnosticKind::MayStrandUpdatePrefix {
+            update: "B.fs;A.fs".to_owned(),
+            fragment: "A.fs".to_owned(),
+        }]
+    );
+    // So too where every outcome strands, but at different fragments: the
+    // build skips `A.fs;A.fs` and stops at the second `B.fs`, design-time
+    // evaluation stops at `A.fs`.
+    let p = parse(
+        r#"<Project><ItemGroup>
+    <Compile Update="A.fs;A.fs" Link="a" Condition="false" />
+    <Compile Update="B.fs;A.fs;B.fs" CompileOrder="CompileFirst" />
+    <Compile Include="A.fs;B.fs" />
+  </ItemGroup></Project>"#,
+    );
+    assert!(p.items_uncertain);
+    assert!(
+        !p.diagnostics.iter().any(|d| matches!(
+            &d.kind,
+            DiagnosticKind::StrandedUpdatePrefix { update, .. } if update == "B.fs;A.fs;B.fs"
+        )),
+        "{:?}",
+        p.diagnostics
+    );
+    // The Compile set's own record of the decline, which the LSP's deferral
+    // explanation reads, says the same.
+    assert!(
+        p.compile_item_uncertainties.iter().any(|c| matches!(
+            &c.kind,
+            crate::CompileItemUncertaintyCauseKind::Diagnostic(
+                DiagnosticKind::MayStrandUpdatePrefix { update, .. }
+            ) if update == "B.fs;A.fs;B.fs"
+        )) && !p.compile_item_uncertainties.iter().any(|c| matches!(
+            &c.kind,
+            crate::CompileItemUncertaintyCauseKind::Diagnostic(
+                DiagnosticKind::StrandedUpdatePrefix { update, .. }
+            ) if update == "B.fs;A.fs;B.fs"
+        )),
+        "{:?}",
+        p.compile_item_uncertainties
+    );
+    // So too an `Update` the walk may not run, though it strands wherever it
+    // runs: here every outcome holds the stranded `A.fs`, and the build
+    // may skip `B.fs;A.fs`.
+    let p = parse(
+        r#"<Project><ItemGroup>
+    <Compile Update="A.fs;A.fs" Link="a" />
+    <Compile Update="B.fs;A.fs" CompileOrder="CompileFirst" Condition="'É' == 'é'" />
+    <Compile Include="A.fs;B.fs" />
+  </ItemGroup></Project>"#,
+    );
+    assert!(p.items_uncertain);
+    assert!(
+        p.diagnostics.iter().any(|d| matches!(
+            &d.kind,
+            DiagnosticKind::MayStrandUpdatePrefix { update, .. } if update == "B.fs;A.fs"
+        )),
+        "{:?}",
+        p.diagnostics
+    );
+    assert!(
+        !p.diagnostics.iter().any(|d| matches!(
+            &d.kind,
+            DiagnosticKind::StrandedUpdatePrefix { update, .. } if update == "B.fs;A.fs"
+        )),
+        "{:?}",
+        p.diagnostics
+    );
+}
+
+/// A label is never evaluated, so an item reference in one reads no list and
+/// restarts no batch; nor does a gate comparing with `<`, which is read as a
+/// condition, not again as XML as a metadatum is.
+#[test]
+#[cfg(not(windows))]
+fn a_label_reads_no_item_list() {
+    // A sequence a read there would make uncertain
+    // ([`an_item_list_read_may_restart_the_batch`]).
+    let with = |between: &str| {
+        parse(&format!(
+            r#"<Project><ItemGroup>
+    <Compile Update="A.fs;A.fs" Link="a" Condition="false" />
+    <Compile Update="A.fs" Link="b" />
+  </ItemGroup>
+  {between}
+  <ItemGroup>
+    <Compile Update="B.fs;B.fs" Link="c" Condition="false" />
+    <Compile Update="A.fs;B.fs" CompileOrder="CompileFirst" />
+    <Compile Include="C.fs;A.fs;B.fs" />
+  </ItemGroup></Project>"#
+        ))
+    };
+    let without = with("");
+    assert!(!without.items_uncertain, "{:?}", without.diagnostics);
+    for labelled in [
+        r#"<ItemGroup Label="@(Compile)" />"#,
+        r#"<ItemGroup><Other Include="x" Label="@(Compile)" /></ItemGroup>"#,
+        r#"<ItemGroup><Other Include="x"><Meta Label="@(Compile)">m</Meta></Other></ItemGroup>"#,
+        r#"<ItemGroup><Other Include="x" Condition="'1' &lt; '2'" /></ItemGroup>"#,
+        r#"<ItemGroup Condition="'1' &lt; '2'"><Other Include="x" /></ItemGroup>"#,
+    ] {
+        let p = with(labelled);
+        assert!(!p.items_uncertain, "{labelled}: {:?}", p.diagnostics);
+        assert_eq!(
+            file_names(&p.items),
+            file_names(&without.items),
+            "{labelled}"
+        );
+    }
+}
+
+/// Under MSBuild's case-sensitive item names, `compile` and `Compile` are
+/// separate batches; the walk keys them as one (#1162), so the order its
+/// batch adds over `update_may_strand` is not claimed: here SDK 10.0.401
+/// compiles `B.fs` first (codex found, round 29). Without the escape hatch the
+/// same project commits.
+#[test]
+#[cfg(not(windows))]
+fn case_sensitive_item_names_decline_the_order_the_batch_adds() {
+    let source = r#"<Project><ItemGroup>
+    <compile Update="Z.fs" Link="z" />
+    <Compile Update="A.fs;A.fs" Link="a" />
+    <Compile Update="B.fs;A.fs" CompileOrder="CompileFirst" />
+    <Compile Include="A.fs;B.fs" />
+  </ItemGroup></Project>"#;
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    let with_env = |env: HashMap<String, String>| {
+        crate::parse_fsproj_with_imports(
+            &crate::ProjectFile::buffer(&root.join("Demo.fsproj"), source).unwrap(),
+            &HashMap::new(),
+            &env,
+            None,
+            None,
+        )
+        .unwrap()
+    };
+    let sensitive = with_env(HashMap::from([(
+        "MSBUILDUSECASESENSITIVEITEMNAMES".to_owned(),
+        "1".to_owned(),
+    )]));
+    assert!(
+        sensitive.items_uncertain,
+        "{:?}",
+        file_names(&sensitive.items)
+    );
+    let insensitive = with_env(HashMap::new());
+    assert!(
+        !insensitive.items_uncertain,
+        "{:?}",
+        insensitive.diagnostics
+    );
+    // No strand is claimed across the two either: MSBuild keeps them apart,
+    // and the capitalised `B.fs;A.fs` joins an empty batch (codex found,
+    // round 30).
+    let source = r#"<Project><ItemGroup>
+    <compile Update="A.fs;A.fs" Link="a" />
+    <Compile Update="B.fs;A.fs" CompileOrder="CompileFirst" />
+    <Compile Include="A.fs;B.fs" />
+  </ItemGroup></Project>"#;
+    let p = crate::parse_fsproj_with_imports(
+        &crate::ProjectFile::buffer(&root.join("Demo.fsproj"), source).unwrap(),
+        &HashMap::new(),
+        &HashMap::from([(
+            "MSBUILDUSECASESENSITIVEITEMNAMES".to_owned(),
+            "1".to_owned(),
+        )]),
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(
+        !p.diagnostics.iter().any(|d| matches!(
+            &d.kind,
+            DiagnosticKind::StrandedUpdatePrefix { update, .. } if update == "B.fs;A.fs"
+        )),
+        "{:?}",
+        p.diagnostics
+    );
+}
+
+/// An `Update` that leaves the batch at its first fragment reads no further:
+/// a wildcard first, then a hundred thousand fragments, has the batch read a
+/// bounded number of fragments and ask for as many keys, whatever follows.
+#[test]
+#[cfg(not(windows))]
+fn an_update_settled_at_its_first_fragment_reads_no_further() {
+    const N: usize = 100_000;
+    let rest: Vec<String> = (0..N).map(|i| format!("F{i}.fs")).collect();
+    // Fed to a pending batch run and not run, and to a flushed one run; and
+    // one leaving a pending batch at its first fragment, a collision.
+    for (before, first, gate) in [
+        (
+            r#"<Compile Update="A.fs" Link="a" />"#,
+            "*.fs",
+            r#" Condition="false""#,
+        ),
+        (
+            r#"<Compile Update="A.fs" Link="a" /><Compile Include="B.fs" />"#,
+            "*.fs",
+            "",
+        ),
+        (r#"<Compile Update="A.fs" Link="a" />"#, "A.fs", ""),
+    ] {
+        let src = format!(
+            r#"<Project><ItemGroup>
+    {before}
+    <Compile Update="{first};{}" Link="b"{gate} />
+  </ItemGroup></Project>"#,
+            rest.join(";")
+        );
+        let (_, costs) = crate::test_support::count_walk_costs(|| parse(&src));
+        assert!(
+            costs.batch_keys <= 16,
+            "{before}: {} fragment keys asked for",
+            costs.batch_keys
+        );
+        assert!(
+            costs.batch_fragments_read <= 16,
+            "{before}: {} fragments read",
+            costs.batch_fragments_read
+        );
+    }
+}
+
+/// A rollback can leave a world one key in a table sized for thousands; a
+/// read then adds an empty outcome, and `A.fs;A.fs` makes the two outcomes
+/// one again. Comparing them walks the smaller table, so repeating the pair
+/// costs a bounded multiple of the pairs, not of the table.
+#[test]
+#[cfg(not(windows))]
+fn comparing_outcomes_walks_the_smaller_table() {
+    const N: usize = 4000;
+    const PAIRS: usize = 400;
+    let rooted: Vec<String> = (0..N)
+        .map(|i| format!("$(MSBuildProjectDirectory)/R{i}.fs"))
+        .collect();
+    let mut src = format!(
+        "<Project><ItemGroup>\n    <Compile Update=\"A.fs;{};A.fs\" Link=\"k\" />\n",
+        rooted.join(";")
+    );
+    for _ in 0..PAIRS {
+        src.push_str("    <Other Include=\"x\" Condition=\"'@(Compile)' != ''\" />\n");
+        src.push_str("    <Compile Update=\"A.fs;A.fs\" Link=\"m\" Condition=\"false\" />\n");
+    }
+    src.push_str("  </ItemGroup></Project>");
+    let (_, costs) = crate::test_support::count_walk_costs(|| parse(&src));
+    assert!(
+        costs.batch_keys_copied <= 2 * N as u64 + 64 * PAIRS as u64,
+        "{} table slots walked for {PAIRS} pairs",
+        costs.batch_keys_copied,
+    );
+}
+
+/// MSBuild removes a fragment by its text after collapsing its separators,
+/// which it does only where the working directory holds the spec's first
+/// segment (`MaybeAdjustFilePath`): `\repo\proj\Z.fs` leaves the batch with
+/// its `Update` from a working directory holding `src`, and stays stranded
+/// from another. A later `Update` then strands `Z.fs` with `CompileFirst`
+/// from the first only. No compile order is certain.
+#[test]
+#[cfg(not(windows))]
+fn a_removal_that_turns_on_the_working_directory_declines() {
+    let p = parse(
+        r#"<Project><ItemGroup>
+    <Compile Update="src\..\R.fs;\repo\proj\Z.fs;%41.fs" Link="r" Condition="false" />
+    <Compile Update="Z.fs;R.fs" CompileOrder="CompileFirst" />
+    <Compile Include="A.fs;Z.fs" />
+  </ItemGroup></Project>"#,
+    );
+    assert!(p.items_uncertain, "{:?}", file_names(&p.items));
+}
+
+/// Reading an item list computes it once: a later computation resumes past
+/// the read with an empty batch. Here `@(Compile)`, read before
+/// `B.fs;B.fs`, may empty the batch there, so `A.fs;B.fs` may strand `A.fs`
+/// with `CompileFirst` (design-time MSBuild does, SDK 10.0.401, as codex
+/// found), wherever the read is written: an item's condition, its group's,
+/// spaced, through a property, or in a `<Choose>` arm the walk does not take.
+/// So too where the walk is not certain of a property the gate reads, and a
+/// value of it may form the reference: one write of `Read` the walk does not
+/// decide, a write of `At` holding only the `@` that `$(At)(Compile)`
+/// completes, or a write of `P` holding the `(Compile)` that `@$(P)` does.
+/// So too where the walk is certain of `At`, holding `@`, and in the bodies
+/// and attributes MSBuild reads through the XML layer: a property written in
+/// CDATA, a metadatum split by a comment, a metadatum attribute read again as
+/// XML. No compile order is certain.
+#[test]
+#[cfg(not(windows))]
+fn an_item_list_read_may_restart_the_batch() {
+    let read_at = |props: &str, read: &str| {
+        format!(
+            r#"<Project>{props}<ItemGroup>
+    <Compile Update="A.fs;A.fs" Link="a" Condition="false" />
+    <Compile Update="A.fs" Link="b" />
+  </ItemGroup>
+  {read}
+  <ItemGroup>
+    <Compile Update="B.fs;B.fs" Link="c" Condition="false" />
+    <Compile Update="A.fs;B.fs" CompileOrder="CompileFirst" />
+    <Compile Include="C.fs;A.fs;B.fs" />
+  </ItemGroup></Project>"#
+        )
+    };
+    let read = r#"<PropertyGroup><Read>@(Compile)</Read></PropertyGroup>"#;
+    let undecided = |name: &str, value: &str| {
+        format!(
+            r#"<PropertyGroup><{name}>x</{name}><{name} Condition="'É' == 'é'">{value}</{name}></PropertyGroup>"#
+        )
+    };
+    for (case, props, gate) in [
+        (
+            "item condition",
+            read.to_string(),
+            r#"<ItemGroup><Other Include="x" Condition="'@(Compile)' != ''" /></ItemGroup>"#,
+        ),
+        (
+            "group condition",
+            read.to_string(),
+            r#"<ItemGroup Condition="'@(Compile)' != ''"><Other Include="x" /></ItemGroup>"#,
+        ),
+        (
+            "spaced",
+            read.to_string(),
+            r#"<ItemGroup><Other Include="x" Condition="'@( Compile )' != ''" /></ItemGroup>"#,
+        ),
+        (
+            "through a property",
+            read.to_string(),
+            r#"<ItemGroup><Other Include="x" Condition="'$(Read)' != ''" /></ItemGroup>"#,
+        ),
+        (
+            "in a group the walk does not decide",
+            read.to_string(),
+            r#"<ItemGroup Condition="'É' == 'é'"><Other Include="x" Condition="'@(Compile)' != ''" /></ItemGroup>"#,
+        ),
+        (
+            "untaken Choose arm",
+            read.to_string(),
+            r#"<Choose><When Condition="'É' == 'é'"><ItemGroup><Other Include="x" Condition="'@(Compile)' != ''" /></ItemGroup></When></Choose>"#,
+        ),
+        (
+            "through an undecided property",
+            undecided("Read", "@(Compile)"),
+            r#"<ItemGroup><Other Include="x" Condition="'$(Read)' != ''" /></ItemGroup>"#,
+        ),
+        (
+            "completed after an undecided property",
+            undecided("At", "@"),
+            r#"<ItemGroup><Other Include="x" Condition="'$(At)(Compile)' != ''" /></ItemGroup>"#,
+        ),
+        (
+            "completed before an undecided property",
+            undecided("P", "(Compile)"),
+            r#"<ItemGroup><Other Include="x" Condition="'@$(P)' != ''" /></ItemGroup>"#,
+        ),
+        (
+            "completed after a certain property",
+            r#"<PropertyGroup><At>@</At></PropertyGroup>"#.to_string(),
+            r#"<ItemGroup><Other Include="x" Meta="$(At)(Compile)" /></ItemGroup>"#,
+        ),
+        (
+            "through a write in a Choose arm the walk does not decide",
+            r#"<PropertyGroup><Read>x</Read></PropertyGroup><Choose><When Condition="'É' == 'é'"><PropertyGroup><Read>@(Compile)</Read></PropertyGroup></When></Choose>"#.to_string(),
+            r#"<ItemGroup><Other Include="x" Condition="'$(Read)' != ''" /></ItemGroup>"#,
+        ),
+        (
+            "through a property written in CDATA",
+            r#"<PropertyGroup><Read><![CDATA[@(Compile)]]></Read></PropertyGroup>"#.to_string(),
+            r#"<ItemGroup><Other Include="x" Condition="'$(Read)' != ''" /></ItemGroup>"#,
+        ),
+        (
+            "a metadatum named as a group, of an item named as the project",
+            r#"<ItemGroup><Project Include="y" /></ItemGroup>"#.to_string(),
+            r#"<ItemGroup><Project Include="x"><ItemDefinitionGroup>@<!-- -->(Compile)</ItemDefinitionGroup></Project></ItemGroup>"#,
+        ),
+        (
+            "a metadatum named as a group",
+            String::new(),
+            r#"<ItemGroup><Other Include="x"><ItemDefinitionGroup>@<!-- -->(Compile)</ItemDefinitionGroup></Other></ItemGroup>"#,
+        ),
+        (
+            "a metadatum of mixed content",
+            String::new(),
+            r#"<ItemGroup><Other Include="x"><Meta><Inner />@(Compile)</Meta></Other></ItemGroup>"#,
+        ),
+        (
+            "completed after an undecided property function",
+            undecided("At", "$( [MSBuild]::ConvertFromBase64(QA==))"),
+            r#"<ItemGroup><Other Include="x" Condition="'$(At)(Compile)' != ''" /></ItemGroup>"#,
+        ),
+        (
+            "a metadatum split by a comment",
+            String::new(),
+            r#"<ItemGroup><Other Include="x"><Meta>@<!-- -->(Compile)</Meta></Other></ItemGroup>"#,
+        ),
+        (
+            "a metadatum attribute read again as XML",
+            String::new(),
+            r#"<ItemGroup><Other Include="x" Meta="&lt;![CDATA[@]]&gt;(Compile)" /></ItemGroup>"#,
+        ),
+        (
+            "through a property function",
+            r#"<PropertyGroup><Read>$([System.String]::Concat('@', '(Compile)'))</Read></PropertyGroup>"#.to_string(),
+            r#"<ItemGroup><Other Include="x" Condition="'$(Read)' != ''" /></ItemGroup>"#,
+        ),
+    ] {
+        let p = parse(&read_at(&props, gate));
+        assert!(
+            p.items_uncertain || file_names(&p.items) == ["A.fs", "C.fs", "B.fs"],
+            "{case}: {:?}",
+            file_names(&p.items)
+        );
+    }
+    // A read between two `Update`s of one group restarts the batch between
+    // them, after the first has joined it.
+    let p = parse(
+        r#"<Project><ItemGroup>
+    <Compile Update="A.fs;A.fs" Link="a" Condition="false" />
+    <Compile Update="A.fs" Link="b" />
+    <Other Include="x" Condition="'@(Compile)' != ''" />
+    <Compile Update="B.fs;B.fs" Link="c" Condition="false" />
+    <Compile Update="A.fs;B.fs" CompileOrder="CompileFirst" />
+    <Compile Include="C.fs;A.fs;B.fs" />
+  </ItemGroup></Project>"#,
+    );
+    assert!(
+        p.items_uncertain || file_names(&p.items) == ["A.fs", "C.fs", "B.fs"],
+        "within a group: {:?}",
+        file_names(&p.items)
+    );
+}
+
+/// A text the walk cannot read may read an item list though nothing it sees
+/// holds an `@` or a `%`: an expression it cannot expand, here in a metadatum,
+/// may return any text (`Normalize` folds a fullwidth `＠` to `@` under the
+/// compatibility forms), as may a function spelled with whitespace after
+/// `$(` (`ConvertFromBase64(QA==)` is `@`), and so may a metadatum attribute
+/// whose reading again as XML it does not model (a processing instruction).
+/// The walk does not follow the batch past any of them, so no compile order
+/// is certain.
+#[test]
+#[cfg(not(windows))]
+fn a_text_the_walk_cannot_read_may_read_an_item_list() {
+    for (case, read) in [
+        (
+            "unexpanded",
+            r#"<Other Include="x" Meta="$(P.Normalize())" />"#,
+        ),
+        ("unread", r#"<Other Include="x" Meta="&lt;?x?&gt;" />"#),
+        (
+            "spaced function",
+            r#"<Other Include="x" Meta="$( [MSBuild]::ConvertFromBase64(QA==))(Compile)" />"#,
+        ),
+    ] {
+        let p = parse(&format!(
+            r#"<Project><ItemGroup>
+    <Compile Update="A.fs;A.fs" Link="a" Condition="false" />
+    <Compile Update="A.fs" Link="b" />
+  </ItemGroup>
+  <ItemGroup>{read}</ItemGroup>
+  <ItemGroup>
+    <Compile Update="B.fs;B.fs" Link="c" Condition="false" />
+    <Compile Update="A.fs;B.fs" CompileOrder="CompileFirst" />
+    <Compile Include="C.fs;A.fs;B.fs" />
+  </ItemGroup></Project>"#
+        ));
+        assert!(p.items_uncertain, "{case}: {:?}", file_names(&p.items));
+    }
+}
+
+/// A property the walk did not see written may hold an item reference: an
+/// import it skipped under a gate it did not decide may write it, as may the
+/// file an import names through a value the walk is not certain of. A write
+/// the walk did not decide may copy an environment or global value holding
+/// the `@` that `$(At)(Compile)` completes, or a value the walk seeds itself
+/// (`MSBuildThisFileDirectory` under a directory named `d@(Compile)`); an
+/// environment or global value may hold the reference whole; and a name the
+/// walk holds no value of (`MSBuildStartupDirectory`, with no startup
+/// directory given) may hold anything, read directly or through a property
+/// built on it. Each read may restart the batch, as in
+/// [`an_item_list_read_may_restart_the_batch`], so the walk does not follow
+/// the batch past it, and no compile order is certain.
+#[test]
+#[cfg(not(windows))]
+fn a_property_the_walk_did_not_see_written_may_read_an_item_list() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    let writes_q = "<Project><PropertyGroup><Q>@(Compile)</Q></PropertyGroup></Project>";
+    std::fs::write(root.join("q.props"), writes_q).unwrap();
+    std::fs::write(root.join("off.props"), writes_q).unwrap();
+    std::fs::write(root.join("on.props"), "<Project />").unwrap();
+    let seeded = root.join("d@(Compile)");
+    std::fs::create_dir(&seeded).unwrap();
+    std::fs::write(
+        root.join("x@.props"),
+        "<Project><PropertyGroup><At>$(MSBuildThisFileName)</At></PropertyGroup></Project>",
+    )
+    .unwrap();
+    let body = |props: &str, gate: &str| {
+        format!(
+            r#"<Project>{props}<ItemGroup>
+    <Compile Update="A.fs;A.fs" Link="a" Condition="false" />
+    <Compile Update="A.fs" Link="b" />
+  </ItemGroup>
+  <ItemGroup><Other Include="x" Condition="{gate}" /></ItemGroup>
+  <ItemGroup>
+    <Compile Update="B.fs;B.fs" Link="c" Condition="false" />
+    <Compile Update="A.fs;B.fs" CompileOrder="CompileFirst" />
+    <Compile Include="C.fs;A.fs;B.fs" />
+  </ItemGroup></Project>"#
+        )
+    };
+    // One binding per map, so that none masks another's case.
+    let at = HashMap::from([("E".to_string(), "@".to_string())]);
+    let reference = HashMap::from([("R".to_string(), "@(Compile)".to_string())]);
+    let none = HashMap::new;
+    let splice = r#"<PropertyGroup><At>x</At><At Condition="'É' == 'é'">$(E)</At></PropertyGroup>"#;
+    for (case, dir, props, gate, globals, environment) in [
+        (
+            "skipped import",
+            &root,
+            format!(r#"{UNTRUSTED_F}<Import Project="q.props" Condition="'$(F)' == 'off'" />"#),
+            "'$(Q)' != ''",
+            none(),
+            none(),
+        ),
+        (
+            "import path",
+            &root,
+            format!(r#"{UNTRUSTED_F}<Import Project="$(F).props" />"#),
+            "'$(Q)' != ''",
+            none(),
+            none(),
+        ),
+        (
+            "environment",
+            &root,
+            splice.to_string(),
+            "'$(At)(Compile)' != ''",
+            none(),
+            at.clone(),
+        ),
+        (
+            "environment written over later",
+            &root,
+            format!("{splice}<PropertyGroup><E>x</E></PropertyGroup>"),
+            "'$(At)(Compile)' != ''",
+            none(),
+            at.clone(),
+        ),
+        (
+            "global",
+            &root,
+            splice.to_string(),
+            "'$(At)(Compile)' != ''",
+            at.clone(),
+            none(),
+        ),
+        (
+            "environment reference",
+            &root,
+            String::new(),
+            "'$(R)' != ''",
+            none(),
+            reference.clone(),
+        ),
+        (
+            // A value the walk is certain of that still holds a property
+            // expression, which a second expansion (`MatchOnMetadata`'s)
+            // turns into a read.
+            "an expression left for a second expansion",
+            &root,
+            r#"<PropertyGroup><Q>@(Compile)</Q></PropertyGroup>"#.to_string(),
+            "'$(S)' != ''",
+            none(),
+            HashMap::from([("S".to_string(), "$(Q)".to_string())]),
+        ),
+        (
+            "seeded",
+            &seeded,
+            r#"<PropertyGroup><P>x</P><P Condition="'É' == 'é'">$(MSBuildThisFileDirectory)</P></PropertyGroup>"#
+                .to_string(),
+            "'$(P)' != ''",
+            none(),
+            none(),
+        ),
+        (
+            "seeded in an import",
+            &root,
+            format!(
+                r#"{UNTRUSTED_F}<Import Project="x@.props" /><PropertyGroup><At Condition="'$(F)' == 'on'">y</At></PropertyGroup>"#
+            ),
+            "'$(At)(Compile)' != ''",
+            none(),
+            none(),
+        ),
+        (
+            "unheld",
+            &root,
+            String::new(),
+            "'$(MSBuildStartupDirectory)' != 'x'",
+            none(),
+            none(),
+        ),
+        (
+            "built on an unheld name",
+            &root,
+            r#"<PropertyGroup><Start>$(MSBuildStartupDirectory)</Start></PropertyGroup>"#
+                .to_string(),
+            "'$(Start)' != 'x'",
+            none(),
+            none(),
+        ),
+    ] {
+        let p = crate::parse_fsproj_with_imports(
+            &crate::ProjectFile::buffer(&dir.join("Demo.fsproj"), body(&props, gate)).unwrap(),
+            &globals,
+            &environment,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(p.items_uncertain, "{case}: {:?}", file_names(&p.items));
+    }
+}
+
+#[test]
+#[cfg(not(windows))]
+fn updates_the_walk_runs_copy_no_batch() {
+    const N: usize = 2000;
+    let mut src = String::from("<Project><ItemGroup>\n");
+    for i in 0..N {
+        src.push_str(&format!("    <Compile Update=\"K{i}.fs\" Link=\"k\" />\n"));
+    }
+    src.push_str("  </ItemGroup></Project>");
+    let (p, costs) = crate::test_support::count_walk_costs(|| parse(&src));
+    assert!(!p.items_uncertain, "{:?}", p.diagnostics);
+    assert_eq!(costs.batch_keys_copied, 0);
+    assert!(costs.batch_keys <= 2 * N as u64, "{}", costs.batch_keys);
+    // Then `N` condition-false `Update`s that, run, leave the pending batch
+    // at some fragment and flush it: their outcomes are the batch and an
+    // empty one, and neither copies its keys, wherever the `Update` leaves.
+    for leaving in [
+        "*.fs",
+        "K0.fs",
+        "Fresh.fs;K0.fs",
+        "Fresh.fs;Other.fs;Fresh.fs",
+    ] {
+        let mut src = src.replace("  </ItemGroup></Project>", "");
+        for _ in 0..N {
+            src.push_str(&format!(
+                "    <Compile Update=\"{leaving}\" Link=\"w\" Condition=\"false\" />\n"
+            ));
+        }
+        src.push_str("  </ItemGroup></Project>");
+        let (_, costs) = crate::test_support::count_walk_costs(|| parse(&src));
+        assert!(
+            costs.batch_keys_copied <= 8 * N as u64,
+            "{leaving}: {} keys copied for {N} keys and {N} Updates",
+            costs.batch_keys_copied
+        );
+    }
+}
+
+/// A strand across `Update`s names the fragment the second leaves the batch
+/// at: `A.fs;A.fs` strands `A.fs`, and `B.fs;A.fs` leaves at `A.fs`,
+/// stranding `B.fs`. For packages, the cause is the strand's, not a
+/// duplicate identity.
+#[test]
+#[cfg(not(windows))]
+fn a_strand_across_updates_names_its_fragment() {
+    let p = parse(
+        r#"<Project><ItemGroup>
+    <Compile Update="A.fs;A.fs" Link="a" />
+    <Compile Update="B.fs;A.fs" CompileOrder="CompileFirst" />
+    <Compile Include="A.fs;B.fs" />
+    <PackageReference Update="Alpha;Alpha" />
+    <PackageReference Update="Beta;Alpha" VersionOverride="1.0" />
+    <PackageReference Include="Alpha;Beta" Version="1.0" />
+  </ItemGroup></Project>"#,
+    );
+    assert!(
+        p.diagnostics.iter().any(|d| matches!(
+            &d.kind,
+            DiagnosticKind::StrandedUpdatePrefix { update, fragment }
+                if update == "B.fs;A.fs" && fragment == "A.fs"
+        )),
+        "{:?}",
+        p.diagnostics
+    );
+    assert!(
+        p.package_reference_uncertainties.iter().any(|c| matches!(
+            &c.kind,
+            PackageReferenceUncertaintyCauseKind::StrandedUpdate { update, fragment }
+                if update == "Beta;Alpha" && fragment == "Alpha"
+        )),
+        "{:?}",
+        p.package_reference_uncertainties
+    );
+}
 
 #[test]
 fn compile_update_compile_order_keeps_original_order_within_bucket() {
@@ -5217,6 +7069,7 @@ fn unevaluable_metadata_write_reads_as_unknown() {
 }
 
 #[test]
+#[cfg(not(windows))]
 fn duplicate_identity_package_update_marks_the_set_uncertain() {
     // MSBuild quirk (dotnet 10 probe, found by the generative oracle): a
     // `<PackageReference Update>` whose spec lists the same identity twice
@@ -5244,32 +7097,33 @@ fn duplicate_identity_package_update_marks_the_set_uncertain() {
         PackageReferenceUncertaintyCauseKind::DuplicateUpdateIdentity { id } if id == "Gamma"
     )));
 
-    // The unique-spec form keeps the ordered semantics and stays certain: an
-    // Update preceding the Include modifies nothing. (`Delta;Gamma` may leave
-    // the batch of `Update`s past its first fragment, which the walk does
-    // not follow: see `a_multi_fragment_update_declines_its_list`.)
-    let p = parse(
-        r#"<Project>
+    // The unique-spec forms keep the ordered semantics and stay certain: an
+    // Update preceding the Include modifies nothing.
+    for update in ["Gamma", "Delta;Gamma"] {
+        let src = format!(
+            r#"<Project>
   <ItemGroup>
-    <PackageReference Update="Gamma" VersionOverride="1.0" />
+    <PackageReference Update="{update}" VersionOverride="1.0" />
     <PackageReference Include="Alpha;Gamma" Version="1.0" />
   </ItemGroup>
-</Project>"#,
-    );
-    assert!(
-        !p.package_references_uncertain,
-        "a unique Update spec must stay certain: {:?}",
-        p.package_reference_uncertainties
-    );
-    let gamma = p
-        .package_references
-        .iter()
-        .find(|r| r.id == "Gamma")
-        .expect("Gamma captured");
-    assert_eq!(
-        gamma.version_override, None,
-        "an Update before the Include is a no-op"
-    );
+</Project>"#
+        );
+        let p = parse(&src);
+        assert!(
+            !p.package_references_uncertain,
+            "unique Update spec {update:?} must stay certain: {:?}",
+            p.package_reference_uncertainties
+        );
+        let gamma = p
+            .package_references
+            .iter()
+            .find(|r| r.id == "Gamma")
+            .expect("Gamma captured");
+        assert_eq!(
+            gamma.version_override, None,
+            "an Update before the Include is a no-op for spec {update:?}"
+        );
+    }
 }
 
 #[test]

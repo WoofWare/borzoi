@@ -2222,6 +2222,31 @@ enum ItemAttribute {
     Metadata,
 }
 
+/// The operation `LazyItemEvaluator.ProcessItemElement` builds for the item
+/// or item definition at `node`: an `Include`, else a `Remove`, else an
+/// `Update`, else none.
+pub(super) fn item_operation(node: Node<'_, '_>) -> Option<&'static str> {
+    ["Include", "Remove", "Update"]
+        .into_iter()
+        .find(|operation| attribute(node, operation).is_some())
+}
+
+/// Whether the attribute `name` of an item or item definition whose
+/// operation is `operation` is a metadatum ([`item_attribute_of`]), which
+/// MSBuild reads again as XML.
+pub(super) fn item_attribute_is_metadatum(operation: Option<&str>, name: &str) -> bool {
+    item_attribute_of(operation, name) == ItemAttribute::Metadata
+}
+
+/// Whether MSBuild evaluates the attribute `name` of an item or item
+/// definition whose operation is `operation` ([`item_operation`]): its gate,
+/// its operation, or a metadatum ([`item_attribute_of`]); not a label, an
+/// option, or an operation's attribute the item's own operation does not
+/// read.
+pub(super) fn item_attribute_is_evaluated(operation: Option<&str>, name: &str) -> bool {
+    name == "Condition" || item_attribute_of(operation, name) != ItemAttribute::Unexpanded
+}
+
 /// What the attribute `name` of the item or item definition at `node` is to
 /// MSBuild, by the item's operation: `LazyItemEvaluator.ProcessItemElement`
 /// builds an `Include`, else a `Remove`, else an `Update`, and each build
@@ -2229,9 +2254,12 @@ enum ItemAttribute {
 /// metadatum but a loader error ([`loader`]), so the names are matched as
 /// MSBuild spells them.
 fn item_attribute(node: Node<'_, '_>, name: &str) -> ItemAttribute {
-    let operation = ["Include", "Remove", "Update"]
-        .into_iter()
-        .find(|operation| attribute(node, operation).is_some());
+    item_attribute_of(item_operation(node), name)
+}
+
+/// [`item_attribute`] for an item whose operation is already known
+/// ([`item_operation`]).
+fn item_attribute_of(operation: Option<&str>, name: &str) -> ItemAttribute {
     match (operation, name) {
         (
             _,

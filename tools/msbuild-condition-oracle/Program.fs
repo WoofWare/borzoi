@@ -48,7 +48,8 @@
 ///     inner XML, `Utilities.GetXmlNodeInnerContents`), in document order,
 ///     for the rejection judgement's reading of them to be held to.
 ///
-///   {"op":"itemsMeta","xml":s,"path":s,"itemType":s,"metadata":[name, ..]}
+///   {"op":"itemsMeta","xml":s,"path":s,"itemType":s,"metadata":[name, ..],
+///    "designTime":true?}
 ///     -> {"ok":true,"items":[{"identity":s,"escaped":s,"metadata":{name:value, ..}}, ..]}
 ///      | {"ok":false}                           // MSBuild rejects the project
 ///     The `items` op enriched for the *dependency* set, where `FullPath` is
@@ -589,7 +590,10 @@ let private respondItems (root: JsonElement) : string =
 /// item list and every metadata derivation starts from), and the requested
 /// metadata's evaluated values, in evaluation order. `None` when MSBuild
 /// rejects the project.
+/// With `DesignTime` (`Evaluation`), the items are the editable `Project`'s,
+/// and the metadata values are escaped, as the SDK's targets compare them.
 let private evalItemsMeta
+    (evaluation: Evaluation)
     (path: string)
     (xml: string)
     (itemType: string)
@@ -599,20 +603,38 @@ let private evalItemsMeta
 
     try
         writeProject path xml
+        let globals = Collections.Generic.Dictionary<string, string>()
 
-        let instance =
-            ProjectInstance(path, Collections.Generic.Dictionary<string, string>(), null, collection)
+        match evaluation with
+        | Build ->
+            let instance = ProjectInstance(path, globals, null, collection)
 
-        instance.GetItems itemType
-        |> Seq.map (fun item ->
-            let values =
-                metadata
-                |> List.map (fun name -> (name, item.GetMetadataValue name))
-                |> Map.ofList
+            instance.GetItems itemType
+            |> Seq.map (fun item ->
+                let values =
+                    metadata
+                    |> List.map (fun name -> (name, item.GetMetadataValue name))
+                    |> Map.ofList
 
-            (item.EvaluatedInclude, (item :> Microsoft.Build.Framework.ITaskItem2).EvaluatedIncludeEscaped, values))
-        |> List.ofSeq
-        |> Some
+                (item.EvaluatedInclude, (item :> Microsoft.Build.Framework.ITaskItem2).EvaluatedIncludeEscaped, values))
+            |> List.ofSeq
+            |> Some
+        | DesignTime ->
+            let project = Project(path, globals, null, collection)
+
+            // Escaped, as the SDK's targets compare metadata
+            // (`WithMetadataValue` reads `GetMetadataValueEscaped`): an
+            // unescaped `Compile%46irst` would read as `CompileFirst`.
+            project.GetItems itemType
+            |> Seq.map (fun item ->
+                let values =
+                    metadata
+                    |> List.map (fun name -> (name, Project.GetMetadataValueEscaped(item, name)))
+                    |> Map.ofList
+
+                (item.EvaluatedInclude, Project.GetEvaluatedItemIncludeEscaped item, values))
+            |> List.ofSeq
+            |> Some
     with :? InvalidProjectFileException ->
         None
 
@@ -626,7 +648,12 @@ let private respondItemsMeta (root: JsonElement) : string =
         |> Seq.map (fun n -> n.GetString())
         |> List.ofSeq
 
-    match evalItemsMeta path xml itemType metadata with
+    let evaluation =
+        match root.TryGetProperty "designTime" with
+        | true, d when d.ValueKind = JsonValueKind.True -> DesignTime
+        | _ -> Build
+
+    match evalItemsMeta evaluation path xml itemType metadata with
     | Some items ->
         JsonSerializer.Serialize
             {| ok = true

@@ -48,6 +48,24 @@ pub struct WalkCosts {
     /// one it runs on, kept as a census, and counted only where the caller
     /// asks (`test_support::with_refusal_census`).
     pub refusal_paths: u64,
+    /// The fragment keys MSBuild's batch of `Update`s was asked about
+    /// (`item_pass::batch_fragment_key`).
+    pub batch_keys: u64,
+    /// The keys copied into another outcome of MSBuild's batch of `Update`s
+    /// (`item_pass::copy_world`).
+    pub batch_keys_copied: u64,
+    /// The bytes of those keys, and of the keys two outcomes were compared
+    /// by.
+    pub batch_bytes_copied: u64,
+    /// The most bytes of keys one outcome of a batch of `Update`s held at
+    /// once (`item_pass::UpdateBatchRun::insert`): a peak, not a sum.
+    pub batch_bytes_held_peak: u64,
+    /// The `Update` specs the batch of `Update`s expanded to feed itself
+    /// (`item_pass::feed_update_batch`).
+    pub batch_spec_expansions: u64,
+    /// The fragments of `Update` specs the batch read
+    /// (`item_pass::batch_fragments`).
+    pub batch_fragments_read: u64,
 }
 
 /// Whether the caller asked for `WalkCosts::refusal_paths`'s census on
@@ -91,6 +109,12 @@ thread_local! {
             property_writes: 0,
             second_walk_property_writes: 0,
             refusal_paths: 0,
+            batch_keys: 0,
+            batch_keys_copied: 0,
+            batch_bytes_copied: 0,
+            batch_bytes_held_peak: 0,
+            batch_spec_expansions: 0,
+            batch_fragments_read: 0,
         })
     };
 }

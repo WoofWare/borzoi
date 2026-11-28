@@ -86,6 +86,38 @@ pub(crate) fn item_expression_span(text: &str, from: usize) -> Option<std::ops::
     Some(start..text.len())
 }
 
+/// An expanded item spec [`spec_fragments`] accepts: no item expression in it
+/// holds a `;`. Every `;` then lies outside an expression, so MSBuild's
+/// `SemiColonTokenizer` splits the spec at each one, and its fragments are
+/// its `;`-separated pieces, each as MSBuild names it. The batch of `Update`s
+/// reads only such a spec.
+#[derive(Clone, Copy)]
+struct SplitSpec<'s>(&'s Escaped);
+
+impl<'s> SplitSpec<'s> {
+    /// `spec`, where [`spec_fragments`] accepts it.
+    fn of(spec: &'s Escaped) -> Option<Self> {
+        spec_fragments(spec).ok().map(|_| SplitSpec(spec))
+    }
+
+    /// The fragments, as [`spec_fragments`] reads them, lazily: the refusal
+    /// was settled when the spec was split.
+    fn fragments(self) -> impl Iterator<Item = &'s str> {
+        self.0
+            .as_escaped()
+            .split(';')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    }
+}
+
+/// `spec`'s fragments as the batch of `Update`s reads them, each counted as
+/// it is read: a reader that stops early reads no further.
+fn batch_fragments(spec: SplitSpec<'_>) -> impl Iterator<Item = &str> {
+    spec.fragments()
+        .inspect(|_| crate::cost::count(|costs| costs.batch_fragments_read += 1))
+}
+
 /// An expanded `Include` as MSBuild spells it before splitting it into items
 /// ([`item_spec::include_spelling`]): on Unix, a Windows-authored
 /// `..\X\X.fsproj` becomes `../X/X.fsproj`. Where that spelling turns on
@@ -347,6 +379,10 @@ pub(super) fn replay_deferred_item_groups(entry_doc: &Document<'_>, state: &mut 
         let saved_span =
             std::mem::replace(&mut state.import_site_span, group.import_site_span.clone());
         let saved_sdk = std::mem::replace(&mut state.in_sdk_subtree, group.in_sdk_subtree);
+        // What MSBuild may not reach, each operation in it may not run
+        // ([`feed_update_batch`]).
+        let doubted = !group.reach_certain;
+        state.reach_doubted += usize::from(doubted);
         let evaluate = match group.kind {
             DeferredGroupKind::ItemDefinitionGroup => evaluate_item_definition_group,
             DeferredGroupKind::ItemGroup => evaluate_item_group,
@@ -363,11 +399,16 @@ pub(super) fn replay_deferred_item_groups(entry_doc: &Document<'_>, state: &mut 
                 taint_group_references_on_doubted_reads(node, state);
             }
         };
+        // The children of an `<ItemGroup>` the pass evaluates are reached one
+        // by one, walked or fed ([`note_element_reads`]).
+        let walked_element_by_element =
+            group.kind == DeferredGroupKind::ItemGroup && !group.judge_only;
         match group.file {
             DeferredFileKey::Entry => {
                 // The entry file's `MSBuildThisFile*` bindings are already
                 // live (every property-pass frame restored them on exit).
                 let node = resolve_deferred_node(entry_doc, group);
+                note_group_reads(node, walked_element_by_element, state);
                 let dir = state.entry_project_dir.clone();
                 judge(node, &dir, state);
                 if !group.judge_only {
@@ -383,6 +424,7 @@ pub(super) fn replay_deferred_item_groups(entry_doc: &Document<'_>, state: &mut 
                 // against the import's directory, not the entry project's.
                 let frame = state.enter_this_file(&file.path);
                 let node = resolve_deferred_node(doc, group);
+                note_group_reads(node, walked_element_by_element, state);
                 let dir = file
                     .path
                     .parent()
@@ -395,6 +437,7 @@ pub(super) fn replay_deferred_item_groups(entry_doc: &Document<'_>, state: &mut 
                 state.exit_this_file(frame);
             }
         }
+        state.reach_doubted -= usize::from(doubted);
         state.import_site_span = saved_span;
         state.in_sdk_subtree = saved_sdk;
     }
@@ -717,6 +760,11 @@ fn evaluate_item_group(node: Node<'_, '_>, state: &mut State<'_>) {
     if has_package_child {
         state.note_package_uncertain_if_condition_uses_sdk_taint(node);
     }
+    // Whether the walk decided the group's gate from certain inputs, probes
+    // included: what it walks under one it did not, MSBuild may not run.
+    let gate_certain = attribute(node, "Condition").is_none_or(|condition| {
+        directory_build::decided_from_certain_inputs(state, &condition, &state.entry_project_dir)
+    });
     let gate = evaluate_item_condition(node, state);
     if group_condition_tainted {
         item_lists_tainted_by_group_condition.apply(state);
@@ -734,10 +782,13 @@ fn evaluate_item_group(node: Node<'_, '_>, state: &mut State<'_>) {
                 state.project_references_uncertain = true;
             }
             restore(state);
+            state.reach_doubted += usize::from(!gate_certain);
             for child in node.children().filter(Node::is_element) {
+                note_element_reads(child, state);
                 taint_walked_reference_on_doubted_reads(child, state);
                 walk_item_child(child, state);
             }
+            state.reach_doubted -= usize::from(!gate_certain);
         }
         CondGate::Skip => {
             // Skipped only on an untrusted false: a hidden mutation may run
@@ -754,7 +805,7 @@ fn evaluate_item_group(node: Node<'_, '_>, state: &mut State<'_>) {
             // reads a name the walk doubts.
             taint_group_references_on_doubted_reads(node, state);
             restore(state);
-            judge_update_batches_of(node, state);
+            feed_unwalked_group(node, state);
         }
         CondGate::Unsupported => {
             // Record the carve-outs while both contexts are still set.
@@ -772,7 +823,7 @@ fn evaluate_item_group(node: Node<'_, '_>, state: &mut State<'_>) {
             }
             taint_group_references_on_doubted_reads(node, state);
             restore(state);
-            judge_update_batches_of(node, state);
+            feed_unwalked_group(node, state);
         }
     }
 }
@@ -1047,24 +1098,140 @@ pub(super) enum PackageItemKind {
     GlobalPackageReference,
 }
 
+/// Restate the strand walking an element named, judged against an empty batch
+/// (the diagnostics from `from` on), as the batch judges it: where every
+/// outcome strands at one fragment, that fragment, certain; where some
+/// outcome strands, or the batch is not followed, a fragment MSBuild may
+/// strand at. A batch that holds keys may stop the spec earlier than an empty
+/// one does, and design-time evaluation may hold keys a build does not.
+fn restate_named_strand(
+    from: usize,
+    causes_from: usize,
+    verdict: &BatchVerdict,
+    state: &mut State<'_>,
+) {
+    let restate = |kind: &mut DiagnosticKind| {
+        let DiagnosticKind::StrandedUpdatePrefix { update, fragment } = &*kind else {
+            return;
+        };
+        if fragment.is_empty() {
+            return;
+        }
+        let update = update.clone();
+        *kind = match verdict {
+            BatchVerdict::Strands(certain) => DiagnosticKind::StrandedUpdatePrefix {
+                update,
+                fragment: certain.clone(),
+            },
+            BatchVerdict::MayStrandAt(possible) => DiagnosticKind::MayStrandUpdatePrefix {
+                update,
+                fragment: possible.clone(),
+            },
+            BatchVerdict::MayStrand | BatchVerdict::HoldsUnfollowed => {
+                DiagnosticKind::MayStrandUpdatePrefix {
+                    update,
+                    fragment: fragment.clone(),
+                }
+            }
+            // The batch's own outcomes strand nothing here, but walking the
+            // element declined already (an over-decline, kept: #1197):
+            // the strand it named is no certain one.
+            BatchVerdict::Holds | BatchVerdict::HoldsOnLossyKey => {
+                DiagnosticKind::MayStrandUpdatePrefix {
+                    update,
+                    fragment: fragment.clone(),
+                }
+            }
+        };
+    };
+    // The project diagnostic and the Compile set's own record of it (which
+    // the LSP's deferral explanation reads) say the same.
+    for diagnostic in &mut state.diagnostics[from..] {
+        restate(&mut diagnostic.kind);
+    }
+    for cause in &mut state.compile_item_uncertainties[causes_from..] {
+        if let CompileItemUncertaintyCauseKind::Diagnostic(kind) = &mut cause.kind {
+            restate(kind);
+        }
+    }
+}
+
+/// Whether no key an `Update` at `node` of `item_type`, of the expanded
+/// `spec`, could match on is lossy ([`item_spec::key_is_lossy`]): its own
+/// fragments, and the identities of the items of its type included so far
+/// ([`State::lossy_keys_included`]). A lossy key, such as a trailing
+/// separator, is one MSBuild's versions read differently.
+fn batch_commit_is_lossless(
+    node: Node<'_, '_>,
+    item_type: &str,
+    spec: SplitSpec<'_>,
+    state: &State<'_>,
+) -> bool {
+    if state.lossy_keys_included.contains(item_type) {
+        return false;
+    }
+    // A Compile `Update` that writes no `CompileOrder` moves no item, so what
+    // it matches changes no order: nothing to read.
+    if item_type == "Compile" && !writes_compile_order(node) {
+        return true;
+    }
+    !batch_fragments(spec).any(|fragment| item_spec::key_is_lossy(&fragment_identity(fragment)))
+}
+
+/// Whether the item at `node` writes `CompileOrder`, as an attribute or a
+/// metadatum element.
+fn writes_compile_order(node: Node<'_, '_>) -> bool {
+    node.attributes()
+        .any(|attr| attr.name().eq_ignore_ascii_case("CompileOrder"))
+        || node.children().any(|child| {
+            child.is_element() && child.tag_name().name().eq_ignore_ascii_case("CompileOrder")
+        })
+}
+
+/// Note that an item of `item_type` whose identity is `identity` has been
+/// included, for [`batch_commit_is_lossless`].
+fn note_included_key(item_type: &'static str, identity: &str, state: &mut State<'_>) {
+    if item_spec::key_is_lossy(identity) {
+        state.lossy_keys_included.insert(item_type);
+    }
+}
+
 fn walk_item_child(node: Node<'_, '_>, state: &mut State<'_>) {
     #[cfg(any(test, feature = "test-support"))]
     let causes_before = state.package_reference_uncertainties.len();
     // MSBuild's batch of `Update`s, judged for the types whose `Update`s the
     // walk models, whatever the element's condition: see
     // [`update_may_strand`]. Where walking the element names the fragment
-    // its spec strands at ([`DiagnosticKind::StrandedUpdatePrefix`]), that
-    // decline stands alone.
-    let may_strand = batched_item_type(node).filter(|_| update_may_strand(node, state));
+    // its spec strands at ([`DiagnosticKind::StrandedUpdatePrefix`]), judged
+    // against an empty batch, that one decline stands, saying what the batch
+    // says ([`restate_named_strand`]).
+    let fed = batched_item_type(node)
+        .map(|item_type| (item_type, feed_update_batch(node, item_type, state)));
     let diagnostics_before = state.diagnostics.len();
+    let compile_causes_before = state.compile_item_uncertainties.len();
     walk_item_child_unattributed(node, state);
     let named_a_strand = state.diagnostics[diagnostics_before..].iter().any(|d| {
         matches!(&d.kind, DiagnosticKind::StrandedUpdatePrefix { fragment, .. } if !fragment.is_empty())
     });
-    if let Some(item_type) = may_strand
-        && !named_a_strand
-    {
-        note_update_may_strand(node, item_type, state);
+    match fed {
+        _ if named_a_strand => {
+            if let Some((_, verdict)) = &fed {
+                restate_named_strand(diagnostics_before, compile_causes_before, verdict, state);
+            }
+        }
+        Some((item_type, BatchVerdict::Strands(fragment))) => {
+            note_batch_declined(node, item_type, Strand::Certain(fragment), state)
+        }
+        Some((item_type, BatchVerdict::MayStrandAt(fragment))) => {
+            note_batch_declined(node, item_type, Strand::Possible(fragment), state)
+        }
+        Some((item_type, BatchVerdict::MayStrand)) => {
+            note_update_may_strand(node, item_type, state)
+        }
+        Some((item_type, BatchVerdict::HoldsOnLossyKey)) => {
+            note_version_dependent_match(node, item_type, state)
+        }
+        Some((_, BatchVerdict::Holds | BatchVerdict::HoldsUnfollowed)) | None => {}
     }
     // What the package set's causes say about another dependency list is the
     // probe's business only.
@@ -1935,6 +2102,22 @@ fn read_compile_order_metadata_write(
             );
             return None;
         }
+        // The SDK's order target buckets items by the escaped value as
+        // written (`WithMetadataValue`), neither trimmed nor unescaped, so
+        // ` CompileFirst ` and `Compile%46irst` are in no bucket. The walk
+        // reads only a value both spellings agree on.
+        if expansion.value.ignoring_trust().as_escaped() != value {
+            state.push(
+                DiagnosticKind::UnsupportedItemOperation {
+                    operation: format!(
+                        "CompileOrder {:?}, padded or escaped",
+                        diagnostic_preview(expansion.value.ignoring_trust().as_escaped())
+                    ),
+                },
+                span,
+            );
+            return None;
+        }
         Some(value)
     }
 
@@ -2086,7 +2269,7 @@ fn resolve_compile_update_targets(
             state.push(
                 DiagnosticKind::StrandedUpdatePrefix {
                     update: raw.to_string(),
-                    fragment: entry.to_string(),
+                    fragment: diagnostic_preview(entry),
                 },
                 node.range(),
             );
@@ -2609,6 +2792,9 @@ fn walk_package_reference(node: Node<'_, '_>, state: &mut State<'_>) {
         // [`finalize_package_references`] collapses Update onto prior Include
         // (where `Clear` correctly erases, unlike a lossy `Option`) and only
         // then detects the versionless symptom on the effective set.
+        if op == PackageRefOp::Include {
+            note_included_key("PackageReference", &id, state);
+        }
         state
             .captured_package_references
             .push(CapturedPackageReference {
@@ -2667,19 +2853,22 @@ fn update_may_strand(node: Node<'_, '_>, state: &State<'_>) -> bool {
     if !rejection::operands_are_certain(state, &update) {
         return true;
     }
+    crate::cost::count(|costs| costs.batch_spec_expansions += 1);
     let expansion = expand_silent(&update, state);
-    if expansion.had_issue() {
-        return true;
-    }
+    expansion.had_issue() || spec_may_strand(expansion.value.ignoring_trust())
+}
+
+/// Whether an `Update` of the exact expanded `spec` may leave MSBuild's batch
+/// past its first fragment ([`update_may_strand`]): it has two fragments or
+/// more, and its first holds no expansion character.
+fn spec_may_strand(spec: &Escaped) -> bool {
     // The question reads only the first fragment and whether a second follows,
     // and an item expression holding a `;` moves neither answer: in the first
     // fragment its `@(` falls before its first `;`, so the plain split's first
     // fragment holds it too; in a later one there is a second fragment either
     // way. So this split is exact here though [`spec_fragments`] refuses the
     // spec.
-    let mut fragments = expansion
-        .value
-        .ignoring_trust()
+    let mut fragments = spec
         .as_escaped()
         .split(';')
         .map(str::trim)
@@ -2697,26 +2886,97 @@ fn update_may_strand(node: Node<'_, '_>, state: &State<'_>) -> bool {
 /// stranded in MSBuild's batch of `Update`s ([`update_may_strand`]).
 fn note_update_may_strand(node: Node<'_, '_>, item_type: &str, state: &mut State<'_>) {
     let update = attribute(node, "Update").unwrap_or_default().to_string();
+    note_update_declined(
+        node,
+        item_type,
+        DiagnosticKind::UnmodelledUpdateBatch { update },
+        state,
+    );
+}
+
+/// Decline `item_type`'s list at `node`, an `Update` the batch finds strands
+/// nothing, but whose match rests on a key MSBuild's versions read
+/// differently ([`batch_commit_is_lossless`]): SDK 8.0.428 keeps a trailing
+/// separator SDK 10.0.401 trims.
+fn note_version_dependent_match(node: Node<'_, '_>, item_type: &str, state: &mut State<'_>) {
+    let update = attribute(node, "Update").unwrap_or_default().to_string();
+    let operation = format!(
+        "{item_type} Update=\"{update}\" whose match rests on a trailing separator, which \
+         MSBuild's versions read differently"
+    );
+    note_update_declined(
+        node,
+        item_type,
+        DiagnosticKind::UnsupportedItemOperation { operation },
+        state,
+    );
+}
+
+/// Decline `item_type`'s list at `node` for `kind`: a Compile diagnostic, or
+/// the matching cause on the `PackageReference` list.
+fn note_update_declined(
+    node: Node<'_, '_>,
+    item_type: &str,
+    kind: DiagnosticKind,
+    state: &mut State<'_>,
+) {
     if item_type == "Compile" {
         let previous = state.compile_context;
         state.compile_context = true;
-        state.push(
-            DiagnosticKind::UnmodelledUpdateBatch { update },
-            node.range(),
-        );
+        state.push(kind, node.range());
         state.compile_context = previous;
     } else {
         #[cfg(any(test, feature = "test-support"))]
         let causes_before = state.package_reference_uncertainties.len();
         let previous = state.package_context;
         state.package_context = true;
-        state.note_package_uncertain(
-            PackageReferenceUncertaintyCauseKind::UnmodelledUpdateBatch { update },
-            node.range(),
-        );
+        let cause = match kind {
+            DiagnosticKind::UnmodelledUpdateBatch { update } => {
+                PackageReferenceUncertaintyCauseKind::UnmodelledUpdateBatch { update }
+            }
+            other => PackageReferenceUncertaintyCauseKind::Diagnostic(other),
+        };
+        state.note_package_uncertain(cause, node.range());
         state.package_context = previous;
         // The cause is the `PackageReference` list's alone, whether or not
         // the walk walks `node` ([`walk_item_child`] attributes its own).
+        #[cfg(any(test, feature = "test-support"))]
+        state.attribute_package_causes(causes_before, PackageItemKind::PackageReference);
+    }
+}
+
+/// Decline `item_type`'s list at `node`, an `Update` that leaves MSBuild's
+/// batch at a fragment stranding an earlier one, which then applies late:
+/// in every outcome the walk follows ([`BatchVerdict::Strands`]), or in some
+/// ([`BatchVerdict::MayStrandAt`]), which the diagnostic says.
+fn note_batch_declined(node: Node<'_, '_>, item_type: &str, strand: Strand, state: &mut State<'_>) {
+    let update = attribute(node, "Update").unwrap_or_default().to_string();
+    if item_type == "Compile" {
+        let previous = state.compile_context;
+        state.compile_context = true;
+        let kind = match strand {
+            Strand::Certain(fragment) => DiagnosticKind::StrandedUpdatePrefix { update, fragment },
+            Strand::Possible(fragment) => {
+                DiagnosticKind::MayStrandUpdatePrefix { update, fragment }
+            }
+        };
+        state.push(kind, node.range());
+        state.compile_context = previous;
+    } else {
+        #[cfg(any(test, feature = "test-support"))]
+        let causes_before = state.package_reference_uncertainties.len();
+        let previous = state.package_context;
+        state.package_context = true;
+        let cause = match strand {
+            Strand::Certain(fragment) => {
+                PackageReferenceUncertaintyCauseKind::StrandedUpdate { update, fragment }
+            }
+            Strand::Possible(fragment) => {
+                PackageReferenceUncertaintyCauseKind::MayStrandUpdate { update, fragment }
+            }
+        };
+        state.note_package_uncertain(cause, node.range());
+        state.package_context = previous;
         #[cfg(any(test, feature = "test-support"))]
         state.attribute_package_causes(causes_before, PackageItemKind::PackageReference);
     }
@@ -2743,18 +3003,850 @@ fn certainly_skipped(node: Node<'_, '_>, state: &State<'_>) -> bool {
     })
 }
 
-/// [`update_may_strand`] for every child of an `<ItemGroup>` the walk does
-/// not walk, unless MSBuild never runs it either: its `Update`s may run.
-fn judge_update_batches_of(node: Node<'_, '_>, state: &mut State<'_>) {
-    if certainly_skipped(node, state) {
+/// Feed every child of an `<ItemGroup>` the walk does not walk to the batch
+/// as an operation that may or may not run ([`feed_update_batch`]). Even a
+/// group whose gate is false from certain inputs is one: design-time
+/// evaluation batches the `Update`s in it. Its `Update`s apply nothing, so
+/// none of them declines on its own.
+fn feed_unwalked_group(node: Node<'_, '_>, state: &mut State<'_>) {
+    let never_runs = certainly_skipped(node, state);
+    state.reach_doubted += 1;
+    for child in node.children().filter(Node::is_element) {
+        note_element_reads(child, state);
+        if let Some(item_type) = batched_item_type(child) {
+            match feed_update_batch(child, item_type, state) {
+                BatchVerdict::Holds
+                | BatchVerdict::HoldsOnLossyKey
+                | BatchVerdict::HoldsUnfollowed => {}
+                BatchVerdict::Strands(_)
+                | BatchVerdict::MayStrandAt(_)
+                | BatchVerdict::MayStrand
+                    if never_runs => {}
+                BatchVerdict::MayStrandAt(fragment) => {
+                    note_batch_declined(child, item_type, Strand::Possible(fragment), state)
+                }
+                BatchVerdict::Strands(fragment) => {
+                    note_batch_declined(child, item_type, Strand::Certain(fragment), state)
+                }
+                BatchVerdict::MayStrand => note_update_may_strand(child, item_type, state),
+            }
+        }
+    }
+    state.reach_doubted -= 1;
+}
+
+/// MSBuild's batch of `Update`s for one item type (`LazyItemList.ComputeItems`),
+/// as far as the walk follows it.
+#[derive(Debug)]
+pub(super) enum BatchState {
+    /// The batch is one of these, as operations the walk may or may not run
+    /// went: at least one, at most [`MAX_BATCH_WORLDS`], all distinct.
+    Known(Vec<UpdateBatchRun>),
+    /// A batch the walk does not follow: a fragment it cannot key, an inexact
+    /// spec, or more outcomes than [`MAX_BATCH_WORLDS`]. Every later `Update`
+    /// of the type is judged without it ([`update_may_strand`]); a flush may
+    /// have emptied it, but the walk cannot tell that one ran.
+    Unknown,
+}
+
+impl Default for BatchState {
+    fn default() -> Self {
+        BatchState::Known(vec![UpdateBatchRun::default()])
+    }
+}
+
+/// The most outcomes the walk follows a batch through: each operation it may
+/// or may not run doubles them, and a flush folds them back.
+const MAX_BATCH_WORLDS: usize = 4;
+
+/// The most keys, and the most bytes of them, the walk copies into a second
+/// outcome of one operation it may or may not run; past either, it follows
+/// no batch. So following a batch costs each operation a bounded copy, and
+/// a bounded comparison of outcomes, whatever the batch holds: only one
+/// outcome ever holds more than this, and none of its copies can.
+const MAX_COPIED_KEYS: usize = 64;
+const MAX_COPIED_BYTES: usize = 4096;
+
+/// The most bytes of keys any one outcome of a batch holds; past it, the walk
+/// follows no batch. A run of `Update`s no operation flushes would otherwise
+/// keep every key it expanded, however long.
+const MAX_HELD_BYTES: usize = 4 * 1024 * 1024;
+
+/// One state MSBuild's batch may be in.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(super) struct UpdateBatchRun {
+    /// The keys the batch holds ([`item_spec::batch_key`]), stranded ones
+    /// included.
+    keys: HashSet<String>,
+    /// The XOR of the keys' hashes, kept with them, so that two worlds are
+    /// told apart without comparing their keys ([`known_worlds`]).
+    digest: u64,
+    /// The keys' total length in bytes, kept with them.
+    bytes: usize,
+    /// Whether the last operation was an `Update` that joined the batch, so
+    /// that the next operation flushes it, stranded keys and all.
+    pending: bool,
+    /// Whether the batch also holds keys the walk does not compute. It does
+    /// only while pending: a lone fragment the walk cannot key joins an empty
+    /// batch for certain, and the flush that follows empties it.
+    opaque: bool,
+}
+
+impl UpdateBatchRun {
+    fn key_hash(key: &str) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        key.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// Add `key`: false where the batch holds it already. The key's buffer
+    /// is about its length, which is what [`MAX_HELD_BYTES`] counts.
+    fn insert(&mut self, key: String) -> bool {
+        debug_assert!(
+            key.capacity() <= 2 * key.len().max(16),
+            "a key of {} bytes in a buffer of {}",
+            key.len(),
+            key.capacity()
+        );
+        let hash = Self::key_hash(&key);
+        let length = key.len();
+        let added = self.keys.insert(key);
+        if added {
+            self.digest ^= hash;
+            self.bytes += length;
+            let held = self.bytes as u64;
+            crate::cost::count(|costs| {
+                costs.batch_bytes_held_peak = costs.batch_bytes_held_peak.max(held);
+            });
+        }
+        added
+    }
+
+    fn remove(&mut self, key: &str) {
+        if self.keys.remove(key) {
+            self.digest ^= Self::key_hash(key);
+            self.bytes -= key.len();
+        }
+    }
+
+    /// Whether the walk copies this world into a second outcome, rather than
+    /// follow no batch ([`MAX_COPIED_KEYS`]): its keys, their bytes and the
+    /// table holding them are all small.
+    fn copyable(&self) -> bool {
+        self.keys.len() <= MAX_COPIED_KEYS
+            && self.keys.capacity() <= 4 * MAX_COPIED_KEYS
+            && self.bytes <= MAX_COPIED_BYTES
+    }
+
+    /// Whether `self` and `other` may be the same state: cheap, and exact
+    /// wherever it says they differ.
+    fn may_equal(&self, other: &Self) -> bool {
+        self.pending == other.pending
+            && self.opaque == other.opaque
+            && self.keys.len() == other.keys.len()
+            && self.bytes == other.bytes
+            && self.digest == other.digest
+    }
+
+    /// Whether `self` and `other` are the same state. The keys are compared
+    /// by walking the table of smaller capacity, which is the cost counted: a
+    /// table a rollback left sparse is walked only against another as sparse,
+    /// and no copy is ([`UpdateBatchRun::copyable`]).
+    fn same_state(&self, other: &Self) -> bool {
+        if !self.may_equal(other) {
+            return false;
+        }
+        let (small, large) = if self.keys.capacity() <= other.keys.capacity() {
+            (self, other)
+        } else {
+            (other, self)
+        };
+        crate::cost::count(|costs| {
+            costs.batch_keys_copied += small.keys.capacity() as u64;
+            costs.batch_bytes_copied += small.bytes as u64;
+        });
+        small.keys.iter().all(|key| large.keys.contains(key))
+    }
+}
+
+/// What feeding an element to the batch says about its list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BatchVerdict {
+    /// Nothing the walk does not follow, by a batch it follows.
+    Holds,
+    /// Nothing stranded, by a batch the walk follows, for an `Update` that
+    /// may leave past its first fragment ([`spec_may_strand`]); but a key it
+    /// could match on is one MSBuild's versions read differently
+    /// ([`batch_commit_is_lossless`]), so the walk does not commit.
+    HoldsOnLossyKey,
+    /// Nothing the walk does not follow, by `update_may_strand`'s judgement
+    /// of an `Update` the batch, unknown, no longer follows: the spec is
+    /// settled already, and nothing is added over that judgement.
+    HoldsUnfollowed,
+    /// The `Update` leaves the batch at this fragment, in every outcome the
+    /// walk follows, with an earlier one stranded and no batch pending, so
+    /// the earlier one applies late.
+    Strands(String),
+    /// The `Update` leaves the batch at this fragment stranding an earlier
+    /// one in some outcome the walk follows (design-time evaluation, say),
+    /// not every one.
+    MayStrandAt(String),
+    /// The batch is unknown, and the `Update` may strand
+    /// ([`update_may_strand`]).
+    MayStrand,
+}
+
+/// Feed `node`, an element of `item_type`, to MSBuild's batch of `Update`s.
+///
+/// The mechanism is `LazyItemList.ComputeItems`
+/// (`src/Build/Evaluation/LazyItemEvaluator.cs` in dotnet/msbuild, SDK
+/// 10.0.401). Its batching is this closed set of branches, each modelled
+/// here and nothing else:
+///
+/// - **Join.** Consecutive `Update`s of one type join a batch keyed by
+///   `NormalizePathForComparisonNoThrow`, compared `OrdinalIgnoreCase`
+///   ([`item_spec::batch_key`]), fragment by fragment.
+/// - **Leave at an expansion.** An `Update` leaves the batch at the first
+///   fragment holding an expansion character (`*`, `?`, `$(`, `@(`, `%`, in
+///   the escaped text).
+/// - **Leave at a collision.** Or at the first fragment whose key the batch
+///   already holds. Leaving removes its earlier fragments by their text
+///   rather than their key: one spelled as its key leaves with it, and any
+///   other stays *stranded*, to apply at a later flush. Leaving is followed by
+///   a flush only where an earlier `Update` had joined (`pending`), and a
+///   flush then applies the strands at once, which is harmless.
+/// - **Join with nothing.** An `Update` whose spec holds no fragment is marked
+///   added all the same (`addedToBatch`), leaving the batch pending.
+/// - **Flush.** Any other operation flushes a pending batch, and nothing else;
+///   a flush empties the batch, strands included.
+/// - **Restart.** Reading the list (`@(Type)`) computes it, once; a later
+///   computation resumes past the read with an empty batch
+///   ([`note_possible_item_list_reads`]).
+///
+/// An operation the walk certainly runs ([`OperationRuns::Always`]) moves the
+/// batch as modelled. Any other one has two outcomes, and the walk follows
+/// both: build evaluation skips an `Update` it does not run, and design-time
+/// evaluation batches its fragments all the same (probed, SDK 10.0.401: after
+/// a condition-false `Update="Z.fs"`, `A.fs;A.fs` and `B.fs;A.fs` leave
+/// `B.fs` the stranded `CompileFirst` in a build and not in `-getItem`),
+/// without applying its metadata.
+fn feed_update_batch(node: Node<'_, '_>, item_type: &str, state: &mut State<'_>) -> BatchVerdict {
+    let key = item_key(item_type);
+    let runs = operation_runs(node, state);
+    let update = attribute(node, "Update").filter(|_| !node.has_attribute("Include"));
+    let Some(update) = update else {
+        // Another operation: it flushes a pending batch where it runs.
+        if let Some(BatchState::Known(worlds)) = state.update_batches.get_mut(&key) {
+            let mut after = Vec::with_capacity(worlds.len());
+            for world in std::mem::take(worlds) {
+                if !world.pending {
+                    after.push(world);
+                    continue;
+                }
+                if runs == OperationRuns::Maybe {
+                    after.push(world);
+                }
+                after.push(UpdateBatchRun::default());
+            }
+            state.update_batches.insert(key, known_worlds(after));
+        }
+        return BatchVerdict::Holds;
+    };
+    // A batch the walk no longer follows judges the `Update` without it, and
+    // needs no expansion here. Under MSBuild's case-sensitive item names
+    // (#1162), where `compile` and `Compile` are separate batches the walk
+    // keys as one, no batch is followed at all.
+    if state.case_sensitive_item_names
+        || matches!(state.update_batches.get(&key), Some(BatchState::Unknown))
+    {
+        return if update_may_strand(node, state) {
+            BatchVerdict::MayStrand
+        } else {
+            BatchVerdict::HoldsUnfollowed
+        };
+    }
+    let exact = rejection::operands_are_certain(state, &update);
+    crate::cost::count(|costs| costs.batch_spec_expansions += 1);
+    let expansion = expand_silent(&update, state);
+    let project_dir = state.entry_project_dir.clone();
+    // A metadatum of an `Update` MSBuild never runs never applies, stranded or
+    // not ([`feed_update_batch`]'s design-time outcome).
+    let never_runs = certainly_skipped(node, state);
+    let spec = expansion.value.ignoring_trust();
+    // A spec in which an item expression holds a `;` is one the walk names
+    // no fragments of ([`spec_fragments`]), so the batch is not followed past
+    // it.
+    let split = (exact && !expansion.had_issue())
+        .then(|| SplitSpec::of(spec))
+        .flatten();
+    let batch = state.update_batches.entry(key).or_default();
+    let fed = match (&mut *batch, split) {
+        (BatchState::Known(worlds), Some(split)) => {
+            feed_worlds(std::mem::take(worlds), split, &project_dir, runs).map(|fed| (fed, split))
+        }
+        _ => None,
+    };
+    let (strand, split) = match fed {
+        Some(((after, strand), split)) => {
+            *batch = known_worlds(after);
+            (strand, split)
+        }
+        None => {
+            *batch = BatchState::Unknown;
+            // [`update_may_strand`]'s judgement, of the expansion in hand.
+            let may_strand =
+                !never_runs && (!exact || expansion.had_issue() || spec_may_strand(spec));
+            return if may_strand {
+                BatchVerdict::MayStrand
+            } else {
+                BatchVerdict::HoldsUnfollowed
+            };
+        }
+    };
+    match strand {
+        _ if never_runs => BatchVerdict::Holds,
+        Some(Strand::Certain(fragment)) => BatchVerdict::Strands(fragment),
+        Some(Strand::Possible(fragment)) => BatchVerdict::MayStrandAt(fragment),
+        // The certain verdict this batch adds over `update_may_strand`'s: an
+        // `Update` that may leave past its first fragment, followed and found
+        // to strand nothing. It stands only where every key the `Update`
+        // could match on is lossless, so that no version of MSBuild matches
+        // differently ([`batch_commit_is_lossless`]).
+        None if spec_may_strand(spec)
+            && !batch_commit_is_lossless(node, item_type, split, state) =>
+        {
+            BatchVerdict::HoldsOnLossyKey
+        }
+        None => BatchVerdict::Holds,
+    }
+}
+
+/// Whether `text` holds an item reference, of any type and spacing: `@(`, or
+/// `%(` for batching over a list.
+pub(super) fn holds_item_reference(text: &str) -> bool {
+    text.contains("@(") || text.contains("%(")
+}
+
+/// Whether `text`, a value as MSBuild reads it, may read an item list.
+///
+/// A text is held to a positive domain. It reads no list where it holds no
+/// item reference ([`holds_item_reference`]) and either holds no `$`, or the
+/// walk is certain of its expansion, which then holds none either (a name
+/// the walk holds no value of, `MSBuildStartupDirectory` with no startup
+/// directory given, leaves it uncertain). Any other text
+/// may read one: a property the walk is not certain of may hold any text, or
+/// splice one around the text's own, and so may a value the walk cannot read
+/// (`None`). That declines some orders the walk could keep (a gate reading an
+/// untrusted property while a batch is pending); the declines are deliberate,
+/// the price of not tracking where each property's text came from.
+fn text_may_read_item_lists(text: Option<&str>, state: &State<'_>) -> bool {
+    let Some(text) = text else {
+        return true;
+    };
+    if holds_item_reference(text) {
+        return true;
+    }
+    if !text.contains('$') {
+        return false;
+    }
+    let expansion = expand_silent(text, state);
+    let certain = !expansion.had_issue() && rejection::operands_are_certain(state, text);
+    // An expansion that still holds a property expression may be expanded
+    // again (`MatchOnMetadata` is, fragment by fragment), so it may read one.
+    let expanded = expansion.value.ignoring_trust().as_escaped();
+    !certain || holds_item_reference(expanded) || expanded.contains("$(")
+}
+
+/// Whether an attribute of `element` MSBuild evaluates may read an item
+/// list, read as `reading` of its name says MSBuild reads it
+/// ([`AttributeReading`]).
+fn attributes_may_read_item_lists(
+    element: Node<'_, '_>,
+    reading: impl Fn(&str) -> AttributeReading,
+    state: &State<'_>,
+) -> bool {
+    element.attributes().any(|attr| {
+        // Decoding and reading again as XML change no value without one of
+        // these, nor make an item reference or an expansion appear.
+        if !attr.value().contains(['@', '%', '$', '<']) {
+            return false;
+        }
+        let decoded = || {
+            text_may_read_item_lists(
+                Some(&crate::document::attribute_value(element, &attr)),
+                state,
+            )
+        };
+        match reading(attr.name()) {
+            AttributeReading::Unevaluated => false,
+            AttributeReading::Decoded => decoded(),
+            AttributeReading::Metadatum => {
+                decoded()
+                    || text_may_read_item_lists(
+                        metadata_attribute(element, &attr).as_deref(),
+                        state,
+                    )
+            }
+        }
+    })
+}
+
+/// How MSBuild reads an attribute of a group or of a metadatum element: its
+/// gate decoded, a label never.
+fn gate_reading(name: &str) -> AttributeReading {
+    if name == "Label" {
+        AttributeReading::Unevaluated
+    } else {
+        AttributeReading::Decoded
+    }
+}
+
+/// How MSBuild reads an attribute the read scan meets
+/// ([`attributes_may_read_item_lists`]).
+#[derive(Clone, Copy)]
+enum AttributeReading {
+    /// Never evaluated: a label, an option, an operation's attribute the
+    /// item's own operation does not read.
+    Unevaluated,
+    /// Decoded and evaluated as written: a gate, an item's operation.
+    Decoded,
+    /// A metadatum written as an attribute, which MSBuild stores as element
+    /// content and reads back, again as XML ([`metadata_attribute`]).
+    Metadatum,
+}
+
+/// Whether `item`, an element of an item or item definition group, may read
+/// an item list: through an attribute (its gate, its spec, a metadatum), or
+/// through a metadatum element (child of `item`, by place, whatever its name),
+/// its attributes or its body. A body is read as MSBuild reads it, with its
+/// CDATA sections, comments and elements
+/// ([`rejection::element_inner_contents`]), each metadatum on its own.
+fn item_may_read_item_lists(item: Node<'_, '_>, state: &State<'_>) -> bool {
+    let operation = rejection::item_operation(item);
+    attributes_may_read_item_lists(
+        item,
+        |name| {
+            if rejection::item_attribute_is_metadatum(operation, name) {
+                AttributeReading::Metadatum
+            } else if rejection::item_attribute_is_evaluated(operation, name) {
+                AttributeReading::Decoded
+            } else {
+                AttributeReading::Unevaluated
+            }
+        },
+        state,
+    ) || item.children().filter(Node::is_element).any(|metadatum| {
+        attributes_may_read_item_lists(metadatum, gate_reading, state)
+            || text_may_read_item_lists(
+                rejection::element_inner_contents(metadatum).as_deref(),
+                state,
+            )
+    })
+}
+
+/// Where MSBuild may read an item list ([`text_may_read_item_lists`]), it may
+/// compute the list there, once, and resume later computations past it with
+/// an empty batch: each batch gains that outcome. Where every batch the walk
+/// follows is already empty in every outcome, a restart moves nothing, and
+/// `may_read` is not asked.
+fn note_possible_item_list_reads(state: &mut State<'_>, may_read: impl FnOnce(&State<'_>) -> bool) {
+    let empty = UpdateBatchRun::default();
+    let may_restart = state.update_batches.values().any(|batch| match batch {
+        BatchState::Known(worlds) => worlds.iter().any(|world| *world != empty),
+        BatchState::Unknown => false,
+    });
+    if !may_restart || !may_read(state) {
         return;
     }
-    for child in node.children().filter(Node::is_element) {
-        if let Some(item_type) = batched_item_type(child)
-            && update_may_strand(child, state)
-        {
-            note_update_may_strand(child, item_type, state);
+    for batch in state.update_batches.values_mut() {
+        if let BatchState::Known(worlds) = batch {
+            let mut after = std::mem::take(worlds);
+            after.push(UpdateBatchRun::default());
+            *batch = known_worlds(after);
         }
+    }
+}
+
+/// [`note_possible_item_list_reads`] where the item pass replays `group`: a
+/// group it walks reads at its gate here, and at each item as it reaches it
+/// ([`note_element_reads`]); one it only judges, or an
+/// `<ItemDefinitionGroup>`, at its gate or any of its items.
+fn note_group_reads(group: Node<'_, '_>, walked_element_by_element: bool, state: &mut State<'_>) {
+    note_possible_item_list_reads(state, |state| {
+        attributes_may_read_item_lists(group, gate_reading, state)
+            || (!walked_element_by_element
+                && group
+                    .children()
+                    .filter(Node::is_element)
+                    .any(|item| item_may_read_item_lists(item, state)))
+    });
+}
+
+/// [`note_possible_item_list_reads`] at `item`, a child of a group the item
+/// pass walks or feeds: MSBuild reads there before it registers the item's
+/// operation.
+fn note_element_reads(item: Node<'_, '_>, state: &mut State<'_>) {
+    note_possible_item_list_reads(state, |state| item_may_read_item_lists(item, state));
+}
+
+/// The batch after an operation, as the worlds it may be in: each once, and
+/// unknown past [`MAX_BATCH_WORLDS`]. Two worlds are compared key by key only
+/// where everything cheap about them agrees ([`UpdateBatchRun::may_equal`]).
+fn known_worlds(worlds: Vec<UpdateBatchRun>) -> BatchState {
+    let mut distinct: Vec<UpdateBatchRun> = Vec::with_capacity(worlds.len());
+    for world in worlds {
+        let seen = distinct.iter().any(|kept| kept.same_state(&world));
+        if !seen {
+            distinct.push(world);
+        }
+    }
+    if distinct.len() > MAX_BATCH_WORLDS {
+        BatchState::Unknown
+    } else {
+        BatchState::Known(distinct)
+    }
+}
+
+/// An `Update` of the exact expanded `spec` fed to each world of a known
+/// batch, run or not as `runs` says: the worlds after it, and a fragment it
+/// strands at in any. `None` where a world becomes one the walk does not
+/// follow. The spec's fragments are read lazily, again for each world
+/// ([`spec_fragments`]), so a world that settles at its first fragment reads
+/// no further, and no table of them is built.
+fn feed_worlds(
+    worlds: Vec<UpdateBatchRun>,
+    spec: SplitSpec<'_>,
+    project_dir: &Path,
+    runs: OperationRuns,
+) -> Option<(Vec<UpdateBatchRun>, Option<Strand>)> {
+    let mut after = Vec::with_capacity(worlds.len() * 2);
+    let mut strand = None;
+    // Whether every outcome strands: an outcome where the `Update` does not
+    // run, or runs and strands nothing, says it does not.
+    let mut every_outcome_strands = true;
+    for world in worlds {
+        if runs == OperationRuns::Maybe {
+            every_outcome_strands = false;
+            if batch_unmoved_by(&world, spec, project_dir) {
+                after.push(world);
+                continue;
+            }
+            if world.pending && !world.opaque && leaves_somewhere(&world, spec, project_dir) {
+                // Run, it leaves the batch and flushes it: the outcomes are
+                // the batch as it is and an empty one.
+                after.push(world);
+                after.push(UpdateBatchRun::default());
+                continue;
+            }
+            if !world.copyable() {
+                return None;
+            }
+            after.push(copy_world(&world));
+        }
+        let (ran, stranded_at) = feed_world(world, spec, project_dir)?;
+        after.extend(ran);
+        // Certain only where every outcome strands at the one fragment.
+        every_outcome_strands &= match (&strand, &stranded_at) {
+            (_, None) => false,
+            (Some(earlier), Some(now)) => earlier == now,
+            (None, Some(_)) => true,
+        };
+        strand = strand.or(stranded_at);
+        if after.len() > MAX_BATCH_WORLDS * 2 {
+            return None;
+        }
+    }
+    // Every outcome reads the one spec, so one index is one fragment.
+    let strand = strand.map(|at| {
+        let fragment = fragment_as_parsed(spec, at);
+        if every_outcome_strands {
+            Strand::Certain(fragment)
+        } else {
+            Strand::Possible(fragment)
+        }
+    });
+    Some((after, strand))
+}
+
+/// A fragment an `Update` leaves the batch at, stranding an earlier one: in
+/// every outcome the walk follows, or in some.
+enum Strand {
+    Certain(String),
+    Possible(String),
+}
+
+/// A fragment's key in the batch, where the walk computes it: `None` for one
+/// holding an expansion character (it leaves the batch), and `Some(None)` for
+/// one the walk cannot key ([`item_spec::batch_key`]).
+fn batch_fragment_key(fragment: &str, project_dir: &Path) -> Option<Option<String>> {
+    let expands = ["*", "?", "$(", "@(", "%"]
+        .iter()
+        .any(|marker| fragment.contains(marker));
+    if expands {
+        return None;
+    }
+    let decoded = fragment_identity(fragment);
+    crate::cost::count(|costs| costs.batch_keys += 1);
+    let key = item_spec::batch_key(&decoded, project_dir).map(|mut key| {
+        // Normalising may shorten a key far below the buffer it was built in
+        // (`a/../` collapses); the batch keeps only what it counts.
+        key.shrink_to_fit();
+        key
+    });
+    Some(key.filter(|key| !removal_turns_on_the_spelling(&decoded, key)))
+}
+
+/// Whether removing `decoded` (a fragment spelled without an escape) by its
+/// text may find its `key` or not as the build's working directory has it:
+/// MSBuild collapses the separators of a spec whose first segment exists
+/// there (`FileUtilities.MaybeAdjustFilePath`) before it removes fragments by
+/// their text, so a fragment with a `\` or a run of separators that,
+/// collapsed, is spelled as its key leaves the batch with its `Update` or
+/// stays stranded as the working directory has it.
+fn removal_turns_on_the_spelling(decoded: &str, key: &str) -> bool {
+    if !decoded.contains('\\') && !decoded.contains("//") {
+        return false;
+    }
+    let mut collapsed = String::with_capacity(decoded.len());
+    for c in decoded.chars() {
+        let c = if c == '\\' { '/' } else { c };
+        if !(c == '/' && collapsed.ends_with('/')) {
+            collapsed.push(c);
+        }
+    }
+    collapsed.make_ascii_lowercase();
+    collapsed == key
+}
+
+/// `world`, copied into another outcome of an operation the walk may or may
+/// not run.
+fn copy_world(world: &UpdateBatchRun) -> UpdateBatchRun {
+    crate::cost::count(|costs| {
+        // A table costs its capacity to copy, not only the keys it holds.
+        costs.batch_keys_copied += world.keys.capacity().max(world.keys.len()) as u64;
+        costs.batch_bytes_copied += world.bytes as u64;
+    });
+    world.clone()
+}
+
+/// An `Update` of exact `fragments` that runs, fed to one world: the worlds
+/// it may leave, and the index of the fragment it leaves the batch at where
+/// it strands an earlier one. `None` where the walk does not follow it.
+fn feed_world(
+    world: UpdateBatchRun,
+    spec: SplitSpec<'_>,
+    project_dir: &Path,
+) -> Option<(Vec<UpdateBatchRun>, Option<usize>)> {
+    if batch_fragments(spec).next().is_none() {
+        // A spec that expands to no fragment joins nothing, but joins the
+        // batch all the same: `LazyItemList.ComputeItems` marks it added
+        // whether or not its fragment loop runs, so the batch is pending,
+        // its keys kept.
+        let mut ran = world;
+        ran.pending = true;
+        return Some((vec![ran], None));
+    }
+    if world.opaque {
+        // A batch holding a key the walk does not know is pending: the
+        // `Update` joins whole, or leaves somewhere and flushes it. Either way
+        // it strands nothing late.
+        // A fragment with an expansion character ends the batching for
+        // certain, so the `Update` leaves at it or before: flushed.
+        let flushed = UpdateBatchRun::default();
+        let mut joined = world;
+        let mut unknown = false;
+        for fragment in batch_fragments(spec) {
+            let Some(key) = batch_fragment_key(fragment, project_dir) else {
+                return Some((vec![flushed], None));
+            };
+            // A fragment the walk cannot key may join or leave; a later
+            // expansion character may still settle it.
+            let Some(key) = key else {
+                unknown = true;
+                continue;
+            };
+            if unknown {
+                continue;
+            }
+            // Past the budget the walk follows no batch, before it holds the
+            // key ([`MAX_HELD_BYTES`]).
+            if joined.bytes + key.len() > MAX_HELD_BYTES {
+                return None;
+            }
+            joined.insert(key);
+        }
+        if unknown {
+            return None;
+        }
+        return Some((vec![joined, flushed], None));
+    }
+    let mut run = world;
+    let mut left_at = None;
+    // Whether a joined fragment is one leaving would strand: its written text
+    // is not its key, so removing it by text misses.
+    let mut strandable = false;
+    // The keys this spec added that leaving removes: those of fragments
+    // spelled as their key, which removing by text finds.
+    let mut removed_on_leaving = Vec::new();
+    for (i, fragment) in batch_fragments(spec).enumerate() {
+        let Some(key) = batch_fragment_key(fragment, project_dir) else {
+            left_at = Some(i);
+            break;
+        };
+        let Some(key) = key else {
+            // A lone fragment the walk cannot key joins a batch that is
+            // empty for certain; anything else, the walk does not follow.
+            if batch_fragments(spec).nth(1).is_none() && run.keys.is_empty() && !run.pending {
+                run.pending = true;
+                run.opaque = true;
+                return Some((vec![run], None));
+            }
+            return None;
+        };
+        // Past the budget the walk follows no batch, before it holds the key.
+        if run.bytes + key.len() > MAX_HELD_BYTES {
+            return None;
+        }
+        if !run.insert(key.clone()) {
+            left_at = Some(i);
+            break;
+        }
+        let decoded = fragment_identity(fragment);
+        let stays =
+            !crate::glob::compares_unnormalised(&decoded) && key != fragment.to_ascii_lowercase();
+        if stays {
+            strandable = true;
+        } else {
+            removed_on_leaving.push(key);
+        }
+    }
+    let Some(i) = left_at else {
+        run.pending = true;
+        return Some((vec![run], None));
+    };
+    let strands = i > 0 && strandable && !run.pending;
+    if run.pending {
+        run = UpdateBatchRun::default();
+    } else {
+        for key in &removed_on_leaving {
+            run.remove(key);
+        }
+    }
+    Some((vec![run], strands.then_some(i)))
+}
+
+/// The fragment at index `at` of `spec`, as a diagnostic names it
+/// ([`diagnostic_preview`]). A [`SplitSpec`]'s fragments are MSBuild's own,
+/// item expressions included: `@(H->Distinct(), ';')` is the two fragments
+/// `@(H->Distinct(), '` and `')`, as `Include="A;@(H->Distinct(), ';')"` makes
+/// the items `A`, `@(H->Distinct(), '` and `')` (probed, SDK 10.0.401).
+fn fragment_as_parsed(spec: SplitSpec<'_>, at: usize) -> String {
+    diagnostic_preview(spec.fragments().nth(at).unwrap_or_default())
+}
+
+/// The most of an expanded text a diagnostic of the batch holds: a strand's
+/// fragment, a `CompileOrder` the SDK reads as written. One property spliced
+/// into many elements would otherwise be held, and reported, once for each
+/// (#1199 is the same for main's other diagnostics).
+const MAX_DIAGNOSTIC_PREVIEW_BYTES: usize = 256;
+
+/// `text` as a diagnostic of the batch names it: whole up to
+/// [`MAX_DIAGNOSTIC_PREVIEW_BYTES`], and past that its first bytes and an
+/// ellipsis.
+fn diagnostic_preview(text: &str) -> String {
+    if text.len() <= MAX_DIAGNOSTIC_PREVIEW_BYTES {
+        return text.to_owned();
+    }
+    let mut end = MAX_DIAGNOSTIC_PREVIEW_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &text[..end])
+}
+
+/// Whether an `Update` of exact `fragments` leaves the batch `world` as it is
+/// whether it runs or not: it leaves at its first fragment with no batch
+/// pending ([`leaves_at_first_fragment`]).
+fn batch_unmoved_by(world: &UpdateBatchRun, spec: SplitSpec<'_>, project_dir: &Path) -> bool {
+    !world.pending && leaves_at_first_fragment(world, spec, project_dir)
+}
+
+/// Whether an `Update` of exact `fragments` that runs leaves `world` at some
+/// fragment, every fragment before it keyed: one holding an expansion
+/// character, or a key the batch or an earlier fragment holds. A lookup per
+/// fragment, and no copy of the batch.
+///
+/// `false`, no claim, once the keys it has joined pass [`MAX_HELD_BYTES`]:
+/// feeding the `Update` then follows no batch ([`feed_world`]).
+fn leaves_somewhere(world: &UpdateBatchRun, spec: SplitSpec<'_>, project_dir: &Path) -> bool {
+    let mut joined = HashSet::new();
+    let mut joined_bytes = 0;
+    for fragment in batch_fragments(spec) {
+        match batch_fragment_key(fragment, project_dir) {
+            None => return true,
+            Some(Some(key)) => {
+                if world.keys.contains(&key) {
+                    return true;
+                }
+                joined_bytes += key.len();
+                if joined_bytes > MAX_HELD_BYTES {
+                    return false;
+                }
+                let held = joined_bytes as u64;
+                crate::cost::count(|costs| {
+                    costs.batch_bytes_held_peak = costs.batch_bytes_held_peak.max(held);
+                });
+                if !joined.insert(key) {
+                    return true;
+                }
+            }
+            Some(None) => return false,
+        }
+    }
+    false
+}
+
+/// Whether an `Update` of exact `fragments` that runs leaves `world` at its
+/// first fragment: one holding an expansion character, or a key the batch
+/// holds. One lookup, whatever the batch holds; an opaque batch may hold any
+/// key, so only an expansion character answers there.
+fn leaves_at_first_fragment(
+    world: &UpdateBatchRun,
+    spec: SplitSpec<'_>,
+    project_dir: &Path,
+) -> bool {
+    let Some(first) = batch_fragments(spec).next() else {
+        return false;
+    };
+    match batch_fragment_key(first, project_dir) {
+        None => true,
+        Some(Some(key)) => !world.opaque && world.keys.contains(&key),
+        Some(None) => false,
+    }
+}
+
+/// Whether MSBuild runs an item operation, as far as the walk can tell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OperationRuns {
+    /// Its gate is decided true from certain inputs, and the walk reached it
+    /// for certain ([`State::reach_doubted`]).
+    Always,
+    /// Anything else, a gate decided false included: design-time evaluation
+    /// batches its fragments ([`feed_update_batch`]).
+    Maybe,
+}
+
+/// Whether MSBuild runs the item operation `node` ([`OperationRuns`]).
+fn operation_runs(node: Node<'_, '_>, state: &State<'_>) -> OperationRuns {
+    let decided_true = attribute(node, "Condition").is_none_or(|condition| {
+        directory_build::decision_from_certain_inputs(state, &condition, &state.entry_project_dir)
+            == Some(true)
+    });
+    if decided_true && state.reach_doubted == 0 {
+        OperationRuns::Always
+    } else {
+        OperationRuns::Maybe
     }
 }
 
@@ -3891,7 +4983,7 @@ pub(super) fn metadata_attribute<'a>(
     node: Node<'a, '_>,
     attr: &roxmltree::Attribute<'a, '_>,
 ) -> Option<std::borrow::Cow<'a, str>> {
-    let value = crate::document::attribute(node, attr.name())?;
+    let value = crate::document::attribute_value(node, attr);
     if !value.contains('<') {
         return Some(value);
     }
@@ -4462,6 +5554,10 @@ fn push_resolved_item(
     item: ResolvedItem,
     identity: Option<String>,
 ) {
+    if item.kind == ItemKind::Compile {
+        let include = item.include.to_string_lossy();
+        note_included_key("Compile", &include, state);
+    }
     let order = state.next_item_order;
     state.next_item_order += 1;
     bucket_for_placement(state, placement).push(OrderedResolvedItem {

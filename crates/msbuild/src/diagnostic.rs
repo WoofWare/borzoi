@@ -145,6 +145,12 @@ pub enum DiagnosticKind {
     /// (an escape). That is an upstream bug the evaluator does not mirror, so
     /// the Compile order is not claimed.
     StrandedUpdatePrefix { update: String, fragment: String },
+    /// A `<Compile Update>` (`update` is its spec) that leaves MSBuild's
+    /// batch of `Update`s at `fragment`, stranding a fragment before it, in
+    /// some evaluation the walk follows and not every one (a design-time
+    /// evaluation batches a condition-false `Update` a build skips, say), so
+    /// the fragment may apply late. The Compile order is not claimed.
+    MayStrandUpdatePrefix { update: String, fragment: String },
     /// A `<Compile Update>` (`update` is its spec) that may leave
     /// `LazyItemEvaluator.ComputeItems`'s batch of `Update`s past its first
     /// fragment, stranding the fragments before it to apply late. The
@@ -682,6 +688,15 @@ pub enum PackageReferenceUncertaintyCauseKind {
     /// MSBuild's batch of `Update`s past its first fragment
     /// ([`DiagnosticKind::UnmodelledUpdateBatch`]).
     UnmodelledUpdateBatch { update: String },
+    /// A `<PackageReference Update>` (`update` is its spec) leaves MSBuild's
+    /// batch of `Update`s at `fragment`, stranding a fragment before it, which
+    /// applies late, out of document order
+    /// ([`DiagnosticKind::StrandedUpdatePrefix`]'s package twin).
+    StrandedUpdate { update: String, fragment: String },
+    /// [`PackageReferenceUncertaintyCauseKind::StrandedUpdate`] in some
+    /// evaluation the walk follows, not every one
+    /// ([`DiagnosticKind::MayStrandUpdatePrefix`]'s package twin).
+    MayStrandUpdate { update: String, fragment: String },
     /// The package/framework identity could not be reduced to literal item
     /// identities.
     UnevaluableIdentity { value: String },
