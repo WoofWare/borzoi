@@ -2588,11 +2588,72 @@ struct GridCell {
     held: String,
     /// Whether the arm is one MSBuild takes.
     taken: bool,
+    /// The hostile dimensions of the values the cell writes, none for the
+    /// grid's own.
+    hostile: BTreeSet<Dimension>,
+    /// The site's text, and the values the walk holds of the names it reads
+    /// (a name absent is one it holds none of).
+    call: String,
+    held_values: Vec<(String, String)>,
 }
+
+/// The hostile values [`arm_history_grid`] does not draw.
+const ARM_GRID_EXCLUDED: &[(Dimension, &str)] = &[
+    PROJECT_EXCLUDED[0],
+    (
+        Dimension::OverwrittenLater,
+        "a grid cell's hostile value is its name's last write, which no later write puts back",
+    ),
+];
 
 /// [`arm_history_grid`]'s histories: whether a refused write goes before the
 /// write of `A`, and of `B`, that MSBuild makes after the site's arm.
 const HISTORIES: [[bool; 2]; 4] = [[false, false], [true, false], [false, true], [true, true]];
+
+/// A value a grid cell writes, as the document spells it, as its label names
+/// it, and of which hostile dimensions.
+struct GridValue {
+    text: String,
+    raw: String,
+    label: String,
+    hostile: BTreeSet<Dimension>,
+}
+
+/// The values a grid cell's `plain` axis takes: each plain value, and, in
+/// one corner of the other axes (an arm MSBuild takes, `U` written `nope`
+/// over `bad`, or the gated family's `z`), every hostile value of
+/// `value::alphabet()` the grid draws, rendered around the first plain value.
+/// Labelled by its dimension and a hash, as a manifest key holds no line
+/// break.
+fn rewrites(plain: &[&str], arm: &str, before: &str, written: &str) -> Vec<GridValue> {
+    let mut values: Vec<GridValue> = plain
+        .iter()
+        .map(|value| GridValue {
+            text: xml_text(value),
+            raw: (*value).to_owned(),
+            label: (*value).to_owned(),
+            hostile: BTreeSet::new(),
+        })
+        .collect();
+    let corner = arm == UNDECIDED_TRUE
+        && ((before == "bad" && written == "nope") || (before.is_empty() && written == "z"));
+    if corner {
+        let excluded: BTreeSet<Dimension> = ARM_GRID_EXCLUDED.iter().map(|(d, _)| *d).collect();
+        for entry in value::alphabet().entries() {
+            if excluded.contains(&entry.dimension) {
+                continue;
+            }
+            let rendered = entry.value.render(plain[0]);
+            values.push(GridValue {
+                text: xml_text(&rendered),
+                raw: rendered.clone(),
+                label: format!("{}:{}", entry.dimension.id(), fnv1a(&rendered)),
+                hostile: BTreeSet::from([entry.dimension]),
+            });
+        }
+    }
+    values
+}
 
 /// [`arm_history_grid`]'s cells. Family `item`: #1164's own shape, an arm
 /// writing a value `U` that a call there throws on (or not), beside `A` and
@@ -2638,18 +2699,24 @@ fn arm_history_cells() -> Vec<GridCell> {
     ];
     for arm in [UNDECIDED_TRUE, UNDECIDED_FALSE] {
         for (text, condition) in calls {
-            for site in [
-                format!("<I Include=\"{}\" />", xml_attribute(text)),
-                format!(
-                    "<I Include=\"x\" Condition=\"{}\" />",
-                    xml_attribute(condition)
+            for (call, site) in [
+                (text, format!("<I Include=\"{}\" />", xml_attribute(text))),
+                (
+                    condition,
+                    format!(
+                        "<I Include=\"x\" Condition=\"{}\" />",
+                        xml_attribute(condition)
+                    ),
                 ),
             ] {
                 for before in ["", "1", "bad", "2.0", "abcd"] {
                     for written in ["nope", "3.0"] {
-                        for a in ["v1.0", "abc"] {
+                        for a in rewrites(&["v1.0", "abc"], arm, before, written) {
                             for b in ["", "1"] {
                                 let site_text = site.clone();
+                                let (a_label, a_hostile, a_raw) =
+                                    (a.label.clone(), a.hostile.clone(), a.raw.clone());
+                                let a = a.text.clone();
                                 let document = move |arm_write: &str, history: &[bool]| {
                                     let site = &site_text;
                                     format!(
@@ -2667,7 +2734,7 @@ fn arm_history_cells() -> Vec<GridCell> {
                                 let arm_write = format!("<U>{written}</U>");
                                 cells.push(GridCell {
                                     label: format!(
-                                        "item / {arm} / {site} / U={before} then {written} / A={a} / B={b}"
+                                        "item / {arm} / {site} / U={before} then {written} / A={a_label} / B={b}"
                                     ),
                                     // As the walk holds it: `X`, a write it
                                     // refuses, as the empty value it reads.
@@ -2678,6 +2745,14 @@ fn arm_history_cells() -> Vec<GridCell> {
                                         .map(|history| document(&arm_write, history))
                                         .collect(),
                                     taken: arm == UNDECIDED_TRUE,
+                                    hostile: a_hostile,
+                                    call: (*call).to_owned(),
+                                    held_values: vec![
+                                        ("U".to_owned(), before.to_owned()),
+                                        ("A".to_owned(), a_raw),
+                                        ("B".to_owned(), b.to_owned()),
+                                        ("Q".to_owned(), "axc1d".to_owned()),
+                                    ],
                                 });
                             }
                         }
@@ -2708,7 +2783,13 @@ fn arm_history_cells() -> Vec<GridCell> {
                 ),
             ] {
                 for a in ["z", "off"] {
-                    for before in ["a", "abcdefghijkl0", "1.0"] {
+                    for before in rewrites(&["a", "abcdefghijkl0", "1.0"], arm, "", a) {
+                        let (before_label, before_hostile, before_raw) = (
+                            before.label.clone(),
+                            before.hostile.clone(),
+                            before.raw.clone(),
+                        );
+                        let before = before.text.clone();
                         let site_text = site.clone();
                         let document = move |gated: &str, history: &[bool]| {
                             let site = &site_text;
@@ -2725,13 +2806,21 @@ fn arm_history_cells() -> Vec<GridCell> {
                             xml_attribute("'$(A)' == 'off'")
                         );
                         cells.push(GridCell {
-                            label: format!("gated / {arm} / {kind} / {text} / A={a} / B={before}"),
+                            label: format!(
+                                "gated / {arm} / {kind} / {text} / A={a} / B={before_label}"
+                            ),
                             held: document("", &HISTORIES[0]),
                             documents: HISTORIES
                                 .iter()
                                 .map(|history| document(&gated, history))
                                 .collect(),
                             taken: arm == UNDECIDED_TRUE,
+                            hostile: before_hostile,
+                            call: text.to_owned(),
+                            held_values: vec![
+                                ("A".to_owned(), a.to_owned()),
+                                ("B".to_owned(), before_raw),
+                            ],
                         });
                     }
                 }
@@ -2750,17 +2839,23 @@ fn arm_history_cells() -> Vec<GridCell> {
 ///   rejection, and a value it commits is MSBuild's;
 /// - where MSBuild rejects it, the walk commits nothing, but where MSBuild
 ///   evaluates the cell's held document (the arm's write the walk does not
-///   hold left out): the rejection rests on a value the walk does not know,
-///   which it does not judge (#1051). Those cells are pinned in
+///   hold left out, `X` read empty): the rejection rests on a value the walk
+///   does not know, which it does not judge (#1051); or where the walk's own
+///   expansion of the site's text on the values it holds is one it does not
+///   model, no site yet (#1094). Those cells are pinned in
 ///   `manifests/rejection_arm_history_grid.txt`, so that one closing, or
 ///   opening, shows there; so are the cells it withdraws though MSBuild
 ///   evaluates them, the decline's cost;
 /// - of two histories, the one with more refused writes is withdrawn
 ///   wherever the other is, and certain only where it is;
 /// - and where MSBuild takes the arm and evaluates both the project and its
-///   held document, the call throws on neither MSBuild's values nor the
-///   walk's, so the walk must commit: a judgement that withdrew on every
-///   name it is unsure of would fail there.
+///   held document, in a cell of the grid's own values, the call throws on
+///   neither MSBuild's values nor the walk's, so the walk must commit: a
+///   judgement that withdrew on every name it is unsure of would fail there.
+///
+/// One corner of the grid takes every hostile value of `value::alphabet()`
+/// as the rewrite of `A` (or the gated family's earlier `B`), counted in the
+/// `arm_history` census.
 #[test]
 fn arm_history_grid() {
     let mut oracle = Oracle::spawn();
@@ -2791,6 +2886,11 @@ fn arm_history_grid() {
     let (mut cases, mut must_commit, mut rejected) = (0usize, 0usize, 0usize);
     let mut failures = Vec::new();
     let mut pinned = Vec::new();
+    let census = coverage::open(
+        "crates/msbuild/tests/rejection_generative_diff.rs",
+        "arm_history",
+        ARM_GRID_EXCLUDED,
+    );
     for cell in arm_history_cells() {
         let plain = &cell.documents[0];
         let theirs = oracle.project_design_time(plain, &oracle_names, Some(&project_path), &[]);
@@ -2799,6 +2899,11 @@ fn arm_history_grid() {
             .project_design_time(&cell.held, &oracle_names, Some(&project_path), &[])
             .is_some();
         rejected += usize::from(theirs.is_none());
+        let committed_plain = claim(&walk(plain), "After").is_some();
+        census.reached(
+            &cell.hostile,
+            outcome(theirs.is_none(), committed_plain && theirs.is_some()),
+        );
         let walked: Vec<(&[bool; 2], &String, borzoi_msbuild::ParsedProject)> = HISTORIES
             .iter()
             .zip(&cell.documents)
@@ -2815,8 +2920,17 @@ fn arm_history_grid() {
             let mut verdict = "-";
             match &theirs {
                 None if !claims.is_empty() => {
+                    // A function the walk does not model in the site's text,
+                    // on the values it holds: no site yet (#1094).
+                    let unmodelled = substitute(&cell.call, &property_map(&cell.held_values))
+                        .1
+                        .iter()
+                        .any(|issue| matches!(issue, Issue::Unsupported { .. }));
                     if held_evaluates {
                         verdict = "commits on a rejection resting on a value the walk does not hold (#1051)";
+                    } else if unmodelled {
+                        verdict =
+                            "commits on a rejection in a text the walk does not model (#1094)";
                     } else {
                         failures.push(format!(
                             "{} / {history:?}: MSBuild rejects, and the walk commits {claims:?}\n{xml}",
@@ -2844,7 +2958,10 @@ fn arm_history_grid() {
                     if parsed.rejection.is_some() {
                         verdict = "withdraws a project MSBuild evaluates";
                     }
-                    if cell.taken && held_evaluates {
+                    // The grid's own values only: a hostile one may make a
+                    // write the walk refuses, so that it holds another value
+                    // than the held document says, and declines.
+                    if cell.taken && held_evaluates && cell.hostile.is_empty() {
                         must_commit += 1;
                         if committed.is_none() {
                             failures.push(format!(
@@ -2900,6 +3017,10 @@ fn arm_history_grid() {
         rejected > 0 && must_commit > 0,
         "the grid exercises nothing"
     );
+    census.finish(
+        "BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-msbuild --test \
+         rejection_generative_diff arm_history_grid",
+    );
     let manifest = Manifest::from_keyed(pinned).expect("well-formed entries");
     manifest::check(
         &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -2908,8 +3029,8 @@ fn arm_history_grid() {
         "BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-msbuild --test \
          rejection_generative_diff arm_history_grid\n\
          Each entry is a grid cell where, in some history, the walk commits on a project MSBuild \
-         rejects over a value the walk does not hold (#1051), or withdraws a project MSBuild \
-         evaluates: the decline's cost. Its value is each history's verdict, in HISTORIES' order \
+         rejects over a value the walk does not hold (#1051) or in a text it does not model \
+         (#1094), or withdraws a project MSBuild evaluates: the decline's cost. Its value is each history's verdict, in HISTORIES' order \
          (`-` for none).",
     );
 }
