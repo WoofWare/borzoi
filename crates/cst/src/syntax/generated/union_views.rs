@@ -8,7 +8,10 @@
 //! or an [`UnexpectedChild`] for any other. Not part of the union's lock or
 //! of any facade.
 
-use super::union_pats::{LongIdentPat, Pat};
+use super::union_pats::{
+    ArrayOrListPat, ConstPat, LongIdentPat, NamedPat, NullPat, OptionalValPat, ParenPat, QuotePat,
+    RecordPat, TuplePat, WildcardPat,
+};
 use super::union_standalone::{ActivePatName, LongIdent, NamePatPairs, TyparDecls};
 use crate::syntax::{
     AstNode, NodeOrToken, SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, TextRange,
@@ -35,7 +38,17 @@ pub enum LongIdentPatChild {
     ActivePatName(ActivePatName),
     TyparDecls(TyparDecls),
     NamePatPairs(NamePatPairs),
-    Arg(Pat),
+    NamedPat(NamedPat),
+    LongIdentPat(LongIdentPat),
+    WildcardPat(WildcardPat),
+    ParenPat(ParenPat),
+    ConstPat(ConstPat),
+    NullPat(NullPat),
+    TuplePat(TuplePat),
+    ArrayOrListPat(ArrayOrListPat),
+    RecordPat(RecordPat),
+    QuotePat(QuotePat),
+    OptionalValPat(OptionalValPat),
     Token(LongIdentPatToken, SyntaxToken),
 }
 
@@ -54,8 +67,40 @@ impl LongIdentPatChild {
             LongIdentPatChild::ActivePatName(c) => NodeOrToken::Node(c.syntax().clone()),
             LongIdentPatChild::TyparDecls(c) => NodeOrToken::Node(c.syntax().clone()),
             LongIdentPatChild::NamePatPairs(c) => NodeOrToken::Node(c.syntax().clone()),
-            LongIdentPatChild::Arg(c) => NodeOrToken::Node(c.syntax().clone()),
+            LongIdentPatChild::NamedPat(c) => NodeOrToken::Node(c.syntax().clone()),
+            LongIdentPatChild::LongIdentPat(c) => NodeOrToken::Node(c.syntax().clone()),
+            LongIdentPatChild::WildcardPat(c) => NodeOrToken::Node(c.syntax().clone()),
+            LongIdentPatChild::ParenPat(c) => NodeOrToken::Node(c.syntax().clone()),
+            LongIdentPatChild::ConstPat(c) => NodeOrToken::Node(c.syntax().clone()),
+            LongIdentPatChild::NullPat(c) => NodeOrToken::Node(c.syntax().clone()),
+            LongIdentPatChild::TuplePat(c) => NodeOrToken::Node(c.syntax().clone()),
+            LongIdentPatChild::ArrayOrListPat(c) => NodeOrToken::Node(c.syntax().clone()),
+            LongIdentPatChild::RecordPat(c) => NodeOrToken::Node(c.syntax().clone()),
+            LongIdentPatChild::QuotePat(c) => NodeOrToken::Node(c.syntax().clone()),
+            LongIdentPatChild::OptionalValPat(c) => NodeOrToken::Node(c.syntax().clone()),
             LongIdentPatChild::Token(_, t) => NodeOrToken::Token(t.clone()),
+        }
+    }
+
+    /// The variant holding the child: its name, or `Token(<token variant>)`.
+    pub fn tag(&self) -> &'static str {
+        match self {
+            LongIdentPatChild::LongIdent(_) => "LongIdent",
+            LongIdentPatChild::ActivePatName(_) => "ActivePatName",
+            LongIdentPatChild::TyparDecls(_) => "TyparDecls",
+            LongIdentPatChild::NamePatPairs(_) => "NamePatPairs",
+            LongIdentPatChild::NamedPat(_) => "NamedPat",
+            LongIdentPatChild::LongIdentPat(_) => "LongIdentPat",
+            LongIdentPatChild::WildcardPat(_) => "WildcardPat",
+            LongIdentPatChild::ParenPat(_) => "ParenPat",
+            LongIdentPatChild::ConstPat(_) => "ConstPat",
+            LongIdentPatChild::NullPat(_) => "NullPat",
+            LongIdentPatChild::TuplePat(_) => "TuplePat",
+            LongIdentPatChild::ArrayOrListPat(_) => "ArrayOrListPat",
+            LongIdentPatChild::RecordPat(_) => "RecordPat",
+            LongIdentPatChild::QuotePat(_) => "QuotePat",
+            LongIdentPatChild::OptionalValPat(_) => "OptionalValPat",
+            LongIdentPatChild::Token(LongIdentPatToken::Error, _) => "Token(Error)",
         }
     }
 
@@ -81,8 +126,38 @@ impl LongIdentPatChild {
                 if let Some(c) = NamePatPairs::cast(n.clone()) {
                     return Ok(LongIdentPatChild::NamePatPairs(c));
                 }
-                if let Some(c) = Pat::cast(n.clone()) {
-                    return Ok(LongIdentPatChild::Arg(c));
+                if let Some(c) = NamedPat::cast(n.clone()) {
+                    return Ok(LongIdentPatChild::NamedPat(c));
+                }
+                if let Some(c) = LongIdentPat::cast(n.clone()) {
+                    return Ok(LongIdentPatChild::LongIdentPat(c));
+                }
+                if let Some(c) = WildcardPat::cast(n.clone()) {
+                    return Ok(LongIdentPatChild::WildcardPat(c));
+                }
+                if let Some(c) = ParenPat::cast(n.clone()) {
+                    return Ok(LongIdentPatChild::ParenPat(c));
+                }
+                if let Some(c) = ConstPat::cast(n.clone()) {
+                    return Ok(LongIdentPatChild::ConstPat(c));
+                }
+                if let Some(c) = NullPat::cast(n.clone()) {
+                    return Ok(LongIdentPatChild::NullPat(c));
+                }
+                if let Some(c) = TuplePat::cast(n.clone()) {
+                    return Ok(LongIdentPatChild::TuplePat(c));
+                }
+                if let Some(c) = ArrayOrListPat::cast(n.clone()) {
+                    return Ok(LongIdentPatChild::ArrayOrListPat(c));
+                }
+                if let Some(c) = RecordPat::cast(n.clone()) {
+                    return Ok(LongIdentPatChild::RecordPat(c));
+                }
+                if let Some(c) = QuotePat::cast(n.clone()) {
+                    return Ok(LongIdentPatChild::QuotePat(c));
+                }
+                if let Some(c) = OptionalValPat::cast(n.clone()) {
+                    return Ok(LongIdentPatChild::OptionalValPat(c));
                 }
                 Err(unexpected)
             }
@@ -142,6 +217,18 @@ impl LongIdentChild {
         }
     }
 
+    /// The variant holding the child: its name, or `Token(<token variant>)`.
+    pub fn tag(&self) -> &'static str {
+        match self {
+            LongIdentChild::ActivePatName(_) => "ActivePatName",
+            LongIdentChild::Token(LongIdentToken::Ident, _) => "Token(Ident)",
+            LongIdentChild::Token(LongIdentToken::Dot, _) => "Token(Dot)",
+            LongIdentChild::Token(LongIdentToken::New, _) => "Token(New)",
+            LongIdentChild::Token(LongIdentToken::LParen, _) => "Token(LParen)",
+            LongIdentChild::Token(LongIdentToken::RParen, _) => "Token(RParen)",
+        }
+    }
+
     /// Classify one non-trivia child of a `LongIdent` whose kind is `parent`.
     fn classify(parent: SyntaxKind, el: SyntaxElement) -> Result<Self, UnexpectedChild> {
         let unexpected = UnexpectedChild {
@@ -186,66 +273,63 @@ impl LongIdent {
     }
 }
 
-/// Each viewed node kind, with every child its view declares: a kind, and
-/// whether the child is a token.
+/// Each viewed node kind, with every child its view declares: its kind,
+/// whether it is a token, and the tag of the variant holding it.
 #[cfg_attr(not(any(test, feature = "view-reference")), allow(dead_code))]
-pub(crate) const VIEWED: &[(SyntaxKind, &[(SyntaxKind, bool)])] = &[
+pub(crate) const VIEWED: &[(SyntaxKind, &[(SyntaxKind, bool, &str)])] = &[
     (
         SyntaxKind::LONG_IDENT_PAT,
         &[
-            (SyntaxKind::LONG_IDENT, false),
-            (SyntaxKind::ACTIVE_PAT_NAME, false),
-            (SyntaxKind::TYPAR_DECLS, false),
-            (SyntaxKind::NAME_PAT_PAIRS, false),
-            (SyntaxKind::NAMED_PAT, false),
-            (SyntaxKind::LONG_IDENT_PAT, false),
-            (SyntaxKind::WILDCARD_PAT, false),
-            (SyntaxKind::PAREN_PAT, false),
-            (SyntaxKind::CONST_PAT, false),
-            (SyntaxKind::MEASURE_LIT_PAT, false),
-            (SyntaxKind::NULL_PAT, false),
-            (SyntaxKind::TYPED_PAT, false),
-            (SyntaxKind::TUPLE_PAT, false),
-            (SyntaxKind::AS_PAT, false),
-            (SyntaxKind::ARRAY_OR_LIST_PAT, false),
-            (SyntaxKind::RECORD_PAT, false),
-            (SyntaxKind::IS_INST_PAT, false),
-            (SyntaxKind::LIST_CONS_PAT, false),
-            (SyntaxKind::ANDS_PAT, false),
-            (SyntaxKind::OR_PAT, false),
-            (SyntaxKind::ATTRIB_PAT, false),
-            (SyntaxKind::OPTIONAL_VAL_PAT, false),
-            (SyntaxKind::QUOTE_PAT, false),
-            (SyntaxKind::ERROR, true),
+            (SyntaxKind::LONG_IDENT, false, "LongIdent"),
+            (SyntaxKind::ACTIVE_PAT_NAME, false, "ActivePatName"),
+            (SyntaxKind::TYPAR_DECLS, false, "TyparDecls"),
+            (SyntaxKind::NAME_PAT_PAIRS, false, "NamePatPairs"),
+            (SyntaxKind::NAMED_PAT, false, "NamedPat"),
+            (SyntaxKind::LONG_IDENT_PAT, false, "LongIdentPat"),
+            (SyntaxKind::WILDCARD_PAT, false, "WildcardPat"),
+            (SyntaxKind::PAREN_PAT, false, "ParenPat"),
+            (SyntaxKind::CONST_PAT, false, "ConstPat"),
+            (SyntaxKind::NULL_PAT, false, "NullPat"),
+            (SyntaxKind::TUPLE_PAT, false, "TuplePat"),
+            (SyntaxKind::ARRAY_OR_LIST_PAT, false, "ArrayOrListPat"),
+            (SyntaxKind::RECORD_PAT, false, "RecordPat"),
+            (SyntaxKind::QUOTE_PAT, false, "QuotePat"),
+            (SyntaxKind::OPTIONAL_VAL_PAT, false, "OptionalValPat"),
+            (SyntaxKind::ERROR, true, "Token(Error)"),
         ],
     ),
     (
         SyntaxKind::LONG_IDENT,
         &[
-            (SyntaxKind::ACTIVE_PAT_NAME, false),
-            (SyntaxKind::IDENT_TOK, true),
-            (SyntaxKind::DOT_TOK, true),
-            (SyntaxKind::NEW_TOK, true),
-            (SyntaxKind::LPAREN_TOK, true),
-            (SyntaxKind::RPAREN_TOK, true),
+            (SyntaxKind::ACTIVE_PAT_NAME, false, "ActivePatName"),
+            (SyntaxKind::IDENT_TOK, true, "Token(Ident)"),
+            (SyntaxKind::DOT_TOK, true, "Token(Dot)"),
+            (SyntaxKind::NEW_TOK, true, "Token(New)"),
+            (SyntaxKind::LPAREN_TOK, true, "Token(LParen)"),
+            (SyntaxKind::RPAREN_TOK, true, "Token(RParen)"),
         ],
     ),
 ];
 
-/// What `node`'s view yields, each child as the tree holds it, or `None`
-/// for a node no view reads.
+/// What `node`'s view yields, each child as the tree holds it with the tag
+/// of the variant holding it, or `None` for a node no view reads.
 #[cfg_attr(not(any(test, feature = "view-reference")), allow(dead_code))]
-pub(crate) fn view_of(node: &SyntaxNode) -> Option<Result<Vec<SyntaxElement>, UnexpectedChild>> {
+#[allow(clippy::type_complexity)]
+pub(crate) fn view_of(
+    node: &SyntaxNode,
+) -> Option<Result<Vec<(SyntaxElement, &'static str)>, UnexpectedChild>> {
     match node.kind() {
         SyntaxKind::LONG_IDENT_PAT => Some(
-            LongIdentPat::cast(node.clone())?
+            LongIdentPat::cast(node.clone())
+                .expect("a `LongIdentPat` casts from `LONG_IDENT_PAT`")
                 .view()
-                .map(|children| children.iter().map(|c| c.element()).collect()),
+                .map(|children| children.iter().map(|c| (c.element(), c.tag())).collect()),
         ),
         SyntaxKind::LONG_IDENT => Some(
-            LongIdent::cast(node.clone())?
+            LongIdent::cast(node.clone())
+                .expect("a `LongIdent` casts from `LONG_IDENT`")
                 .view()
-                .map(|children| children.iter().map(|c| c.element()).collect()),
+                .map(|children| children.iter().map(|c| (c.element(), c.tag())).collect()),
         ),
         _ => None,
     }

@@ -30,7 +30,17 @@ fn spell_pat(children: &[LongIdentPatChild]) -> Vec<String> {
             LongIdentPatChild::ActivePatName(_) => "ActivePatName".to_string(),
             LongIdentPatChild::TyparDecls(_) => "TyparDecls".to_string(),
             LongIdentPatChild::NamePatPairs(_) => "NamePatPairs".to_string(),
-            LongIdentPatChild::Arg(_) => "Arg".to_string(),
+            LongIdentPatChild::NamedPat(_)
+            | LongIdentPatChild::LongIdentPat(_)
+            | LongIdentPatChild::WildcardPat(_)
+            | LongIdentPatChild::ParenPat(_)
+            | LongIdentPatChild::ConstPat(_)
+            | LongIdentPatChild::NullPat(_)
+            | LongIdentPatChild::TuplePat(_)
+            | LongIdentPatChild::ArrayOrListPat(_)
+            | LongIdentPatChild::RecordPat(_)
+            | LongIdentPatChild::QuotePat(_)
+            | LongIdentPatChild::OptionalValPat(_) => "Arg".to_string(),
             LongIdentPatChild::Token(LongIdentPatToken::Error, t) => {
                 format!("Error {:?}", t.text())
             }

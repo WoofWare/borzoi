@@ -592,7 +592,18 @@ fn head_name(l: &borzoi_cst::syntax::LongIdentPat) -> MemberHead {
         match child {
             LongIdentPatChild::LongIdent(head) => heads.push(head),
             LongIdentPatChild::TyparDecls(_) => typar_lists += 1,
-            LongIdentPatChild::Arg(_) => {}
+            // An argument pattern is no part of the name.
+            LongIdentPatChild::NamedPat(_)
+            | LongIdentPatChild::LongIdentPat(_)
+            | LongIdentPatChild::WildcardPat(_)
+            | LongIdentPatChild::ParenPat(_)
+            | LongIdentPatChild::ConstPat(_)
+            | LongIdentPatChild::NullPat(_)
+            | LongIdentPatChild::TuplePat(_)
+            | LongIdentPatChild::ArrayOrListPat(_)
+            | LongIdentPatChild::RecordPat(_)
+            | LongIdentPatChild::QuotePat(_)
+            | LongIdentPatChild::OptionalValPat(_) => {}
             // A zero-width `ERROR` is the lex filter's layout virtual (before
             // an adjacent argument, `this.M(x)`) or a recovery placeholder:
             // it spells nothing, and the head identifier stays the only name.

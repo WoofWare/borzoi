@@ -21,7 +21,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::{CATEGORIES, Enum, Node, find_node, node_kinds, reformat};
+use crate::{CATEGORIES, Node, node_kinds, reformat};
 
 /// The repo-relative path of the generated views.
 pub const OUTPUT_PATH: &str = "crates/cst/src/syntax/generated/union_views.rs";
@@ -32,9 +32,12 @@ pub struct View {
     pub node: &'static str,
     /// What reads it through the view, for the doc comment.
     pub reader: &'static str,
-    /// `(variant, type)`: the child nodes it may hold, each a node type or a
-    /// dispatch enum of the tables (whose every kind the variant takes).
-    pub children: &'static [(&'static str, &'static str)],
+    /// The child nodes it may hold, each a node type of the tables that casts
+    /// from exactly one `SyntaxKind`, and each a variant of its own name. A
+    /// dispatch enum (`Pat`) or a multi-kind node is not one: a kind it came
+    /// to take would join the view with no table row, and so no variant, for
+    /// a reader to decide.
+    pub children: &'static [&'static str],
     /// `(variant, kind)`: the child tokens it may hold, by `SyntaxKind` name.
     /// Trivia is never a child of a view; a zero-width token is a child like
     /// any other.
@@ -47,11 +50,23 @@ pub const VIEWS: &[View] = &[
         node: "LongIdentPat",
         reader: "`borzoi-sema`'s extension-name pass (a member head's name)",
         children: &[
-            ("LongIdent", "LongIdent"),
-            ("ActivePatName", "ActivePatName"),
-            ("TyparDecls", "TyparDecls"),
-            ("NamePatPairs", "NamePatPairs"),
-            ("Arg", "Pat"),
+            "LongIdent",
+            "ActivePatName",
+            "TyparDecls",
+            "NamePatPairs",
+            // The argument patterns the parser puts under a long-identifier
+            // pattern (`view-reference` holds the list to every parse).
+            "NamedPat",
+            "LongIdentPat",
+            "WildcardPat",
+            "ParenPat",
+            "ConstPat",
+            "NullPat",
+            "TuplePat",
+            "ArrayOrListPat",
+            "RecordPat",
+            "QuotePat",
+            "OptionalValPat",
         ],
         // A zero-width `ERROR` is a layout virtual the lex filter inserted
         // (as before an adjacent argument, `this.M(x)`); one with text is
@@ -61,7 +76,7 @@ pub const VIEWS: &[View] = &[
     View {
         node: "LongIdent",
         reader: "`borzoi-sema`'s extension-name pass (a member head's name)",
-        children: &[("ActivePatName", "ActivePatName")],
+        children: &["ActivePatName"],
         tokens: &[
             ("Ident", "IDENT_TOK"),
             ("Dot", "DOT_TOK"),
@@ -79,47 +94,49 @@ fn node(name: &str) -> Option<&'static Node> {
         .find_map(|c| c.nodes.iter().find(|n| n.name == name))
 }
 
-/// The dispatch enum `name` of the tables and its category's nodes, if it is
-/// one.
-fn dispatch_enum(name: &str) -> Option<(&'static Enum, &'static [Node])> {
-    CATEGORIES.iter().find_map(|c| {
-        c.enums
-            .iter()
-            .find(|e| e.name == name)
-            .map(|e| (e, c.nodes))
-    })
-}
-
-/// The `SyntaxKind`s a child type takes: a node type's own, or every kind of
-/// every variant of a dispatch enum. Panics on a name that is neither.
-pub fn child_kinds(ty: &str) -> Vec<String> {
-    match (dispatch_enum(ty), node(ty)) {
-        (Some((e, nodes)), _) => e
-            .variants
-            .iter()
-            .flat_map(|(_, n)| node_kinds(find_node(nodes, n)))
-            .collect(),
-        (None, Some(n)) => node_kinds(n),
-        (None, None) => panic!("`{ty}` is no node type or dispatch enum of the tables"),
-    }
+/// Whether `name` is a dispatch enum of the tables.
+fn is_dispatch_enum(name: &str) -> bool {
+    CATEGORIES
+        .iter()
+        .any(|c| c.enums.iter().any(|e| e.name == name))
 }
 
 /// Every child `view` declares, nodes then tokens, in table order: its kind,
-/// and whether it is a token (a node and a token may share a kind, as an
-/// `ERROR` does).
-pub fn declared_children(view: &View) -> Vec<(String, bool)> {
+/// whether it is a token (a node and a token may share a kind, as an `ERROR`
+/// does), and the tag of the variant that holds it ([`tag`]). Panics on a
+/// child type [`check`] rejects.
+pub fn declared_children(view: &View) -> Vec<(String, bool, String)> {
     view.children
         .iter()
-        .flat_map(|(_, ty)| child_kinds(ty))
-        .map(|k| (k, false))
-        .chain(view.tokens.iter().map(|(_, k)| ((*k).to_string(), true)))
+        .map(|ty| {
+            let [kind] = node_kinds(node(ty).expect("a node type"))
+                .try_into()
+                .unwrap_or_else(|kinds: Vec<String>| {
+                    panic!("`{ty}` casts from {kinds:?}, not one kind")
+                });
+            (kind, false, tag(ty, None))
+        })
+        .chain(
+            view.tokens
+                .iter()
+                .map(|(variant, k)| ((*k).to_string(), true, tag("Token", Some(variant)))),
+        )
         .collect()
 }
 
+/// How the reference table and a child's `tag()` spell a variant: a node
+/// variant's name, or `Token(<token variant>)`.
+fn tag(variant: &str, token: Option<&str>) -> String {
+    match token {
+        Some(token) => format!("{variant}({token})"),
+        None => variant.to_string(),
+    }
+}
+
 /// Why `views` is not a table the generator can emit, if it is not: a view of
-/// a type the tables do not declare, or of one type twice; a child type that
-/// is neither a node type nor a dispatch enum; a child kind two variants
-/// claim (the first would take it silently); a variant name used twice.
+/// a type the tables do not declare, or of one type twice; a child that is
+/// not a single-kind node type; a child kind two variants claim (the first
+/// would take it silently); a variant name used twice.
 pub fn check(views: &[View]) -> Result<(), Vec<String>> {
     let mut errors = Vec::new();
     let mut seen = BTreeSet::new();
@@ -131,23 +148,32 @@ pub fn check(views: &[View]) -> Result<(), Vec<String>> {
             errors.push(format!("`{}` is no node type of the tables", view.node));
             continue;
         }
-        let unknown: Vec<&str> = view
-            .children
-            .iter()
-            .map(|(_, ty)| *ty)
-            .filter(|ty| dispatch_enum(ty).is_none() && node(ty).is_none())
-            .collect();
-        for ty in &unknown {
-            errors.push(format!(
-                "`{}`'s view holds `{ty}`, which is no node type or dispatch enum",
-                view.node
-            ));
+        let before = errors.len();
+        for ty in view.children {
+            match node(ty) {
+                Some(n) if node_kinds(n).len() == 1 => {}
+                Some(n) => errors.push(format!(
+                    "`{}`'s view holds `{ty}`, which casts from {:?}: a multi-kind node, \
+                     whose every kind needs a row of its own",
+                    view.node,
+                    node_kinds(n)
+                )),
+                None if is_dispatch_enum(ty) => errors.push(format!(
+                    "`{}`'s view holds `{ty}`, a dispatch enum: list its node types, each a \
+                     row of its own",
+                    view.node
+                )),
+                None => errors.push(format!(
+                    "`{}`'s view holds `{ty}`, which is no node type",
+                    view.node
+                )),
+            }
         }
-        if !unknown.is_empty() {
+        if errors.len() > before {
             continue;
         }
         let mut kinds = BTreeSet::new();
-        for (kind, is_token) in declared_children(view) {
+        for (kind, is_token, _) in declared_children(view) {
             if !kinds.insert((kind.clone(), is_token)) {
                 errors.push(format!(
                     "`{}`'s view claims `{kind}` in two variants",
@@ -156,10 +182,9 @@ pub fn check(views: &[View]) -> Result<(), Vec<String>> {
             }
         }
         let mut names = BTreeSet::new();
-        let variants = view.children.iter().map(|(v, _)| *v);
         // A token is the `Token` variant's, beside the child nodes'.
         let token_variant = (!view.tokens.is_empty()).then_some("Token");
-        for name in variants.chain(token_variant) {
+        for name in view.children.iter().copied().chain(token_variant) {
             if !names.insert(name) {
                 errors.push(format!(
                     "`{}`'s view names two variants `{name}`",
@@ -224,23 +249,22 @@ pub fn generate() -> String {
     reformat(&out)
 }
 
-/// The category module (`union_pats`, …) declaring the node type or dispatch
-/// enum `name`.
+/// The category module (`union_pats`, …) declaring the node type `name`.
 fn module_of(name: &str) -> &'static str {
     let category = CATEGORIES
         .iter()
-        .find(|c| c.nodes.iter().any(|n| n.name == name) || c.enums.iter().any(|e| e.name == name))
+        .find(|c| c.nodes.iter().any(|n| n.name == name))
         .unwrap_or_else(|| panic!("`{name}` is in no category"));
     let file = category.path.rsplit('/').next().expect("a path");
     file.strip_suffix(".rs").expect("a Rust file")
 }
 
-/// The `use` lines naming every node type and dispatch enum `views` names,
+/// The `use` lines naming every node type `views` names,
 /// each from its own category's module.
 fn imports(views: &[View]) -> String {
     let mut by_module: std::collections::BTreeMap<&str, BTreeSet<&str>> = Default::default();
     for view in views {
-        for name in std::iter::once(view.node).chain(view.children.iter().map(|(_, ty)| *ty)) {
+        for name in std::iter::once(view.node).chain(view.children.iter().copied()) {
             by_module.entry(module_of(name)).or_default().insert(name);
         }
     }
@@ -269,8 +293,8 @@ fn gen_view(view: &View, out: &mut String) {
          pub enum {child} {{\n",
         reader = view.reader
     ));
-    for (variant, ty) in view.children {
-        out.push_str(&format!("    {variant}({ty}),\n"));
+    for ty in view.children {
+        out.push_str(&format!("    {ty}({ty}),\n"));
     }
     if has_tokens {
         out.push_str(&format!("    Token({tokens}, SyntaxToken),\n"));
@@ -293,9 +317,9 @@ fn gen_view(view: &View, out: &mut String) {
         "NodeOrToken::Node(_) => Err(unexpected),\n".to_string()
     } else {
         let mut casts = String::new();
-        for (variant, ty) in view.children {
+        for ty in view.children {
             casts.push_str(&format!(
-                "if let Some(c) = {ty}::cast(n.clone()) {{ return Ok({child}::{variant}(c)); }}\n"
+                "if let Some(c) = {ty}::cast(n.clone()) {{ return Ok({child}::{ty}(c)); }}\n"
             ));
         }
         format!("NodeOrToken::Node(n) => {{\n{casts}Err(unexpected)\n}}\n")
@@ -312,21 +336,33 @@ fn gen_view(view: &View, out: &mut String) {
         "NodeOrToken::Token(_) => Err(unexpected),\n".to_string()
     };
     let mut element_arms = String::new();
-    for (variant, _) in view.children {
+    let mut tag_arms = String::new();
+    for ty in view.children {
         element_arms.push_str(&format!(
-            "{child}::{variant}(c) => NodeOrToken::Node(c.syntax().clone()),\n"
+            "{child}::{ty}(c) => NodeOrToken::Node(c.syntax().clone()),\n"
         ));
+        tag_arms.push_str(&format!("{child}::{ty}(_) => \"{}\",\n", tag(ty, None)));
     }
     if has_tokens {
         element_arms.push_str(&format!(
             "{child}::Token(_, t) => NodeOrToken::Token(t.clone()),\n"
         ));
+        for (variant, _) in view.tokens {
+            tag_arms.push_str(&format!(
+                "{child}::Token({tokens}::{variant}, _) => \"{}\",\n",
+                tag("Token", Some(variant))
+            ));
+        }
     }
     out.push_str(&format!(
         "impl {child} {{\n\
          /// The child itself, as the tree holds it.\n\
          pub fn element(&self) -> SyntaxElement {{\n\
          match self {{\n{element_arms}}}\n\
+         }}\n\n\
+         /// The variant holding the child: its name, or `Token(<token variant>)`.\n\
+         pub fn tag(&self) -> &'static str {{\n\
+         match self {{\n{tag_arms}}}\n\
          }}\n\n\
          /// Classify one non-trivia child of a `{node}` whose kind is `parent`.\n\
          fn classify(parent: SyntaxKind, el: SyntaxElement) -> Result<Self, UnexpectedChild> {{\n\
@@ -358,16 +394,16 @@ fn gen_view(view: &View, out: &mut String) {
     ));
 }
 
-/// The table the `view-reference` check and the view tests read: each viewed
-/// node kind, with every child kind its view declares, and the verdict of a
-/// node's view by its kind.
+/// The table the `view-reference` check reads: each viewed node kind, with
+/// every child its view declares (kind, whether a token, variant tag); and
+/// what a node's view yields, by its kind.
 fn gen_reference(out: &mut String) {
     let mut table = String::new();
     let mut arms = String::new();
     for view in VIEWS {
         let declared: Vec<String> = declared_children(view)
             .iter()
-            .map(|(k, is_token)| format!("(SyntaxKind::{k}, {is_token})"))
+            .map(|(k, is_token, tag)| format!("(SyntaxKind::{k}, {is_token}, \"{tag}\")"))
             .collect();
         let viewed = node(view.node).expect("checked");
         for kind in node_kinds(viewed) {
@@ -376,20 +412,21 @@ fn gen_reference(out: &mut String) {
                 declared.join(", ")
             ));
             arms.push_str(&format!(
-                "SyntaxKind::{kind} => Some({}::cast(node.clone())?.view().map(|children| children.iter().map(|c| c.element()).collect())),\n",
-                view.node
+                "SyntaxKind::{kind} => Some({node}::cast(node.clone()).expect(\"a `{node}` casts from `{kind}`\").view().map(|children| children.iter().map(|c| (c.element(), c.tag())).collect())),\n",
+                node = view.node
             ));
         }
     }
     out.push_str(&format!(
-        "/// Each viewed node kind, with every child its view declares: a kind, and\n\
-         /// whether the child is a token.\n\
+        "/// Each viewed node kind, with every child its view declares: its kind,\n\
+         /// whether it is a token, and the tag of the variant holding it.\n\
          #[cfg_attr(not(any(test, feature = \"view-reference\")), allow(dead_code))]\n\
-         pub(crate) const VIEWED: &[(SyntaxKind, &[(SyntaxKind, bool)])] = &[\n{table}];\n\n\
-         /// What `node`'s view yields, each child as the tree holds it, or `None`\n\
-         /// for a node no view reads.\n\
+         pub(crate) const VIEWED: &[(SyntaxKind, &[(SyntaxKind, bool, &str)])] = &[\n{table}];\n\n\
+         /// What `node`'s view yields, each child as the tree holds it with the tag\n\
+         /// of the variant holding it, or `None` for a node no view reads.\n\
          #[cfg_attr(not(any(test, feature = \"view-reference\")), allow(dead_code))]\n\
-         pub(crate) fn view_of(node: &SyntaxNode) -> Option<Result<Vec<SyntaxElement>, UnexpectedChild>> {{\n\
+         #[allow(clippy::type_complexity)]\n\
+         pub(crate) fn view_of(node: &SyntaxNode) -> Option<Result<Vec<(SyntaxElement, &'static str)>, UnexpectedChild>> {{\n\
          match node.kind() {{\n{arms}_ => None,\n}}\n\
          }}\n"
     ));
@@ -404,14 +441,6 @@ mod tests {
         check(VIEWS).unwrap_or_else(|e| panic!("{}", e.join("\n")));
     }
 
-    #[test]
-    fn a_dispatch_enum_child_takes_every_kind_of_its_variants() {
-        let kinds = child_kinds("Pat");
-        assert!(kinds.contains(&"NAMED_PAT".to_string()));
-        assert!(kinds.contains(&"LONG_IDENT_PAT".to_string()));
-        assert_eq!(child_kinds("LongIdent"), ["LONG_IDENT"]);
-    }
-
     /// The generated file imports each type a view names from its own
     /// category's module, whichever category that is.
     #[test]
@@ -419,15 +448,15 @@ mod tests {
         let view = View {
             node: "IdentExpr",
             reader: "",
-            children: &[("Arg", "Pat"), ("Ty", "Type"), ("Head", "LongIdent")],
+            children: &["NamedPat", "LongIdentType", "LongIdent"],
             tokens: &[],
         };
         assert_eq!(
             imports(std::slice::from_ref(&view)),
             "use super::union_exprs::{IdentExpr};\n\
-             use super::union_pats::{Pat};\n\
+             use super::union_pats::{NamedPat};\n\
              use super::union_standalone::{LongIdent};\n\
-             use super::union_types::{Type};\n"
+             use super::union_types::{LongIdentType};\n"
         );
     }
 
@@ -445,21 +474,30 @@ mod tests {
                 },
             ),
             (
-                "no node type or dispatch enum",
+                "which is no node type",
                 View {
                     node: "LongIdent",
                     reader: "",
-                    children: &[("X", "NoSuchChild")],
+                    children: &["NoSuchChild"],
                     tokens: &[],
                 },
             ),
             (
-                // `LongIdentPat` is one of `Pat`'s kinds.
-                "in two variants",
+                "a dispatch enum",
                 View {
                     node: "LongIdentPat",
                     reader: "",
-                    children: &[("Head", "LongIdentPat"), ("Arg", "Pat")],
+                    children: &["Pat"],
+                    tokens: &[],
+                },
+            ),
+            (
+                // `AppExpr` casts from `APP_EXPR` and `INFIX_APP_EXPR`.
+                "a multi-kind node",
+                View {
+                    node: "ParenExpr",
+                    reader: "",
+                    children: &["AppExpr"],
                     tokens: &[],
                 },
             ),
@@ -477,17 +515,8 @@ mod tests {
                 View {
                     node: "LongIdent",
                     reader: "",
-                    children: &[("A", "LongIdent"), ("A", "ActivePatName")],
+                    children: &["ActivePatName", "ActivePatName"],
                     tokens: &[],
-                },
-            ),
-            (
-                "two variants `Token`",
-                View {
-                    node: "LongIdent",
-                    reader: "",
-                    children: &[("Token", "ActivePatName")],
-                    tokens: &[("Dot", "DOT_TOK")],
                 },
             ),
             (

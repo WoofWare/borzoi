@@ -964,12 +964,13 @@ fn assert_glued_stars_are_the_lexer_s(root: &SyntaxNode, glued_stars: &[Range<us
 }
 
 /// The exhaustive child views (`tools/astgen/src/views.rs`) agree with the
-/// tree. For every viewed node, its `view()` yields exactly the node's
-/// non-trivia children, in order, when each is a child its view declares (by
-/// kind, and as a node or a token), and refuses the first one that is not;
-/// so the generated classifier and the table it was generated from say the
-/// same thing. And when the parse recovered from nothing (`clean`), no viewed
-/// node holds an undeclared child, so the table covers what the parser emits.
+/// tree and with their table. A node has a view exactly when the table lists
+/// its kind. A viewed node's `view()` yields exactly its non-trivia children,
+/// in order, each in the variant the table names for it (by kind, and as a
+/// node or a token), when every child is one its view declares; and refuses
+/// the first one that is not. And when the parse recovered from nothing
+/// (`clean`), no viewed node holds an undeclared child, so the table covers
+/// what the parser emits.
 #[cfg(feature = "view-reference")]
 fn assert_views_agree_with_the_tree(root: &SyntaxNode, source: &str, clean: bool) {
     use crate::syntax::{NodeOrToken, SyntaxElement, VIEWED, view_of};
@@ -978,24 +979,42 @@ fn assert_views_agree_with_the_tree(root: &SyntaxNode, source: &str, clean: bool
         format!("{start}..{end} ({:?})", &source[start..end])
     };
     for node in root.descendants() {
-        let Some(verdict) = view_of(&node) else {
-            continue;
-        };
         let declared = VIEWED
             .iter()
             .find(|(kind, _)| *kind == node.kind())
-            .map(|(_, declared)| *declared)
-            .expect("every node with a view is in `VIEWED`");
+            .map(|(_, declared)| *declared);
+        let verdict = view_of(&node);
+        let (declared, verdict) = match (declared, verdict) {
+            (None, None) => continue,
+            (Some(declared), Some(verdict)) => (declared, verdict),
+            (declared, verdict) => panic!(
+                "the `{:?}` at {}: the table lists its kind: {}, but a view reads it: {}",
+                node.kind(),
+                at(node.text_range()),
+                declared.is_some(),
+                verdict.is_some(),
+            ),
+        };
+        let tag_of = |el: &SyntaxElement| {
+            let is_token = matches!(el, NodeOrToken::Token(_));
+            declared
+                .iter()
+                .find(|(kind, token, _)| *kind == el.kind() && *token == is_token)
+                .map(|(_, _, tag)| *tag)
+        };
         let children: Vec<SyntaxElement> = node
             .children_with_tokens()
             .filter(|el| !el.kind().is_trivia())
             .collect();
-        let is_declared = |el: &SyntaxElement| {
-            declared.contains(&(el.kind(), matches!(el, NodeOrToken::Token(_))))
-        };
-        let undeclared = children.iter().find(|el| !is_declared(el));
+        let undeclared = children.iter().find(|el| tag_of(el).is_none());
         let agrees = match (&verdict, undeclared) {
-            (Ok(yielded), None) => *yielded == children,
+            (Ok(yielded), None) => {
+                let expected: Vec<(SyntaxElement, &str)> = children
+                    .iter()
+                    .map(|el| (el.clone(), tag_of(el).expect("declared")))
+                    .collect();
+                *yielded == expected
+            }
             (Err(refused), Some(el)) => {
                 refused.parent == node.kind()
                     && refused.kind == el.kind()
@@ -1010,7 +1029,10 @@ fn assert_views_agree_with_the_tree(root: &SyntaxNode, source: &str, clean: bool
              first its view does not declare is {:?}",
             node.kind(),
             at(node.text_range()),
-            children.iter().map(|el| el.kind()).collect::<Vec<_>>(),
+            children
+                .iter()
+                .map(|el| (el.kind(), tag_of(el)))
+                .collect::<Vec<_>>(),
             undeclared,
         );
         if clean && let Some(el) = undeclared {
