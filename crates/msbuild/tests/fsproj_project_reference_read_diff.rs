@@ -1205,7 +1205,7 @@ fn a_gate_decided_by_exists_keeps_no_fabricated_edge() {
          <ItemGroup><Helper Include=\"A.fsproj\" /></ItemGroup>\
          <ItemGroup Condition=\"Exists('Demo.fsproj') Or '$(Gate)' == 'x'\">\
          <ProjectReference Include=\"@(Helper, ';Wrong.fsproj;')\" />\
-         <ProjectReference Include=\"A.fsproj\" /></ItemGroup></Project>"
+         <ProjectReference Include=\"Literal.fsproj\" /></ItemGroup></Project>"
     );
     let dir = tempfile::TempDir::new().expect("tempdir");
     let root = borzoi_msbuild::observed::host_fs::canonicalize(dir.path()).expect("canonicalize");
@@ -1233,14 +1233,58 @@ fn a_gate_decided_by_exists_keeps_no_fabricated_edge() {
             .iter()
             .map(|item| published(&item.include))
             .collect();
-        assert!(
-            ours.contains(&root.join("proj/A.fsproj")),
-            "the gate is decided, so its literal reference is kept: {ours:?}"
+        // The gate is decided, so the list is not withdrawn and its literal
+        // reference, named apart from what the expression makes, is kept.
+        let claim = common::reference_claim(&parsed);
+        assert_ne!(
+            claim,
+            common::ReferenceClaim::Nothing,
+            "resolver: {with_resolver}: the decided gate withdrew the list"
         );
-        if let Err(failure) =
-            common::check_reference_claim(common::reference_claim(&parsed), &ours, &theirs)
-        {
+        assert!(
+            ours.contains(&root.join("proj/Literal.fsproj")),
+            "resolver: {with_resolver}: the literal reference is kept: {ours:?}"
+        );
+        if let Err(failure) = common::check_reference_claim(claim, &ours, &theirs) {
             panic!("resolver: {with_resolver}: {failure}\n{xml}");
         }
     }
+}
+
+/// This PR's claim is the reference *list*: its generalised gate doubt (a
+/// toolset or environment name, #1181) applies to the list's gates, not to a
+/// metadatum's. A `ReferenceOutputAssembly` child gated on a toolset name
+/// resolves as on main: skipped where the walk's empty value fails the gate,
+/// so the default stands, as MSBuild's value `true` does here. (Its opposite
+/// polarity is a pre-existing wrong value, #1189.)
+#[test]
+fn a_metadatum_gate_on_a_toolset_name_resolves_as_on_main() {
+    let xml = "<Project><ItemGroup><ProjectReference Include=\"A.fsproj\">\
+               <ReferenceOutputAssembly Condition=\"'$(MSBuildStartupDirectory)' != ''\">true</ReferenceOutputAssembly>\
+               </ProjectReference></ItemGroup></Project>";
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let root = borzoi_msbuild::observed::host_fs::canonicalize(dir.path()).expect("canonicalize");
+    let proj = layout(&root);
+    std::fs::write(&proj, xml).unwrap();
+    let parsed = parse_fsproj_with_imports(
+        &borzoi_msbuild::ProjectFile::buffer(&proj, xml)
+            .expect("a project path spelt as its full path"),
+        &HashMap::new(),
+        &common::oracle_environment(),
+        None,
+        None,
+    )
+    .expect("well-formed XML parses");
+    assert_eq!(
+        common::reference_claim(&parsed),
+        common::ReferenceClaim::Exact,
+        "{:#?}",
+        parsed.diagnostics
+    );
+    assert_eq!(parsed.project_references.len(), 1);
+    assert_eq!(
+        parsed.project_references[0].reference_output_assembly,
+        borzoi_msbuild::ItemMetadataValue::ABSENT,
+        "the gated write is skipped, as on main, and the default stands"
+    );
 }

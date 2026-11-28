@@ -4928,7 +4928,7 @@ fn resolve_string_metadata(
         // (A clean decision over undefined-but-never-written properties
         // stays exact under the environment model — the pinned
         // `'$(NoSuchProp)'` cases.)
-        let untrusted_gate = state.condition_reads_untrusted_value(child, &state.entry_project_dir);
+        let untrusted_gate = state.metadata_condition_reads_untrusted_value(child);
         match evaluate_item_condition(child, state) {
             CondGate::Run => {
                 if untrusted_gate {

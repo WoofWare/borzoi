@@ -3513,6 +3513,28 @@ impl<'r> State<'r> {
         })
     }
 
+    /// [`Self::condition_reads_untrusted_value`] as it reads a metadatum's own
+    /// gate (a `<ReferenceOutputAssembly>` child, say): a reference whose trust
+    /// is untrusted, or a decision resting on a refused name no later write
+    /// bound. A toolset or environment name the walk holds no value of is not
+    /// counted here, as the list's gates count it (#1181): the list is that
+    /// claim's domain, and counting it here would resolve the metadatum
+    /// `Unknown`, which drops the edge without saying the compile closure may
+    /// lack it, where the walk follows the default as MSBuild often does.
+    /// Not claimed: that the walk's value is MSBuild's when such a gate goes
+    /// the other way for it (#1189).
+    fn metadata_condition_reads_untrusted_value(&self, node: Node<'_, '_>) -> bool {
+        attribute(node, "Condition").as_deref().is_some_and(|cond| {
+            if self.condition_trust(cond, None).reference_is_untrusted() {
+                return true;
+            }
+            !self.condition_is_decided_exactly(cond, None, &|name| {
+                self.undefined_read_is_exact(name)
+            }) && properties::property_references(cond)
+                .any(|name| !self.lookup.is_bound(name) && self.trust_of(name).refused())
+        })
+    }
+
     /// The trust a condition's *decision* carries: certain when the values the
     /// walk holds exactly decide it ([`Self::condition_is_decided_exactly`]),
     /// else the join of the trusts of every property it mentions.
