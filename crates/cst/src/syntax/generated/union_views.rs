@@ -276,6 +276,7 @@ impl LongIdent {
 /// Each viewed node kind, with every child its view declares: its kind,
 /// whether it is a token, and the tag of the variant holding it.
 #[cfg_attr(not(any(test, feature = "view-reference")), allow(dead_code))]
+#[allow(clippy::type_complexity)]
 pub(crate) const VIEWED: &[(SyntaxKind, &[(SyntaxKind, bool, &str)])] = &[
     (
         SyntaxKind::LONG_IDENT_PAT,

@@ -103,7 +103,7 @@ fn is_dispatch_enum(name: &str) -> bool {
 
 /// Every child `view` declares, nodes then tokens, in table order: its kind,
 /// whether it is a token (a node and a token may share a kind, as an `ERROR`
-/// does), and the tag of the variant that holds it ([`tag`]). Panics on a
+/// does), and the tag of the variant that holds it (`tag`). Panics on a
 /// child type [`check`] rejects.
 pub fn declared_children(view: &View) -> Vec<(String, bool, String)> {
     view.children
@@ -421,6 +421,7 @@ fn gen_reference(out: &mut String) {
         "/// Each viewed node kind, with every child its view declares: its kind,\n\
          /// whether it is a token, and the tag of the variant holding it.\n\
          #[cfg_attr(not(any(test, feature = \"view-reference\")), allow(dead_code))]\n\
+         #[allow(clippy::type_complexity)]\n\
          pub(crate) const VIEWED: &[(SyntaxKind, &[(SyntaxKind, bool, &str)])] = &[\n{table}];\n\n\
          /// What `node`'s view yields, each child as the tree holds it with the tag\n\
          /// of the variant holding it, or `None` for a node no view reads.\n\
