@@ -146,6 +146,7 @@ pub fn walk(
         let second = first(true);
         state.adopt_second_walk(second);
     }
+    state.publish_each_site_once();
     #[cfg(feature = "test-support")]
     state.record_published_sites();
     let project = state.into_project();
@@ -266,6 +267,7 @@ pub fn walk_with_imports<'r>(
         let second = first(true);
         state.adopt_second_walk(second);
     }
+    state.publish_each_site_once();
     #[cfg(feature = "test-support")]
     state.record_published_sites();
     #[cfg(any(test, feature = "test-support"))]
@@ -1363,10 +1365,6 @@ struct State<'r> {
     /// walk's sites are compared to, and adopted from
     /// ([`State::adopt_second_walk`]).
     noted_sites: Vec<rejection::NotedSite>,
-    /// The construct, cause and certainty of each of [`Self::noted_sites`]
-    /// this walk noted itself: one noted again (a file two undecided import
-    /// points both walk) is one site.
-    noted_keys: HashSet<rejection::SiteKey>,
     /// Whether this is the second walk, whose rejection judgement holds a
     /// bound name whose only doubt is a refusal's mark certain where it names
     /// a text's throw ([`directory_build::is_certain_setting_aside_refusal`]).
@@ -1982,7 +1980,6 @@ impl<'r> State<'r> {
             walk_opaque: None,
             rejection: None,
             noted_sites: Vec::new(),
-            noted_keys: HashSet::new(),
             second_walk: false,
             rewritten_after_refusal: HashSet::new(),
             second_walk_needed: std::cell::Cell::new(false),
@@ -2472,7 +2469,6 @@ impl<'r> State<'r> {
             walk_opaque: _,
             rejection,
             noted_sites: _,
-            noted_keys: _,
             second_walk: _,
             rewritten_after_refusal: _,
             second_walk_needed: _,

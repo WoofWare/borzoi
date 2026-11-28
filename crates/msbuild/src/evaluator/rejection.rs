@@ -201,24 +201,15 @@ impl State<'_> {
             origin: self.current_origin(),
         };
         let kind = rejection.diagnostic_kind();
-        let construct = SiteConstruct {
-            file: self.site_file.clone(),
-            start: span.start,
-            end: span.end,
-            text,
-        };
-        // A construct this walk noted with this cause and certainty already
-        // (a file two undecided import points both walk) is one site.
-        if !self
-            .noted_keys
-            .insert((construct.clone(), rejection.cause.clone(), certainty))
-        {
-            return;
-        }
         // `push` records the diagnostic first, at this index, whatever it
         // pushes after it.
         self.noted_sites.push(NotedSite {
-            construct,
+            construct: SiteConstruct {
+                file: self.site_file.clone(),
+                start: span.start,
+                end: span.end,
+                text,
+            },
             diagnostic: self.diagnostics.len(),
         });
         if replaces {
@@ -299,6 +290,51 @@ impl State<'_> {
         }
     }
 
+    /// Publish each site once: a construct noted again with one cause and
+    /// certainty (a file two undecided import points both walk) keeps its
+    /// first diagnostic. Done when the walks are over, so that what the walk
+    /// read of its own diagnostics as it went (whether a gate raised doubt)
+    /// is what it pushed.
+    pub(super) fn publish_each_site_once(&mut self) {
+        let mut seen: HashSet<(SiteConstruct, RejectionCause, bool)> = HashSet::new();
+        let mut dropped = vec![false; self.diagnostics.len()];
+        let diagnostics = &self.diagnostics;
+        self.noted_sites.retain(|site| {
+            let certain = matches!(
+                diagnostics[site.diagnostic].kind,
+                DiagnosticKind::Rejected { .. }
+            );
+            let fresh = seen.insert((
+                site.construct.clone(),
+                site.cause(diagnostics).clone(),
+                certain,
+            ));
+            if !fresh {
+                dropped[site.diagnostic] = true;
+            }
+            fresh
+        });
+        if !dropped.contains(&true) {
+            return;
+        }
+        // Each kept diagnostic moves down by the dropped ones before it.
+        let mut before = Vec::with_capacity(dropped.len());
+        let mut removed = 0;
+        for &gone in &dropped {
+            before.push(removed);
+            removed += usize::from(gone);
+        }
+        for site in &mut self.noted_sites {
+            site.diagnostic -= before[site.diagnostic];
+        }
+        let mut index = 0;
+        self.diagnostics.retain(|_| {
+            let keep = !dropped[index];
+            index += 1;
+            keep
+        });
+    }
+
     /// Each site the evaluation publishes, by construct and cause, where
     /// `test_support::published_sites` collects: what a sweep counts
     /// repetitions by, before spans are remapped.
@@ -368,16 +404,13 @@ impl NotedSite {
     }
 }
 
-/// A site's construct, cause and certainty: what one walk notes once.
-pub(super) type SiteKey = (SiteConstruct, RejectionCause, RejectionCertainty);
-
 /// The construct a site is about, named by the source alone: the entry
 /// project's buffer or the imported file it is in ([`State::site_file`]), its
 /// element's span there (not the import site a
 /// published span names, which every construct of an imported file shares),
 /// and which of the element's texts it is ([`text_at`]).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(super) struct SiteConstruct {
+struct SiteConstruct {
     file: Option<std::rc::Rc<Path>>,
     start: usize,
     end: usize,

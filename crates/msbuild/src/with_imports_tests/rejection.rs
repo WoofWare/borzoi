@@ -2086,12 +2086,14 @@ fn no_second_walk_where_its_reading_cannot_differ() {
 
 /// A site only the second walk finds in an SDK's `Sdk.props` or
 /// `Sdk.targets` is noted, after every site the first walk notes, in the
-/// SDK's file and in the project's body: the first walk names `$(Short[9])`
-/// of the SDK's text, the second `$(P[9])`, holding the refused `P` at `z`.
-/// The evaluation's rejection is the first walk's certain site (#1153).
+/// SDK's file and in the project's body, each in the order the walk reaches
+/// it: the first walk names `$(Short[8])` of the SDK's text, the second
+/// `$(P[9])`, holding the refused `P` at `z`, and the body's own is
+/// `$(Short[9])`. The evaluation's rejection is the first walk's certain
+/// site, the SDK's (#1153).
 #[test]
 fn a_second_walks_site_in_an_sdks_file_is_noted() {
-    let site = "<Project><ItemGroup><I Include=\"$(P[9])$(Short[9])\" /></ItemGroup></Project>";
+    let site = "<Project><ItemGroup><I Include=\"$(P[9])$(Short[8])\" /></ItemGroup></Project>";
     let throw = |expression: &str| RejectionCause::ThrowingExpression {
         expression: expression.to_owned(),
     };
@@ -2101,12 +2103,12 @@ fn a_second_walks_site_in_an_sdks_file_is_noted() {
         (
             "<Project></Project>",
             site,
-            [throw("$(Short[9])"), throw("$(Short[9])"), throw("$(P[9])")],
+            [throw("$(Short[9])"), throw("$(Short[8])"), throw("$(P[9])")],
         ),
         (
             site,
             "<Project></Project>",
-            [throw("$(Short[9])"), throw("$(Short[9])"), throw("$(P[9])")],
+            [throw("$(Short[8])"), throw("$(Short[9])"), throw("$(P[9])")],
         ),
     ] {
         let tmp = TempDir::new().unwrap();
@@ -2133,7 +2135,7 @@ fn a_second_walks_site_in_an_sdks_file_is_noted() {
         assert_eq!(site_causes(&parsed), expected, "{:#?}", parsed.diagnostics);
         let rejection = parsed.rejection.as_ref().expect("withdrawn");
         assert_eq!(rejection.certainty, RejectionCertainty::Certain);
-        assert_eq!(rejection.cause, throw("$(Short[9])"));
+        assert_eq!(rejection.cause, throw("$(Short[8])"));
     }
 }
 
@@ -2249,6 +2251,64 @@ fn a_construct_noted_twice_is_one_site() {
         .filter(|d| matches!(&d.kind, DiagnosticKind::MayBeRejected { cause } if *cause == item))
         .count();
     assert_eq!(noted, 1, "{:#?}", parsed.diagnostics);
+}
+
+/// A construct noted twice is published once, but each visit judges it as it
+/// would alone: the `<When>` in `Directory.Build.props`, which two undecided
+/// import points walk, is gated on `'$(P)' == 'z' Or '$(S[9])' != ''`, `P`
+/// refused then rewritten there, a site at either visit, which keeps the
+/// `<Choose>` undecided both times. Were the repeated
+/// site's diagnostic suppressed as it was noted, the second visit would read
+/// no doubt from its gate, take the arm, and write the long `A` it then holds
+/// to `B`, so that `$(B[9])` would throw on nothing and its site go unnoted
+/// (#1164).
+#[test]
+fn a_construct_noted_again_is_judged_again() {
+    let tmp = TempDir::new().unwrap();
+    let block = COMMON_PROPS_BLOCK.replace(
+        "exists('$(DirectoryBuildPropsPath)')\"/>",
+        &format!("({UNDECIDED_TRUE} Or exists('$(DirectoryBuildPropsPath)'))\"/>"),
+    );
+    let (sdk_dir, props, targets) = write_synthetic_sdk(
+        tmp.path(),
+        "S",
+        &format!(
+            "<Project>\n<PropertyGroup><A>a</A><B>a</B></PropertyGroup>\n\
+             {block}<PropertyGroup><A>abcdefghijkl</A></PropertyGroup>\n{block}</Project>\n"
+        ),
+        "<Project />",
+    );
+    write_at(
+        tmp.path(),
+        "Directory.Build.props",
+        "<Project><PropertyGroup><P>@(J)</P><P>z</P><S>a</S></PropertyGroup>\
+         <Choose><When Condition=\"'$(P)' == 'z' Or '$(S[9])' != ''\">\
+         <PropertyGroup><B>$(A)</B></PropertyGroup></When></Choose></Project>",
+    );
+    let project_path = write_at(
+        tmp.path(),
+        "proj/p.fsproj",
+        "<Project Sdk=\"S\"><PropertyGroup><T>$(B[9])</T></PropertyGroup></Project>\n",
+    );
+    let parsed = parse_file_with_sdk(&project_path, |name| {
+        if name == "S" {
+            Ok(SdkPaths {
+                root: sdk_dir.clone(),
+                props: props.clone(),
+                targets: targets.clone(),
+            })
+        } else {
+            Err(SdkResolveError::NotFound)
+        }
+    });
+    let throw = RejectionCause::ThrowingExpression {
+        expression: "$(B[9])".to_owned(),
+    };
+    assert!(
+        site_causes(&parsed).contains(&throw),
+        "{:#?}",
+        parsed.diagnostics
+    );
 }
 
 /// The entry project's buffer and a document opened from its file are two
