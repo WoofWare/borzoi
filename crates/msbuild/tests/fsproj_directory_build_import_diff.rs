@@ -330,6 +330,7 @@ fn evaluate(
             &workloads::WorkloadEnvironment {
                 user_dotnet_root: user_dotnet_root.as_deref(),
                 overrides_present,
+                resolver_switched_off: common::workload_resolver_switched_off_from_process(),
                 global_json: Default::default(),
                 process_architecture: None,
             },
@@ -393,6 +394,7 @@ fn evaluate_gate(oracle: &mut Oracle, dir: &Path, value: &str) -> (Option<String
             &workloads::WorkloadEnvironment {
                 user_dotnet_root: user_dotnet_root.as_deref(),
                 overrides_present,
+                resolver_switched_off: common::workload_resolver_switched_off_from_process(),
                 global_json: Default::default(),
                 process_architecture: None,
             },

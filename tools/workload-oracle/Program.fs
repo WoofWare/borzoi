@@ -33,8 +33,14 @@
 ///      SDK resolver makes, handed the global.json MSBuild found, if any;
 ///      the install state is read under the process's own architecture)
 ///     -> {"ok":true,"kind":"multiple","paths":[..]}
-///      | {"ok":true,"kind":"single"|"empty"|"null"}
+///      | {"ok":true,"kind":"single","path":p}
+///      | {"ok":true,"kind":"empty","properties":{name:value},
+///         "items":[{"type":t,"spec":s,"metadata":{name:value}}]}
+///      | {"ok":true,"kind":"null"}
 ///      | {"ok":false,"thrown":..}
+///     (a name that is no locator asks `TryGetPackInfo`: an installed pack is
+///      `single`, one that is not is `empty` with a `MissingWorkloadPack`
+///      item, and no pack of the name is `null`)
 ///
 /// A response `{"error":..}` means the request or the tool is broken, never a
 /// resolver verdict.
@@ -130,8 +136,38 @@ let private respondResolve (root: JsonElement) : string =
                 {| ok = true
                    kind = "multiple"
                    paths = Seq.toArray paths |}
-        | "SinglePathResolutionResult" -> JsonSerializer.Serialize {| ok = true; kind = "single" |}
-        | "EmptyResolutionResult" -> JsonSerializer.Serialize {| ok = true; kind = "empty" |}
+        | "SinglePathResolutionResult" ->
+            JsonSerializer.Serialize
+                {| ok = true
+                   kind = "single"
+                   path = result.GetType().GetProperty("Path").GetValue(result) :?> string |}
+        | "EmptyResolutionResult" ->
+            let property (target: obj) (name: string) =
+                target.GetType().GetProperty(name).GetValue(target)
+
+            let properties =
+                property result "propertiesToAdd" :?> Collections.Generic.IDictionary<string, string>
+
+            // `IDictionary<string, SdkResultItem>`, whose value type lives in
+            // `Microsoft.Build.Framework`, which this tool does not reference.
+            let items =
+                [| for entry in property result "itemsToAdd" :?> Collections.IEnumerable do
+                       let item = property entry "Value"
+
+                       let metadata =
+                           match property item "Metadata" with
+                           | null -> dict []
+                           | m -> m :?> Collections.Generic.IDictionary<string, string>
+
+                       {| ``type`` = property entry "Key" :?> string
+                          spec = property item "ItemSpec" :?> string
+                          metadata = metadata |} |]
+
+            JsonSerializer.Serialize
+                {| ok = true
+                   kind = "empty"
+                   properties = properties
+                   items = items |}
         | "NullResolutionResult" -> JsonSerializer.Serialize {| ok = true; kind = "null" |}
         | other -> JsonSerializer.Serialize {| error = $"unknown resolution result %s{other}" |}
     with ex ->

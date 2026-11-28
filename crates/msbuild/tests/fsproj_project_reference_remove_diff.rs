@@ -772,6 +772,7 @@ fn the_non_existent_idiom_commits_on_the_real_sdk() {
             &workloads::WorkloadEnvironment {
                 user_dotnet_root: user_dotnet_root.as_deref(),
                 overrides_present,
+                resolver_switched_off: common::workload_resolver_switched_off_from_process(),
                 global_json: Default::default(),
                 process_architecture: None,
             },

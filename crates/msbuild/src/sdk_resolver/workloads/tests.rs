@@ -25,6 +25,7 @@ fn no_user_env() -> WorkloadEnvironment<'static> {
     WorkloadEnvironment {
         user_dotnet_root: None,
         overrides_present: false,
+        resolver_switched_off: false,
         global_json: Default::default(),
         process_architecture: None,
     }
@@ -712,6 +713,7 @@ fn user_root_participates_in_the_primary_band_only() {
     let env = WorkloadEnvironment {
         user_dotnet_root: Some(&user),
         overrides_present: false,
+        resolver_switched_off: false,
         global_json: Default::default(),
         process_architecture: None,
     };
@@ -734,6 +736,7 @@ fn user_root_shadows_dotnet_root_in_the_current_band() {
     let env = WorkloadEnvironment {
         user_dotnet_root: Some(&user),
         overrides_present: false,
+        resolver_switched_off: false,
         global_json: Default::default(),
         process_architecture: None,
     };
@@ -765,6 +768,7 @@ fn user_root_shadows_by_name_even_when_it_holds_no_valid_manifest() {
     let env = WorkloadEnvironment {
         user_dotnet_root: Some(&user),
         overrides_present: false,
+        resolver_switched_off: false,
         global_json: Default::default(),
         process_architecture: None,
     };
@@ -791,6 +795,7 @@ fn user_root_equal_to_dotnet_root_participates_once() {
     let env = WorkloadEnvironment {
         user_dotnet_root: Some(root),
         overrides_present: false,
+        resolver_switched_off: false,
         global_json: Default::default(),
         process_architecture: None,
     };
@@ -909,6 +914,7 @@ fn env_overrides_present_degrade() {
     let env = WorkloadEnvironment {
         user_dotnet_root: None,
         overrides_present: true,
+        resolver_switched_off: false,
         global_json: Default::default(),
         process_architecture: None,
     };
@@ -1058,6 +1064,7 @@ fn auto_import_finds_user_packs_even_without_user_manifests() {
     let env = WorkloadEnvironment {
         user_dotnet_root: Some(&user),
         overrides_present: false,
+        resolver_switched_off: false,
         global_json: Default::default(),
         process_architecture: None,
     };
@@ -1084,6 +1091,7 @@ fn manifestless_user_root_still_resolves_targets_from_dotnet() {
     let env = WorkloadEnvironment {
         user_dotnet_root: Some(&user),
         overrides_present: false,
+        resolver_switched_off: false,
         global_json: Default::default(),
         process_architecture: None,
     };
@@ -1106,6 +1114,7 @@ fn auto_import_empty_when_manifestless_user_root_ships_no_props() {
     let env = WorkloadEnvironment {
         user_dotnet_root: Some(&user),
         overrides_present: false,
+        resolver_switched_off: false,
         global_json: Default::default(),
         process_architecture: None,
     };
@@ -1129,6 +1138,7 @@ fn nonexistent_user_root_participates_nowhere() {
     let env = WorkloadEnvironment {
         user_dotnet_root: Some(&user),
         overrides_present: false,
+        resolver_switched_off: false,
         global_json: Default::default(),
         process_architecture: None,
     };
@@ -1148,6 +1158,7 @@ fn a_global_json_pin_of_a_missing_workload_set_degrades_both_locators() {
     let env = WorkloadEnvironment {
         user_dotnet_root: None,
         overrides_present: false,
+        resolver_switched_off: false,
         global_json: crate::GlobalJsonWorkloads::Reads {
             workload_version: Some("10.0.300".to_owned()),
             use_workload_sets: None,
@@ -1389,4 +1400,264 @@ fn the_known_list_splits_as_read_all_lines_splits() {
     assert_eq!(super::read_all_lines("a\n\nb\n"), ["a", "", "b"]);
     assert_eq!(super::read_all_lines(" a \r\n"), [" a "]);
     assert!(super::read_all_lines("").is_empty());
+}
+
+/// A dotnet root whose running SDK (10.0.300) has one manifest defining the
+/// pack `Contoso.Pack` (`packs` is its `packs` object), and a NuGet folder
+/// holding a restored `Contoso.Pack` 2.0.0, which `msbuild-sdks` pins.
+struct PackOrLayout {
+    _tmp: TempDir,
+    root: PathBuf,
+    nuget: PathBuf,
+    pins: std::collections::BTreeMap<String, crate::SdkVersion>,
+}
+
+/// An installed `Contoso.Pack` 1.0.0 under `root`, its `Sdk` folder holding
+/// both entry points.
+fn install_contoso_pack(root: &Path) -> PathBuf {
+    let pack = root.join("packs/Contoso.Pack/1.0.0");
+    write(&pack.join("Sdk/Sdk.props"), "<Project/>");
+    write(&pack.join("Sdk/Sdk.targets"), "<Project/>");
+    pack
+}
+
+impl PackOrLayout {
+    fn new(packs: &str) -> PackOrLayout {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("dotnet");
+        let nuget = tmp.path().join("nuget");
+        let version_dir = host_sdk(&root, "10.0.300", &["contoso.one"]);
+        write(
+            &version_dir.join("NETCoreSdkRuntimeIdentifierChain.txt"),
+            "linux-x64\nany\n",
+        );
+        write(
+            &root.join("sdk-manifests/10.0.300/contoso.one/1.0.0/WorkloadManifest.json"),
+            &format!(r#"{{"version": "1.0.0", "packs": {packs}}}"#),
+        );
+        let package = nuget.join("contoso.pack/2.0.0");
+        write(&package.join(".nupkg.metadata"), "{}");
+        write(&package.join("Sdk/Sdk.props"), "<Project/>");
+        write(&package.join("Sdk/Sdk.targets"), "<Project/>");
+        let pins = std::collections::BTreeMap::from([(
+            "Contoso.Pack".to_owned(),
+            crate::SdkVersion::parse("2.0.0").unwrap(),
+        )]);
+        PackOrLayout {
+            _tmp: tmp,
+            root,
+            nuget,
+            pins,
+        }
+    }
+
+    fn resolve(
+        &self,
+        name: &str,
+        env: &WorkloadEnvironment<'_>,
+    ) -> Result<SdkResolution, SdkResolveError> {
+        crate::resolve_sdk(
+            &self.root,
+            Some(&self.nuget),
+            name,
+            None,
+            Some(&self.pins),
+            env,
+            &Observer::new(),
+        )
+    }
+
+    /// The one root `name` resolves to: an ordinary SDK's, or a workload
+    /// pack's `Sdk` folder.
+    fn root_of(&self, name: &str, env: &WorkloadEnvironment<'_>) -> PathBuf {
+        match self.resolve(name, env) {
+            Ok(SdkResolution::Single(paths)) => paths.root,
+            Ok(SdkResolution::Roots(roots)) if roots.len() == 1 => roots[0].clone(),
+            other => panic!("{name} resolves to {other:?}"),
+        }
+    }
+}
+
+const CONTOSO_PACK: &str = r#"{"Contoso.Pack": {"kind": "Sdk", "version": "1.0.0"}}"#;
+
+#[test]
+fn a_name_the_running_sdk_ships_is_never_looked_up_as_a_pack() {
+    // MSBuild asks its default resolver, the running SDK's `Sdks`, first; the
+    // workload resolver is asked only where that misses, so not even a
+    // workload state that declines reaches the name.
+    let layout = PackOrLayout::new(CONTOSO_PACK);
+    let shipped = layout.root.join("sdk/10.0.300/Sdks/Contoso.Pack/Sdk");
+    write(&shipped.join("Sdk.props"), "<Project/>");
+    write(&shipped.join("Sdk.targets"), "<Project/>");
+    install_contoso_pack(&layout.root);
+    let declining = WorkloadEnvironment {
+        overrides_present: true,
+        resolver_switched_off: false,
+        ..no_user_env()
+    };
+    assert_eq!(layout.root_of("Contoso.Pack", &no_user_env()), shipped);
+    assert_eq!(layout.root_of("Contoso.Pack", &declining), shipped);
+}
+
+#[test]
+fn a_workload_pack_is_served_ahead_of_nuget() {
+    // The workload resolver (priority 4000) answers before NuGet's (6000),
+    // for the name in any case.
+    let layout = PackOrLayout::new(CONTOSO_PACK);
+    let pack = install_contoso_pack(&layout.root);
+    assert_eq!(
+        layout.root_of("Contoso.Pack", &no_user_env()),
+        pack.join("Sdk")
+    );
+    assert_eq!(
+        layout.root_of("contoso.PACK", &no_user_env()),
+        pack.join("Sdk")
+    );
+}
+
+#[test]
+fn a_name_no_pack_has_for_the_host_goes_on_to_nuget() {
+    // An alias naming none of the host's runtime identifiers is no pack: the
+    // workload resolver returns null, and NuGet serves its pinned copy.
+    let layout = PackOrLayout::new(
+        r#"{"Contoso.Pack": {"kind": "Sdk", "version": "1.0.0", "alias-to": {"win-x64": "Contoso.Pack.Win"}}}"#,
+    );
+    fs::create_dir_all(layout.root.join("packs/Contoso.Pack.Win/1.0.0")).unwrap();
+    assert_eq!(
+        layout.root_of("Contoso.Pack", &no_user_env()),
+        layout.nuget.join("contoso.pack/2.0.0/Sdk")
+    );
+}
+
+#[test]
+fn a_missing_workload_pack_declines() {
+    // The resolver succeeds with no path and a `MissingWorkloadPack` item,
+    // which the walk does not model; NuGet is never asked.
+    let layout = PackOrLayout::new(CONTOSO_PACK);
+    let err = layout.resolve("Contoso.Pack", &no_user_env()).unwrap_err();
+    assert!(
+        matches!(&err, SdkResolveError::UnsupportedLayout { reason } if reason.contains("MissingWorkloadPack")),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn a_workload_state_we_cannot_resolve_declines_a_name_the_running_sdk_lacks() {
+    // Every name the running SDK does not ship reaches the workload resolver,
+    // which loads its manifests before answering; a state we cannot resolve
+    // exactly declines even a name NuGet would serve.
+    let layout = PackOrLayout::new("{}");
+    assert_eq!(
+        layout.root_of("Contoso.Pack", &no_user_env()),
+        layout.nuget.join("contoso.pack/2.0.0/Sdk")
+    );
+    let declining = WorkloadEnvironment {
+        overrides_present: true,
+        resolver_switched_off: false,
+        ..no_user_env()
+    };
+    assert!(matches!(
+        layout.resolve("Contoso.Pack", &declining),
+        Err(SdkResolveError::UnsupportedLayout { .. })
+    ));
+}
+
+#[test]
+fn the_disable_sentinel_declines_every_workload_answer() {
+    // `CachingWorkloadResolver` answers nothing where
+    // `DisableWorkloadResolver.sentinel` sits in the SDK directory; neither a
+    // locator nor a pack lookup commits there, though both would without it.
+    let layout = PackOrLayout::new(CONTOSO_PACK);
+    let version_dir = layout.root.join("sdk/10.0.300");
+    install_contoso_pack(&layout.root);
+    let answers = || {
+        [
+            layout.resolve("Contoso.Pack", &no_user_env()).is_ok(),
+            resolve_workload_locator(
+                AUTO,
+                &layout.root,
+                &version_dir,
+                &no_user_env(),
+                &Observer::new(),
+            )
+            .is_ok(),
+        ]
+    };
+    assert_eq!(answers(), [true, true]);
+    write(&version_dir.join("DisableWorkloadResolver.sentinel"), "");
+    assert_eq!(answers(), [false, false]);
+}
+
+#[test]
+fn a_switched_off_resolver_leaves_a_pack_name_to_nuget_and_declines_a_locator() {
+    // `MSBuildEnableWorkloadResolver=false`: the resolver answers nothing, so
+    // NuGet serves its pinned copy over the installed pack, and a locator,
+    // which the resolvers after it do not serve as the workload resolver does,
+    // declines.
+    let layout = PackOrLayout::new(CONTOSO_PACK);
+    install_contoso_pack(&layout.root);
+    let off = WorkloadEnvironment {
+        resolver_switched_off: true,
+        ..no_user_env()
+    };
+    assert_eq!(
+        layout.root_of("Contoso.Pack", &no_user_env()),
+        layout.root.join("packs/Contoso.Pack/1.0.0/Sdk")
+    );
+    assert_eq!(
+        layout.root_of("Contoso.Pack", &off),
+        layout.nuget.join("contoso.pack/2.0.0/Sdk")
+    );
+    let version_dir = layout.root.join("sdk/10.0.300");
+    assert!(
+        resolve_workload_locator(AUTO, &layout.root, &version_dir, &off, &Observer::new()).is_err()
+    );
+}
+
+#[test]
+fn a_versioned_reference_to_a_workload_pack_declines() {
+    // `Name/Version` is the name to the workload resolver under the
+    // `<Project Sdk>` shorthand and the whole spelling under an explicit
+    // import; only a pack of the name makes the two differ.
+    let layout = PackOrLayout::new(CONTOSO_PACK);
+    install_contoso_pack(&layout.root);
+    assert!(matches!(
+        layout.resolve("Contoso.Pack/2.0.0", &no_user_env()),
+        Err(SdkResolveError::UnsupportedLayout { .. })
+    ));
+    let other = PackOrLayout::new("{}");
+    assert_eq!(
+        match other.resolve("Contoso.Pack/2.0.0", &no_user_env()) {
+            Ok(SdkResolution::Single(paths)) => paths.root,
+            o => panic!("{o:?}"),
+        },
+        other.nuget.join("contoso.pack/2.0.0/Sdk")
+    );
+}
+
+#[test]
+fn a_workload_pack_is_a_root_an_import_resolves_against() {
+    // The resolver serves the pack's `Sdk` folder on the pack directory's
+    // existence alone, whatever it holds: the import's own `Project` is
+    // judged against it, as for a locator, and `locate_dotnet_sdk`, which
+    // serves only a verified `Sdk.props` and `Sdk.targets`, declines it.
+    let layout = PackOrLayout::new(CONTOSO_PACK);
+    let pack = layout.root.join("packs/Contoso.Pack/1.0.0");
+    fs::create_dir_all(&pack).unwrap();
+    assert_eq!(
+        layout.resolve("Contoso.Pack", &no_user_env()).unwrap(),
+        SdkResolution::Roots(vec![pack.join("Sdk")])
+    );
+    assert!(matches!(
+        crate::locate_dotnet_sdk(
+            &layout.root,
+            Some(&layout.nuget),
+            "Contoso.Pack",
+            None,
+            Some(&layout.pins),
+            &no_user_env(),
+            &Observer::new(),
+        ),
+        Err(SdkResolveError::UnsupportedLayout { .. })
+    ));
 }

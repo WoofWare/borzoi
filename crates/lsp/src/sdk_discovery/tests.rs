@@ -1750,6 +1750,36 @@ fn an_install_state_under_the_muxer_s_architecture_is_read() {
     }
 }
 
+/// A name the running SDK does not ship reaches the workload resolver too,
+/// which reads the install state under the muxer's architecture as the
+/// locators do, so the workload pack it names resolves, and the muxer is
+/// among its reads.
+#[test]
+fn a_workload_pack_resolves_under_the_muxer_s_architecture() {
+    let tmp = TempDir::new().unwrap();
+    let tmp = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    let (older, _, muxer, disc) = install_state_world(&tmp, ARM64_MUXER, false);
+    fs::write(
+        older.join("WorkloadManifest.json"),
+        r#"{"version": "1.0.0", "packs": {"Contoso.Pack": {"kind": "Sdk", "version": "1.0.0"}}}"#,
+    )
+    .unwrap();
+    let pack = tmp.join("dotnet/packs/Contoso.Pack/1.0.0");
+    fs::create_dir_all(pack.join("Sdk")).unwrap();
+    fs::write(pack.join("Sdk/Sdk.props"), "<Project/>").unwrap();
+    fs::write(pack.join("Sdk/Sdk.targets"), "<Project/>").unwrap();
+    let observer = Observer::new();
+    match disc.resolve("Contoso.Pack", &observer) {
+        Ok(SdkResolution::Roots(roots)) => assert_eq!(roots, vec![pack.join("Sdk")]),
+        other => panic!("{other:?}"),
+    }
+    let (reads, _) = observer.finish();
+    assert!(
+        reads.reads().iter().any(|read| read.path == muxer),
+        "{reads:#?}"
+    );
+}
+
 /// The muxer's header is part of what a resolution read: rewriting the muxer
 /// with the same bytes leaves the reads standing and the next resolution's
 /// reads the same, while a muxer of another architecture makes them stale,
@@ -1810,28 +1840,6 @@ fn an_install_state_declines_where_the_muxer_does_not_say() {
     }
 }
 
-/// Only a workload locator reads the muxer.
-#[test]
-fn only_a_workload_locator_reads_the_muxer() {
-    let tmp = TempDir::new().unwrap();
-    let (_, _, muxer, disc) = install_state_world(tmp.path(), ARM64_MUXER, false);
-    install_sdk(&tmp.path().join("dotnet"), "10.0.300", "Microsoft.NET.Sdk");
-    let observer = Observer::new();
-    disc.resolve("Microsoft.NET.Sdk", &observer).unwrap();
-    let (reads, _) = observer.finish();
-    assert!(
-        reads.reads().iter().all(|read| read.path != muxer),
-        "{reads:#?}"
-    );
-    assert!(
-        resolve_locator(&disc)
-            .1
-            .reads()
-            .iter()
-            .any(|read| read.path == muxer)
-    );
-}
-
 #[test]
 fn resolve_degrades_locators_when_global_json_pins_workload_set() {
     // Identical layout to the exact-resolution test above, except the
@@ -1890,6 +1898,21 @@ fn workload_override_detection_follows_upstream_value_semantics() {
             .workload_overrides_present
     );
     assert!(!with_var("UNRELATED", "x").workload_overrides_present);
+    // An additional SDK resolver folder, which `??` takes even when empty.
+    for (name, value) in [
+        ("MSBUILDADDITIONALSDKRESOLVERSFOLDER_NET", ""),
+        ("MSBUILDADDITIONALSDKRESOLVERSFOLDER", "/r"),
+    ] {
+        let env = with_var(name, value);
+        assert!(env.sdk_resolvers_folder_override && !env.workload_overrides_present);
+    }
+    // The resolver's own switch: off only at `false`, in any case.
+    let switched_off = |value| with_var("MSBuildEnableWorkloadResolver", value);
+    assert!(switched_off("FALSE").workload_resolver_switched_off);
+    assert!(!switched_off("FALSE").workload_overrides_present);
+    assert!(!switched_off("true").workload_resolver_switched_off);
+    assert!(!switched_off(" false").workload_resolver_switched_off);
+    assert!(!switched_off("").workload_resolver_switched_off);
 }
 
 #[test]
