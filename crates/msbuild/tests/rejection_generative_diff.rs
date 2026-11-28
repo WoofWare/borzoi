@@ -2581,20 +2581,21 @@ fn a_throw_in_an_arm_is_judged_alike_whatever_the_history() {
 
 /// One cell of [`arm_history_grid`]: its document in each history
 /// ([`HISTORIES`], in order), and the document with the write MSBuild may
-/// make and the walk does not hold left out.
+/// make and the walk does not hold left out, `{held}` standing for the value
+/// the walk holds of `held_name`.
 struct GridCell {
     label: String,
     documents: Vec<String>,
     held: String,
+    held_name: &'static str,
     /// Whether the arm is one MSBuild takes.
     taken: bool,
     /// The hostile dimensions of the values the cell writes, none for the
     /// grid's own.
     hostile: BTreeSet<Dimension>,
-    /// The site's text, and the values the walk holds of the names it reads
-    /// (a name absent is one it holds none of).
+    /// The site's text, and the names it reads whose values the walk holds.
     call: String,
-    held_values: Vec<(String, String)>,
+    held_names: &'static [&'static str],
 }
 
 /// The hostile values [`arm_history_grid`] does not draw.
@@ -2614,7 +2615,6 @@ const HISTORIES: [[bool; 2]; 4] = [[false, false], [true, false], [false, true],
 /// it, and of which hostile dimensions.
 struct GridValue {
     text: String,
-    raw: String,
     label: String,
     hostile: BTreeSet<Dimension>,
 }
@@ -2630,7 +2630,6 @@ fn rewrites(plain: &[&str], arm: &str, before: &str, written: &str) -> Vec<GridV
         .iter()
         .map(|value| GridValue {
             text: xml_text(value),
-            raw: (*value).to_owned(),
             label: (*value).to_owned(),
             hostile: BTreeSet::new(),
         })
@@ -2646,7 +2645,6 @@ fn rewrites(plain: &[&str], arm: &str, before: &str, written: &str) -> Vec<GridV
             let rendered = entry.value.render(plain[0]);
             values.push(GridValue {
                 text: xml_text(&rendered),
-                raw: rendered.clone(),
                 label: format!("{}:{}", entry.dimension.id(), fnv1a(&rendered)),
                 hostile: BTreeSet::from([entry.dimension]),
             });
@@ -2714,9 +2712,9 @@ fn arm_history_cells() -> Vec<GridCell> {
                         for a in rewrites(&["v1.0", "abc"], arm, before, written) {
                             for b in ["", "1"] {
                                 let site_text = site.clone();
-                                let (a_label, a_hostile, a_raw) =
-                                    (a.label.clone(), a.hostile.clone(), a.raw.clone());
+                                let (a_label, a_hostile) = (a.label.clone(), a.hostile.clone());
                                 let a = a.text.clone();
+                                let final_writes = format!("<A>{a}</A><B>{b}</B><After>");
                                 let document = move |arm_write: &str, history: &[bool]| {
                                     let site = &site_text;
                                     format!(
@@ -2738,8 +2736,14 @@ fn arm_history_cells() -> Vec<GridCell> {
                                     ),
                                     // As the walk holds it: `X`, a write it
                                     // refuses, as the empty value it reads.
+                                    // and `A` as the value it holds.
                                     held: document("", &HISTORIES[0])
-                                        .replace(&format!("<X>{REFUSED}</X>"), "<X></X>"),
+                                        .replace(&format!("<X>{REFUSED}</X>"), "<X></X>")
+                                        .replace(
+                                            &final_writes,
+                                            &format!("<A>{{held}}</A><B>{b}</B><After>"),
+                                        ),
+                                    held_name: "A",
                                     documents: HISTORIES
                                         .iter()
                                         .map(|history| document(&arm_write, history))
@@ -2747,12 +2751,7 @@ fn arm_history_cells() -> Vec<GridCell> {
                                     taken: arm == UNDECIDED_TRUE,
                                     hostile: a_hostile,
                                     call: (*call).to_owned(),
-                                    held_values: vec![
-                                        ("U".to_owned(), before.to_owned()),
-                                        ("A".to_owned(), a_raw),
-                                        ("B".to_owned(), b.to_owned()),
-                                        ("Q".to_owned(), "axc1d".to_owned()),
-                                    ],
+                                    held_names: &["U", "A", "B", "Q"],
                                 });
                             }
                         }
@@ -2784,12 +2783,10 @@ fn arm_history_cells() -> Vec<GridCell> {
             ] {
                 for a in ["z", "off"] {
                     for before in rewrites(&["a", "abcdefghijkl0", "1.0"], arm, "", a) {
-                        let (before_label, before_hostile, before_raw) = (
-                            before.label.clone(),
-                            before.hostile.clone(),
-                            before.raw.clone(),
-                        );
+                        let (before_label, before_hostile) =
+                            (before.label.clone(), before.hostile.clone());
                         let before = before.text.clone();
+                        let first_writes = format!("<A>{a}</A><B>{before}</B>");
                         let site_text = site.clone();
                         let document = move |gated: &str, history: &[bool]| {
                             let site = &site_text;
@@ -2809,7 +2806,9 @@ fn arm_history_cells() -> Vec<GridCell> {
                             label: format!(
                                 "gated / {arm} / {kind} / {text} / A={a} / B={before_label}"
                             ),
-                            held: document("", &HISTORIES[0]),
+                            held: document("", &HISTORIES[0])
+                                .replace(&first_writes, &format!("<A>{a}</A><B>{{held}}</B>")),
+                            held_name: "B",
                             documents: HISTORIES
                                 .iter()
                                 .map(|history| document(&gated, history))
@@ -2817,10 +2816,7 @@ fn arm_history_cells() -> Vec<GridCell> {
                             taken: arm == UNDECIDED_TRUE,
                             hostile: before_hostile,
                             call: text.to_owned(),
-                            held_values: vec![
-                                ("A".to_owned(), a.to_owned()),
-                                ("B".to_owned(), before_raw),
-                            ],
+                            held_names: &["A", "B"],
                         });
                     }
                 }
@@ -2894,21 +2890,46 @@ fn arm_history_grid() {
     for cell in arm_history_cells() {
         let plain = &cell.documents[0];
         let theirs = oracle.project_design_time(plain, &oracle_names, Some(&project_path), &[]);
-        // MSBuild's answer with the names as the walk holds them.
-        let held_evaluates = oracle
-            .project_design_time(&cell.held, &oracle_names, Some(&project_path), &[])
-            .is_some();
         rejected += usize::from(theirs.is_none());
-        let committed_plain = claim(&walk(plain), "After").is_some();
-        census.reached(
-            &cell.hostile,
-            outcome(theirs.is_none(), committed_plain && theirs.is_some()),
-        );
         let walked: Vec<(&[bool; 2], &String, borzoi_msbuild::ParsedProject)> = HISTORIES
             .iter()
             .zip(&cell.documents)
             .map(|(history, xml)| (history, xml, walk(xml)))
             .collect();
+        // The values the walk holds of the names the site reads, in the plain
+        // history: what MSBuild is run on in the held document, and what the
+        // walk's own expansion of the site is made on.
+        let held_values: Vec<(String, String)> = cell
+            .held_names
+            .iter()
+            .filter_map(|name| {
+                walked[0]
+                    .2
+                    .properties
+                    .get(*name)
+                    .map(|value| ((*name).to_owned(), value.clone()))
+            })
+            .collect();
+        let held_value = held_values
+            .iter()
+            .find(|(name, _)| name == cell.held_name)
+            .map_or(String::new(), |(_, value)| spelt(value));
+        // MSBuild's answer with the names as the walk holds them.
+        let held_evaluates = oracle
+            .project_design_time(
+                &cell.held.replace("{held}", &held_value),
+                &oracle_names,
+                Some(&project_path),
+                &[],
+            )
+            .is_some();
+        census.reached(
+            &cell.hostile,
+            outcome(
+                theirs.is_none(),
+                claim(&walked[0].2, "After").is_some() && theirs.is_some(),
+            ),
+        );
         let mut verdicts: Vec<&str> = Vec::new();
         for (history, xml, parsed) in &walked {
             cases += 1;
@@ -2922,7 +2943,7 @@ fn arm_history_grid() {
                 None if !claims.is_empty() => {
                     // A function the walk does not model in the site's text,
                     // on the values it holds: no site yet (#1094).
-                    let unmodelled = substitute(&cell.call, &property_map(&cell.held_values))
+                    let unmodelled = substitute(&cell.call, &property_map(&held_values))
                         .1
                         .iter()
                         .any(|issue| matches!(issue, Issue::Unsupported { .. }));

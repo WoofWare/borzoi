@@ -290,29 +290,45 @@ impl State<'_> {
         }
     }
 
-    /// Publish each site once: a construct noted again with one cause and
-    /// certainty (a file two undecided import points both walk) keeps its
-    /// first diagnostic. Done when the walks are over, so that what the walk
-    /// read of its own diagnostics as it went (whether a gate raised doubt)
-    /// is what it pushed.
+    /// Publish each site once: a construct noted again with one cause (a
+    /// file two undecided import points both walk, or one file reached
+    /// through two spellings) keeps one diagnostic, its first certain one if
+    /// any was certain, else its first. Done when the walks are over, so that
+    /// what the walk read of its own diagnostics as it went (whether a gate
+    /// raised doubt) is what it pushed.
     pub(super) fn publish_each_site_once(&mut self) {
-        let mut seen: HashSet<(SiteConstruct, RejectionCause, bool)> = HashSet::new();
-        let mut dropped = vec![false; self.diagnostics.len()];
         let diagnostics = &self.diagnostics;
-        self.noted_sites.retain(|site| {
-            let certain = matches!(
+        let certain = |site: &NotedSite| {
+            matches!(
                 diagnostics[site.diagnostic].kind,
                 DiagnosticKind::Rejected { .. }
-            );
-            let fresh = seen.insert((
-                site.construct.clone(),
-                site.cause(diagnostics).clone(),
-                certain,
-            ));
-            if !fresh {
+            )
+        };
+        // The diagnostic each construct and cause keeps.
+        let mut kept: HashMap<(&SiteConstruct, &RejectionCause), usize> = HashMap::new();
+        for site in &self.noted_sites {
+            let key = (&site.construct, site.cause(diagnostics));
+            match kept.get(&key) {
+                Some(&first)
+                    if certain(site)
+                        && !matches!(diagnostics[first].kind, DiagnosticKind::Rejected { .. }) =>
+                {
+                    kept.insert(key, site.diagnostic);
+                }
+                Some(_) => {}
+                None => {
+                    kept.insert(key, site.diagnostic);
+                }
+            }
+        }
+        let keep: HashSet<usize> = kept.into_values().collect();
+        let mut dropped = vec![false; self.diagnostics.len()];
+        self.noted_sites.retain(|site| {
+            let stays = keep.contains(&site.diagnostic);
+            if !stays {
                 dropped[site.diagnostic] = true;
             }
-            fresh
+            stays
         });
         if !dropped.contains(&true) {
             return;
