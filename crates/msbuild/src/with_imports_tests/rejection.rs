@@ -2312,57 +2312,73 @@ fn a_construct_noted_again_is_judged_again() {
 }
 
 /// A construct noted with one cause at two certainties is one published site,
-/// the certain one: `inner.props`, imported plainly while `S` is a certain
-/// `a` and again through a link once `S` is refused and rewritten, holds one
-/// `$(S[9])`, which the first visit notes certain and the second possible
-/// (#1164).
+/// the certain one, whichever visit comes first: `inner.props`, holding one
+/// `$(S[9])`, is imported once while `S` is a certain `a` and once, through a
+/// link, while the walk doubts `S` (refused and rewritten, or written under a
+/// gate it cannot decide). The certain visit's import is where the one
+/// published diagnostic stands, `Rejected` (#1164).
 #[cfg(unix)]
 #[test]
 fn a_construct_noted_at_two_certainties_is_its_certain_site() {
-    let tmp = TempDir::new().unwrap();
-    let project_path = project(
-        &tmp,
-        "  <PropertyGroup><S>a</S></PropertyGroup><Import Project=\"inner.props\" />\
-         <PropertyGroup><S>@(J)</S><S>a</S></PropertyGroup><Import Project=\"link.props\" />",
-        &[(
-            "proj/inner.props",
-            "<Project><PropertyGroup><T>$(S[9])</T></PropertyGroup></Project>",
-        )],
-    );
-    std::os::unix::fs::symlink(
-        tmp.path().join("proj/inner.props"),
-        tmp.path().join("proj/link.props"),
-    )
-    .unwrap();
-    let (parsed, published) = crate::test_support::published_sites(|| parse_file(&project_path));
-    let throw = RejectionCause::ThrowingExpression {
-        expression: "$(S[9])".to_owned(),
-    };
-    // Every evaluation `parse_file` makes (its own, and its soundness
-    // sweep's) publishes each construct's cause once.
-    for sites in &published {
-        let mut seen = BTreeSet::new();
+    let certain_import = "<Import Project=\"inner.props\" />";
+    for body in [
+        format!(
+            "  <PropertyGroup><S>a</S></PropertyGroup>{certain_import}\
+             <PropertyGroup><S>@(J)</S><S>a</S></PropertyGroup><Import Project=\"link.props\" />"
+        ),
+        format!(
+            "  <PropertyGroup><S>a</S><S Condition=\"{UNDECIDED_TRUE}\">a</S></PropertyGroup>\
+             <Import Project=\"link.props\" />\
+             <PropertyGroup><S>a</S></PropertyGroup>{certain_import}"
+        ),
+    ] {
+        let tmp = TempDir::new().unwrap();
+        let project_path = project(
+            &tmp,
+            &body,
+            &[(
+                "proj/inner.props",
+                "<Project><PropertyGroup><T>$(S[9])</T></PropertyGroup></Project>",
+            )],
+        );
+        std::os::unix::fs::symlink(
+            tmp.path().join("proj/inner.props"),
+            tmp.path().join("proj/link.props"),
+        )
+        .unwrap();
+        let text = host_fs::read_to_string(&project_path).unwrap();
+        let at = text.find(certain_import).expect("the certain import");
+        let (parsed, published) =
+            crate::test_support::published_sites(|| parse_file(&project_path));
+        // Every evaluation `parse_file` makes (its own, and its soundness
+        // sweep's) publishes each construct's cause once.
+        for sites in &published {
+            let mut seen = BTreeSet::new();
+            assert!(
+                sites.iter().all(|site| seen.insert(site)),
+                "a construct's cause published twice: {sites:?}\n{:#?}",
+                parsed.diagnostics
+            );
+        }
+        let throw = RejectionCause::ThrowingExpression {
+            expression: "$(S[9])".to_owned(),
+        };
+        let noted: Vec<(&DiagnosticKind, &Range<usize>)> = parsed
+            .diagnostics
+            .iter()
+            .filter(|d| {
+                matches!(&d.kind, DiagnosticKind::Rejected { cause } | DiagnosticKind::MayBeRejected { cause } if *cause == throw)
+            })
+            .map(|d| (&d.kind, &d.span))
+            .collect();
         assert!(
-            sites.iter().all(|site| seen.insert(site)),
-            "a construct's cause published twice: {sites:?}\n{:#?}",
-            parsed.diagnostics
+            matches!(
+                noted.as_slice(),
+                [(DiagnosticKind::Rejected { .. }, span)] if span.start == at
+            ),
+            "{body}: {noted:#?}"
         );
     }
-    let noted: Vec<&DiagnosticKind> = parsed
-        .diagnostics
-        .iter()
-        .map(|d| &d.kind)
-        .filter(|kind| {
-            matches!(kind, DiagnosticKind::Rejected { cause } | DiagnosticKind::MayBeRejected { cause } if *cause == throw)
-        })
-        .collect();
-    assert!(
-        noted
-            .iter()
-            .any(|kind| matches!(kind, DiagnosticKind::Rejected { .. })),
-        "{:#?}",
-        parsed.diagnostics
-    );
 }
 
 /// The entry project's buffer and a document opened from its file are two

@@ -2865,7 +2865,9 @@ fn arm_history_grid() {
         parse_fsproj_with_imports(
             &borzoi_msbuild::ProjectFile::buffer(&project_path, xml).unwrap(),
             &HashMap::new(),
-            &HashMap::new(),
+            // The environment the oracle runs in, so that a value reading a
+            // variable reads the same on both sides.
+            &common::oracle_environment(),
             None,
             None,
         )
