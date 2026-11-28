@@ -2763,23 +2763,31 @@ fn resolve_node_uncached(
             // too: only a contribution present under every TFM is invariant,
             // so a target that any branch demotes to OutputOnly (e.g. a
             // TFM-conditioned `ExcludeAssets`) survives as OutputOnly.
-            // What any TFM takes, by target, the transparent kind winning: the
-            // intersection's shortfall against it is a reference the real build
-            // may take that the env lacks.
-            let mut taken_by_some: HashMap<PathBuf, EdgeKind> = HashMap::new();
-            let mut note_taken = |target: &PathBuf, kind: EdgeKind| {
-                taken_by_some
-                    .entry(target.clone())
-                    .and_modify(|k| {
-                        if kind == EdgeKind::Full {
-                            *k = EdgeKind::Full;
-                        }
-                    })
-                    .or_insert(kind);
+            // Each evaluation's list may be exact while the intersection is
+            // not the build's: a target some TFM takes that another does not,
+            // or takes only as OutputOnly, is missing from the env under the
+            // first (#1181). Targets are compared as the graph follows them,
+            // the transparent kind winning, so this holds exactly when some
+            // branch's map differs from the first branch's.
+            let by_target = |edges: &mut dyn Iterator<Item = (PathBuf, EdgeKind)>| {
+                let mut kinds: HashMap<PathBuf, EdgeKind> = HashMap::new();
+                for (target, kind) in edges {
+                    kinds
+                        .entry(target)
+                        .and_modify(|k| {
+                            // Two references to one target within a branch:
+                            // the transparent one wins (its flow happens
+                            // regardless of the other's exclusion).
+                            if kind == EdgeKind::Full {
+                                *k = EdgeKind::Full;
+                            }
+                        })
+                        .or_insert(kind);
+                }
+                kinds
             };
-            for e in &outer_edges {
-                note_taken(&e.target, e.kind);
-            }
+            let baseline = by_target(&mut outer_edges.iter().map(|e| (e.target.clone(), e.kind)));
+            let mut intersection_short = false;
             let mut surviving = outer_edges;
             // Any branch whose list was suppressed leaves the intersection
             // short of edges the real build may take, whichever TFM it picks.
@@ -2806,23 +2814,12 @@ fn resolve_node_uncached(
                 };
                 any_suppressed |= references_suppressed(&branch, purpose);
                 any_incomplete |= references_incomplete(&branch, purpose, is_entry);
-                let mut branch_kinds: HashMap<PathBuf, EdgeKind> = HashMap::new();
-                for e in edges_of(&branch, purpose, is_entry) {
-                    branch_kinds
-                        .entry(e.target)
-                        .and_modify(|k| {
-                            // Two references to one target within a branch:
-                            // the transparent one wins (its flow happens
-                            // regardless of the other's exclusion).
-                            if e.kind == EdgeKind::Full {
-                                *k = EdgeKind::Full;
-                            }
-                        })
-                        .or_insert(e.kind);
-                }
-                for (target, kind) in &branch_kinds {
-                    note_taken(target, *kind);
-                }
+                let branch_kinds = by_target(
+                    &mut edges_of(&branch, purpose, is_entry)
+                        .into_iter()
+                        .map(|e| (e.target, e.kind)),
+                );
+                intersection_short |= branch_kinds != baseline;
                 surviving.retain_mut(|e| match branch_kinds.get(&e.target) {
                     None => false,
                     Some(EdgeKind::Full) => true,
@@ -2839,26 +2836,6 @@ fn resolve_node_uncached(
                 // retain below is a no-op on an empty vector, so the only cost
                 // is the remaining evaluations.
             }
-            // Each evaluation's list may be exact while the intersection is
-            // not the build's: whatever some TFM takes beyond it is missing
-            // from the env under that TFM (#1181).
-            // Compared by target, the transparent kind winning, as the graph
-            // follows them: a target that survives as `Full` through any of
-            // its edges lost nothing, whichever order they were declared in.
-            let mut surviving_by_target: HashMap<&PathBuf, EdgeKind> = HashMap::new();
-            for e in &surviving {
-                surviving_by_target
-                    .entry(&e.target)
-                    .and_modify(|k| {
-                        if e.kind == EdgeKind::Full {
-                            *k = EdgeKind::Full;
-                        }
-                    })
-                    .or_insert(e.kind);
-            }
-            let intersection_short = taken_by_some
-                .iter()
-                .any(|(target, kind)| surviving_by_target.get(target) != Some(kind));
             NodeResult::Resolved {
                 edges: surviving,
                 tfm: NodeTfm::Unresolved,

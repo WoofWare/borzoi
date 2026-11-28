@@ -1374,12 +1374,15 @@ fn project_reference_has_unmodelled_significant_metadata(
 }
 
 /// Whether a `<ProjectReference>` metadatum's own gate could let it run in a
-/// real build: only a clean false the walk decides exactly proves it cannot
-/// ([`State::metadatum_gate_is_undecided`]).
+/// real build: only a false the walk decides exactly proves it cannot
+/// ([`State::condition_reads_untrusted_value`]). An unbound name whose
+/// undefined read is not exact counts as unknown there, so a metadatum gated
+/// on a toolset or environment name the walk holds no value of may run, and
+/// the compile closure reads the metadatum as a contribution it cannot know.
 fn metadatum_gate_may_run(node: Node<'_, '_>, state: &State<'_>) -> bool {
     match evaluate_item_condition_silent(node, state).0 {
         CondGate::Run | CondGate::Unsupported => true,
-        CondGate::Skip => state.metadatum_gate_is_undecided(node, &state.entry_project_dir),
+        CondGate::Skip => state.condition_reads_untrusted_value(node, &state.entry_project_dir),
     }
 }
 
@@ -4931,14 +4934,15 @@ fn resolve_string_metadata(
         .filter(|n| n.tag_name().name().eq_ignore_ascii_case(name))
         .collect();
     for child in children {
-        // A gate decided only by an unpinned or SDK-tainted read may go the
-        // other way in a real build — in EITHER direction: an untrusted
-        // false may apply the write we skipped, an untrusted true may skip
-        // the write we applied. Both leave the effective value unknowable.
-        // (A clean decision over undefined-but-never-written properties
-        // stays exact under the environment model — the pinned
-        // `'$(NoSuchProp)'` cases.)
-        let untrusted_gate = state.metadatum_gate_is_undecided(child, &state.entry_project_dir);
+        // A gate the values the walk holds exactly do not decide (an
+        // untrusted read, a refused write, a toolset or environment name the
+        // walk holds no value of) may go the other way in a real build — in
+        // EITHER direction: an untrusted false may apply the write we
+        // skipped, an untrusted true may skip the write we applied. Both
+        // leave the effective value unknowable. (A clean decision over a name
+        // whose undefined read is exact stays exact under the environment
+        // model — the pinned `'$(NoSuchProp)'` cases.)
+        let untrusted_gate = state.condition_reads_untrusted_value(child, &state.entry_project_dir);
         match evaluate_item_condition(child, state) {
             CondGate::Run => {
                 if untrusted_gate {
