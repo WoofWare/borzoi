@@ -678,12 +678,65 @@ fn fixture_strategy() -> impl Strategy<Value = Fixture> {
 // Both-ways evaluation.
 // ---------------------------------------------------------------------------
 
-/// The resident oracle, the `Sdks` directory its SDK resolver reads, and the
-/// lifted ordering target, shared by every test in the binary.
+/// The `Sdks` directory every oracle's SDK resolver reads, under the shared
+/// root, and one oracle per SDK the devshell provides, shared by every test in
+/// the binary.
 struct Shared {
     root: PathBuf,
+    sdks: Vec<SdkOracle>,
+}
+
+/// One SDK's resident oracle, running that SDK's MSBuild, and the ordering
+/// target lifted from that SDK's `Microsoft.FSharp.Targets`.
+struct SdkOracle {
+    /// The SDK's version, its directory's name (`8.0.425`).
+    version: String,
+    /// `<dotnet root>/sdk/<version>`, as the oracle was pinned to it.
+    dir: PathBuf,
     oracle: Mutex<Oracle>,
     order_target: String,
+}
+
+impl SdkOracle {
+    fn oracle(&self) -> std::sync::MutexGuard<'_, Oracle> {
+        self.oracle.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// Every SDK the devshell provides whose MSBuild the oracle can run: those in
+/// `DOTNET_ROOT`, the root `dotnet` resolves, and in `BORZOI_DOTNET_ROOT_SDK8`,
+/// which adds SDK 8 (`flake.nix`'s `dotnet-sdk-sdk8`), one per version, in
+/// version order. A certain order must be every one's: MSBuild's item
+/// semantics move between releases (#1175). SDK 11's root is not among them:
+/// the oracle, a net10 program, cannot load SDK 11's MSBuild.
+fn sdk_dirs() -> Vec<(String, PathBuf)> {
+    let mut found = std::collections::BTreeMap::new();
+    for var in ["DOTNET_ROOT", "BORZOI_DOTNET_ROOT_SDK8"] {
+        let root = std::env::var_os(var).unwrap_or_else(|| {
+            panic!("{var} is unset: run the compile-order differentials in the devshell")
+        });
+        let sdk = Path::new(&root).join("sdk");
+        let entries = std::fs::read_dir(&sdk)
+            .unwrap_or_else(|e| panic!("list {} ({var}): {e}", sdk.display()));
+        for entry in entries {
+            let entry = entry.expect("read an SDK directory entry");
+            let version = entry.file_name().to_string_lossy().into_owned();
+            if entry.path().join("MSBuild.dll").is_file() {
+                found
+                    .entry(sdk_version_key(&version))
+                    .or_insert((version, entry.path()));
+            }
+        }
+    }
+    found.into_values().collect()
+}
+
+/// `version` (`10.0.112`) as numbers, for ordering SDKs by release.
+fn sdk_version_key(version: &str) -> Vec<u64> {
+    version
+        .split(['.', '-'])
+        .map(|part| part.parse().unwrap_or(u64::MAX))
+        .collect()
 }
 
 fn shared() -> &'static Shared {
@@ -694,14 +747,112 @@ fn shared() -> &'static Shared {
         std::fs::create_dir_all(root.join("Sdks")).expect("mkdir Sdks");
         let root =
             borzoi_msbuild::observed::host_fs::canonicalize(root).expect("canonicalize root");
-        let mut oracle = Oracle::spawn_with_sdks_path(&root.join("Sdks"));
-        let order_target = lift_order_target(&mut oracle);
-        Shared {
-            root,
-            oracle: Mutex::new(oracle),
-            order_target,
-        }
+        let sdks = sdk_dirs()
+            .into_iter()
+            .map(|(version, dir)| {
+                let mut oracle = Oracle::spawn_for_sdk_with_sdks_path(&dir, &root.join("Sdks"));
+                let order_target = lift_order_target(&mut oracle);
+                SdkOracle {
+                    version,
+                    dir,
+                    oracle: Mutex::new(oracle),
+                    order_target,
+                }
+            })
+            .collect();
+        Shared { root, sdks }
     })
+}
+
+/// Each SDK's oracle runs that SDK's MSBuild, so a certain order is graded
+/// against every one, not against whichever `dotnet` resolves under several
+/// names: a pinned oracle that fell back would leave an SDK ungraded and every
+/// test green. The identity is read here, without the oracle's help: the
+/// directory from the devshell's roots ([`sdk_dirs`]), the version from the
+/// `ProductVersion` of that directory's `Microsoft.Build.dll`, which MSBuild's
+/// `MSBuildVersion` reports from the assembly it loaded. And the set holds an
+/// SDK 8 and an SDK 10, so a devshell that loses one fails here.
+#[test]
+fn every_sdk_oracle_runs_that_sdks_msbuild() {
+    let sdks = &shared().sdks;
+    let versions: Vec<&str> = sdks.iter().map(|sdk| sdk.version.as_str()).collect();
+    for major in ["8", "10"] {
+        assert!(
+            versions
+                .iter()
+                .any(|version| version.split('.').next() == Some(major)),
+            "no SDK {major} among {versions:?}: the compile-order differentials grade SDK 8 and SDK 10 at least"
+        );
+    }
+    for sdk in sdks {
+        let names = ["MSBuildBinPath".to_string(), "MSBuildVersion".to_string()];
+        let mut values = sdk
+            .oracle()
+            .project("<Project />", &names, None, &[])
+            .expect("an empty project evaluates");
+        let bin = values.remove("MSBuildBinPath").expect("MSBuildBinPath");
+        let canonical = |path: &Path| {
+            borzoi_msbuild::observed::host_fs::canonicalize(path)
+                .unwrap_or_else(|e| panic!("canonicalize {}: {e}", path.display()))
+        };
+        assert_eq!(
+            canonical(Path::new(&bin)),
+            canonical(&sdk.dir),
+            "the oracle pinned to SDK {} ran the MSBuild in {bin}",
+            sdk.version
+        );
+        let reported = values.remove("MSBuildVersion").expect("MSBuildVersion");
+        let installed = product_version(&sdk.dir.join("Microsoft.Build.dll"));
+        assert!(
+            installed.starts_with(&reported),
+            "the oracle pinned to SDK {} reports MSBuild {reported}, but its Microsoft.Build.dll is {installed}",
+            sdk.version
+        );
+    }
+}
+
+/// The value of the `ProductVersion` string in a PE file's version resource.
+///
+/// A `StringFileInfo` entry is `{wLength, wValueLength, wType}` (three `u16`s),
+/// the key as NUL-terminated UTF-16LE, padding to a 32-bit boundary, then the
+/// value as NUL-terminated UTF-16LE. Resource data is 32-bit aligned in the
+/// file, so the padding can be computed from the file offset. Panics unless the
+/// key occurs exactly once.
+fn product_version(dll: &Path) -> String {
+    let bytes = borzoi_msbuild::observed::host_fs::read(dll)
+        .unwrap_or_else(|e| panic!("read {}: {e}", dll.display()));
+    let key: Vec<u8> = "ProductVersion\0"
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    let hits: Vec<usize> = bytes
+        .windows(key.len())
+        .enumerate()
+        .filter(|(_, window)| *window == key.as_slice())
+        .map(|(offset, _)| offset)
+        .collect();
+    let [hit] = hits.as_slice() else {
+        panic!(
+            "expected one ProductVersion entry in {}, found {}",
+            dll.display(),
+            hits.len()
+        );
+    };
+    let value_start = (hit + key.len()).next_multiple_of(4);
+    let value: Vec<u16> = bytes[value_start..]
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&pair| u16::from_le_bytes(pair))
+        .take_while(|&unit| unit != 0)
+        .collect();
+    String::from_utf16(&value).expect("ProductVersion is UTF-16")
+}
+
+/// The SDK our side's verdict is laid out under where no oracle runs: the
+/// first, since our evaluator reads none of the order target's text.
+fn first_sdk() -> &'static SdkOracle {
+    shared().sdks.first().expect("the devshell provides an SDK")
 }
 
 /// The `FSharpSourceCodeCompileOrder` target's text, verbatim, from the
@@ -745,7 +896,8 @@ impl Drop for Laid {
     }
 }
 
-fn write_and_parse(fixture: &Fixture) -> (Laid, ParsedProject) {
+/// `fixture` laid out with `msbuild`'s ordering target, and our evaluation of it.
+fn write_and_parse(fixture: &Fixture, msbuild: &SdkOracle) -> (Laid, ParsedProject) {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     let shared = shared();
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
@@ -757,7 +909,7 @@ fn write_and_parse(fixture: &Fixture) -> (Laid, ParsedProject) {
     let props = sdk_dir.join("Sdk.props");
     let targets = sdk_dir.join("Sdk.targets");
     std::fs::write(&props, fixture.sdk_props_xml()).expect("write Sdk.props");
-    std::fs::write(&targets, fixture.sdk_targets_xml(&shared.order_target))
+    std::fs::write(&targets, fixture.sdk_targets_xml(&msbuild.order_target))
         .expect("write Sdk.targets");
     let case_dir = shared.root.join(format!("case{n}"));
     std::fs::create_dir_all(case_dir.join("proj")).expect("mkdir proj");
@@ -807,37 +959,43 @@ fn write_and_parse(fixture: &Fixture) -> (Laid, ParsedProject) {
     )
 }
 
-/// The property body: certain ⇒ our compile order is MSBuild's, exactly.
-/// Returns whether the case was certain (i.e. the oracle ran).
+/// The property body: certain ⇒ our compile order is MSBuild's, exactly,
+/// under every SDK's MSBuild ([`sdk_dirs`]). Returns whether the case was
+/// certain (i.e. the oracles ran).
 fn check_certain_implies_exact(fixture: &Fixture) -> Result<bool, TestCaseError> {
-    let (laid, parsed) = write_and_parse(fixture);
-    if parsed.items_uncertain {
-        return Ok(false);
-    }
-    let theirs = shared()
-        .oracle
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .target_items(&laid.proj, "FSharpSourceCodeCompileOrder", "Compile")
-        .unwrap_or_else(|| {
-            panic!(
-                "MSBuild rejected a generated project (SDK {}):\n{}",
+    for sdk in &shared().sdks {
+        let (laid, parsed) = write_and_parse(fixture, sdk);
+        if parsed.items_uncertain {
+            return Ok(false);
+        }
+        // A project MSBuild rejects has no compile order, so a certain one
+        // is wrong.
+        let Some(theirs) =
+            sdk.oracle()
+                .target_items(&laid.proj, "FSharpSourceCodeCompileOrder", "Compile")
+        else {
+            return Err(TestCaseError::fail(format!(
+                "claimed certain, but SDK {}'s MSBuild rejects the project (synthetic SDK {}).\n{}\nour diagnostics: {:#?}",
+                sdk.version,
                 laid.sdk,
-                fixture.describe()
-            )
-        });
-    let ours: Vec<String> = parsed
-        .items
-        .iter()
-        .map(|item| full_path(&item.include))
-        .collect();
-    prop_assert_eq!(
-        &ours,
-        &theirs,
-        "claimed certain, but the compile order diverges.\n{}\nour diagnostics: {:#?}",
-        fixture.describe(),
-        parsed.diagnostics
-    );
+                fixture.describe(),
+                parsed.diagnostics
+            )));
+        };
+        let ours: Vec<String> = parsed
+            .items
+            .iter()
+            .map(|item| full_path(&item.include))
+            .collect();
+        prop_assert_eq!(
+            &ours,
+            &theirs,
+            "claimed certain, but the compile order diverges from SDK {}'s MSBuild.\n{}\nour diagnostics: {:#?}",
+            sdk.version,
+            fixture.describe(),
+            parsed.diagnostics
+        );
+    }
     Ok(true)
 }
 
@@ -1033,7 +1191,7 @@ fn batch_cases_often_commit() {
             .new_tree(&mut runner)
             .expect("generate fixture")
             .current();
-        let (_laid, parsed) = write_and_parse(&fixture);
+        let (_laid, parsed) = write_and_parse(&fixture, first_sdk());
         let distinct: std::collections::HashSet<String> = parsed
             .items
             .iter()
@@ -1065,7 +1223,7 @@ fn most_generated_cases_are_certain() {
             .new_tree(&mut runner)
             .expect("generate fixture")
             .current();
-        let (_laid, parsed) = write_and_parse(&fixture);
+        let (_laid, parsed) = write_and_parse(&fixture, first_sdk());
         if !parsed.items_uncertain {
             certain += 1;
         }
@@ -1140,38 +1298,43 @@ fn known_certain_fixture_reaches_oracle_and_matches() {
             }],
         }],
     };
-    let (laid, parsed) = write_and_parse(&fixture);
-    let names = |paths: &[String]| -> Vec<String> {
-        paths
+    for sdk in &shared().sdks {
+        let (laid, parsed) = write_and_parse(&fixture, sdk);
+        let names = |paths: &[String]| -> Vec<String> {
+            paths
+                .iter()
+                .map(|p| {
+                    Path::new(p)
+                        .strip_prefix(laid.proj.parent().expect("project dir"))
+                        .unwrap_or_else(|_| panic!("{p} lies outside the project"))
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect()
+        };
+        let expected = ["B.fs", "E.fs", "D.fs", "A.fs"];
+        let theirs = sdk
+            .oracle()
+            .target_items(&laid.proj, "FSharpSourceCodeCompileOrder", "Compile")
+            .expect("MSBuild evaluates the canary");
+        assert_eq!(
+            names(&theirs),
+            expected,
+            "SDK {}'s MSBuild oracle changed",
+            sdk.version
+        );
+        assert!(
+            !parsed.items_uncertain,
+            "the canary must be certain: {:#?}",
+            parsed.diagnostics
+        );
+        let ours: Vec<String> = parsed
+            .items
             .iter()
-            .map(|p| {
-                Path::new(p)
-                    .strip_prefix(laid.proj.parent().expect("project dir"))
-                    .unwrap_or_else(|_| panic!("{p} lies outside the project"))
-                    .to_string_lossy()
-                    .into_owned()
-            })
-            .collect()
-    };
-    let expected = ["B.fs", "E.fs", "D.fs", "A.fs"];
-    let theirs = shared()
-        .oracle
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .target_items(&laid.proj, "FSharpSourceCodeCompileOrder", "Compile")
-        .expect("MSBuild evaluates the canary");
-    assert_eq!(names(&theirs), expected, "MSBuild oracle changed");
-    assert!(
-        !parsed.items_uncertain,
-        "the canary must be certain: {:#?}",
-        parsed.diagnostics
-    );
-    let ours: Vec<String> = parsed
-        .items
-        .iter()
-        .map(|item| full_path(&item.include))
-        .collect();
-    assert_eq!(names(&ours), expected);
+            .map(|item| full_path(&item.include))
+            .collect();
+        assert_eq!(names(&ours), expected);
+    }
 }
 
 /// Our captured identity as MSBuild's `FullPath` spells it: a captured
@@ -1406,23 +1569,93 @@ const CORNERS: &[(&str, bool)] = &[
     <Compile Update="B.fs" Visible="false" />"#,
         true,
     ),
+    // Spellings MSBuild's versions key differently (#1175; found by codex on
+    // #1157): SDK 10.0.401's key trims a trailing separator, escapes
+    // nothing, keeps a spelling `PathIsInvalid` names as written, and never
+    // throws; SDK 8.0.428's keeps the separator, escapes, normalises such a
+    // spelling, and throws on a NUL.
+    // A trailing separator on the `Include`.
+    (
+        r#"    <Compile Include="C.fs;A.fs/" />
+    <Compile Update="A.fs" CompileOrder="CompileFirst" />"#,
+        false,
+    ),
+    // A trailing separator on the `Update`.
+    (
+        r#"    <Compile Include="C.fs;A.fs" />
+    <Compile Update="A.fs/" CompileOrder="CompileFirst" />"#,
+        false,
+    ),
+    // A `:` in the file name, which SDK 10 keys as written and SDK 8
+    // normalises.
+    (
+        r#"    <Compile Include="B.fs;a:b.fs" />
+    <Compile Update="./a:b.fs" CompileOrder="CompileFirst" />"#,
+        false,
+    ),
+    // A rooted fragment holding a `(`, which SDK 8 escapes, so removing it by
+    // its text strands it there.
+    (
+        r#"    <Compile Update="/tmp/A(x).fs;/tmp/A(x).fs" Link="a" />
+    <Compile Update="B.fs;/tmp/A(x).fs" CompileOrder="CompileFirst" />
+    <Compile Include="C.fs;B.fs" />"#,
+        false,
+    ),
+    // An included NUL, on which SDK 8's full path throws when an `Update`
+    // keys the list: excluded from the order, then a multi-fragment `Update`.
+    (
+        r#"    <Compile Include="C.fs" />
+    <Compile Include="Bad%00.fs" CompileOrder="Excluded" />
+    <Compile Update="A.fs;Z.fs" CompileOrder="CompileFirst" />"#,
+        false,
+    ),
+    // The same with one fragment.
+    (
+        r#"    <Compile Include="C.fs;A.fs" />
+    <Compile Include="Bad%00.fs" CompileOrder="Excluded" />
+    <Compile Update="A.fs" CompileOrder="CompileFirst" />"#,
+        false,
+    ),
+    // A condition-false `Include` of a NUL, which design-time evaluation
+    // keys (#1157 round 40).
+    (
+        r#"    <Compile Include="C.fs;A.fs" />
+    <Compile Include="Bad%00.fs" Condition="false" />
+    <Compile Update="A.fs;B.fs" CompileOrder="CompileFirst" />"#,
+        false,
+    ),
+    // An included NUL, then an `Update` in a group the walk cannot decide
+    // (#1157 round 40).
+    (
+        r#"    <Compile Include="C.fs" />
+    <Compile Include="Bad%00.fs" CompileOrder="Excluded" />
+  </ItemGroup>
+  <ItemGroup Condition="'É' == 'é'">
+    <Compile Update="A.fs;Z.fs" Link="x" />"#,
+        false,
+    ),
 ];
 
 #[test]
 fn corners_decline_or_match_msbuild() {
+    // Every corner is graded, and every failure reported, before the test
+    // fails: one SDK's departure hides no other.
+    let mut failures = Vec::new();
     for (index, &(body, certain)) in CORNERS.iter().enumerate() {
         let fixture = Fixture {
             sdk_props: Vec::new(),
             project: vec![Group::Flip, Group::Raw(body)],
             sdk_targets: Vec::new(),
         };
-        let reached =
-            check_certain_implies_exact(&fixture).unwrap_or_else(|e| panic!("corner {index}: {e}"));
-        assert_eq!(
-            reached, certain,
-            "corner {index} certain={reached}, recorded {certain}:\n{body}"
-        );
+        match check_certain_implies_exact(&fixture) {
+            Err(e) => failures.push(format!("corner {index}: {e}")),
+            Ok(reached) if reached != certain => failures.push(format!(
+                "corner {index} certain={reached}, recorded {certain}:\n{body}"
+            )),
+            Ok(_) => {}
+        }
     }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
 
 /// MSBuild's stranded-prefix bug, pinned so that an upstream fix is seen: an
@@ -1446,35 +1679,36 @@ fn stranded_update_prefix_reaches_a_later_include() {
         project: vec![Group::Raw(body)],
         sdk_targets: Vec::new(),
     };
-    let (laid, parsed) = write_and_parse(&fixture);
-    let theirs = shared()
-        .oracle
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .target_items(&laid.proj, "FSharpSourceCodeCompileOrder", "Compile")
-        .expect("MSBuild evaluates the canary");
-    let dir = laid
-        .proj
-        .parent()
-        .expect("project dir")
-        .to_string_lossy()
-        .into_owned();
-    let names: Vec<&str> = theirs
-        .iter()
-        .map(|p| p.strip_prefix(&dir).expect("inside the project"))
-        .collect();
-    assert_eq!(
-        names,
-        ["/B.fs", "/A.fs", "/A.fs"],
-        "MSBuild no longer strands the prefix: reconsider StrandedUpdatePrefix"
-    );
-    assert!(parsed.items_uncertain, "{:#?}", parsed.diagnostics);
-    assert!(
-        parsed.diagnostics.iter().any(|d| matches!(
-            d.kind,
-            borzoi_msbuild::DiagnosticKind::StrandedUpdatePrefix { .. }
-        )),
-        "{:#?}",
-        parsed.diagnostics
-    );
+    for sdk in &shared().sdks {
+        let (laid, parsed) = write_and_parse(&fixture, sdk);
+        let theirs = sdk
+            .oracle()
+            .target_items(&laid.proj, "FSharpSourceCodeCompileOrder", "Compile")
+            .expect("MSBuild evaluates the canary");
+        let dir = laid
+            .proj
+            .parent()
+            .expect("project dir")
+            .to_string_lossy()
+            .into_owned();
+        let names: Vec<&str> = theirs
+            .iter()
+            .map(|p| p.strip_prefix(&dir).expect("inside the project"))
+            .collect();
+        assert_eq!(
+            names,
+            ["/B.fs", "/A.fs", "/A.fs"],
+            "SDK {}'s MSBuild no longer strands the prefix: reconsider StrandedUpdatePrefix",
+            sdk.version
+        );
+        assert!(parsed.items_uncertain, "{:#?}", parsed.diagnostics);
+        assert!(
+            parsed.diagnostics.iter().any(|d| matches!(
+                d.kind,
+                borzoi_msbuild::DiagnosticKind::StrandedUpdatePrefix { .. }
+            )),
+            "{:#?}",
+            parsed.diagnostics
+        );
+    }
 }

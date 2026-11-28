@@ -1339,7 +1339,10 @@ let private respondEvaluated (root: JsonElement) : string =
 /// The `targetItems` op: evaluate the project file at `path` as it stands on
 /// disk, execute `target` on that evaluation in-process, and read back the
 /// `FullPath` of every `itemType` item the build leaves, in order. `None` when
-/// MSBuild rejects the project at evaluation.
+/// MSBuild rejects the project at evaluation: an `InvalidProjectFileException`,
+/// or an `ArgumentException` MSBuild raises from a path it computes (SDK
+/// 8.0.425's `GetFullPath` throws on a NUL in an item's identity while an
+/// `Update` keys the list), which fails `dotnet msbuild` just as surely.
 ///
 /// This is how a differential sees what a target makes of the evaluated items
 /// (F#'s `FSharpSourceCodeCompileOrder` reorders the Compile list) without a
@@ -1372,8 +1375,9 @@ let private targetItems
             |> Seq.map (fun item -> item.GetMetadataValue "FullPath")
             |> List.ofSeq
         )
-    with :? InvalidProjectFileException ->
-        None
+    with
+    | :? InvalidProjectFileException -> None
+    | :? ArgumentException -> None
 
 let private respondTargetItems (root: JsonElement) : string =
     let path = root.GetProperty("path").GetString()

@@ -319,6 +319,19 @@ impl Oracle {
         Oracle::spawn_with(vec!["--sdks-path".into(), sdks_path.as_os_str().to_owned()])
     }
 
+    /// [`Self::spawn_with_sdks_path`], running the MSBuild of exactly the SDK
+    /// installed at `sdk_dir` (`<dotnet root>/sdk/<version>`), which may lie in
+    /// another dotnet root than the one `dotnet` resolves. The oracle refuses
+    /// to start if no MSBuild is installed there.
+    pub fn spawn_for_sdk_with_sdks_path(sdk_dir: &Path, sdks_path: &Path) -> Oracle {
+        Oracle::spawn_with(vec![
+            "--msbuild-sdk".into(),
+            sdk_dir.as_os_str().to_owned(),
+            "--sdks-path".into(),
+            sdks_path.as_os_str().to_owned(),
+        ])
+    }
+
     /// An oracle whose process runs under the culture `locale` names (as its
     /// `LANG` and `LC_ALL`), for a differential where MSBuild's answer turns on
     /// the build's culture. MSBuild also reads the two as properties, which no

@@ -229,6 +229,21 @@
           pkgs.dotnetCorePackages.sdk_11_0_1xx
         ];
 
+        # A third dotnet root, never the default: `dotnet-sdk`'s SDKs plus
+        # SDK 8, exported as `BORZOI_DOTNET_ROOT_SDK8` for the compile-order
+        # differentials, which hold the walk to the MSBuild of every SDK in it
+        # (`fsproj_compile_order_generative_diff`, #1175). MSBuild's item
+        # semantics move between releases, and the walk serves projects built
+        # by older SDKs too. SDK 8 stays out of `dotnet-sdk` itself, so the
+        # per-SDK censuses and every other test that lists the installed SDKs
+        # keep their set. (SDK 11 is not in it: the net10 MSBuild oracle cannot
+        # load SDK 11's MSBuild.)
+        dotnet-sdk-sdk8 = pkgs.dotnetCorePackages.combinePackages [
+          pkgs.dotnet-sdk_10
+          pkgs.dotnetCorePackages.sdk_10_0_1xx
+          pkgs.dotnetCorePackages.sdk_8_0
+        ];
+
         # Offline NuGet store: a content-addressed closure of every package
         # `cargo test` restores (the C# sidecar, fcs-dump, the xUnit tests,
         # the assembly fixtures, and the bundled-e2e synthetic pair). Built
@@ -404,6 +419,9 @@
             # the corpus's own projects point their children at it (see
             # `dotnet-sdk-corpus` above).
             export BORZOI_DOTNET_ROOT_SDK11=${dotnet-sdk-corpus}/share/dotnet
+            # Likewise only for the compile-order differentials' oracles (see
+            # `dotnet-sdk-sdk8` above).
+            export BORZOI_DOTNET_ROOT_SDK8=${dotnet-sdk-sdk8}/share/dotnet
             export DOTNET_CLI_TELEMETRY_OPTOUT=1
             export DOTNET_NOLOGO=1
             export DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1
