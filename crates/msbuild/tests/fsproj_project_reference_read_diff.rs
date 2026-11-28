@@ -1064,3 +1064,93 @@ fn a_metadatum_gate_the_walk_cannot_decide_leaves_the_metadatum_unknown() {
         assert!(!item("false", name).unmodelled_reference_metadata, "{name}");
     }
 }
+
+/// A `ReferenceOutputAssembly` write under a gate the walk cannot settle (on
+/// a toolset name, on a refused write, or one it does not model), held to
+/// MSBuild in both worlds: the same document with the gate written `true`,
+/// and written `false`. Wherever the walk resolves the metadatum to a value,
+/// MSBuild holds that value in both, so it is the build's whichever way the
+/// gate goes. Wherever the write leaves the value as it stands (an empty
+/// write, one expanding to exactly nothing, the standing value again) and
+/// MSBuild agrees in both worlds, the walk resolves it, so the grid cannot
+/// pass by declining every write.
+#[test]
+fn a_write_under_an_unsettled_gate_resolves_only_where_both_worlds_agree() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let root = borzoi_msbuild::observed::host_fs::canonicalize(dir.path()).expect("canonicalize");
+    let proj = layout(&root);
+    let mut oracle = Oracle::spawn();
+    let normalized = |value: Option<&String>| value.filter(|v| !v.is_empty()).cloned();
+    let msbuild = |oracle: &mut Oracle, xml: &str| -> Option<String> {
+        std::fs::write(&proj, xml).unwrap();
+        let items = oracle
+            .items_meta(xml, &proj, "ProjectReference", &["ReferenceOutputAssembly"])
+            .unwrap_or_else(|| panic!("MSBuild evaluates the document:\n{xml}"));
+        assert_eq!(items.len(), 1, "{xml}");
+        normalized(items[0].1.get("ReferenceOutputAssembly"))
+    };
+    let gates = [
+        "'$(MSBuildStartupDirectory)' != ''",
+        "'$(Gate)' == 'w'",
+        "'\u{c9}' == '\u{e9}'",
+    ];
+    let mut failures = Vec::new();
+    let mut must = 0;
+    for prior in [
+        "",
+        " ReferenceOutputAssembly=\"false\"",
+        " ReferenceOutputAssembly=\"true\"",
+    ] {
+        for gate in gates {
+            for write in ["", "&#32;", "false", "true", "$(NoSuchProp)", "$(Gate)"] {
+                let document = |condition: &str| {
+                    format!(
+                        "<Project><PropertyGroup><Gate>{REFUSED_BODY}</Gate></PropertyGroup>\
+                         <ItemGroup><ProjectReference Include=\"A.fsproj\"{prior}>\
+                         <ReferenceOutputAssembly Condition=\"{condition}\">{write}</ReferenceOutputAssembly>\
+                         </ProjectReference></ItemGroup></Project>"
+                    )
+                };
+                let xml = document(gate);
+                let taken = msbuild(&mut oracle, &document("true"));
+                let skipped = msbuild(&mut oracle, &document("false"));
+                let parsed = parse_fsproj_with_imports(
+                    &borzoi_msbuild::ProjectFile::buffer(&proj, &xml)
+                        .expect("a project path spelt as its full path"),
+                    &HashMap::new(),
+                    &common::oracle_environment(),
+                    None,
+                    None,
+                )
+                .expect("well-formed XML parses");
+                let ours = parsed.project_references[0]
+                    .reference_output_assembly
+                    .clone();
+                let cell = format!(
+                    "prior `{prior}`, gate `{gate}`, write `{write}`: ours {ours:?}, MSBuild {taken:?} / {skipped:?}"
+                );
+                match &ours {
+                    borzoi_msbuild::ItemMetadataValue::Known(value) => {
+                        if value.as_ref() != taken.as_ref() || taken != skipped {
+                            failures.push(format!("resolved where a world differs: {cell}"));
+                        }
+                    }
+                    borzoi_msbuild::ItemMetadataValue::Unknown => {
+                        let no_op = matches!(write, "" | "$(NoSuchProp)")
+                            || (prior.contains(&format!("\"{write}\"")));
+                        if no_op && taken == skipped {
+                            must += 1;
+                            failures.push(format!("declined a write that moves nothing: {cell}"));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} ({must} declined no-ops):\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}

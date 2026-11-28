@@ -4918,33 +4918,22 @@ fn resolve_string_metadata(
         // stays exact under the environment model — the pinned
         // `'$(NoSuchProp)'` cases.)
         let untrusted_gate = state.metadatum_gate_is_undecided(child, &state.entry_project_dir);
-        // Under a gate the walk cannot decide, a write that leaves the value
-        // as it stands moves nothing whichever way MSBuild takes the gate.
-        let undecided = |resolved: &ItemMetadataValue| {
-            if literal_metadata_write(child).is_some_and(|written| {
-                normalized_metadata(&written) == normalized_metadata(resolved)
-            }) {
-                resolved.clone()
-            } else {
-                ItemMetadataValue::Unknown
-            }
-        };
         match evaluate_item_condition(child, state) {
             CondGate::Run => {
                 if untrusted_gate {
-                    resolved = undecided(&resolved);
+                    resolved = unsettled_write(child, &resolved, state);
                     continue;
                 }
             }
             CondGate::Skip => {
                 if untrusted_gate {
-                    resolved = undecided(&resolved);
+                    resolved = unsettled_write(child, &resolved, state);
                 }
                 continue;
             }
             CondGate::Unsupported => {
                 emit_unsupported_condition(child, state);
-                resolved = ItemMetadataValue::Unknown;
+                resolved = unsettled_write(child, &resolved, state);
                 continue;
             }
         }
@@ -4982,17 +4971,53 @@ fn resolve_string_metadata(
     }
 }
 
-/// The value a metadatum write `child` gives, where that is known without
-/// expanding it: an empty body is the empty value, and literal text (no
-/// `$`, `@` or `%`, so no expansion or escape, and no backslash, which
-/// MSBuild's path fixup may rewrite) is itself. `None` where the walk would
-/// have to evaluate the body to know.
-fn literal_metadata_write(child: Node<'_, '_>) -> Option<ItemMetadataValue> {
+/// The metadatum value after `child`, a write under a gate the walk cannot
+/// settle (one it cannot decide exactly, or one it does not model): the value
+/// standing before it where applying the write gives that value too, since
+/// then it moves nothing whichever way MSBuild takes the gate; `Unknown`
+/// otherwise.
+fn unsettled_write(
+    child: Node<'_, '_>,
+    standing: &ItemMetadataValue,
+    state: &State<'_>,
+) -> ItemMetadataValue {
+    match silent_metadata_write(child, state) {
+        Some(written) if normalized_metadata(&written) == normalized_metadata(standing) => {
+            standing.clone()
+        }
+        _ => ItemMetadataValue::Unknown,
+    }
+}
+
+/// The value metadatum write `child` gives if MSBuild applies it, computed as
+/// the walk computes a write it takes (`resolve_string_metadata`), but without
+/// a diagnostic, and faithfully: only an empty body is the empty value. A body
+/// of whitespace alone is one MSBuild keeps (a `&#32;`), so the walk cannot
+/// say it is empty. `None` where the walk cannot know the value.
+fn silent_metadata_write(child: Node<'_, '_>, state: &State<'_>) -> Option<ItemMetadataValue> {
     let raw = collect_element_text(child)?;
-    if raw.trim().is_empty() {
+    if raw.is_empty() {
         return Some(ItemMetadataValue::Known(None));
     }
-    (!raw.contains(['$', '@', '%', '\\'])).then_some(ItemMetadataValue::Known(Some(raw)))
+    if raw.trim().is_empty() {
+        return None;
+    }
+    let expansion = expand_metadata_silent(&raw, state);
+    if expansion.had_issue()
+        || expansion.unpinned_root.is_some()
+        || state.raw_uses_sdk_package_taint(&raw)
+    {
+        return None;
+    }
+    let value = expansion.value.into_ignoring_trust();
+    let escaped = value.as_escaped();
+    if contains_item_reference(escaped)
+        || contains_metadata_reference(escaped)
+        || path_fixup::worlds(escaped).is_some()
+    {
+        return None;
+    }
+    Some(ItemMetadataValue::Known(Some(value.unescape())))
 }
 
 /// A metadatum value with an empty value read as absent, as the caller of
