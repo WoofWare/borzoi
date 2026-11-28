@@ -3466,6 +3466,25 @@ impl<'r> State<'r> {
         ItemMetadataValue::Known(None)
     }
 
+    /// Whether a `<ProjectReference>` metadatum's own gate is one the walk
+    /// cannot decide: the values it holds exactly do not settle it
+    /// ([`Self::condition_is_decided_exactly`]), whatever leaves a name
+    /// unknown — an untrusted reference, a refused write, a toolset or
+    /// environment name the walk holds no value of. MSBuild may take such a
+    /// gate either way, so the metadatum it guards is `Unknown` where it is
+    /// read by value, and possibly present where it is read by its presence.
+    /// Broader than [`Self::condition_reads_untrusted_value`] by those
+    /// unbound names: a metadatum resolved on the walk's empty reading of
+    /// one is a value MSBuild may not hold, and the compile closure reads an
+    /// `Unknown` one as a contribution it cannot know.
+    fn metadatum_gate_is_undecided(&self, node: Node<'_, '_>, exists_dir: &Path) -> bool {
+        attribute(node, "Condition").as_deref().is_some_and(|cond| {
+            !self.condition_is_decided_exactly(cond, Some(exists_dir), &|name| {
+                self.undefined_read_is_exact(name)
+            })
+        })
+    }
+
     /// Whether a node's `Condition` leans on a value that may differ in a
     /// real build — an *unpinned* property (written under a gate we couldn't
     /// evaluate) or an SDK-package-tainted one — making even a cleanly

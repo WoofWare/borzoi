@@ -1171,3 +1171,99 @@ fn a_possible_registration_refusal_claims_nothing_of_the_value() {
     assert!(certain.contains("reads `System.TimeSpan`"), "{certain}");
     assert!(certain.contains("refuses to register"), "{certain}");
 }
+
+/// A `<ProjectReference>` with the given resolutions, otherwise plain.
+fn reference(
+    reference_output_assembly: borzoi_msbuild::ItemMetadataValue,
+    unmodelled: bool,
+) -> borzoi_msbuild::ResolvedItem {
+    borzoi_msbuild::ResolvedItem {
+        kind: borzoi_msbuild::ItemKind::ProjectReference,
+        include: PathBuf::from("/w/Lib/Lib.fsproj"),
+        reference_output_assembly,
+        exclude_assets: borzoi_msbuild::ItemMetadataValue::ABSENT,
+        include_assets: borzoi_msbuild::ItemMetadataValue::ABSENT,
+        private_assets: borzoi_msbuild::ItemMetadataValue::ABSENT,
+        unmodelled_reference_metadata: unmodelled,
+        span: 0..0,
+    }
+}
+
+/// A kept reference whose compile contribution turns on metadata the
+/// evaluator could not resolve leaves the env incomplete, and the user is
+/// told which reference and which metadatum, not that its edges were
+/// dropped. A reference whose metadata is known says nothing.
+#[test]
+fn an_inexact_reference_is_reported_with_its_metadatum() {
+    let mut parsed = certain_project();
+    parsed.project_references = vec![reference(borzoi_msbuild::ItemMetadataValue::Unknown, false)];
+    let ds = deferrals(evaluated(&parsed), FoldOutcome::Unknown);
+    assert_eq!(ds.len(), 1, "{ds:?}");
+    assert_eq!(ds[0].capability(), DeferredCapability::CompleteReferenceSet);
+    let causes = ds[0].causes().recorded();
+    assert_eq!(causes.len(), 1, "{causes:?}");
+    assert!(causes[0].contains("/w/Lib/Lib.fsproj"), "{causes:?}");
+    assert!(causes[0].contains("ReferenceOutputAssembly"), "{causes:?}");
+    let message = message_for(&parsed).expect("an inexact reference is reported");
+    assert!(!message.contains("ignoring"), "{message}");
+
+    parsed.project_references = vec![reference(borzoi_msbuild::ItemMetadataValue::ABSENT, true)];
+    let ds = deferrals(evaluated(&parsed), FoldOutcome::Unknown);
+    assert_eq!(ds.len(), 1, "{ds:?}");
+    assert!(
+        ds[0].causes().recorded()[0].contains("does not model"),
+        "{:?}",
+        ds[0].causes()
+    );
+
+    for known in ["true", "false"] {
+        parsed.project_references = vec![reference(
+            borzoi_msbuild::ItemMetadataValue::known(known),
+            false,
+        )];
+        assert!(
+            deferrals(evaluated(&parsed), FoldOutcome::Unknown).is_empty(),
+            "ReferenceOutputAssembly={known} is known"
+        );
+    }
+}
+
+/// The predicate the graph walk reads and the reported capability are one
+/// fact, and never together with dropped edges, which say more.
+#[test]
+fn the_incomplete_verdict_and_the_reported_capability_are_one_fact() {
+    let mut parsed = certain_project();
+    for uncertain in [false, true] {
+        for unknown in [false, true] {
+            for outer in [false, true] {
+                parsed.project_references_uncertain = uncertain;
+                parsed.project_references = vec![reference(
+                    if unknown {
+                        borzoi_msbuild::ItemMetadataValue::Unknown
+                    } else {
+                        borzoi_msbuild::ItemMetadataValue::ABSENT
+                    },
+                    false,
+                )];
+                let eval = ProjectEvaluation::Evaluated {
+                    parsed: &parsed,
+                    not_an_inner_build: outer,
+                };
+                let case = format!("uncertain={uncertain} unknown={unknown} outer={outer}");
+                let reported = deferrals(eval, FoldOutcome::Unknown);
+                assert_eq!(
+                    eval.may_lack_reference_edges(true),
+                    reported
+                        .iter()
+                        .any(|d| d.capability() == DeferredCapability::CompleteReferenceSet),
+                    "{case}"
+                );
+                assert_eq!(
+                    eval.may_lack_reference_edges(true),
+                    unknown && !uncertain && !outer,
+                    "{case}"
+                );
+            }
+        }
+    }
+}

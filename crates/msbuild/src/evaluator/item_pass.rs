@@ -1356,8 +1356,18 @@ fn project_reference_has_unmodelled_significant_metadata(
             && is_unmodelled_significant_reference_metadata(attr.name())
     }) || node.children().filter(Node::is_element).any(|child| {
         is_unmodelled_significant_reference_metadata(child.tag_name().name())
-            && reference_gate_may_run(child, state)
+            && metadatum_gate_may_run(child, state)
     })
+}
+
+/// Whether a `<ProjectReference>` metadatum's own gate could let it run in a
+/// real build: only a clean false the walk decides exactly proves it cannot
+/// ([`State::metadatum_gate_is_undecided`]).
+fn metadatum_gate_may_run(node: Node<'_, '_>, state: &State<'_>) -> bool {
+    match evaluate_item_condition_silent(node, state).0 {
+        CondGate::Run | CondGate::Unsupported => true,
+        CondGate::Skip => state.metadatum_gate_is_undecided(node, &state.entry_project_dir),
+    }
 }
 
 /// Capture static item declarations for item types this evaluator otherwise
@@ -4907,7 +4917,7 @@ fn resolve_string_metadata(
         // (A clean decision over undefined-but-never-written properties
         // stays exact under the environment model — the pinned
         // `'$(NoSuchProp)'` cases.)
-        let untrusted_gate = state.condition_reads_untrusted_value(child);
+        let untrusted_gate = state.metadatum_gate_is_undecided(child, &state.entry_project_dir);
         match evaluate_item_condition(child, state) {
             CondGate::Run => {
                 if untrusted_gate {

@@ -3113,13 +3113,15 @@ struct ReferenceSet {
 impl ReferenceSet {
     /// The resolution declined before it reached the project-reference edges —
     /// an untrusted TFM verdict, no dotnet root, no assets file, a failed
-    /// resolve. The env is empty, so it makes no assembly reading at all and
-    /// there is nothing for a missing reference to be wrong about; claiming
-    /// edges here would only invent a degradation nobody can observe.
-    fn declined(retryable: bool) -> Self {
+    /// resolve. The env is empty. The edges it did not reach claim nothing;
+    /// a node the graph walk already knows may contribute assemblies its
+    /// edges lack ([`incomplete_contribution_edges`]) it still says, so the
+    /// empty env does not claim completeness over them. Whether a declined env
+    /// is complete at all is #1190.
+    fn declined(retryable: bool, ref_targets: &GraphRefTargets) -> Self {
         ReferenceSet {
             dlls: Vec::new(),
-            edges: Vec::new(),
+            edges: incomplete_contribution_edges(ref_targets).collect(),
             retryable,
             unrecorded: Vec::new(),
             package_folders: Vec::new(),
@@ -3203,6 +3205,13 @@ struct GraphRefTargets {
     /// assemblies is missing, which is exactly the claim the incompleteness
     /// mark needs.
     suppressed: Vec<PathBuf>,
+    /// Nodes whose edges may contribute fewer assemblies than the build
+    /// references through them
+    /// ([`crate::project_graph::ProjectNode::references_incomplete`]). Their
+    /// edges are kept, so they are in [`Self::fsharp`] and [`Self::csharp`];
+    /// what is missing is not, and one [`ReferenceOutcome::Unread`] per such
+    /// node says so, as for [`Self::suppressed`].
+    incomplete: Vec<PathBuf>,
 }
 
 /// One F# node of the closure, as the env fold consumes it: the
@@ -3241,6 +3250,9 @@ fn graph_ref_targets(graph: &ProjectGraph, entry: &Path, observer: &Observer) ->
                 // references are missing from the env just as a sibling's are.
                 if node.references_uncertain {
                     targets.suppressed.push(canonicalise(&node.path, observer));
+                }
+                if node.references_incomplete {
+                    targets.incomplete.push(canonicalise(&node.path, observer));
                 }
                 if !paths_equal(&node.path, &entry_key) {
                     targets.fsharp.push(FsharpRefTarget {
@@ -3304,14 +3316,14 @@ fn resolve_reference_dlls(
             project = %project.display(),
             "entry TFM provenance is untrusted; assembly env defaults to empty"
         );
-        return ReferenceSet::declined(false);
+        return ReferenceSet::declined(false, ref_targets);
     }
     let Some(dotnet_root) = dotnet_root else {
         tracing::info!(
             project = %project.display(),
             "no dotnet_root; assembly env defaults to empty"
         );
-        return ReferenceSet::declined(false);
+        return ReferenceSet::declined(false, ref_targets);
     };
     let assets_path = match project.parent() {
         Some(dir) => dir.join("obj").join("project.assets.json"),
@@ -3320,7 +3332,7 @@ fn resolve_reference_dlls(
                 project = %project.display(),
                 "project path has no parent; assembly env defaults to empty"
             );
-            return ReferenceSet::declined(false);
+            return ReferenceSet::declined(false, ref_targets);
         }
     };
     // Assets file present → read restore output (the authoritative path).
@@ -3362,7 +3374,7 @@ fn resolve_reference_dlls(
                     error = %err,
                     "resolve_assemblies_root_only failed; assembly env defaults to empty"
                 );
-                return ReferenceSet::declined(false);
+                return ReferenceSet::declined(false, ref_targets);
             }
         }
     } else {
@@ -3396,7 +3408,7 @@ fn resolve_reference_dlls(
                 );
                 return ReferenceSet {
                     unrecorded,
-                    ..ReferenceSet::declined(false)
+                    ..ReferenceSet::declined(false, ref_targets)
                 };
             }
             RestoreOutcome::TransientFailure => {
@@ -3409,7 +3421,7 @@ fn resolve_reference_dlls(
                 );
                 return ReferenceSet {
                     unrecorded,
-                    ..ReferenceSet::declined(true)
+                    ..ReferenceSet::declined(true, ref_targets)
                 };
             }
         }
@@ -3490,6 +3502,7 @@ fn resolve_reference_dlls(
         .into_iter()
         .chain(csharp_edges)
         .chain(suppressed_edges)
+        .chain(incomplete_contribution_edges(ref_targets))
         .collect();
     // Conservation: every edge the graph walk *retained* is accounted for, so a
     // reference that contributed nothing is recorded as missing rather than
@@ -3505,9 +3518,13 @@ fn resolve_reference_dlls(
     // ([`GraphRefTargets::suppressed`]), one outcome each.
     debug_assert_eq!(
         edges.len(),
-        ref_targets.fsharp.len() + ref_targets.csharp.len() + ref_targets.suppressed.len(),
+        ref_targets.fsharp.len()
+            + ref_targets.csharp.len()
+            + ref_targets.suppressed.len()
+            + ref_targets.incomplete.len(),
         "every retained project-reference edge, and every node whose edges were \
-         suppressed, must yield exactly one outcome"
+         suppressed or may contribute less than the build references, must yield \
+         exactly one outcome"
     );
     // A transient F# output-scan failure has no `retryable` channel of its own —
     // that flag came from the sidecar — but it needs one for the same reason:
@@ -3525,6 +3542,26 @@ fn resolve_reference_dlls(
         retryable: set.retryable || set.has_transient_failure(),
         ..set
     }
+}
+
+/// One [`ReferenceOutcome::Unread`] per node whose edges may contribute fewer
+/// assemblies than the build references through them
+/// ([`GraphRefTargets::incomplete`]). There is nothing to look for — the
+/// contribution turns on metadata the evaluator could not resolve — so each is
+/// a pure incompleteness claim, and `transient: false` because only an edit to
+/// that project can change it. It holds whether or not the resolution reached
+/// the edges the walk kept.
+fn incomplete_contribution_edges(
+    ref_targets: &GraphRefTargets,
+) -> impl Iterator<Item = ReferenceEdge> + '_ {
+    ref_targets.incomplete.iter().map(|project| ReferenceEdge {
+        project: project.clone(),
+        outcome: ReferenceOutcome::Unread {
+            why: "a reference's compile contribution turns on metadata the evaluator could \
+                  not resolve",
+            transient: false,
+        },
+    })
 }
 
 /// Whether the env build may read C# `<ProjectReference>`s, and the sidecar it
@@ -6639,6 +6676,7 @@ mod tests {
             tfm: crate::project_graph::NodeTfm::NotEvaluated,
             output_name: None,
             references_uncertain: false,
+            references_incomplete: false,
         }
     }
 
@@ -7601,7 +7639,7 @@ mod tests {
 
         // A declined resolution claims neither: the env is empty, so it makes no
         // assembly reading for a missing reference to be wrong about.
-        let declined = ReferenceSet::declined(false);
+        let declined = ReferenceSet::declined(false, &GraphRefTargets::default());
         assert_eq!(declined.unread().count(), 0);
         assert_eq!(declined.not_built().count(), 0);
         assert!(!EnvInputs::of(&declined).not_built);
@@ -7925,6 +7963,90 @@ mod tests {
             "a suppressed reference list leaves an unknown number of assemblies \
              missing, so the env must not claim to be complete"
         );
+    }
+
+    /// A reference whose compile contribution turns on metadata the evaluator
+    /// could not resolve is followed only where the build references it, and
+    /// where its edge is dropped the env does not claim completeness. Each row
+    /// states MSBuild's verdict on whether the compiler references
+    /// `MiniLibFs.dll` (the property is on the env, so a row passes where main
+    /// is already sound):
+    ///
+    /// - a `ReferenceOutputAssembly` child gated on a toolset name the walk
+    ///   holds no value of, `true` where MSBuild takes the gate (main follows
+    ///   it, rightly) and `false` (main follows it too: a phantom fold);
+    /// - a presence-read `BuildReference` child under the same gate, `true`
+    ///   (benign, so MSBuild references it; main follows it, rightly);
+    /// - a `ReferenceOutputAssembly` the walk refused to compute, `true` (main
+    ///   drops the edge and calls the env complete);
+    /// - literal controls, which the env answers exactly and completely.
+    #[test]
+    fn an_edge_of_unknown_contribution_is_followed_only_where_built_and_dropped_only_incomplete() {
+        let dll_bytes = minilibfs_dll_bytes();
+        let gated = |name: &str, value: &str| {
+            format!(
+                r#"<ProjectReference Include="MiniLibFs/MiniLibFs.fsproj"><{name} Condition="'$(MSBuildStartupDirectory)' != ''">{value}</{name}></ProjectReference>"#
+            )
+        };
+        // (row, the reference, MSBuild references the DLL, an exact control)
+        let cases = [
+            ("ROA true under a toolset gate", gated("ReferenceOutputAssembly", "true"), true, false),
+            ("ROA false under a toolset gate", gated("ReferenceOutputAssembly", "false"), false, false),
+            ("BuildReference true under a toolset gate", gated("BuildReference", "true"), true, false),
+            (
+                "a refused ROA",
+                r#"<ProjectReference Include="MiniLibFs/MiniLibFs.fsproj" ReferenceOutputAssembly="$([System.String]::Copy('true'))" />"#.to_string(),
+                true,
+                false,
+            ),
+            (
+                "a literal ROA false",
+                r#"<ProjectReference Include="MiniLibFs/MiniLibFs.fsproj" ReferenceOutputAssembly="false" />"#.to_string(),
+                false,
+                true,
+            ),
+            (
+                "a plain reference",
+                r#"<ProjectReference Include="MiniLibFs/MiniLibFs.fsproj" />"#.to_string(),
+                true,
+                true,
+            ),
+        ];
+        for (row, reference, built, control) in cases {
+            let tmp = TempDir::new().unwrap();
+            let root = tmp.path();
+            let sibling_dir = root.join("MiniLibFs");
+            std::fs::create_dir_all(&sibling_dir).unwrap();
+            built_fsproj(&sibling_dir, "MiniLibFs", "Release", "net10.0", &dll_bytes);
+            let proj = root.join("App.fsproj");
+            write(
+                &proj,
+                &format!("<Project><ItemGroup>{reference}</ItemGroup></Project>"),
+            );
+            let dotnet_root = root.join("dotnet");
+            std::fs::create_dir_all(&dotnet_root).unwrap();
+            write_app_assets(root, true);
+            let mut sema = SemanticState::new();
+            let env = sema.assembly_env_for_project(
+                &proj,
+                Some(&dotnet_root),
+                &ServedTfm::NoneDeclared,
+                &Workspace::default(),
+            );
+            let folds = env.has_namespace(&["MiniLibFs".to_string()]);
+            let incomplete = env.identities_incomplete();
+            assert!(
+                !folds || built,
+                "{row}: folds an assembly the build does not reference"
+            );
+            assert!(
+                folds || !built || incomplete,
+                "{row}: drops an assembly the build references, and claims completeness"
+            );
+            if control {
+                assert_eq!((folds, incomplete), (built, false), "{row}");
+            }
+        }
     }
 
     /// A restored `App.fsproj` whose one `<ProjectReference>` is the C# project

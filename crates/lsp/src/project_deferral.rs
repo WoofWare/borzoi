@@ -110,6 +110,37 @@ impl ProjectEvaluation<'_> {
             } => parsed.project_references_uncertain || *not_an_inner_build,
         }
     }
+
+    /// Whether the inter-project reference edges are kept for this project
+    /// but may contribute fewer assemblies than the build references through
+    /// them, so the assembly env built from them is incomplete: a kept
+    /// reference's compile contribution turns on metadata the evaluator could
+    /// not resolve, or on significant P2P metadata the walk does not model
+    /// (`workspace::CompileContribution::exact`), read for an entry edge or
+    /// not as `is_entry` says. The predicate `workspace::references_incomplete`
+    /// applies (modulo the same walk-purpose gate). Never together with
+    /// [`Self::drops_reference_edges`]: a dropped list says more.
+    ///
+    /// Shared rather than restated, for the reason
+    /// [`Self::drops_reference_edges`] is.
+    pub fn may_lack_reference_edges(&self, is_entry: bool) -> bool {
+        !self.inexact_references(is_entry).is_empty()
+    }
+
+    /// The kept references whose compile contribution is inexact, as
+    /// [`Self::may_lack_reference_edges`] reads them: none when the edges are
+    /// dropped.
+    fn inexact_references(&self, is_entry: bool) -> Vec<&borzoi_msbuild::ResolvedItem> {
+        match self {
+            ProjectEvaluation::Failed => Vec::new(),
+            ProjectEvaluation::Evaluated { parsed, .. } if !self.drops_reference_edges() => parsed
+                .project_references
+                .iter()
+                .filter(|item| !crate::workspace::compile_edge_kind(item, is_entry).exact)
+                .collect(),
+            ProjectEvaluation::Evaluated { .. } => Vec::new(),
+        }
+    }
 }
 
 /// A thing the LSP does for a project, which it is not doing for this one.
@@ -121,9 +152,10 @@ impl ProjectEvaluation<'_> {
 ///
 /// # Known coverage limit: graph-level reference suppression
 ///
-/// [`Self::ProjectReferenceEdges`] is reported from the *entry project's own*
-/// evaluation. The compile-closure graph walk suppresses edges per node, on
-/// facts this input does not carry:
+/// [`Self::ProjectReferenceEdges`] and [`Self::CompleteReferenceSet`] are
+/// reported from the *entry project's own* evaluation. The compile-closure
+/// graph walk suppresses edges, or marks a node incomplete, per node, on facts
+/// this input does not carry:
 ///
 /// - a **later target framework** of a multi-targeted project (the walk
 ///   evaluates additional/seeded TFMs; a clean first TFM hides an uncertain
@@ -160,6 +192,16 @@ pub enum DeferredCapability {
     /// [`crate::project_graph::ProjectNode::references_uncertain`] and drops
     /// the edge from the runtime `AssemblyEnv`.
     ProjectReferenceEdges,
+    /// A complete set of referenced assemblies. The project's
+    /// `<ProjectReference>` edges are kept and followed, but a reference's
+    /// compile contribution turns on metadata the evaluator could not resolve
+    /// (or the walk does not model), so the build may reference assemblies
+    /// through it that the `AssemblyEnv` lacks, and the env is marked
+    /// incomplete: a name it does not find is not proof the build lacks it.
+    ///
+    /// Declined by [`crate::workspace`]'s `references_incomplete`, which sets
+    /// [`crate::project_graph::ProjectNode::references_incomplete`].
+    CompleteReferenceSet,
 }
 
 impl DeferredCapability {
@@ -174,6 +216,10 @@ impl DeferredCapability {
             DeferredCapability::ProjectReferenceEdges => {
                 "ignoring this project's <ProjectReference> edges, so types from referenced \
                  projects won't resolve"
+            }
+            DeferredCapability::CompleteReferenceSet => {
+                "what this project's <ProjectReference>s contribute is not fully known, so names \
+                 that could come from a referenced project may not resolve"
             }
         }
     }
@@ -589,7 +635,50 @@ pub fn deferrals(eval: ProjectEvaluation<'_>, fold: FoldOutcome<'_>) -> Vec<Defe
         ));
     }
 
+    // The report is the entry project's own.
+    let inexact = eval.inexact_references(true);
+    if !inexact.is_empty() {
+        out.push(Deferral::new(
+            DeferredCapability::CompleteReferenceSet,
+            DeclineStage::Evaluation,
+            inexact.into_iter().map(render_inexact_reference),
+        ));
+    }
+
     out
+}
+
+/// Why a kept reference's compile contribution is not known: the reference,
+/// and the metadata it turns on.
+fn render_inexact_reference(item: &borzoi_msbuild::ResolvedItem) -> String {
+    let unknown = |value: &borzoi_msbuild::ItemMetadataValue| {
+        matches!(value, borzoi_msbuild::ItemMetadataValue::Unknown)
+    };
+    let what: Vec<&str> = [
+        ("ReferenceOutputAssembly", &item.reference_output_assembly),
+        ("IncludeAssets", &item.include_assets),
+        ("ExcludeAssets", &item.exclude_assets),
+        ("PrivateAssets", &item.private_assets),
+    ]
+    .into_iter()
+    .filter(|(_, value)| unknown(value))
+    .map(|(name, _)| name)
+    .collect();
+    let mut parts = Vec::new();
+    if !what.is_empty() {
+        parts.push(format!(
+            "metadata the evaluator could not resolve ({})",
+            what.join(", ")
+        ));
+    }
+    if item.unmodelled_reference_metadata {
+        parts.push("P2P metadata borzoi does not model".to_string());
+    }
+    format!(
+        "the <ProjectReference> to {} turns on {}",
+        item.include.display(),
+        parts.join(" and ")
+    )
 }
 
 /// Whether the Compile-order fold's verdict is knowable from current state.

@@ -125,6 +125,8 @@ pub enum NodeResult {
         output_name: Option<String>,
         /// See [`ProjectNode::references_uncertain`].
         references_uncertain: bool,
+        /// See [`ProjectNode::references_incomplete`].
+        references_incomplete: bool,
     },
     /// The project file does not exist on disk.
     NotFound,
@@ -140,6 +142,7 @@ impl NodeResult {
             tfm: NodeTfm::NotEvaluated,
             output_name: None,
             references_uncertain: false,
+            references_incomplete: false,
         }
     }
 }
@@ -182,6 +185,14 @@ pub struct ProjectNode {
     /// while the env still claims to be complete — and any of them could
     /// declare a type that shadows a package or framework one.
     pub references_uncertain: bool,
+    /// Whether the assemblies this node's edges contribute may lack some the
+    /// build references through them: a reference whose compile contribution
+    /// turns on metadata the evaluator could not resolve
+    /// ([`borzoi_msbuild::ItemMetadataValue::Unknown`]), whose edge is dropped
+    /// or degraded (`workspace::compile_edge_kind`). The edges it keeps are
+    /// real; the env built over them is not complete, for the same reason
+    /// [`Self::references_uncertain`]'s is not.
+    pub references_incomplete: bool,
 }
 
 /// A problem found while building the graph. Each carries the offending
@@ -296,6 +307,7 @@ impl Builder {
                 tfm,
                 output_name,
                 references_uncertain,
+                references_incomplete,
             } => {
                 let key = lexically_normalize(path);
                 self.visited.insert(key.clone());
@@ -307,6 +319,7 @@ impl Builder {
                     tfm,
                     output_name,
                     references_uncertain,
+                    references_incomplete,
                 });
                 for edge in references {
                     match edge.kind {
@@ -380,6 +393,7 @@ impl Builder {
                         tfm: NodeTfm::NotEvaluated,
                         output_name: None,
                         references_uncertain: false,
+                        references_incomplete: false,
                     });
                 }
             }
@@ -423,6 +437,7 @@ impl Builder {
                         tfm,
                         output_name,
                         references_uncertain: _,
+                        references_incomplete: _,
                     } => {
                         self.visited.insert(key.clone());
                         self.nodes.push(ProjectNode {
@@ -441,6 +456,7 @@ impl Builder {
                             // was already recorded by the full walk, which runs
                             // first and keeps its own mark.
                             references_uncertain: false,
+                            references_incomplete: false,
                         });
                     }
                 }
@@ -662,6 +678,7 @@ mod tests {
             tfm: NodeTfm::NotEvaluated,
             output_name: None,
             references_uncertain: true,
+            references_incomplete: false,
         };
 
         // P0 -[OutputOnly]→ P1, and P1's list is suppressed.
