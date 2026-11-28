@@ -111,6 +111,41 @@ impl<'s> SplitSpec<'s> {
     }
 }
 
+/// An element's `Update` spec, expanded at most once, where first needed, for
+/// both the read scan ([`note_element_reads`]) and the batch
+/// ([`feed_update_batch`]). The item pass reads the final property table, so
+/// one expansion is the spec's value at every use; the value lives only while
+/// the pass is at the element.
+struct UpdateSpec<'a> {
+    raw: Option<std::borrow::Cow<'a, str>>,
+    expansion: std::cell::OnceCell<Expansion>,
+}
+
+impl<'a> UpdateSpec<'a> {
+    /// `node`'s `Update` attribute, not yet expanded.
+    fn of(node: Node<'a, '_>) -> Self {
+        UpdateSpec {
+            raw: attribute(node, "Update"),
+            expansion: std::cell::OnceCell::new(),
+        }
+    }
+
+    /// The spec as written, decoded.
+    fn raw(&self) -> Option<&str> {
+        self.raw.as_deref()
+    }
+
+    /// The spec's silent expansion ([`expand_silent`]), computed on the first
+    /// call and counted then.
+    fn expansion(&self, state: &State<'_>) -> Option<&Expansion> {
+        let raw = self.raw.as_deref()?;
+        Some(self.expansion.get_or_init(|| {
+            crate::cost::count(|costs| costs.batch_spec_expansions += 1);
+            expand_silent(raw, state)
+        }))
+    }
+}
+
 /// `spec`'s fragments as the batch of `Update`s reads them, each counted as
 /// it is read: a reader that stops early reads no further.
 fn batch_fragments(spec: SplitSpec<'_>) -> impl Iterator<Item = &str> {
@@ -784,9 +819,10 @@ fn evaluate_item_group(node: Node<'_, '_>, state: &mut State<'_>) {
             restore(state);
             state.reach_doubted += usize::from(!gate_certain);
             for child in node.children().filter(Node::is_element) {
-                note_element_reads(child, state);
+                let update = UpdateSpec::of(child);
+                note_element_reads(child, &update, state);
                 taint_walked_reference_on_doubted_reads(child, state);
-                walk_item_child(child, state);
+                walk_item_child(child, &update, state);
             }
             state.reach_doubted -= usize::from(!gate_certain);
         }
@@ -1196,7 +1232,7 @@ fn note_included_key(item_type: &'static str, identity: &str, state: &mut State<
     }
 }
 
-fn walk_item_child(node: Node<'_, '_>, state: &mut State<'_>) {
+fn walk_item_child(node: Node<'_, '_>, update: &UpdateSpec<'_>, state: &mut State<'_>) {
     #[cfg(any(test, feature = "test-support"))]
     let causes_before = state.package_reference_uncertainties.len();
     // MSBuild's batch of `Update`s, judged for the types whose `Update`s the
@@ -1206,7 +1242,7 @@ fn walk_item_child(node: Node<'_, '_>, state: &mut State<'_>) {
     // against an empty batch, that one decline stands, saying what the batch
     // says ([`restate_named_strand`]).
     let fed = batched_item_type(node)
-        .map(|item_type| (item_type, feed_update_batch(node, item_type, state)));
+        .map(|item_type| (item_type, feed_update_batch(node, item_type, update, state)));
     let diagnostics_before = state.diagnostics.len();
     let compile_causes_before = state.compile_item_uncertainties.len();
     walk_item_child_unattributed(node, state);
@@ -2843,18 +2879,19 @@ fn walk_package_reference(node: Node<'_, '_>, state: &mut State<'_>) {
 /// most one fragment, or whose first fragment holds an expansion character
 /// (the SDK's `Update="@(Compile)"`). Every other `Update` of the type is
 /// true here, run or not, and the caller declines the list.
-fn update_may_strand(node: Node<'_, '_>, state: &State<'_>) -> bool {
-    let Some(update) = attribute(node, "Update") else {
+fn update_may_strand(node: Node<'_, '_>, update: &UpdateSpec<'_>, state: &State<'_>) -> bool {
+    let Some(raw) = update.raw() else {
         return false;
     };
     if node.has_attribute("Include") || certainly_skipped(node, state) {
         return false;
     }
-    if !rejection::operands_are_certain(state, &update) {
+    if !rejection::operands_are_certain(state, raw) {
         return true;
     }
-    crate::cost::count(|costs| costs.batch_spec_expansions += 1);
-    let expansion = expand_silent(&update, state);
+    let Some(expansion) = update.expansion(state) else {
+        return false;
+    };
     expansion.had_issue() || spec_may_strand(expansion.value.ignoring_trust())
 }
 
@@ -3012,9 +3049,10 @@ fn feed_unwalked_group(node: Node<'_, '_>, state: &mut State<'_>) {
     let never_runs = certainly_skipped(node, state);
     state.reach_doubted += 1;
     for child in node.children().filter(Node::is_element) {
-        note_element_reads(child, state);
+        let update = UpdateSpec::of(child);
+        note_element_reads(child, &update, state);
         if let Some(item_type) = batched_item_type(child) {
-            match feed_update_batch(child, item_type, state) {
+            match feed_update_batch(child, item_type, &update, state) {
                 BatchVerdict::Holds
                 | BatchVerdict::HoldsOnLossyKey
                 | BatchVerdict::HoldsUnfollowed => {}
@@ -3231,11 +3269,16 @@ enum BatchVerdict {
 /// a condition-false `Update="Z.fs"`, `A.fs;A.fs` and `B.fs;A.fs` leave
 /// `B.fs` the stranded `CompileFirst` in a build and not in `-getItem`),
 /// without applying its metadata.
-fn feed_update_batch(node: Node<'_, '_>, item_type: &str, state: &mut State<'_>) -> BatchVerdict {
+fn feed_update_batch(
+    node: Node<'_, '_>,
+    item_type: &str,
+    update: &UpdateSpec<'_>,
+    state: &mut State<'_>,
+) -> BatchVerdict {
     let key = item_key(item_type);
     let runs = operation_runs(node, state);
-    let update = attribute(node, "Update").filter(|_| !node.has_attribute("Include"));
-    let Some(update) = update else {
+    let raw = update.raw().filter(|_| !node.has_attribute("Include"));
+    let Some(raw) = raw else {
         // Another operation: it flushes a pending batch where it runs.
         if let Some(BatchState::Known(worlds)) = state.update_batches.get_mut(&key) {
             let mut after = Vec::with_capacity(worlds.len());
@@ -3260,15 +3303,16 @@ fn feed_update_batch(node: Node<'_, '_>, item_type: &str, state: &mut State<'_>)
     if state.case_sensitive_item_names
         || matches!(state.update_batches.get(&key), Some(BatchState::Unknown))
     {
-        return if update_may_strand(node, state) {
+        return if update_may_strand(node, update, state) {
             BatchVerdict::MayStrand
         } else {
             BatchVerdict::HoldsUnfollowed
         };
     }
-    let exact = rejection::operands_are_certain(state, &update);
-    crate::cost::count(|costs| costs.batch_spec_expansions += 1);
-    let expansion = expand_silent(&update, state);
+    let exact = rejection::operands_are_certain(state, raw);
+    let Some(expansion) = update.expansion(state) else {
+        unreachable!("an element with an `Update` spec has its expansion")
+    };
     let project_dir = state.entry_project_dir.clone();
     // A metadatum of an `Update` MSBuild never runs never applies, stranded or
     // not ([`feed_update_batch`]'s design-time outcome).
@@ -3344,13 +3388,25 @@ fn text_may_read_item_lists(text: Option<&str>, state: &State<'_>) -> bool {
     let Some(text) = text else {
         return true;
     };
+    text_reads_unexpanded(text)
+        .unwrap_or_else(|| expansion_may_read_item_lists(text, &expand_silent(text, state), state))
+}
+
+/// What [`text_may_read_item_lists`] says of `text` with no expansion: that
+/// it may read, holding an item reference; that it does not, holding no `$`;
+/// or nothing, `None`, where its expansion decides.
+fn text_reads_unexpanded(text: &str) -> Option<bool> {
     if holds_item_reference(text) {
-        return true;
+        Some(true)
+    } else if !text.contains('$') {
+        Some(false)
+    } else {
+        None
     }
-    if !text.contains('$') {
-        return false;
-    }
-    let expansion = expand_silent(text, state);
+}
+
+/// [`text_may_read_item_lists`] of `text`, whose expansion is `expansion`.
+fn expansion_may_read_item_lists(text: &str, expansion: &Expansion, state: &State<'_>) -> bool {
     let certain = !expansion.had_issue() && rejection::operands_are_certain(state, text);
     // An expansion that still holds a property expression may be expanded
     // again (`MatchOnMetadata` is, fragment by fragment), so it may read one.
@@ -3360,10 +3416,12 @@ fn text_may_read_item_lists(text: Option<&str>, state: &State<'_>) -> bool {
 
 /// Whether an attribute of `element` MSBuild evaluates may read an item
 /// list, read as `reading` of its name says MSBuild reads it
-/// ([`AttributeReading`]).
+/// ([`AttributeReading`]). Where `element` is an item, `update` is its
+/// `Update` spec, whose expansion the batch shares.
 fn attributes_may_read_item_lists(
     element: Node<'_, '_>,
     reading: impl Fn(&str) -> AttributeReading,
+    update: Option<&UpdateSpec<'_>>,
     state: &State<'_>,
 ) -> bool {
     element.attributes().any(|attr| {
@@ -3373,10 +3431,17 @@ fn attributes_may_read_item_lists(
             return false;
         }
         let decoded = || {
-            text_may_read_item_lists(
-                Some(&crate::document::attribute_value(element, &attr)),
-                state,
-            )
+            let value = crate::document::attribute_value(element, &attr);
+            match update {
+                Some(update) if attr.namespace().is_none() && attr.name() == "Update" => {
+                    text_reads_unexpanded(&value).unwrap_or_else(|| {
+                        update.expansion(state).is_none_or(|expansion| {
+                            expansion_may_read_item_lists(&value, expansion, state)
+                        })
+                    })
+                }
+                _ => text_may_read_item_lists(Some(&value), state),
+            }
         };
         match reading(attr.name()) {
             AttributeReading::Unevaluated => false,
@@ -3422,7 +3487,11 @@ enum AttributeReading {
 /// its attributes or its body. A body is read as MSBuild reads it, with its
 /// CDATA sections, comments and elements
 /// ([`rejection::element_inner_contents`]), each metadatum on its own.
-fn item_may_read_item_lists(item: Node<'_, '_>, state: &State<'_>) -> bool {
+fn item_may_read_item_lists(
+    item: Node<'_, '_>,
+    update: &UpdateSpec<'_>,
+    state: &State<'_>,
+) -> bool {
     let operation = rejection::item_operation(item);
     attributes_may_read_item_lists(
         item,
@@ -3435,9 +3504,10 @@ fn item_may_read_item_lists(item: Node<'_, '_>, state: &State<'_>) -> bool {
                 AttributeReading::Unevaluated
             }
         },
+        Some(update),
         state,
     ) || item.children().filter(Node::is_element).any(|metadatum| {
-        attributes_may_read_item_lists(metadatum, gate_reading, state)
+        attributes_may_read_item_lists(metadatum, gate_reading, None, state)
             || text_may_read_item_lists(
                 rejection::element_inner_contents(metadatum).as_deref(),
                 state,
@@ -3474,20 +3544,20 @@ fn note_possible_item_list_reads(state: &mut State<'_>, may_read: impl FnOnce(&S
 /// `<ItemDefinitionGroup>`, at its gate or any of its items.
 fn note_group_reads(group: Node<'_, '_>, walked_element_by_element: bool, state: &mut State<'_>) {
     note_possible_item_list_reads(state, |state| {
-        attributes_may_read_item_lists(group, gate_reading, state)
+        attributes_may_read_item_lists(group, gate_reading, None, state)
             || (!walked_element_by_element
                 && group
                     .children()
                     .filter(Node::is_element)
-                    .any(|item| item_may_read_item_lists(item, state)))
+                    .any(|item| item_may_read_item_lists(item, &UpdateSpec::of(item), state)))
     });
 }
 
 /// [`note_possible_item_list_reads`] at `item`, a child of a group the item
-/// pass walks or feeds: MSBuild reads there before it registers the item's
-/// operation.
-fn note_element_reads(item: Node<'_, '_>, state: &mut State<'_>) {
-    note_possible_item_list_reads(state, |state| item_may_read_item_lists(item, state));
+/// pass walks or feeds, whose `Update` spec is `update`: MSBuild reads there
+/// before it registers the item's operation.
+fn note_element_reads(item: Node<'_, '_>, update: &UpdateSpec<'_>, state: &mut State<'_>) {
+    note_possible_item_list_reads(state, |state| item_may_read_item_lists(item, update, state));
 }
 
 /// The batch after an operation, as the worlds it may be in: each once, and
@@ -5188,6 +5258,7 @@ fn expand_metadata_silent(raw: &str, state: &State<'_>) -> Expansion {
 }
 
 pub(super) fn expand_silent(raw: &str, state: &State<'_>) -> Expansion {
+    crate::cost::count(|costs| costs.silent_expansions += 1);
     let (value, issues) = if state.follow_imports {
         properties::substitute_with_fs(raw, &state.lookup, state.observer)
     } else {

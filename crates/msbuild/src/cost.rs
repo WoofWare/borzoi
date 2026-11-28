@@ -66,6 +66,9 @@ pub struct WalkCosts {
     /// The fragments of `Update` specs the batch read
     /// (`item_pass::batch_fragments`).
     pub batch_fragments_read: u64,
+    /// The texts the item pass expanded silently, to judge rather than to
+    /// record (`item_pass::expand_silent`).
+    pub silent_expansions: u64,
 }
 
 /// Whether the caller asked for `WalkCosts::refusal_paths`'s census on
@@ -115,6 +118,7 @@ thread_local! {
             batch_bytes_held_peak: 0,
             batch_spec_expansions: 0,
             batch_fragments_read: 0,
+            silent_expansions: 0,
         })
     };
 }

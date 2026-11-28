@@ -1472,6 +1472,27 @@ fn a_followed_update_is_expanded_once() {
     );
 }
 
+/// An `Update` spec read from a property, with a batch pending, is expanded
+/// once: the read scan, which asks whether the spec may read an item list,
+/// and the batch share the expansion (codex found, round 33).
+#[test]
+fn a_property_backed_update_is_expanded_once() {
+    const N: usize = 50;
+    let mut src = String::from("<Project><PropertyGroup>");
+    for i in 0..N {
+        src.push_str(&format!("<F{i}>A{i}.fs;B{i}.fs</F{i}>"));
+    }
+    src.push_str("</PropertyGroup><ItemGroup>\n");
+    for i in 0..N {
+        src.push_str(&format!("    <Compile Update=\"$(F{i})\" Link=\"x\" />\n"));
+    }
+    src.push_str("    <Compile Include=\"A0.fs\" />\n  </ItemGroup></Project>");
+    let (p, costs) = crate::test_support::count_walk_costs(|| parse(&src));
+    assert!(!p.items_uncertain, "{:?}", p.diagnostics);
+    assert_eq!(costs.batch_spec_expansions, N as u64, "specs expanded");
+    assert_eq!(costs.silent_expansions, N as u64, "texts expanded silently");
+}
+
 /// A run of `Update`s no operation flushes keeps every key it expands, so
 /// thousands of them behind one long property would hold megabytes of keys.
 /// The batch holds at most `MAX_HELD_BYTES` of them, then is followed no
@@ -1586,6 +1607,9 @@ fn a_stranding_fragment_is_named_whole() {
     for spec in [
         "B.fs;@(H->'%(Filename);%(Extension)')",
         "B.fs;@(H->'%(Filename); %(Extension)')",
+        // A second expression in the one fragment holds the `;` (codex
+        // round 33): MSBuild's fragment is `@(-)@(-;n)`.
+        "B.fs;@(-)@(-;n);Z.fs",
     ] {
         let p = parse(&source(spec));
         assert!(p.items_uncertain, "{spec}");
@@ -2283,6 +2307,14 @@ fn an_item_list_read_may_restart_the_batch() {
             "through a property",
             read.to_string(),
             r#"<ItemGroup><Other Include="x" Condition="'$(Read)' != ''" /></ItemGroup>"#,
+        ),
+        // The element's `Update` spec is expanded once for the read scan and
+        // the batch; its other attributes are read as their own texts. Probed
+        // (SDK 10.0.401, `-getItem`): `A.fs` is `CompileFirst`.
+        (
+            "completed after a certain property, beside an Update spec",
+            r#"<PropertyGroup><At>@</At></PropertyGroup>"#.to_string(),
+            r#"<ItemGroup><Other Update="x" Condition="'$(At)(Compile)' != ''" /></ItemGroup>"#,
         ),
         (
             "in a group the walk does not decide",
