@@ -129,8 +129,10 @@
 //! doubts only for such a mark, the project having written it again after
 //! the refusal ([`State::rewritten_after_refusal`], [`State::second_walk_needed`]),
 //! the evaluation is walked a second time,
-//! its judgement holding such a bound name certain where it decides whether
-//! what it reaches is a site ([`judged_certain`]), and every site the second
+//! its judgement holding such a bound name certain where it names which of a
+//! text's throws reached for certain is the site
+//! ([`directory_build::is_certain_setting_aside_refusal`],
+//! [`judge_throwing_expression`]), and every site the second
 //! walk notes that the first did not is adopted as a Possible one, after the
 //! first walk's ([`State::adopt_second_walk`]). It reaches what the first
 //! walk reaches, so it can only add sites. The
@@ -426,37 +428,6 @@ pub(super) fn operands_are_certain(state: &State<'_>, text: &str) -> bool {
     properties::property_references(text).all(|name| directory_build::is_certain(state, name))
 }
 
-/// Whether the rejection judgement holds `name` read now as the build reads
-/// it: [`directory_build::is_certain`], but that in the second walk
-/// ([`State::second_walk`]) a bound name's refusal mark is no doubt
-/// ([`directory_build::is_certain_setting_aside_refusal`]). It is read only
-/// where the judgement settles which names a path it did not take leaves
-/// unknown, and which of a text's throws it names: there holding a name
-/// certain can only add a site. Wherever a reading decides what MSBuild
-/// reaches (the walk's course, what it judges, the gates it judges, the
-/// operands of a condition it reaches) and a site's certainty, it is
-/// [`directory_build::is_certain`], in either walk:
-/// a reach the second walk narrowed by holding a name certain would hide a
-/// site wherever the name's value is not the build's (a toolset seed in the
-/// slot a refusal emptied, a rewrite the build may not make). So the second
-/// walk reaches what the first does, and may judge content its own reading
-/// would rule out, which costs a decline and never a site MSBuild meets
-/// (#1183).
-///
-/// In the first walk it records whether the second walk's answer would differ
-/// ([`State::second_walk_needed`]): the second walk is run only then, or where
-/// [`judge_throwing_expression`] would name another throw.
-pub(super) fn judged_certain(state: &State<'_>, name: &str) -> bool {
-    if state.second_walk {
-        return directory_build::is_certain_setting_aside_refusal(state, name);
-    }
-    let certain = directory_build::is_certain(state, name);
-    if !certain && directory_build::is_certain_setting_aside_refusal(state, name) {
-        state.second_walk_needed.set(true);
-    }
-    certain
-}
-
 /// Whether the walk holds a value of `name` MSBuild may hold, as a Possible
 /// site asks: one it computed (bound), however it doubts it, or an undefined
 /// read it shows exact. A value the walk doubts is one MSBuild may hold among
@@ -607,7 +578,12 @@ impl State<'_> {
                 .keys()
                 .filter(|name| {
                     crate::cost::count(|costs| costs.path_writes_examined += 1);
-                    !judged_certain(self, name)
+                    // Settled as main reads it, in either walk: what the path
+                    // leaves unknown decides only that the judgement tries
+                    // no value there ([`State::speculating`]), which no
+                    // reading of a refused name moves, so it schedules no
+                    // second walk.
+                    !directory_build::is_certain(self, name)
                 })
                 .cloned()
                 .collect();
@@ -690,7 +666,7 @@ pub(super) fn import_failure_certainty(
 /// A condition that throws on the values the walk holds
 /// ([`condition::Outcome::Illegal`]) may make MSBuild reject the project. The
 /// rejection is certain where MSBuild throws whatever the names the walk is
-/// not certain of hold ([`judged_certain`], the stale channel
+/// not certain of hold ([`directory_build::is_certain`], the stale channel
 /// included): MSBuild evaluates the condition left to right and stops at the
 /// operand that decides it ([`condition::throws_whatever`]), so a throw on certain
 /// values that MSBuild reaches through operands of certain value is certain,

@@ -1368,8 +1368,8 @@ struct State<'r> {
     /// points both walk) is one site.
     noted_keys: HashSet<rejection::SiteKey>,
     /// Whether this is the second walk, whose rejection judgement holds a
-    /// bound name whose only doubt is a refusal's mark certain
-    /// ([`rejection::judged_certain`]).
+    /// bound name whose only doubt is a refusal's mark certain where it names
+    /// a text's throw ([`directory_build::is_certain_setting_aside_refusal`]).
     second_walk: bool,
     /// The names (lower-cased) a clean write stored a value to after their
     /// last refused one, of a value reading no name whose refusal no such
@@ -1381,9 +1381,10 @@ struct State<'r> {
     /// that read one, is held all the same, and a throw on it is a decline
     /// (#1183).
     rewritten_after_refusal: HashSet<String>,
-    /// Whether the first walk's judgement read a name the second walk's
-    /// would hold certain where the first doubts it ([`rejection::judged_certain`]):
-    /// the trigger for the second walk, which can differ nowhere else.
+    /// Whether the first walk's judgement would name another of a text's
+    /// throws holding a refused-then-rebound name certain
+    /// ([`directory_build::is_certain_setting_aside_refusal`]): the trigger for
+    /// the second walk, which can differ nowhere else.
     second_walk_needed: std::cell::Cell<bool>,
     /// The file the walk is in, as a site's construct names it: the entry
     /// project, whose text is the caller's buffer (`None`), or an imported

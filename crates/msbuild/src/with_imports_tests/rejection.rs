@@ -2314,6 +2314,26 @@ fn the_second_walk_names_the_throw_its_reading_reaches_first() {
     }
 }
 
+/// Nor where a path the walk did not take writes the rewritten name: a group
+/// there is judged on the values held, trying no value for any name, in
+/// either walk, so its site is the same however the refusal is read, and the
+/// evaluation is walked once (#1164).
+#[test]
+fn no_second_walk_for_a_path_the_walk_did_not_take() {
+    let body = format!(
+        "<PropertyGroup><P>abc</P></PropertyGroup><Choose><When Condition=\"{UNDECIDED_TRUE}\">\
+         <PropertyGroup><P>abcdefghijkl</P></PropertyGroup>\
+         <ItemGroup><I Include=\"$(P[9])\" /></ItemGroup></When></Choose>\
+         <PropertyGroup><P>@(J)</P><P>z</P></PropertyGroup>"
+    );
+    let (parsed, costs) =
+        crate::test_support::count_walk_costs(|| both_walkers(&format!("  {body}")));
+    assert_eq!(costs.second_walks, 0, "{costs:?}");
+    for parsed in parsed {
+        assert_withdrawn(&parsed, &["Before", "After"]);
+    }
+}
+
 /// Nor where the throw that reads the rewritten name is reached only
 /// perhaps: then either walk names the first throw it holds, whatever its
 /// reading, so the evaluation is walked once (#1153).

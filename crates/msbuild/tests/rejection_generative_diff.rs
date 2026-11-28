@@ -2610,8 +2610,8 @@ fn arm_history_cells() -> Vec<GridCell> {
         }
     };
     let mut cells = Vec::new();
-    // (Include text, condition) pairs, each calling on `U`, the last two
-    // beside `X`, a write the walk refuses, so holds no value of, and MSBuild
+    // (Include text, condition) pairs, each calling on `U` but the last, the
+    // last three on `X`, a write the walk refuses, so holds no value of, and MSBuild
     // holds `Debug` of: the last reads `U` only past a step that throws on
     // the values held, which a value tried for `X` gets past.
     let calls: &[(&str, &str)] = &[
@@ -2632,6 +2632,9 @@ fn arm_history_cells() -> Vec<GridCell> {
             "$(Q.Split('q$(X)')[1].Split('q$(U)')[1])",
             "'$(Q.Split(`q$(X)`)[1].Split(`q$(U)`)[1])' == ''",
         ),
+        // One on `X` alone, which throws on the empty value the walk reads
+        // and not on MSBuild's `Debug`.
+        ("a$(X[0])b", "'$(X[0])' == 'D'"),
     ];
     for arm in [UNDECIDED_TRUE, UNDECIDED_FALSE] {
         for (text, condition) in calls {
@@ -2666,7 +2669,10 @@ fn arm_history_cells() -> Vec<GridCell> {
                                     label: format!(
                                         "item / {arm} / {site} / U={before} then {written} / A={a} / B={b}"
                                     ),
-                                    held: document("", &HISTORIES[0]),
+                                    // As the walk holds it: `X`, a write it
+                                    // refuses, as the empty value it reads.
+                                    held: document("", &HISTORIES[0])
+                                        .replace(&format!("<X>{REFUSED}</X>"), "<X></X>"),
                                     documents: HISTORIES
                                         .iter()
                                         .map(|history| document(&arm_write, history))
