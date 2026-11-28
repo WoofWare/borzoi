@@ -1216,6 +1216,16 @@ fn an_inexact_reference_is_reported_with_its_metadatum() {
         ds[0].causes()
     );
 
+    // An entry edge does not read `PrivateAssets`, so an unknown one beside
+    // an unknown `ReferenceOutputAssembly` is not named.
+    let mut both = reference(borzoi_msbuild::ItemMetadataValue::Unknown, false);
+    both.private_assets = borzoi_msbuild::ItemMetadataValue::Unknown;
+    parsed.project_references = vec![both];
+    let ds = deferrals(evaluated(&parsed), FoldOutcome::Unknown);
+    let causes = ds[0].causes().recorded();
+    assert!(causes[0].contains("ReferenceOutputAssembly"), "{causes:?}");
+    assert!(!causes[0].contains("PrivateAssets"), "{causes:?}");
+
     for known in ["true", "false"] {
         parsed.project_references = vec![reference(
             borzoi_msbuild::ItemMetadataValue::known(known),

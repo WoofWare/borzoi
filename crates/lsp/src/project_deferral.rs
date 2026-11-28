@@ -649,7 +649,10 @@ pub fn deferrals(eval: ProjectEvaluation<'_>, fold: FoldOutcome<'_>) -> Vec<Defe
 }
 
 /// Why a kept reference's compile contribution is not known: the reference,
-/// and the metadata it turns on.
+/// and the metadata it turns on. The report is the entry project's own, and
+/// an entry edge's contribution does not read `PrivateAssets` (it governs the
+/// flow to the entry's consumers, and the entry has none), so that is never
+/// named.
 fn render_inexact_reference(item: &borzoi_msbuild::ResolvedItem) -> String {
     let unknown = |value: &borzoi_msbuild::ItemMetadataValue| {
         matches!(value, borzoi_msbuild::ItemMetadataValue::Unknown)
@@ -658,7 +661,6 @@ fn render_inexact_reference(item: &borzoi_msbuild::ResolvedItem) -> String {
         ("ReferenceOutputAssembly", &item.reference_output_assembly),
         ("IncludeAssets", &item.include_assets),
         ("ExcludeAssets", &item.exclude_assets),
-        ("PrivateAssets", &item.private_assets),
     ]
     .into_iter()
     .filter(|(_, value)| unknown(value))

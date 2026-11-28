@@ -2998,7 +2998,7 @@ pub(crate) fn compile_edge_kind(item: &ResolvedItem, is_entry: bool) -> CompileC
     // property-list names change which build of the target the real
     // compiler sees. Nothing is safe to fold (D5: drop, under-resolve), and
     // the build may reference anything through it.
-    if item.unmodelled_reference_metadata || build_only.is_none() {
+    if item.unmodelled_reference_metadata {
         return CompileContribution::UNKNOWN;
     }
     // Three-valued (`None` = unknowable): compile flows through the edge iff
@@ -3027,6 +3027,22 @@ pub(crate) fn compile_edge_kind(item: &ResolvedItem, is_entry: bool) -> CompileC
     // degrades to OutputOnly rather than vanishing.
     let blocked = (is_entry && classify(Path::new(&item.include)) == ProjectKind::FSharp)
         .then_some(EdgeKind::OutputOnly);
+    // An unknown `ReferenceOutputAssembly` may be `false` in the real build
+    // (nothing safe to fold — drop the edge), so the contribution turns on it,
+    // unless a known filter blocks a non-entry edge: then nothing reaches the
+    // consumer whichever value the build computes, exactly as when it is
+    // known.
+    if build_only.is_none() {
+        return if !is_entry && flows == Some(false) {
+            CompileContribution::exact(None)
+        } else {
+            CompileContribution::UNKNOWN
+        };
+    }
+    // Not claimed: that a `ReferenceOutputAssembly` known to compare true
+    // decides the direct output and the transitive flow alike, or that one
+    // known not to compare true leaves no route (`OutputItemType`) to
+    // `ReferencePath` (#1189).
     match flows {
         Some(true) => CompileContribution::exact(Some(EdgeKind::Full)),
         // Not claimed: that a blocked C# entry edge's dropped output is all
@@ -6868,9 +6884,17 @@ mod tests {
     /// - **sound**: the edge followed is never more than any build references;
     /// - **exact implies equal**: an exact contribution is what every build
     ///   references;
-    /// - **must-exact**: with no unknown metadata and none unmodelled, or a
+    /// - **must-exact**: with no unmodelled metadata, or a
     ///   `ReferenceOutputAssembly` known not to compare true, the contribution
-    ///   is exact exactly when it equals what the build references.
+    ///   is exact exactly when every concretisation of its unknowns references
+    ///   the same thing through it, and that is what the env follows: an
+    ///   unknown no world can move (an unknown `ReferenceOutputAssembly` on a
+    ///   non-entry edge a known `PrivateAssets` blocks, say) is no reason to
+    ///   call the env incomplete.
+    ///
+    /// The model is the classifier's own probed rules. Its fidelity to
+    /// MSBuild on known metadata (`OutputItemType`, a `ReferenceOutputAssembly`
+    /// spelt `on`, the direct-output/transitive-flow split) is #1189's.
     ///
     /// A C# entry edge blocked by known metadata is exempt from both exactness
     /// properties: it drops the output the build references, as main does,
@@ -6974,17 +6998,16 @@ mod tests {
                                     if got.exact && !equal && !csharp_blocked {
                                         failures.push(format!("exact but not equal: {case}"));
                                     }
-                                    let known = |v: &ItemMetadataValue| {
-                                        matches!(v, ItemMetadataValue::Known(_))
-                                    };
-                                    let all_known = !unmodelled
-                                        && [roa, include, exclude, private].into_iter().all(known);
                                     let build_only = matches!(
                                         roa,
                                         ItemMetadataValue::Known(Some(v))
                                             if borzoi_msbuild::msbuild_boolean(v) != Some(true)
                                     );
-                                    if (all_known || build_only)
+                                    // Every world agreeing on one reach is a
+                                    // contribution that does not turn on what
+                                    // is unknown; unmodelled metadata may
+                                    // always name another build.
+                                    if (!unmodelled || build_only)
                                         && got.exact != equal
                                         && !csharp_blocked
                                     {
