@@ -72,6 +72,9 @@ pub struct WalkCosts {
     /// The expanded `Update` specs the batch checked whole for an item
     /// expression holding a `;` (`item_pass::SplitSpec::of`).
     pub batch_specs_split: u64,
+    /// The operations whose gate the batch judged, to know whether they run
+    /// (`item_pass::operation_runs`).
+    pub batch_gates_judged: u64,
 }
 
 /// Whether the caller asked for `WalkCosts::refusal_paths`'s census on
@@ -123,6 +126,7 @@ thread_local! {
             batch_fragments_read: 0,
             silent_expansions: 0,
             batch_specs_split: 0,
+            batch_gates_judged: 0,
         })
     };
 }

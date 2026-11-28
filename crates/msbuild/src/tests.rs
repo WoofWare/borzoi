@@ -1518,6 +1518,62 @@ fn a_plain_metadatum_is_read_once() {
     assert_eq!(with - without, N as u64 + 1, "texts the read scan expanded");
 }
 
+/// An operation other than an `Update` that runs flushes a pending batch, so
+/// the outcomes `Update`s MSBuild may not run fork into collapse at each
+/// `Include` between them, and the order after them stands. Unflushed, they
+/// would pass four, and the walk would follow no batch.
+#[test]
+#[cfg(not(windows))]
+fn an_include_flushes_the_outcomes_before_it() {
+    let mut items = String::new();
+    for i in 0..4 {
+        items.push_str(&format!(
+            r#"<Compile Update="U{i}.fs" Link="u" Condition="false" /><Compile Include="I{i}.fs" />"#
+        ));
+    }
+    let p = parse(&format!(
+        r#"<Project><ItemGroup>{items}<Compile Include="A.fs;B.fs" /><Compile Update="A.fs;B.fs" CompileOrder="CompileFirst" /></ItemGroup></Project>"#
+    ));
+    assert!(!p.items_uncertain, "{:?}", p.diagnostics);
+    assert_eq!(
+        file_names(&p.items),
+        ["A.fs", "B.fs", "I0.fs", "I1.fs", "I2.fs", "I3.fs"]
+    );
+}
+
+/// An operation other than an `Update` moves the batch only by flushing a
+/// pending one, so where none is pending its gate is not judged for the
+/// batch: a project of conditioned `Include`s pays nothing for it (codex
+/// found, round 36).
+#[test]
+fn an_include_with_no_batch_pending_is_not_judged_for_the_batch() {
+    const N: usize = 100;
+    let src = format!(
+        "<Project><ItemGroup>{}</ItemGroup></Project>",
+        (0..N)
+            .map(|i| format!("<Compile Include=\"F{i}.fs\" Condition=\"'$(X)' == ''\" />"))
+            .collect::<String>()
+    );
+    let (_, costs) = crate::test_support::count_walk_costs(|| parse(&src));
+    assert_eq!(costs.batch_gates_judged, 0, "gates judged for the batch");
+}
+
+/// A restart adds the empty outcome to each batch the walk follows, so where
+/// every one already holds it, a read moves nothing and is not looked for:
+/// after one condition-false `Update`, which leaves both the pending and the
+/// empty outcome, a hundred `Update`s of another type read from a property
+/// cost no expansion (codex found, round 36).
+#[test]
+fn a_read_that_adds_no_outcome_is_not_looked_for() {
+    const N: usize = 100;
+    let src = format!(
+        "<Project><PropertyGroup><L>x</L></PropertyGroup><ItemGroup><Compile Update=\"Z.fs\" Link=\"z\" Condition=\"false\" />{}</ItemGroup></Project>",
+        (0..N).map(|_| "<X Update=\"$(L)\" />").collect::<String>()
+    );
+    let (_, costs) = crate::test_support::count_walk_costs(|| parse(&src));
+    assert_eq!(costs.batch_spec_expansions, 1, "specs expanded");
+}
+
 /// The item pass registers every `UsingTask` after every `ItemGroup`, so a
 /// list read there restarts no batch a later `Update` sees: a pending batch
 /// has the read scan expand no task's attributes (codex found, round 35).

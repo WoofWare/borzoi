@@ -3284,10 +3284,18 @@ fn feed_update_batch(
     state: &mut State<'_>,
 ) -> BatchVerdict {
     let key = item_key(item_type);
-    let runs = operation_runs(node, state);
     let raw = update.raw().filter(|_| !node.has_attribute("Include"));
     let Some(raw) = raw else {
-        // Another operation: it flushes a pending batch where it runs.
+        // Another operation: it flushes a pending batch where it runs, and
+        // moves no other, so its gate is judged only where one is pending.
+        let pending = matches!(
+            state.update_batches.get(&key),
+            Some(BatchState::Known(worlds)) if worlds.iter().any(|world| world.pending)
+        );
+        if !pending {
+            return BatchVerdict::Holds;
+        }
+        let runs = operation_runs(node, state);
         if let Some(BatchState::Known(worlds)) = state.update_batches.get_mut(&key) {
             let mut after = Vec::with_capacity(worlds.len());
             for world in std::mem::take(worlds) {
@@ -3317,6 +3325,7 @@ fn feed_update_batch(
             BatchVerdict::HoldsUnfollowed
         };
     }
+    let runs = operation_runs(node, state);
     let exact = rejection::operands_are_certain(state, raw);
     let Some(expansion) = update.expansion(state) else {
         unreachable!("an element with an `Update` spec has its expansion")
@@ -3523,12 +3532,12 @@ fn item_may_read_item_lists(
 /// Where MSBuild may read an item list ([`text_may_read_item_lists`]), it may
 /// compute the list there, once, and resume later computations past it with
 /// an empty batch: each batch gains that outcome. Where every batch the walk
-/// follows is already empty in every outcome, a restart moves nothing, and
+/// follows already holds the empty outcome, a restart moves nothing, and
 /// `may_read` is not asked.
 fn note_possible_item_list_reads(state: &mut State<'_>, may_read: impl FnOnce(&State<'_>) -> bool) {
     let empty = UpdateBatchRun::default();
     let may_restart = state.update_batches.values().any(|batch| match batch {
-        BatchState::Known(worlds) => worlds.iter().any(|world| *world != empty),
+        BatchState::Known(worlds) => !worlds.contains(&empty),
         BatchState::Unknown => false,
     });
     if !may_restart || !may_read(state) {
@@ -3914,6 +3923,7 @@ enum OperationRuns {
 
 /// Whether MSBuild runs the item operation `node` ([`OperationRuns`]).
 fn operation_runs(node: Node<'_, '_>, state: &State<'_>) -> OperationRuns {
+    crate::cost::count(|costs| costs.batch_gates_judged += 1);
     let decided_true = attribute(node, "Condition").is_none_or(|condition| {
         directory_build::decision_from_certain_inputs(state, &condition, &state.entry_project_dir)
             == Some(true)
