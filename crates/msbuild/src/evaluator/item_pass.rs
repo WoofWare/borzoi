@@ -4921,19 +4921,23 @@ fn resolve_string_metadata(
         match evaluate_item_condition(child, state) {
             CondGate::Run => {
                 if untrusted_gate {
-                    resolved = unsettled_write(child, &resolved, state);
+                    resolved = ItemMetadataValue::Unknown;
                     continue;
                 }
             }
             CondGate::Skip => {
+                // Not claimed: that a write under a gate the walk cannot
+                // decide moves the value. One that leaves it as it stands (an
+                // empty item-definition default, say) is declined all the
+                // same (#1213).
                 if untrusted_gate {
-                    resolved = unsettled_write(child, &resolved, state);
+                    resolved = ItemMetadataValue::Unknown;
                 }
                 continue;
             }
             CondGate::Unsupported => {
                 emit_unsupported_condition(child, state);
-                resolved = unsettled_write(child, &resolved, state);
+                resolved = ItemMetadataValue::Unknown;
                 continue;
             }
         }
@@ -4968,64 +4972,6 @@ fn resolve_string_metadata(
     match resolved {
         ItemMetadataValue::Known(Some(v)) if v.is_empty() => ItemMetadataValue::Known(None),
         other => other,
-    }
-}
-
-/// The metadatum value after `child`, a write under a gate the walk cannot
-/// settle (one it cannot decide exactly, or one it does not model): the value
-/// standing before it where applying the write gives that value too, since
-/// then it moves nothing whichever way MSBuild takes the gate; `Unknown`
-/// otherwise.
-fn unsettled_write(
-    child: Node<'_, '_>,
-    standing: &ItemMetadataValue,
-    state: &State<'_>,
-) -> ItemMetadataValue {
-    match silent_metadata_write(child, state) {
-        Some(written) if normalized_metadata(&written) == normalized_metadata(standing) => {
-            standing.clone()
-        }
-        _ => ItemMetadataValue::Unknown,
-    }
-}
-
-/// The value metadatum write `child` gives if MSBuild applies it, computed as
-/// the walk computes a write it takes (`resolve_string_metadata`), but without
-/// a diagnostic, and faithfully: only an empty body is the empty value. A body
-/// of whitespace alone is one MSBuild keeps (a `&#32;`), so the walk cannot
-/// say it is empty. `None` where the walk cannot know the value.
-fn silent_metadata_write(child: Node<'_, '_>, state: &State<'_>) -> Option<ItemMetadataValue> {
-    let raw = collect_element_text(child)?;
-    if raw.is_empty() {
-        return Some(ItemMetadataValue::Known(None));
-    }
-    if raw.trim().is_empty() {
-        return None;
-    }
-    let expansion = expand_metadata_silent(&raw, state);
-    if expansion.had_issue()
-        || expansion.unpinned_root.is_some()
-        || state.raw_uses_sdk_package_taint(&raw)
-    {
-        return None;
-    }
-    let value = expansion.value.into_ignoring_trust();
-    let escaped = value.as_escaped();
-    if contains_item_reference(escaped)
-        || contains_metadata_reference(escaped)
-        || path_fixup::worlds(escaped).is_some()
-    {
-        return None;
-    }
-    Some(ItemMetadataValue::Known(Some(value.unescape())))
-}
-
-/// A metadatum value with an empty value read as absent, as the caller of
-/// [`resolve_string_metadata`] reads it.
-fn normalized_metadata(value: &ItemMetadataValue) -> ItemMetadataValue {
-    match value {
-        ItemMetadataValue::Known(Some(v)) if v.is_empty() => ItemMetadataValue::Known(None),
-        other => other.clone(),
     }
 }
 

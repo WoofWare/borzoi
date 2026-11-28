@@ -1239,6 +1239,18 @@ fn an_inexact_reference_is_reported_with_its_metadatum() {
     assert!(causes[0].contains("ReferenceOutputAssembly"), "{causes:?}");
     assert!(!causes[0].contains("IncludeAssets"), "{causes:?}");
 
+    // A C# entry edge a known `ExcludeAssets="compile"` blocks is dropped
+    // whatever `ReferenceOutputAssembly` holds, so every resolution of the
+    // unknown one gives one verdict; resolving it still settles the
+    // uncertainty, so it is named, and the cause is never left empty.
+    let mut csharp = reference(borzoi_msbuild::ItemMetadataValue::Unknown, false);
+    csharp.include = PathBuf::from("/w/Lib/Lib.csproj");
+    csharp.exclude_assets = borzoi_msbuild::ItemMetadataValue::known("compile");
+    parsed.project_references = vec![csharp];
+    let ds = deferrals(evaluated(&parsed), FoldOutcome::Unknown);
+    let causes = ds[0].causes().recorded();
+    assert!(causes[0].contains("ReferenceOutputAssembly"), "{causes:?}");
+
     for known in ["true", "false"] {
         parsed.project_references = vec![reference(
             borzoi_msbuild::ItemMetadataValue::known(known),

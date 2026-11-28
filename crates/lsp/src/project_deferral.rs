@@ -680,6 +680,7 @@ fn render_inexact_reference(item: &borzoi_msbuild::ResolvedItem) -> String {
             &["compile", "runtime"],
         ),
     ];
+    let original = crate::workspace::compile_edge_kind(item, true);
     let what: Vec<&str> = fields
         .into_iter()
         .filter(|(_, field, values)| {
@@ -695,7 +696,12 @@ fn render_inexact_reference(item: &borzoi_msbuild::ResolvedItem) -> String {
                     crate::workspace::compile_edge_kind(&probe, true)
                 })
                 .collect();
-            verdicts.windows(2).any(|pair| pair[0] != pair[1])
+            // Named where resolving it could change the verdict: its
+            // resolutions disagree, or agree on a verdict the unresolved
+            // reference does not reach (a blocked C# entry edge is dropped
+            // whatever `ReferenceOutputAssembly` holds, but resolving it
+            // settles whether the drop is exact).
+            verdicts.windows(2).any(|pair| pair[0] != pair[1]) || verdicts[0] != original
         })
         .map(|(name, _, _)| name)
         .collect();
@@ -708,6 +714,9 @@ fn render_inexact_reference(item: &borzoi_msbuild::ResolvedItem) -> String {
     }
     if item.unmodelled_reference_metadata {
         parts.push("P2P metadata borzoi does not model".to_string());
+    }
+    if parts.is_empty() {
+        parts.push("metadata the evaluator could not resolve".to_string());
     }
     format!(
         "the <ProjectReference> to {} turns on {}",

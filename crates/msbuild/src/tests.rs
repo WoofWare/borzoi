@@ -4544,6 +4544,26 @@ fn item_definition_group_project_reference_default_marks_the_list_uncertain() {
     }
 }
 
+/// An empty item-definition default under a gate the walk cannot decide (a
+/// toolset name it holds no value of) leaves `Targets` empty whichever way
+/// MSBuild takes the gate, yet the walk declines the metadatum and so
+/// withdraws the reference list: an over-decline, pinned so that a fix flips
+/// this test (#1213).
+#[test]
+fn item_definition_group_toolset_gated_inert_default_withdraws_the_list() {
+    let p = parse(
+        r#"<Project>
+  <ItemDefinitionGroup>
+    <ProjectReference><Targets Condition="'$(MSBuildStartupDirectory)' != ''" /></ProjectReference>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ProjectReference Include="../B/B.fsproj" />
+  </ItemGroup>
+</Project>"#,
+    );
+    assert!(p.project_references_uncertain);
+}
+
 #[test]
 fn item_definition_group_project_reference_inert_default_stays_certain() {
     // The real F# SDK's `<ItemDefinitionGroup><ProjectReference>` (dotnet 10,
@@ -4591,9 +4611,6 @@ fn item_definition_group_project_reference_inert_default_stays_certain() {
         r#"<ProjectReference><Targets></Targets></ProjectReference>"#,
         r#"<ProjectReference><Targets>$(NoSuchProp)</Targets></ProjectReference>"#,
         r#"<ProjectReference OutputItemType="Content" />"#,
-        // An empty write under a gate the walk cannot decide leaves the
-        // value empty whichever way MSBuild takes it.
-        r#"<ProjectReference><Targets Condition="'$(MSBuildStartupDirectory)' != ''" /></ProjectReference>"#,
     ] {
         let src = format!(
             r#"<Project>

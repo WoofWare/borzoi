@@ -7985,17 +7985,17 @@ mod tests {
     /// A reference whose compile contribution turns on metadata the evaluator
     /// could not resolve is followed only where the build references it, and
     /// where its edge is dropped the env does not claim completeness. Each row
-    /// states MSBuild's verdict on whether the compiler references
-    /// `MiniLibFs.dll` (the property is on the env, so a row passes where main
-    /// is already sound):
+    /// states whether MSBuild's build references `MiniLibFs.dll`; the env may
+    /// fold it only where MSBuild references it, and may leave it out only
+    /// while incomplete or where MSBuild does not reference it:
     ///
     /// - a `ReferenceOutputAssembly` child gated on a toolset name the walk
-    ///   holds no value of, `true` where MSBuild takes the gate (main follows
-    ///   it, rightly) and `false` (main follows it too: a phantom fold);
-    /// - a presence-read `BuildReference` child under the same gate, `true`
-    ///   (benign, so MSBuild references it; main follows it, rightly);
-    /// - a `ReferenceOutputAssembly` the walk refused to compute, `true` (main
-    ///   drops the edge and calls the env complete);
+    ///   holds no value of, writing `true` (MSBuild references it) and
+    ///   `false` (MSBuild does not);
+    /// - a presence-read `BuildReference` child under the same gate, writing
+    ///   `true` (benign: MSBuild references it);
+    /// - a `ReferenceOutputAssembly` the walk refused to compute, `true`
+    ///   (MSBuild references it);
     /// - literal controls, which the env answers exactly and completely.
     #[test]
     fn an_edge_of_unknown_contribution_is_followed_only_where_built_and_dropped_only_incomplete() {
