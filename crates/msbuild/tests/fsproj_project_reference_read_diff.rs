@@ -1299,3 +1299,121 @@ fn a_metadatum_gate_on_a_toolset_name_resolves_as_on_main() {
         parsed.project_references[0].reference_output_assembly
     );
 }
+
+/// The same of a significant P2P metadatum read by its presence
+/// (`BuildReference`): gated on a toolset name, it is skipped as on main, so
+/// the reference carries no unmodelled metadata and its edge is followed, as
+/// MSBuild's `true` keeps it. (A gate that goes the other way for the walk is
+/// #1189's.)
+#[test]
+fn a_presence_read_metadatum_gate_on_a_toolset_name_resolves_as_on_main() {
+    let xml = "<Project><ItemGroup><ProjectReference Include=\"A.fsproj\">\
+               <BuildReference Condition=\"'$(MSBuildStartupDirectory)' != ''\">true</BuildReference>\
+               </ProjectReference></ItemGroup></Project>";
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let root = borzoi_msbuild::observed::host_fs::canonicalize(dir.path()).expect("canonicalize");
+    let proj = layout(&root);
+    std::fs::write(&proj, xml).unwrap();
+    let parsed = parse_fsproj_with_imports(
+        &borzoi_msbuild::ProjectFile::buffer(&proj, xml)
+            .expect("a project path spelt as its full path"),
+        &HashMap::new(),
+        &common::oracle_environment(),
+        None,
+        None,
+    )
+    .expect("well-formed XML parses");
+    assert_eq!(
+        common::reference_claim(&parsed),
+        common::ReferenceClaim::Exact,
+        "{:#?}",
+        parsed.diagnostics
+    );
+    assert_eq!(parsed.project_references.len(), 1);
+    assert!(
+        !parsed.project_references[0].unmodelled_reference_metadata,
+        "the gated child is skipped, as on main, so the edge is followed"
+    );
+}
+
+/// Every `<ProjectReference>` metadatum the compile closure reads
+/// (`ReferenceOutputAssembly`, the asset filters, and the significant P2P
+/// names read by their presence), as an attribute's child element under a
+/// gate on a toolset name, in both polarities and with a value that keeps the
+/// edge and one that drops it: the walk resolves it exactly as it resolves
+/// the same child under the literal its own reading of the gate gives — the
+/// reading main makes. The list's gates doubt a toolset name (#1181); a
+/// metadatum's do not, since a metadatum resolved `Unknown`, or present where
+/// main skips it, drops an edge without marking the compile closure as
+/// lacking it.
+#[test]
+fn a_metadatum_gate_doubts_no_toolset_name() {
+    const NAMES: [&str; 13] = [
+        "ReferenceOutputAssembly",
+        "IncludeAssets",
+        "ExcludeAssets",
+        "PrivateAssets",
+        "BuildReference",
+        "Targets",
+        "SetConfiguration",
+        "SetPlatform",
+        "SetTargetFramework",
+        "AdditionalProperties",
+        "UndefineProperties",
+        "GlobalPropertiesToRemove",
+        "SkipGetTargetFrameworkProperties",
+    ];
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let root = borzoi_msbuild::observed::host_fs::canonicalize(dir.path()).expect("canonicalize");
+    let proj = layout(&root);
+    let resolve = |condition: &str, name: &str, value: &str| {
+        let xml = format!(
+            "<Project><ItemGroup><ProjectReference Include=\"A.fsproj\">\
+             <{name} Condition=\"{condition}\">{value}</{name}>\
+             </ProjectReference></ItemGroup></Project>"
+        );
+        let parsed = parse_fsproj_with_imports(
+            &borzoi_msbuild::ProjectFile::buffer(&proj, &xml)
+                .expect("a project path spelt as its full path"),
+            &HashMap::new(),
+            &common::oracle_environment(),
+            None,
+            None,
+        )
+        .expect("well-formed XML parses");
+        let item = parsed
+            .project_references
+            .first()
+            .unwrap_or_else(|| panic!("the reference is captured: {xml}"));
+        (
+            common::reference_claim(&parsed),
+            format!(
+                "{:?} {:?} {:?} {:?} {}",
+                item.reference_output_assembly,
+                item.include_assets,
+                item.exclude_assets,
+                item.private_assets,
+                item.unmodelled_reference_metadata
+            ),
+        )
+    };
+    let mut cases = 0;
+    for name in NAMES {
+        for value in ["true", "false", "compile", "all"] {
+            // The walk holds no startup directory, so it reads `!= ''` as
+            // false and `== ''` as true.
+            for (gate, literal) in [
+                ("'$(MSBuildStartupDirectory)' != ''", "false"),
+                ("'$(MSBuildStartupDirectory)' == ''", "true"),
+            ] {
+                cases += 1;
+                assert_eq!(
+                    resolve(gate, name, value),
+                    resolve(literal, name, value),
+                    "{name}={value} under `{gate}`"
+                );
+            }
+        }
+    }
+    assert_eq!(cases, NAMES.len() * 4 * 2);
+}

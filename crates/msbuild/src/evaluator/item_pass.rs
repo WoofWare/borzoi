@@ -922,6 +922,19 @@ fn reference_gate_may_run(node: Node<'_, '_>, state: &State<'_>) -> bool {
     }
 }
 
+/// [`reference_gate_may_run`] for a `<ProjectReference>` metadatum's own
+/// gate, under the metadata policy
+/// ([`State::metadata_condition_reads_untrusted_value`]): a metadatum the
+/// compile closure reads by its presence (`BuildReference`, `Targets`) drops
+/// the edge without saying the closure may lack it, so doubting it where main
+/// does not would drop an edge main follows (#1181, #1189).
+fn metadata_gate_may_run(node: Node<'_, '_>, state: &State<'_>) -> bool {
+    match evaluate_item_condition_silent(node, state).0 {
+        CondGate::Run | CondGate::Unsupported => true,
+        CondGate::Skip => state.metadata_condition_reads_untrusted_value(node),
+    }
+}
+
 /// What the `<ItemGroup>`s of an undecided `<Choose>`'s still-possible
 /// branches could do to the item table, by item type.
 ///
@@ -1369,7 +1382,7 @@ fn project_reference_has_unmodelled_significant_metadata(
             && is_unmodelled_significant_reference_metadata(attr.name())
     }) || node.children().filter(Node::is_element).any(|child| {
         is_unmodelled_significant_reference_metadata(child.tag_name().name())
-            && reference_gate_may_run(child, state)
+            && metadata_gate_may_run(child, state)
     })
 }
 
