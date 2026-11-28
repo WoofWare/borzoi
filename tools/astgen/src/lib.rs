@@ -54,6 +54,7 @@ pub mod facade;
 pub mod features;
 pub mod lock;
 pub mod shape;
+pub mod views;
 
 use lock::{Line, Lock, Payload};
 use shape::{Elem, Names};
@@ -1859,6 +1860,7 @@ pub fn all_outputs() -> Vec<(String, String)> {
     let union = union_lock();
     out.push((UNION_LOCK_PATH.to_string(), lock::render("union", &union)));
     out.extend(facade::outputs(&rows, &union));
+    out.push((views::OUTPUT_PATH.to_string(), views::generate()));
     out
 }
 

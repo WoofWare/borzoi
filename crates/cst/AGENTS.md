@@ -12,7 +12,9 @@ that the raw token table rebuilds the full-trivia driver iterator's stream
 (`docs/token-pipeline-soa-plan.md`), and `walk-reference`, under which every
 parse asserts that the diagnostics' partial scans (the warn directives off the
 raw table, the feature gates' kind-filtered walk) find what a walk over every
-element of the tree finds. Self-contained: depends only on `logos` and
+element of the tree finds, and `view-reference`, under which every parse
+asserts that the exhaustive child views agree with the tree (below).
+Self-contained: depends only on `logos` and
 `text-size` (and, behind that test-only feature, `rowan`). Intended to be
 reusable outside this repo, through its *substrate*: the untyped tree
 (`SyntaxNode`, `SyntaxKind`, `AstNode`) and the version gate
@@ -45,6 +47,19 @@ lint job also builds, lints and documents the crate without it.
 `tests/all/facade_properties` holds every facade's node types, enums and
 accessors to the union's (P2–P4 of `docs/ast-versioning-plan.md`) over a
 table astgen generates from the locks.
+
+A typed accessor filters a node's children by kind and skips the rest, so a
+walk that must decline on a child it does not account for reads that node
+through its **exhaustive child view** instead: `view()` yields every
+non-trivia child as a variant of a closed enum (`LongIdentPatChild`, …), or
+an `UnexpectedChild` for one the view does not declare. astgen generates the
+views from `tools/astgen/src/views.rs` into `syntax/generated/union_views.rs`,
+outside the union's lock and every facade, for exactly the node types some
+walk reads that way. The walk matches the variants without a wildcard, so a
+child kind the table comes to declare is a compile error there until it is
+handled; and `view-reference` fails this crate's tests when a parse that
+recovered from nothing holds a child under a viewed node that its view does
+not declare, so the table follows the parser.
 
 ## Working here
 

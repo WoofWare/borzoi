@@ -26,6 +26,10 @@ pub use super::generated::union_exprs::*;
 pub use super::generated::union_pats::*;
 pub use super::generated::union_standalone::*;
 pub use super::generated::union_types::*;
+// Without `unstable-union` nothing in the crate but the `view-reference` check
+// reads the views.
+#[cfg_attr(not(feature = "unstable-union"), allow(unused_imports))]
+pub use super::generated::union_views::*;
 
 /// Helper used by every typed-AST accessor: the first non-trivia child node
 /// of the given kind.
