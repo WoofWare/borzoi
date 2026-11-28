@@ -1226,6 +1226,19 @@ fn an_inexact_reference_is_reported_with_its_metadatum() {
     assert!(causes[0].contains("ReferenceOutputAssembly"), "{causes:?}");
     assert!(!causes[0].contains("PrivateAssets"), "{causes:?}");
 
+    // A known `ExcludeAssets="compile"` already blocks what flows through the
+    // entry edge, so an unknown `IncludeAssets` beside an unknown
+    // `ReferenceOutputAssembly` moves nothing and is not named: only what the
+    // classifier's verdict turns on is.
+    let mut blocked = reference(borzoi_msbuild::ItemMetadataValue::Unknown, false);
+    blocked.exclude_assets = borzoi_msbuild::ItemMetadataValue::known("compile");
+    blocked.include_assets = borzoi_msbuild::ItemMetadataValue::Unknown;
+    parsed.project_references = vec![blocked];
+    let ds = deferrals(evaluated(&parsed), FoldOutcome::Unknown);
+    let causes = ds[0].causes().recorded();
+    assert!(causes[0].contains("ReferenceOutputAssembly"), "{causes:?}");
+    assert!(!causes[0].contains("IncludeAssets"), "{causes:?}");
+
     for known in ["true", "false"] {
         parsed.project_references = vec![reference(
             borzoi_msbuild::ItemMetadataValue::known(known),

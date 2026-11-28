@@ -649,23 +649,56 @@ pub fn deferrals(eval: ProjectEvaluation<'_>, fold: FoldOutcome<'_>) -> Vec<Defe
 }
 
 /// Why a kept reference's compile contribution is not known: the reference,
-/// and the metadata it turns on. The report is the entry project's own, and
-/// an entry edge's contribution does not read `PrivateAssets` (it governs the
-/// flow to the entry's consumers, and the entry has none), so that is never
-/// named.
+/// and the metadata it turns on. Derived from the classifier
+/// (`workspace::compile_edge_kind`), as the entry project's own report reads
+/// it: a metadatum is named only where resolving it, with the rest as they
+/// are, could change what the reference contributes, so an unknown filter a
+/// known one already decides, or a `PrivateAssets` an entry edge does not
+/// read, is never named.
 fn render_inexact_reference(item: &borzoi_msbuild::ResolvedItem) -> String {
-    let unknown = |value: &borzoi_msbuild::ItemMetadataValue| {
-        matches!(value, borzoi_msbuild::ItemMetadataValue::Unknown)
-    };
-    let what: Vec<&str> = [
-        ("ReferenceOutputAssembly", &item.reference_output_assembly),
-        ("IncludeAssets", &item.include_assets),
-        ("ExcludeAssets", &item.exclude_assets),
-    ]
-    .into_iter()
-    .filter(|(_, value)| unknown(value))
-    .map(|(name, _)| name)
-    .collect();
+    use borzoi_msbuild::{ItemMetadataValue, ResolvedItem};
+    type Field = fn(&mut ResolvedItem) -> &mut ItemMetadataValue;
+    let fields: [(&str, Field, &[&str]); 4] = [
+        (
+            "ReferenceOutputAssembly",
+            |item| &mut item.reference_output_assembly,
+            &["true", "false"],
+        ),
+        (
+            "IncludeAssets",
+            |item| &mut item.include_assets,
+            &["compile", "runtime"],
+        ),
+        (
+            "ExcludeAssets",
+            |item| &mut item.exclude_assets,
+            &["compile", "runtime"],
+        ),
+        (
+            "PrivateAssets",
+            |item| &mut item.private_assets,
+            &["compile", "runtime"],
+        ),
+    ];
+    let what: Vec<&str> = fields
+        .into_iter()
+        .filter(|(_, field, values)| {
+            let mut probe = item.clone();
+            if !matches!(field(&mut probe), ItemMetadataValue::Unknown) {
+                return false;
+            }
+            let verdicts: Vec<_> = std::iter::once(ItemMetadataValue::ABSENT)
+                .chain(values.iter().map(|v| ItemMetadataValue::known(*v)))
+                .map(|value| {
+                    let mut probe = item.clone();
+                    *field(&mut probe) = value;
+                    crate::workspace::compile_edge_kind(&probe, true)
+                })
+                .collect();
+            verdicts.windows(2).any(|pair| pair[0] != pair[1])
+        })
+        .map(|(name, _, _)| name)
+        .collect();
     let mut parts = Vec::new();
     if !what.is_empty() {
         parts.push(format!(

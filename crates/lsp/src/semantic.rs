@@ -3114,14 +3114,15 @@ impl ReferenceSet {
     /// The resolution declined before it reached the project-reference edges —
     /// an untrusted TFM verdict, no dotnet root, no assets file, a failed
     /// resolve. The env is empty. The edges it did not reach claim nothing;
-    /// a node the graph walk already knows may contribute assemblies its
-    /// edges lack ([`incomplete_contribution_edges`]) it still says, so the
-    /// empty env does not claim completeness over them. Whether a declined env
-    /// is complete at all is #1190.
+    /// what the graph walk already knows its nodes lack
+    /// ([`graph_doubt_edges`]) it still says, so the empty env does not claim
+    /// completeness over it — a suppressed list in one TFM of an unseeded
+    /// multi-target node masks another TFM's inexact contribution, so both
+    /// kinds are carried. Whether a declined env is complete at all is #1190.
     fn declined(retryable: bool, ref_targets: &GraphRefTargets) -> Self {
         ReferenceSet {
             dlls: Vec::new(),
-            edges: incomplete_contribution_edges(ref_targets).collect(),
+            edges: graph_doubt_edges(ref_targets).collect(),
             retryable,
             unrecorded: Vec::new(),
             package_folders: Vec::new(),
@@ -3483,26 +3484,11 @@ fn resolve_reference_dlls(
         .chain(ref_dlls)
         .chain(csharp_ref_dlls)
         .collect();
-    // One outcome per node whose references were suppressed. There is nothing
-    // to look for — the edges are gone — so this is a pure incompleteness
-    // claim, and `transient: false` because only an edit to that project can
-    // change it.
-    let suppressed_edges: Vec<ReferenceEdge> = ref_targets
-        .suppressed
-        .iter()
-        .map(|project| ReferenceEdge {
-            project: project.clone(),
-            outcome: ReferenceOutcome::Unread {
-                why: "the project's own reference list could not be trusted",
-                transient: false,
-            },
-        })
-        .collect();
+
     let edges: Vec<ReferenceEdge> = fsharp_edges
         .into_iter()
         .chain(csharp_edges)
-        .chain(suppressed_edges)
-        .chain(incomplete_contribution_edges(ref_targets))
+        .chain(graph_doubt_edges(ref_targets))
         .collect();
     // Conservation: every edge the graph walk *retained* is accounted for, so a
     // reference that contributed nothing is recorded as missing rather than
@@ -3544,24 +3530,37 @@ fn resolve_reference_dlls(
     }
 }
 
-/// One [`ReferenceOutcome::Unread`] per node whose edges may contribute fewer
-/// assemblies than the build references through them
-/// ([`GraphRefTargets::incomplete`]). There is nothing to look for — the
-/// contribution turns on metadata the evaluator could not resolve — so each is
-/// a pure incompleteness claim, and `transient: false` because only an edit to
-/// that project can change it. It holds whether or not the resolution reached
-/// the edges the walk kept.
-fn incomplete_contribution_edges(
-    ref_targets: &GraphRefTargets,
-) -> impl Iterator<Item = ReferenceEdge> + '_ {
-    ref_targets.incomplete.iter().map(|project| ReferenceEdge {
+/// What the graph walk already knows its nodes lack, as one
+/// [`ReferenceOutcome::Unread`] per node: one whose references were
+/// suppressed ([`GraphRefTargets::suppressed`]), and one whose edges may
+/// contribute fewer assemblies than the build references through them
+/// ([`GraphRefTargets::incomplete`]). There is nothing to look for — the edges
+/// are gone, or their contribution turns on metadata the evaluator could not
+/// resolve — so each is a pure incompleteness claim, and `transient: false`
+/// because only an edit to that project can change it. It holds whether or
+/// not the resolution reached the edges the walk kept.
+///
+/// Not claimed: that what an inexact contribution may lack is missing from
+/// the env. Another exact path may reach the same target (an entry that
+/// references `C` directly beside a `B` whose edge to `C` is inexact), and
+/// the env is marked incomplete all the same (#1211).
+fn graph_doubt_edges(ref_targets: &GraphRefTargets) -> impl Iterator<Item = ReferenceEdge> + '_ {
+    let suppressed = ref_targets.suppressed.iter().map(|project| ReferenceEdge {
+        project: project.clone(),
+        outcome: ReferenceOutcome::Unread {
+            why: "the project's own reference list could not be trusted",
+            transient: false,
+        },
+    });
+    let incomplete = ref_targets.incomplete.iter().map(|project| ReferenceEdge {
         project: project.clone(),
         outcome: ReferenceOutcome::Unread {
             why: "a reference's compile contribution turns on metadata the evaluator could \
                   not resolve",
             transient: false,
         },
-    })
+    });
+    suppressed.chain(incomplete)
 }
 
 /// Whether the env build may read C# `<ProjectReference>`s, and the sidecar it
@@ -7637,12 +7636,30 @@ mod tests {
         let inputs = EnvInputs::of(&unread);
         assert!(inputs.not_built && inputs.incomplete, "{inputs:?}");
 
-        // A declined resolution claims neither: the env is empty, so it makes no
-        // assembly reading for a missing reference to be wrong about.
+        // A declined resolution claims neither of the edges it did not reach.
         let declined = ReferenceSet::declined(false, &GraphRefTargets::default());
         assert_eq!(declined.unread().count(), 0);
         assert_eq!(declined.not_built().count(), 0);
         assert!(!EnvInputs::of(&declined).not_built);
+
+        // What the graph already knows is missing it still says, whichever
+        // kind: a node whose list was suppressed (in one TFM of an unseeded
+        // multi-target node, say, which masks another TFM's inexact
+        // contribution) and a node whose contribution is inexact.
+        for targets in [
+            GraphRefTargets {
+                suppressed: vec![PathBuf::from("/w/B/B.fsproj")],
+                ..GraphRefTargets::default()
+            },
+            GraphRefTargets {
+                incomplete: vec![PathBuf::from("/w/B/B.fsproj")],
+                ..GraphRefTargets::default()
+            },
+        ] {
+            let declined = ReferenceSet::declined(false, &targets);
+            assert_eq!(declined.unread().count(), 1, "{targets:?}");
+            assert!(EnvInputs::of(&declined).incomplete, "{targets:?}");
+        }
     }
 
     /// Write `<root>/obj/project.assets.json` for a single-target `net10.0`
