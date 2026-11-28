@@ -439,12 +439,17 @@ pub(super) fn replay_deferred_item_groups(entry_doc: &Document<'_>, state: &mut 
         // by one, walked or fed ([`note_element_reads`]).
         let walked_element_by_element =
             group.kind == DeferredGroupKind::ItemGroup && !group.judge_only;
+        // Every `UsingTask` is registered after every `ItemGroup`, so a list
+        // read there restarts no batch a later `Update` sees.
+        let reads_may_restart = group.kind != DeferredGroupKind::UsingTask;
         match group.file {
             DeferredFileKey::Entry => {
                 // The entry file's `MSBuildThisFile*` bindings are already
                 // live (every property-pass frame restored them on exit).
                 let node = resolve_deferred_node(entry_doc, group);
-                note_group_reads(node, walked_element_by_element, state);
+                if reads_may_restart {
+                    note_group_reads(node, walked_element_by_element, state);
+                }
                 let dir = state.entry_project_dir.clone();
                 judge(node, &dir, state);
                 if !group.judge_only {
@@ -460,7 +465,9 @@ pub(super) fn replay_deferred_item_groups(entry_doc: &Document<'_>, state: &mut 
                 // against the import's directory, not the entry project's.
                 let frame = state.enter_this_file(&file.path);
                 let node = resolve_deferred_node(doc, group);
-                note_group_reads(node, walked_element_by_element, state);
+                if reads_may_restart {
+                    note_group_reads(node, walked_element_by_element, state);
+                }
                 let dir = file
                     .path
                     .parent()

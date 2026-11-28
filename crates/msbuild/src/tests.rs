@@ -1518,6 +1518,29 @@ fn a_plain_metadatum_is_read_once() {
     assert_eq!(with - without, N as u64 + 1, "texts the read scan expanded");
 }
 
+/// The item pass registers every `UsingTask` after every `ItemGroup`, so a
+/// list read there restarts no batch a later `Update` sees: a pending batch
+/// has the read scan expand no task's attributes (codex found, round 35).
+#[test]
+fn a_task_registered_after_the_last_item_group_restarts_no_batch() {
+    const N: usize = 100;
+    let tasks: String = (0..N)
+        .map(|i| format!("  <UsingTask TaskName=\"T{i}\" AssemblyFile=\"$(P)\" />\n"))
+        .collect();
+    let silent = |pending: &str| {
+        let src = format!(
+            "<Project><PropertyGroup><P>t.dll</P></PropertyGroup><ItemGroup><Compile Include=\"A.fs\" />{pending}</ItemGroup>\n{tasks}</Project>"
+        );
+        crate::test_support::count_walk_costs(|| parse(&src))
+            .1
+            .silent_expansions
+    };
+    let without = silent("");
+    let with = silent("<Compile Update=\"B.fs\" Link=\"b\" />");
+    // The one more is the batch's expansion of the pending `Update`'s spec.
+    assert_eq!(with - without, 1, "texts the read scan expanded");
+}
+
 /// A run of `Update`s no operation flushes keeps every key it expands, so
 /// thousands of them behind one long property would hold megabytes of keys.
 /// The batch holds at most `MAX_HELD_BYTES` of them, then is followed no
